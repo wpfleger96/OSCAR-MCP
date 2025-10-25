@@ -1,1 +1,191 @@
 # OSCAR-MCP
+
+MCP (Model Context Protocol) server for analyzing and inspecting CPAP/APAP therapy data.
+
+## Overview
+
+OSCAR-MCP provides an MCP interface for CPAP therapy data analysis, enabling LLMs like Claude to analyze sleep therapy data, generate reports, and answer questions about treatment effectiveness.
+
+### Features
+
+- **Direct ResMed Import**: Import ResMed AirSense/AirCurve data directly from SD card
+- **Universal Database**: SQLite storage for CPAP data
+- **Auto-Detection**: Automatically detects ResMed device type
+- **CLI Tool**: Import, query, delete, and manage CPAP data from command line
+- **Comprehensive Parsing**: Waveforms, events, statistics, and device metadata
+
+**Supported Devices:** ResMed AirSense 10/11, AirCurve 10/11, S9 series
+
+### Architecture
+
+- **Modular Parser System**: Abstract base class + registry for device detection
+- **Universal Data Model**: All devices convert to unified format
+- **SQLite Database**: Universal schema supporting all device types
+- **Parser-Agnostic MCP Server**: Tools work with any device
+- **UV Package Management**: Modern Python dependency management
+
+## Installation
+
+### Prerequisites
+
+- Python 3.13 or later
+- UV package manager
+- OSCAR desktop application with existing data
+
+### Install from source
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd OSCAR-MCP
+
+# Install with UV
+uv pip install -e .
+```
+
+## Quick Start
+
+### 1. Import ResMed CPAP Data
+
+For **ResMed AirSense/AirCurve users**, import directly from your SD card:
+
+```bash
+# Install dependencies
+uv sync
+
+# Import ResMed data from SD card
+uv run oscar-mcp import-data /path/to/ResMed/Backup/
+
+# Or if you've already imported to OSCAR desktop app
+uv run oscar-mcp import-data ~/Downloads/OSCAR/Profiles/<Profile>/ResMed_*/Backup/
+
+# Advanced import options
+uv run oscar-mcp import-data /path/to/data/ \
+  --limit 10 \                    # Import only first 10 sessions
+  --sort-by date-desc \           # Newest first
+  --date-from 2024-01-01 \        # Filter by date range
+  --date-to 2024-12-31 \
+  --dry-run                       # Preview without importing
+```
+
+The import will:
+- Auto-detect your ResMed device
+- Parse all session files (BRP, PLD, SA2, EVE)
+- Store waveforms, events, and statistics in SQLite
+- Show progress bar during import
+
+### 2. View Imported Data
+
+```bash
+# List all imported sessions
+uv run oscar-mcp list-sessions
+
+# List sessions in date range
+uv run oscar-mcp list-sessions --from-date 2024-01-01 --to-date 2024-12-31
+
+# Show database statistics
+uv run oscar-mcp db stats
+```
+
+### 3. Manage Sessions
+
+```bash
+# Delete sessions by date range (with preview)
+uv run oscar-mcp delete-sessions --from-date 2024-01-01 --to-date 2024-01-31 --dry-run
+
+# Delete specific sessions by ID
+uv run oscar-mcp delete-sessions --session-id "1,2,3"
+
+# Delete all sessions (with confirmation)
+uv run oscar-mcp delete-sessions --all
+
+# Force delete without confirmation prompt
+uv run oscar-mcp delete-sessions --session-id "5" --force
+
+# Database maintenance after large deletions
+uv run oscar-mcp db vacuum
+```
+
+### 4. Direct Database Access
+
+Query the SQLite database directly:
+
+```bash
+sqlite3 ~/.oscar-mcp/oscar_mcp.db
+
+# Example queries
+SELECT COUNT(*) FROM sessions;
+SELECT * FROM devices;
+SELECT date(start_time), duration_seconds FROM sessions ORDER BY start_time DESC LIMIT 10;
+```
+
+## Database Schema
+
+The SQLite database stores all parsed CPAP data:
+
+**Tables:**
+- `devices` - Device metadata (manufacturer, model, serial, firmware)
+- `sessions` - Session records (start, end, duration, mode)
+- `waveforms` - Time-series data (Flow, Pressure, Leak, SpO2, Pulse)
+- `events` - Respiratory events (Apneas, Hypopneas, RERA, etc.)
+- `statistics` - Pre-calculated metrics (AHI, pressure stats, leak stats, SpO2)
+- `settings` - Therapy configuration (key-value pairs)
+
+Database location: `~/.oscar-mcp/oscar_mcp.db`
+
+## Project Structure
+
+```
+OSCAR-MCP/
+├── src/oscar_mcp/
+│   ├── cli.py                   # CLI commands (import, list, db)
+│   ├── constants.py             # Channel IDs and mappings
+│   ├── models/
+│   │   └── unified.py           # Universal data model
+│   ├── database/
+│   │   ├── schema.sql           # SQLite schema
+│   │   ├── manager.py           # Database operations
+│   │   └── importers.py         # Session import pipeline
+│   ├── parsers/
+│   │   ├── base.py              # Abstract parser interface
+│   │   ├── registry.py          # Parser auto-detection
+│   │   ├── resmed_edf.py        # ResMed EDF+ parser
+│   │   └── formats/
+│   │       └── edf.py           # Generic EDF reader
+│   └── utils/
+├── tests/
+│   ├── test_parsers.py          # Parser tests
+│   └── test_import_pipeline.py # Integration tests
+└── pyproject.toml
+```
+
+## Testing
+
+```bash
+# Run all tests
+uv run pytest tests/ -v
+
+# Run with coverage
+uv run pytest tests/ --cov=oscar_mcp
+
+# Check linting
+uv run ruff check .
+```
+
+## Clinical Disclaimer
+
+This tool is for informational purposes only. Always consult with your sleep medicine physician or healthcare provider for medical advice regarding your CPAP therapy.
+
+## License
+
+MIT License
+
+## Acknowledgments
+
+- OSCAR (Open Source CPAP Analysis Reporter) project for the desktop application
+- MCP (Model Context Protocol) for the server framework
+- The sleep apnea community for supporting open-source analysis tools
+
+## Support
+
+For issues, questions, or contributions, please visit the GitHub repository.

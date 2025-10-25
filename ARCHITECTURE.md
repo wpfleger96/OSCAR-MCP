@@ -1,0 +1,451 @@
+# OSCAR-MCP Architecture
+
+Technical documentation for the OSCAR-MCP system architecture, components, and design decisions.
+
+---
+
+## System Overview
+
+### Modular, Parser-Agnostic Platform
+
+```
+┌─────────────────────────────────────────────┐
+│         MCP Server (Parser Agnostic)        │
+│  get_sessions(), analyze_therapy(), etc.    │
+│         Zero knowledge of formats           │
+├─────────────────────────────────────────────┤
+│         SQLite Database ✅                  │
+│  Universal schema, direct BLOB storage      │
+│  Auto-creates at ~/.oscar-mcp/oscar_mcp.db │
+├─────────────────────────────────────────────┤
+│         CLI Import Tool ✅                  │
+│  oscar-mcp import (auto-detection)          │
+│  Progress bars, duplicate prevention        │
+├─────────────────────────────────────────────┤
+│         Unified Data Model                  │
+│  UnifiedSession, WaveformData, etc.         │
+│  All parsers output to this format          │
+├─────────────────────────────────────────────┤
+│         Parser Registry & Detection         │
+│  Auto-detects device from file structure    │
+│  Confidence-based selection                 │
+├─────────────────────────────────────────────┤
+│           Device Parser Plugins             │
+│ ┌──────────┬──────────┬──────────┬────────┐│
+│ │ ResMed   │ OSCAR    │ Philips  │ Future ││
+│ │ EDF+     │ Binary   │ (TODO)   │        ││
+│ │   ✅     │  🔧      │          │        ││
+│ └──────────┴──────────┴──────────┴────────┘│
+└─────────────────────────────────────────────┘
+```
+
+### Key Design Principles
+
+1. **Separation of Concerns**: MCP server never knows about parser formats
+2. **Extensibility**: Add new device support without touching existing code
+3. **Single Source of Truth**: SQLite database stores unified format
+4. **Auto-Detection**: Users just point to data, it "just works"
+5. **Testability**: Each parser tested independently with real data
+
+---
+
+## Core Components
+
+### Unified Data Model
+
+**File:** `src/oscar_mcp/models/unified.py`
+
+All parsers convert to these universal structures:
+
+**UnifiedSession**
+- Device-agnostic session container
+- Start/end times, duration, mode
+- Waveforms dict (by type)
+- Events list
+- Statistics
+- Quality notes
+
+**WaveformData**
+- Time-series data (Flow, Pressure, Leak, SpO2, Pulse)
+- Timestamps as numpy array (seconds offset from session start)
+- Values as numpy float32 array
+- Sample rate, unit, min/max/mean statistics
+
+**RespiratoryEvent**
+- Event types: OA, CA, H, UA, RERA, FL, etc.
+- Start time, duration
+- Optional annotations (from EVE files)
+
+**DeviceInfo**
+- Manufacturer, model, serial number
+- Firmware version
+- Metadata
+
+**SessionStatistics**
+- Event counts (OA, CA, H, etc.)
+- Indices (AHI, OAI, CAI, HI, REI)
+- Pressure stats (min, max, median, p95)
+- Leak stats
+- Respiratory stats
+- SpO2 stats (min, max, mean, time below 90%)
+- Pulse stats
+
+### Parser Infrastructure
+
+**File:** `src/oscar_mcp/parsers/base.py`
+
+**DeviceParser (Abstract Base Class)**
+```python
+class DeviceParser(ABC):
+    @abstractmethod
+    def detect(self, path: Path) -> ParserDetectionResult:
+        """Check if this parser can handle the data"""
+
+    @abstractmethod
+    def get_device_info(self, path: Path) -> DeviceInfo:
+        """Extract device metadata"""
+
+    @abstractmethod
+    def parse_sessions(self, path: Path, ...) -> Iterator[UnifiedSession]:
+        """Parse all sessions to unified format"""
+
+    @abstractmethod
+    def get_metadata(self) -> ParserMetadata:
+        """Parser identification and capabilities"""
+```
+
+**Adding New Parser**:
+```python
+# File: src/oscar_mcp/parsers/philips.py
+class PhilipsParser(DeviceParser):
+    def detect(self, path):
+        return (path / "PXXXXXX").exists()
+
+    def get_device_info(self, path):
+        return DeviceInfo(manufacturer="Philips", ...)
+
+    def parse_sessions(self, path):
+        # Convert Philips format → UnifiedSession
+        yield unified_session
+
+    def get_metadata(self):
+        return ParserMetadata(parser_id="philips", ...)
+
+# Auto-register
+parser_registry.register(PhilipsParser())
+```
+
+### Parser Registry
+
+**File:** `src/oscar_mcp/parsers/registry.py`
+
+- Auto-detects device type from file structure
+- Confidence-based parser selection
+- Manufacturer hints (optional)
+- Global singleton: `parser_registry`
+
+```python
+# Usage
+parser = parser_registry.detect_parser(path)
+for session in parser.parse_sessions(path):
+    # session is UnifiedSession
+    print(f"{session.start_time}: {session.duration_hours}h")
+```
+
+### EDF+ Reader Library
+
+**File:** `src/oscar_mcp/parsers/formats/edf.py`
+
+Generic EDF/EDF+ file reader for medical devices:
+- Signal extraction with proper unit conversion
+- Annotation parsing (for events)
+- Header information extraction
+- **Reusable** by any EDF-based parser
+
+---
+
+## Database Schema
+
+### Tables
+
+**devices**
+```sql
+id, manufacturer, model, serial_number, firmware_version, metadata_json
+UNIQUE(manufacturer, serial_number)
+```
+
+**sessions**
+```sql
+id, device_id, device_session_id, start_time, end_time, duration_seconds,
+therapy_mode, source_format, data_quality_notes
+UNIQUE(device_id, device_session_id)
+```
+
+**waveforms**
+```sql
+id, session_id, waveform_type, sample_rate, unit,
+min_value, max_value, mean_value, data_blob, sample_count
+UNIQUE(session_id, waveform_type)
+```
+- `data_blob`: Numpy array as bytes (timestamps and values stacked)
+- **No compression** - SQLite/filesystem handles that efficiently
+- Simplified from original design for performance
+
+**events**
+```sql
+id, session_id, event_type, start_time, duration_seconds, annotation
+```
+
+**statistics**
+```sql
+id, session_id, [45+ metric columns]
+AHI, OAI, CAI, HI, REI, pressure stats, leak stats, SpO2 stats, etc.
+```
+
+**settings**
+```sql
+id, session_id, setting_key, setting_value
+```
+Key-value pairs for extensibility across device types
+
+---
+
+## Data Flow
+
+### Current ResMed Flow (Working)
+```
+ResMed SD Card
+    ↓
+DATALOG/YYYY/*.edf files
+    ↓
+ResMed EDF+ Parser (src/oscar_mcp/parsers/resmed_edf.py)
+    ↓
+UnifiedSession objects
+    ↓
+Session Importer (src/oscar_mcp/database/importers.py)
+    ↓
+SQLite Database (~/.oscar-mcp/oscar_mcp.db)
+    ↓
+MCP Server Tools (TODO)
+    ↓
+Claude Analysis
+```
+
+### Other Devices Flow (Partial)
+```
+Any CPAP Device
+    ↓
+OSCAR Desktop App
+    ↓
+.000/.001 binary files
+    ↓
+OSCAR Binary Parser (🔧 partial)
+    ↓
+UnifiedSession objects
+    ↓
+[Same pipeline as ResMed]
+```
+
+---
+
+## File Locations
+
+### Production Data
+```
+~/Downloads/OSCAR/Profiles/<ProfileName>/
+├── <Manufacturer>_<Serial>/
+│   ├── Backup/              # ResMed EDF+ files (direct import ✅)
+│   │   ├── STR.edf
+│   │   ├── Identification.json
+│   │   └── DATALOG/YYYY/
+│   │       └── YYYYMMDD_HHMMSS_*.edf
+│   ├── Summaries/           # OSCAR binary (partial parser 🔧)
+│   │   └── *.000
+│   └── Events/              # OSCAR binary (partial parser 🔧)
+│       └── *.001
+```
+
+### Database Location
+```
+~/.oscar-mcp/
+└── oscar_mcp.db            # SQLite database
+    └── oscar_mcp.db-wal    # Write-ahead log
+```
+
+---
+
+## Dependencies
+
+**Core:**
+- Python 3.13+
+- pyedflib (EDF file reading)
+- numpy (efficient array operations)
+- click (CLI)
+- pydantic (data validation)
+
+**Development:**
+- pytest (testing)
+- pytest-cov (coverage)
+- ruff (linting)
+
+**All managed via** `pyproject.toml` with uv
+
+---
+
+## CLI Commands Reference
+
+### Import Data
+
+```bash
+# Import ResMed data from SD card
+uv run oscar-mcp import-data ~/path/to/ResMed/Backup/
+
+# Import with verbose logging
+uv run oscar-mcp -v import-data ~/path/to/data/
+
+# Import options (NEW)
+uv run oscar-mcp import-data ~/path/to/data/ \
+  --limit 10 \
+  --sort-by date-desc \
+  --date-from 2024-10-01 \
+  --date-to 2024-10-31 \
+  --dry-run \
+  --force
+```
+
+### Query Data
+
+```bash
+# List all imported sessions
+uv run oscar-mcp list-sessions
+
+# List sessions in date range
+uv run oscar-mcp list-sessions --from-date 2024-01-01 --to-date 2024-12-31
+
+# Show more sessions
+uv run oscar-mcp list-sessions --limit 50
+```
+
+### Database Management
+
+```bash
+# Show database statistics
+uv run oscar-mcp db stats
+
+# Initialize database (rarely needed - auto-created)
+uv run oscar-mcp db init
+
+# Optimize database (reclaim space)
+uv run oscar-mcp db vacuum
+
+# Direct SQL queries
+sqlite3 ~/.oscar-mcp/oscar_mcp.db
+```
+
+### Run Tests
+
+```bash
+# All tests
+uv run pytest tests/ -v
+
+# Parser tests only
+uv run pytest tests/test_parsers.py -v
+
+# Integration tests only
+uv run pytest tests/test_import_pipeline.py -v
+
+# With coverage
+uv run pytest tests/ --cov=oscar_mcp
+
+# Check linter
+uv run ruff check .
+```
+---
+
+## Device Support & Coverage
+
+### Supported CPAP/BiPAP Manufacturers
+
+OSCAR supports **18 different device manufacturers**, each with unique native formats:
+
+#### 1. ResMed (Most Popular) - ✅ FULLY SUPPORTED
+- **Market Share:** ~40%
+- **Models**: S9, AirSense 10/11, AirCurve 10/11
+- **Native Format**: EDF+ (European Data Format Plus)
+- **Files**: STR.edf, BRP, PLD, EVE, CSL, SAD
+- **Status**: Direct import via ResMed EDF+ parser
+
+#### 2. Philips Respironics - 🔧 Via OSCAR Desktop
+- **Market Share:** ~30%
+- **Models**: DreamStation 1/2/Go, System One, BiPAP AutoSV
+- **Native Format**: Proprietary Binary (.000, .001, .002, .005, .006)
+- **Status**: Via OSCAR desktop app → .000/.001 export
+
+#### 3. Fisher & Paykel - 🔧 Via OSCAR Desktop
+- **Market Share:** ~10%
+- **Models**: ICON series, SleepStyle series
+- **Native Format**: Proprietary binary (ICON) or EDF+ with extensions
+- **Status**: Via OSCAR desktop app
+
+#### 4-18. Other Manufacturers - 🔧 Via OSCAR Desktop
+- Löwenstein (WMEDF format)
+- Weinmann (WMDATA files)
+- DeVilbiss (DV5/DV6)
+- BMC, Resvent / Hoffrichter, vREM, and others
+
+### Parser Strategy
+
+**Option 1: Direct Import (ResMed)** ✅
+```
+ResMed SD Card → OSCAR-MCP → SQLite Database
+```
+- Currently working for ResMed devices
+- 40% market coverage
+
+**Option 2: OSCAR Desktop Export (All Others)** 🔧
+```
+Device SD Card → OSCAR Desktop → .000/.001 Files → OSCAR-MCP → Database
+```
+- Requires completing OSCAR binary parser
+- 100% device coverage
+
+**Option 3: Additional Native Parsers** (Future)
+```
+Philips SD Card → OSCAR-MCP → Database
+```
+- Add parsers for Philips, F&P, etc. as needed
+- Each parser ~200-300 lines
+
+---
+
+## Architecture Benefits
+
+1. ✅ **Extensibility**
+   - New parsers require zero MCP server changes
+   - Add device support by creating one file
+   - Database schema supports all device types
+
+2. ✅ **Maintainability**
+   - Each parser completely independent
+   - Clear separation of concerns
+   - Easy to debug and test in isolation
+   - Simplified codebase (479 lines removed)
+
+3. ✅ **User Experience**
+   - Auto-detection "just works"
+   - Same tools for all device types
+   - Consistent data format
+   - Fast imports (no compression overhead)
+
+4. ✅ **Future-Proof**
+   - Can support any new CPAP device
+   - Can switch parser implementations
+   - Database schema is universal
+
+5. ✅ **Performance**
+   - Direct BLOB storage (no compression overhead)
+   - Efficient numpy serialization
+   - Strategic database indexes
+   - Fast queries on unified schema
+
+---
