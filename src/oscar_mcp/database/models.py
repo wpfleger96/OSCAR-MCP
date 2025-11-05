@@ -338,126 +338,9 @@ class Setting(Base):
 # ============================================================================
 # MEDICAL ANALYSIS INFRASTRUCTURE
 # ============================================================================
-
-
-class KnowledgeBase(Base):
-    """Core knowledge registry for clinical patterns and guidelines."""
-
-    __tablename__ = "knowledge_base"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    knowledge_id = Column(String(100), unique=True, nullable=False)
-    category = Column(String(50), nullable=False)
-    title = Column(String(255), nullable=False)
-    description = Column(Text)
-    source = Column(String(255))
-    version = Column(String(50))
-    content_type = Column(String(50))
-    priority = Column(Integer, default=0)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=utc_now)
-    updated_at = Column(
-        DateTime,
-        default=utc_now,
-        onupdate=utc_now,
-    )
-
-    # Relationships
-    contents = relationship(
-        "KnowledgeContent", back_populates="knowledge", cascade="all, delete-orphan"
-    )
-    media = relationship("KnowledgeMedia", back_populates="knowledge", cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return (
-            f"<KnowledgeBase(id={self.knowledge_id}, category={self.category}, title={self.title})>"
-        )
-
-
-class AnalysisPattern(Base):
-    """Pattern definitions for both programmatic and LLM engines."""
-
-    __tablename__ = "analysis_patterns"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    pattern_id = Column(String(100), unique=True, nullable=False)
-    pattern_name = Column(String(255), nullable=False)
-    category = Column(String(50), nullable=False)
-    visual_description = Column(Text)
-    clinical_significance = Column(Text)
-    algorithm_rules_json = Column(ValidatedJSONWithDefault)  # Algorithmic detection rules
-    threshold_values_json = Column(ValidatedJSONWithDefault)  # Clinical threshold values
-    example_metrics_json = Column(ValidatedJSONWithDefault)  # Example metric ranges
-    severity_level = Column(String(20))
-    confidence_threshold = Column(Float, default=0.6)
-    reference_image_path = Column(String(500))
-    created_at = Column(DateTime, default=utc_now)
-    updated_at = Column(
-        DateTime,
-        default=utc_now,
-        onupdate=utc_now,
-    )
-
-    # Relationships
-    detected = relationship("DetectedPattern", back_populates="pattern")
-    relationships_from = relationship(
-        "PatternRelationship",
-        foreign_keys="PatternRelationship.from_pattern_id",
-        back_populates="from_pattern",
-    )
-    relationships_to = relationship(
-        "PatternRelationship",
-        foreign_keys="PatternRelationship.to_pattern_id",
-        back_populates="to_pattern",
-    )
-
-    def __repr__(self):
-        return f"<AnalysisPattern(id={self.pattern_id}, name={self.pattern_name}, category={self.category})>"
-
-
-class KnowledgeContent(Base):
-    """Structured content storage for knowledge base entries."""
-
-    __tablename__ = "knowledge_content"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    knowledge_id = Column(
-        String(100), ForeignKey("knowledge_base.knowledge_id", ondelete="CASCADE"), nullable=False
-    )
-    content_key = Column(String(100), nullable=False)
-    content_value = Column(Text, nullable=False)
-    data_type = Column(String(20), nullable=False)  # json_array, json_object, markdown, html
-    display_order = Column(Integer, default=0)
-    is_required = Column(Boolean, default=False)
-
-    # Relationships
-    knowledge = relationship("KnowledgeBase", back_populates="contents")
-
-    def __repr__(self):
-        return f"<KnowledgeContent(id={self.id}, knowledge_id={self.knowledge_id}, key={self.content_key})>"
-
-
-class KnowledgeMedia(Base):
-    """Image and media file references for knowledge base."""
-
-    __tablename__ = "knowledge_media"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    knowledge_id = Column(
-        String(100), ForeignKey("knowledge_base.knowledge_id", ondelete="CASCADE"), nullable=False
-    )
-    media_type = Column(String(50), nullable=False)
-    file_path = Column(String(500), nullable=False)
-    caption = Column(Text)
-    metadata_json = Column(ValidatedJSONWithDefault)  # File metadata (resolution, format, etc.)
-    file_hash = Column(String(64))  # SHA256
-    created_at = Column(DateTime, default=utc_now)
-
-    # Relationships
-    knowledge = relationship("KnowledgeBase", back_populates="media")
-
-    def __repr__(self):
-        return f"<KnowledgeMedia(id={self.id}, knowledge_id={self.knowledge_id}, type={self.media_type})>"
+# Simplified schema - reference knowledge stored in Python constants
+# (see src/oscar_mcp/knowledge/patterns.py and thresholds.py)
+# Database only stores runtime analysis data and results
 
 
 class AnalysisResult(Base):
@@ -491,7 +374,12 @@ class AnalysisResult(Base):
 
 
 class DetectedPattern(Base):
-    """Individual pattern detections from analysis."""
+    """
+    Individual pattern detections from analysis.
+
+    Pattern definitions are stored in code (oscar_mcp.knowledge.patterns), not database.
+    This table only stores runtime detections with references to pattern IDs.
+    """
 
     __tablename__ = "detected_patterns"
 
@@ -499,11 +387,7 @@ class DetectedPattern(Base):
     analysis_result_id = Column(
         Integer, ForeignKey("analysis_results.id", ondelete="CASCADE"), nullable=False
     )
-    pattern_id = Column(
-        String(100),
-        ForeignKey("analysis_patterns.pattern_id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    pattern_id = Column(String(100), nullable=False)  # References patterns.py constants
     start_time = Column(DateTime, nullable=False)
     duration = Column(Float)  # seconds
     confidence = Column(Float, nullable=False)
@@ -513,7 +397,6 @@ class DetectedPattern(Base):
 
     # Relationships
     analysis = relationship("AnalysisResult", back_populates="detected_patterns")
-    pattern = relationship("AnalysisPattern", back_populates="detected")
 
     def __repr__(self):
         return f"<DetectedPattern(id={self.id}, pattern={self.pattern_id}, confidence={self.confidence})>"
@@ -543,7 +426,7 @@ class AnalysisFeedback(Base):
 
 
 class AlgorithmConfig(Base):
-    """Algorithm parameters and configuration."""
+    """Algorithm parameters and configuration versioning."""
 
     __tablename__ = "algorithm_configs"
 
@@ -561,35 +444,3 @@ class AlgorithmConfig(Base):
 
     def __repr__(self):
         return f"<AlgorithmConfig(name={self.algorithm_name}, version={self.version}, active={self.is_active})>"
-
-
-class PatternRelationship(Base):
-    """Connections and relationships between patterns."""
-
-    __tablename__ = "pattern_relationships"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    from_pattern_id = Column(
-        String(100), ForeignKey("analysis_patterns.pattern_id", ondelete="CASCADE"), nullable=False
-    )
-    to_pattern_id = Column(
-        String(100), ForeignKey("analysis_patterns.pattern_id", ondelete="CASCADE"), nullable=False
-    )
-    relationship_type = Column(String(50), nullable=False)  # causes, indicates, precedes, etc.
-    strength = Column(Float, default=0.5)  # 0-1
-    notes = Column(Text)
-
-    # Relationships
-    from_pattern = relationship(
-        "AnalysisPattern", foreign_keys=[from_pattern_id], back_populates="relationships_from"
-    )
-    to_pattern = relationship(
-        "AnalysisPattern", foreign_keys=[to_pattern_id], back_populates="relationships_to"
-    )
-
-    __table_args__ = (
-        CheckConstraint("from_pattern_id != to_pattern_id", name="chk_no_self_reference"),
-    )
-
-    def __repr__(self):
-        return f"<PatternRelationship(from={self.from_pattern_id}, to={self.to_pattern_id}, type={self.relationship_type})>"

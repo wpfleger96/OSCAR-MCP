@@ -5,6 +5,7 @@ Provides version-controlled, file-based prompt templates with:
 - Template inheritance and composition
 - Secure template rendering with sandboxing
 - Convenient helper methods for common analysis tasks
+- Automatic inclusion of medical knowledge from Python constants
 """
 
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Any
 
 from jinja2 import FileSystemLoader, TemplateNotFound, select_autoescape
 from jinja2.sandbox import SandboxedEnvironment
+
+from oscar_mcp.knowledge import patterns, thresholds
 
 
 class PromptManager:
@@ -73,16 +76,16 @@ class PromptManager:
                 f"Template '{template_name}' not found in {self.templates_dir}"
             ) from e
 
-    def render_flow_limitation_analysis(
-        self, breath_descriptions: list, reference_patterns: dict
-    ) -> str:
+    def render_flow_limitation_analysis(self, breath_descriptions: list) -> str:
         """
         Convenience method for flow limitation analysis.
+
+        Automatically includes flow limitation class definitions from
+        oscar_mcp.knowledge.patterns.FLOW_LIMITATION_CLASSES.
 
         Args:
             breath_descriptions: List of breath description dicts with visual
                                descriptions, metrics, and timestamps
-            reference_patterns: Dict mapping class numbers to pattern definitions
 
         Returns:
             Rendered analysis prompt
@@ -90,8 +93,66 @@ class PromptManager:
         return self.render_prompt(
             "flow_limitation/analysis.jinja2",
             breath_descriptions=breath_descriptions,
-            reference_patterns=reference_patterns,
+            flow_classes=patterns.FLOW_LIMITATION_CLASSES,
+            thresholds=thresholds.AHI_SEVERITY,
         )
+
+    def render_event_detection(self, breathing_data: list) -> str:
+        """
+        Convenience method for respiratory event detection.
+
+        Automatically includes event definitions and thresholds.
+
+        Args:
+            breathing_data: List of breath/flow data for analysis
+
+        Returns:
+            Rendered event detection prompt
+        """
+        return self.render_prompt(
+            "events/detection.jinja2",
+            breathing_data=breathing_data,
+            event_types=patterns.RESPIRATORY_EVENTS,
+            spo2_ranges=thresholds.SPO2_RANGES,
+        )
+
+    def render_pattern_detection(self, session_data: dict, pattern_type: str = "csr") -> str:
+        """
+        Convenience method for complex pattern detection (CSR, periodic breathing, etc.).
+
+        Args:
+            session_data: Session waveform and metrics data
+            pattern_type: Type of pattern to detect
+
+        Returns:
+            Rendered pattern detection prompt
+        """
+        return self.render_prompt(
+            f"patterns/{pattern_type}_detection.jinja2",
+            session_data=session_data,
+            complex_patterns=patterns.COMPLEX_PATTERNS,
+            relationships=patterns.PATTERN_RELATIONSHIPS,
+        )
+
+    def get_medical_knowledge_context(self) -> dict:
+        """
+        Get all medical knowledge as a dictionary for template context.
+
+        Returns:
+            Dictionary with all medical knowledge constants
+        """
+        return {
+            "flow_classes": patterns.FLOW_LIMITATION_CLASSES,
+            "respiratory_events": patterns.RESPIRATORY_EVENTS,
+            "complex_patterns": patterns.COMPLEX_PATTERNS,
+            "pattern_relationships": patterns.PATTERN_RELATIONSHIPS,
+            "ahi_severity": thresholds.AHI_SEVERITY,
+            "spo2_ranges": thresholds.SPO2_RANGES,
+            "leak_thresholds": thresholds.LEAK_THRESHOLDS,
+            "compliance_criteria": thresholds.COMPLIANCE_CRITERIA,
+            "pressure_ranges": thresholds.PRESSURE_RANGES,
+            "respiratory_rate": thresholds.RESPIRATORY_RATE,
+        }
 
     def list_templates(self) -> list[str]:
         """

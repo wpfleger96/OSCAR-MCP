@@ -398,6 +398,16 @@ EVENT_FILE_EXT = ".001"  # Event/waveform data file
 DEFAULT_DATABASE_PATH = str(Path.home() / ".oscar-mcp" / "oscar_mcp.db")
 DEFAULT_PROFILE_NAME = "Default"
 
+# Knowledge base image paths (relative to project root)
+KNOWLEDGE_IMAGE_BASE = Path("data/guidelines/images")
+IMAGE_DIRS = {
+    "flow_limitation": KNOWLEDGE_IMAGE_BASE / "flow_limitation",
+    "events": KNOWLEDGE_IMAGE_BASE / "events",
+    "patterns": KNOWLEDGE_IMAGE_BASE / "patterns",
+    "charts": KNOWLEDGE_IMAGE_BASE / "charts",
+    "ui": KNOWLEDGE_IMAGE_BASE / "ui",
+}
+
 # Time calculations
 SECONDS_PER_HOUR = 3600
 MILLISECONDS_PER_SECOND = 1000
