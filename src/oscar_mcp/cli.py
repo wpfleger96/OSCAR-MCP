@@ -128,7 +128,10 @@ def import_data(
         total_duration = 0
         total_events = 0
 
-        for session in sessions:
+        # Sort sessions by date descending for display
+        sorted_sessions = sorted(sessions, key=lambda s: s.start_time, reverse=True)
+
+        for session in sorted_sessions:
             duration_hours = session.duration_seconds / 3600 if session.duration_seconds else 0
             total_duration += duration_hours
 
@@ -155,8 +158,11 @@ def import_data(
         click.echo(f"  • Total duration: {total_duration:.1f} hours")
         click.echo(f"  • Total events: {total_events}")
         if sessions:
+            # Calculate actual date range using min/max
+            first_date = min(s.start_time for s in sessions)
+            last_date = max(s.start_time for s in sessions)
             click.echo(
-                f"  • Date range: {sessions[0].start_time:%Y-%m-%d} to {sessions[-1].start_time:%Y-%m-%d}"
+                f"  • Date range: {first_date:%Y-%m-%d} to {last_date:%Y-%m-%d}"
             )
         click.echo("\n✓ Dry run complete. Use without --dry-run to import.")
         return 0
