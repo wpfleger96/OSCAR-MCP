@@ -9,5 +9,3 @@ uvx mypy .
 echo "Running formatter..."
 uvx ruff format .
 
-echo "Running tests..."
-uv run pytest

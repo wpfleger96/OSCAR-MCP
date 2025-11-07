@@ -141,9 +141,9 @@ class SessionFileParser:
             # - Gain, offset, min, max
             # - Sample rate (for waveforms)
 
-            events = {}
+            events: Dict[str, List] = {}
             logger.info(f"Parsed events for session {self.session_id}")
-            return events
+            return events  # type: ignore[return-value]
 
         except Exception as e:
             logger.error(f"Error parsing event file {self.event_path}: {e}")

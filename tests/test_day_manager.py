@@ -11,7 +11,6 @@ from datetime import datetime, date
 from oscar_mcp.database.day_manager import DayManager
 
 
-@pytest.mark.business_logic
 class TestDaySplitLogic:
     """Test day-splitting algorithm (OSCAR-compatible noon boundary logic)."""
 
@@ -113,7 +112,6 @@ class TestDaySplitLogic:
         assert DayManager.get_day_for_session(session_at, profile) == date(2024, 11, 5)
 
 
-@pytest.mark.business_logic
 class TestStatisticalAggregation:
     """Test statistical aggregation across multiple sessions."""
 

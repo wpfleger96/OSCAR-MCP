@@ -38,14 +38,14 @@ class ParserRegistry:
             process(session)
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize empty registry."""
         self._parsers: List[DeviceParser] = []
         self._parsers_by_id: Dict[str, DeviceParser] = {}
         self._parsers_by_manufacturer: Dict[str, List[DeviceParser]] = {}
         logger.info("Parser registry initialized")
 
-    def register(self, parser: DeviceParser):
+    def register(self, parser: DeviceParser) -> None:
         """
         Register a new parser.
 

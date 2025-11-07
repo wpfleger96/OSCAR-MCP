@@ -21,11 +21,15 @@ from sqlalchemy import (
     CheckConstraint,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship, declarative_base
+from sqlalchemy.orm import relationship, DeclarativeBase
 
 from oscar_mcp.database.types import ValidatedJSON, ValidatedJSONWithDefault
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    """Base class for all SQLAlchemy ORM models."""
+
+    pass
 
 
 # Standardized datetime helpers

@@ -308,7 +308,7 @@ class ResmedEDFParser(DeviceParser):
             night_items = sorted(night_groups.items(), key=lambda x: x[0], reverse=True)
         else:
             # Filesystem order (default)
-            night_items = night_groups.items()
+            night_items = list(night_groups.items())
 
         # Track number of sessions yielded for limit
         sessions_yielded = 0
@@ -414,7 +414,7 @@ class ResmedEDFParser(DeviceParser):
                 }
             }
         """
-        groups = {}
+        groups: Dict[str, Dict[str, Dict[str, Path]]] = {}
 
         # Find all EDF files
         for edf_file in datalog_dir.rglob("*.edf"):
@@ -448,7 +448,7 @@ class ResmedEDFParser(DeviceParser):
         segments: Dict[str, Dict[str, Path]],
         device_info: DeviceInfo,
         base_path: Path,
-    ) -> UnifiedSession:
+    ) -> UnifiedSession | None:
         """
         Parse all segments for a single night into one unified session.
 
@@ -556,7 +556,7 @@ class ResmedEDFParser(DeviceParser):
                         merged_waveform = merged_session.waveforms[waveform_type]
 
                         # Adjust timestamps by segment offset (numpy array addition)
-                        adjusted_timestamps = segment_waveform.timestamps + segment_start_offset
+                        adjusted_timestamps = segment_waveform.timestamps + segment_start_offset  # type: ignore[operator]
 
                         # Append data using numpy concatenation
                         merged_waveform.timestamps = np.concatenate(
@@ -683,7 +683,7 @@ class ResmedEDFParser(DeviceParser):
 
         Note: Values of -1 indicate no oximeter was connected.
         """
-        from .formats.edf import is_discontinuous_edf, EDFDiscontinuousReader, get_edf_record_count
+        from .formats.edf import get_edf_record_count
 
         try:
             # Check for zero-record files first (OSCAR allows these, pyedflib rejects them)
@@ -700,25 +700,13 @@ class ResmedEDFParser(DeviceParser):
                 session.has_statistics = True  # Mark that we tried
                 return  # Skip parsing, no data available
 
-            # Check if file is discontinuous and use appropriate reader
-            is_discontinuous = is_discontinuous_edf(file_path)
+            # SA2 signal files are continuous by design (ResMed creates separate files per segment)
+            # If pyedflib rejects a file, it's genuinely corrupted or malformed
+            logger.debug(
+                f"SA2 file {file_path.name} has {record_count} records (size={file_size} bytes)"
+            )
 
-            if is_discontinuous:
-                logger.info(
-                    f"SA2 file {file_path.name} is discontinuous (EDF+D format, size={file_size} bytes) - "
-                    f"using MNE library to read signal data"
-                )
-                session.data_quality_notes.append(
-                    "SA2 file is discontinuous (mask removal detected during session)"
-                )
-                edf_context = EDFDiscontinuousReader(file_path)
-            else:
-                logger.debug(
-                    f"SA2 file {file_path.name} is continuous ({record_count} records, size={file_size} bytes)"
-                )
-                edf_context = EDFReader(file_path)
-
-            with edf_context as edf:
+            with EDFReader(file_path) as edf:
                 has_valid_data = False
 
                 # Parse SpO2 waveform
@@ -827,7 +815,7 @@ class ResmedEDFParser(DeviceParser):
 
     def _parse_breathing_waveforms(self, file_path: Path, session: UnifiedSession):
         """Parse BRP breathing waveform file."""
-        from .formats.edf import is_discontinuous_edf, EDFDiscontinuousReader, get_edf_record_count
+        from .formats.edf import get_edf_record_count
 
         try:
             # Check for zero-record files first (OSCAR allows these, pyedflib rejects them)
@@ -843,25 +831,13 @@ class ResmedEDFParser(DeviceParser):
                 )
                 return  # Skip parsing, no data available
 
-            # Check if file is discontinuous and use appropriate reader
-            is_discontinuous = is_discontinuous_edf(file_path)
+            # BRP signal files are continuous by design (ResMed creates separate files per segment)
+            # If pyedflib rejects a file, it's genuinely corrupted or malformed
+            logger.debug(
+                f"BRP file {file_path.name} has {record_count} records (size={file_size} bytes)"
+            )
 
-            if is_discontinuous:
-                logger.info(
-                    f"BRP file {file_path.name} is discontinuous (EDF+D format, size={file_size} bytes) - "
-                    f"using MNE library to read signal data"
-                )
-                session.data_quality_notes.append(
-                    "BRP file is discontinuous (mask removal detected during session)"
-                )
-                edf_context = EDFDiscontinuousReader(file_path)
-            else:
-                logger.debug(
-                    f"BRP file {file_path.name} is continuous ({record_count} records, size={file_size} bytes)"
-                )
-                edf_context = EDFReader(file_path)
-
-            with edf_context as edf:
+            with EDFReader(file_path) as edf:
                 # BRP typically contains Flow Rate signal
                 # ResMed uses names like "Flow", "Flow.40ms", "FlowRate"
                 flow_signal = self._find_signal(edf, ["Flow"])
@@ -914,7 +890,7 @@ class ResmedEDFParser(DeviceParser):
 
     def _parse_pressure_leak(self, file_path: Path, session: UnifiedSession):
         """Parse PLD pressure/leak file."""
-        from .formats.edf import is_discontinuous_edf, EDFDiscontinuousReader, get_edf_record_count
+        from .formats.edf import get_edf_record_count
 
         try:
             # Check for zero-record files first (OSCAR allows these, pyedflib rejects them)
@@ -930,25 +906,13 @@ class ResmedEDFParser(DeviceParser):
                 )
                 return  # Skip parsing, no data available
 
-            # Check if file is discontinuous and use appropriate reader
-            is_discontinuous = is_discontinuous_edf(file_path)
+            # PLD signal files are continuous by design (ResMed creates separate files per segment)
+            # If pyedflib rejects a file, it's genuinely corrupted or malformed
+            logger.debug(
+                f"PLD file {file_path.name} has {record_count} records (size={file_size} bytes)"
+            )
 
-            if is_discontinuous:
-                logger.info(
-                    f"PLD file {file_path.name} is discontinuous (EDF+D format, size={file_size} bytes) - "
-                    f"using MNE library to read signal data"
-                )
-                session.data_quality_notes.append(
-                    "PLD file is discontinuous (mask removal detected during session)"
-                )
-                edf_context = EDFDiscontinuousReader(file_path)
-            else:
-                logger.debug(
-                    f"PLD file {file_path.name} is continuous ({record_count} records, size={file_size} bytes)"
-                )
-                edf_context = EDFReader(file_path)
-
-            with edf_context as edf:
+            with EDFReader(file_path) as edf:
                 # Parse pressure waveform
                 # ResMed uses names like "Press.2s", "MaskPress.2s", "Pressure", "MaskPressure"
                 pressure_signal = self._find_signal(edf, ["Press", "MaskPress"])

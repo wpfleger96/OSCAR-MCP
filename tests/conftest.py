@@ -13,6 +13,21 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "business_logic: Tests for core business logic and algorithms"
     )
+    config.addinivalue_line(
+        "markers", "integration: Integration tests combining multiple components"
+    )
+    config.addinivalue_line(
+        "markers", "integration_pipeline: Full end-to-end pipeline integration tests"
+    )
+    config.addinivalue_line(
+        "markers", "integration_metrics: Breath metrics calculation and validation"
+    )
+    config.addinivalue_line("markers", "integration_features: Feature extraction integration tests")
+    config.addinivalue_line("markers", "real_data: Tests that process actual CPAP session data")
+    config.addinivalue_line(
+        "markers", "requires_fixtures: Tests that require real session fixtures"
+    )
+    config.addinivalue_line("markers", "slow: Tests that take significant time (>5 seconds)")
 
 
 @pytest.fixture
@@ -97,8 +112,7 @@ def db_session(temp_db):
 @pytest.fixture
 def initialized_db(temp_db):
     """Create database initialized with global session factory (for validation tests)."""
-    from oscar_mcp.database.session import init_database, session_scope
-    import oscar_mcp.database.session as session_module
+    from oscar_mcp.database.session import init_database, session_scope, cleanup_database
 
     # Initialize database with global session factory
     init_database(str(temp_db))
@@ -107,8 +121,8 @@ def initialized_db(temp_db):
     with session_scope() as session:
         yield session
 
-    # Cleanup: Reset global session factory to allow next test to use different database
-    session_module._SessionFactory = None
+    # Cleanup: Dispose engine and reset global session factory
+    cleanup_database()
 
 
 @pytest.fixture
@@ -176,3 +190,68 @@ def test_session_factory(db_session):
         return session
 
     return _create_session
+
+
+# =============================================================================
+# Integration Test Fixtures (Real Session Data)
+# =============================================================================
+
+
+@pytest.fixture
+def db_session_with_baseline_fixture(db_session, fixtures_dir):
+    """Database session with baseline fixture imported (July 2025 continuous session)."""
+    from tests.helpers.fixtures_loader import import_to_test_db
+
+    try:
+        import_to_test_db("2025_july_continuous", db_session)
+        yield db_session
+    except (ValueError, FileNotFoundError) as e:
+        pytest.skip(f"Baseline fixture not available: {e}")
+
+
+@pytest.fixture
+def db_session_with_early_therapy_fixture(db_session, fixtures_dir):
+    """Database session with early therapy fixture imported."""
+    from tests.helpers.fixtures_loader import import_to_test_db
+
+    try:
+        import_to_test_db("2025_early_therapy", db_session)
+        yield db_session
+    except (ValueError, FileNotFoundError) as e:
+        pytest.skip(f"Early therapy fixture not available: {e}")
+
+
+@pytest.fixture
+def db_session_with_multisegment_fixture(db_session, fixtures_dir):
+    """Database session with multi-segment fixture imported (September 2025 complex session with 4 therapy segments)."""
+    from tests.helpers.fixtures_loader import import_to_test_db
+
+    try:
+        import_to_test_db("2025_september_complex", db_session)
+        yield db_session
+    except (ValueError, FileNotFoundError) as e:
+        pytest.skip(f"Multi-segment fixture not available: {e}")
+
+
+@pytest.fixture
+def db_session_with_october_recent_fixture(db_session, fixtures_dir):
+    """Database session with October 2025 recent fixture imported (most recent therapy data)."""
+    from tests.helpers.fixtures_loader import import_to_test_db
+
+    try:
+        import_to_test_db("2025_october_recent", db_session)
+        yield db_session
+    except (ValueError, FileNotFoundError) as e:
+        pytest.skip(f"October recent fixture not available: {e}")
+
+
+@pytest.fixture
+def db_session_with_august_extended_fixture(db_session, fixtures_dir):
+    """Database session with August 2025 extended fixture imported (longest duration session for capacity testing)."""
+    from tests.helpers.fixtures_loader import import_to_test_db
+
+    try:
+        import_to_test_db("2025_august_extended", db_session)
+        yield db_session
+    except (ValueError, FileNotFoundError) as e:
+        pytest.skip(f"August extended fixture not available: {e}")

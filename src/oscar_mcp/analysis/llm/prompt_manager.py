@@ -20,7 +20,7 @@ from oscar_mcp.knowledge import patterns, thresholds
 class PromptManager:
     """Manages Jinja2 prompt templates for medical analysis."""
 
-    def __init__(self, templates_dir: Path = None):
+    def __init__(self, templates_dir: Path | None = None):
         """
         Initialize prompt manager.
 

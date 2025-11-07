@@ -9,6 +9,8 @@ channels and metrics. Useful for:
 - Documentation and user guides
 """
 
+from typing import Any
+
 # Waveform and Time-Series Charts
 # These show continuous data over time
 WAVEFORM_CHARTS = {
@@ -239,7 +241,7 @@ CHART_CATEGORIES = {
 }
 
 
-def get_chart_image(category: str, chart_name: str, image_index: int = 0) -> str:
+def get_chart_image(category: str, chart_name: str, image_index: int = 0) -> str | None:
     """
     Get reference image path for a specific chart.
 
@@ -258,7 +260,7 @@ def get_chart_image(category: str, chart_name: str, image_index: int = 0) -> str
     if category not in CHART_CATEGORIES:
         raise ValueError(f"Unknown category: {category}")
 
-    category_charts = CHART_CATEGORIES[category]
+    category_charts: dict[str, Any] = CHART_CATEGORIES[category]  # type: ignore[assignment]
     if chart_name not in category_charts:
         raise ValueError(f"Unknown chart: {chart_name}")
 
@@ -281,6 +283,7 @@ def list_all_chart_images() -> list:
     """
     images = []
     for category_charts in CHART_CATEGORIES.values():
-        for chart in category_charts.values():
+        charts_dict: dict[str, Any] = category_charts  # type: ignore[assignment]
+        for chart in charts_dict.values():
             images.extend(chart.get("reference_images", []))
     return images

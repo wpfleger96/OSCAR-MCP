@@ -186,21 +186,21 @@ class EDFReader:
             self.open()
 
         # Read header fields
-        start_datetime = self._edf_file.getStartdatetime()
+        start_datetime = self._edf_file.getStartdatetime()  # type: ignore[union-attr]
 
         # Get version from header, default to "0" if not present
-        header_dict = self._edf_file.getHeader()
+        header_dict = self._edf_file.getHeader()  # type: ignore[union-attr]
         version = header_dict.get("version", "0")
 
         self._header = EDFHeader(
             version=version,
-            patient_info=self._edf_file.getPatientName(),
-            recording_info=self._edf_file.getRecordingAdditional(),
+            patient_info=self._edf_file.getPatientName(),  # type: ignore[union-attr]
+            recording_info=self._edf_file.getRecordingAdditional(),  # type: ignore[union-attr]
             start_datetime=start_datetime,
-            num_data_records=self._edf_file.datarecords_in_file,
-            record_duration=self._edf_file.datarecord_duration,
-            num_signals=self._edf_file.signals_in_file,
-            is_edf_plus=self._edf_file.filetype == 1,  # 1 = EDF+
+            num_data_records=self._edf_file.datarecords_in_file,  # type: ignore[union-attr]
+            record_duration=self._edf_file.datarecord_duration,  # type: ignore[union-attr]
+            num_signals=self._edf_file.signals_in_file,  # type: ignore[union-attr]
+            is_edf_plus=self._edf_file.filetype == 1,  # type: ignore[union-attr]
         )
 
         return self._header
@@ -220,8 +220,8 @@ class EDFReader:
 
         self._signals = {}
 
-        for i in range(self._edf_file.signals_in_file):
-            label = self._edf_file.getLabel(i).strip()
+        for i in range(self._edf_file.signals_in_file):  # type: ignore[union-attr]
+            label = self._edf_file.getLabel(i).strip()  # type: ignore[union-attr]
 
             # Skip annotation channels (EDF+ specific)
             if label.startswith("EDF Annotations"):
@@ -229,14 +229,14 @@ class EDFReader:
 
             signal_info = EDFSignalInfo(
                 label=label,
-                transducer=self._edf_file.getTransducer(i).strip(),
-                physical_dimension=self._edf_file.getPhysicalDimension(i).strip(),
-                physical_min=self._edf_file.getPhysicalMinimum(i),
-                physical_max=self._edf_file.getPhysicalMaximum(i),
-                digital_min=self._edf_file.getDigitalMinimum(i),
-                digital_max=self._edf_file.getDigitalMaximum(i),
-                prefiltering=self._edf_file.getPrefilter(i).strip(),
-                samples_per_record=self._edf_file.getNSamples()[i],
+                transducer=self._edf_file.getTransducer(i).strip(),  # type: ignore[union-attr]
+                physical_dimension=self._edf_file.getPhysicalDimension(i).strip(),  # type: ignore[union-attr]
+                physical_min=self._edf_file.getPhysicalMinimum(i),  # type: ignore[union-attr]
+                physical_max=self._edf_file.getPhysicalMaximum(i),  # type: ignore[union-attr]
+                digital_min=self._edf_file.getDigitalMinimum(i),  # type: ignore[union-attr]
+                digital_max=self._edf_file.getDigitalMaximum(i),  # type: ignore[union-attr]
+                prefiltering=self._edf_file.getPrefilter(i).strip(),  # type: ignore[union-attr]
+                samples_per_record=self._edf_file.samples_in_datarecord(i),  # type: ignore[union-attr]
                 signal_index=i,
             )
 
@@ -289,6 +289,13 @@ class EDFReader:
 
         Raises:
             KeyError: If signal not found
+
+        Note:
+            When reading ResMed EDF files, you may see harmless warnings like
+            "read 0, less than X requested!!!" from pyedflib's underlying C library.
+            These occur when the library encounters EDF+ annotation channels mixed
+            with data channels. They do not indicate errors and can be safely ignored.
+            This behavior matches OSCAR's EDF parsing (warnings are just hidden in GUI).
         """
         if self._edf_file is None:
             self.open()
@@ -311,14 +318,14 @@ class EDFReader:
 
             # Read this record's data
             if physical_units:
-                record_data = self._edf_file.readSignal(
+                record_data = self._edf_file.readSignal(  # type: ignore[union-attr]
                     signal_index,
                     start=record_start,
                     n=signal_info.samples_per_record,
                     digital=False,
                 )
             else:
-                record_data = self._edf_file.readSignal(
+                record_data = self._edf_file.readSignal(  # type: ignore[union-attr]
                     signal_index, start=record_start, n=signal_info.samples_per_record, digital=True
                 )
 
@@ -385,7 +392,7 @@ class EDFReader:
         try:
             # Read annotations using pyedflib
             # Returns tuple of (onset_times, durations, texts) where each is an array
-            annotations_tuple = self._edf_file.readAnnotations()
+            annotations_tuple = self._edf_file.readAnnotations()  # type: ignore[union-attr]
 
             # pyedflib returns (onsets_array, durations_array, texts_array)
             if len(annotations_tuple) == 3:
@@ -619,7 +626,7 @@ def parse_edf_annotations_raw(file_path: Path) -> List[EDFAnnotation]:
         Example: +120.5\x1512.5\x14Obstructive apnea\x14\x00
     """
 
-    annotations = []
+    annotations: List[EDFAnnotation] = []
 
     try:
         with open(file_path, "rb") as f:
@@ -992,20 +999,28 @@ class EDFDiscontinuousReader:
             # Import MNE locally to avoid module-level interference with pyedflib
             import mne
             import os
-            import sys
 
             try:
-                # Suppress MNE's verbose output AND stderr from C libraries
-                # MNE's verbose=False doesn't suppress libsndfile errors
-                old_stderr = sys.stderr
-                with open(os.devnull, "w") as devnull:
-                    sys.stderr = devnull
-                    try:
-                        self._mne_raw = mne.io.read_raw_edf(
-                            str(self.file_path), preload=True, verbose=False
-                        )
-                    finally:
-                        sys.stderr = old_stderr
+                # Suppress both stdout and stderr at C-level to silence libsndfile warnings
+                # These warnings are harmless but pollute the output with "read 0, less than X requested!!!"
+                # Python-level redirection doesn't work because C libraries write directly to file descriptors
+                devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                old_stdout_fd = os.dup(1)  # Save original stdout (fd=1)
+                old_stderr_fd = os.dup(2)  # Save original stderr (fd=2)
+                os.dup2(devnull_fd, 1)  # Redirect stdout to /dev/null
+                os.dup2(devnull_fd, 2)  # Redirect stderr to /dev/null
+
+                try:
+                    self._mne_raw = mne.io.read_raw_edf(
+                        str(self.file_path), preload=True, verbose=False
+                    )
+                finally:
+                    # Restore stdout and stderr
+                    os.dup2(old_stdout_fd, 1)
+                    os.dup2(old_stderr_fd, 2)
+                    os.close(old_stdout_fd)
+                    os.close(old_stderr_fd)
+                    os.close(devnull_fd)
 
                 logger.debug(f"Successfully loaded {self.file_path.name} with MNE")
             except Exception as e:

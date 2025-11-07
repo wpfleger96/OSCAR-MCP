@@ -17,7 +17,7 @@ _SessionFactory = None
 _init_lock = threading.Lock()
 
 
-def init_database(database_path: str = None) -> None:
+def init_database(database_path: str | None = None) -> None:
     """
     Initialize the database connection in a thread-safe manner.
 
@@ -106,3 +106,19 @@ def get_engine():
     if _engine is None:
         raise RuntimeError("Database not initialized. Call init_database() first.")
     return _engine
+
+
+def cleanup_database() -> None:
+    """
+    Clean up database connections and reset global state.
+
+    This function should be called during test cleanup to prevent resource warnings.
+    It properly disposes of the SQLAlchemy engine and resets global variables.
+    """
+    global _engine, _SessionFactory
+
+    with _init_lock:
+        if _engine is not None:
+            _engine.dispose()
+            _engine = None
+        _SessionFactory = None

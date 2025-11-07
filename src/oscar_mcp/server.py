@@ -7,7 +7,7 @@ MCP server providing tools for analyzing and inspecting OSCAR CPAP/APAP therapy 
 import json
 import logging
 from datetime import date, timedelta
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -89,7 +89,10 @@ server = FastMCP(name="oscar-mcp", instructions=INSTRUCTIONS)
 @server.resource("docs://channels")
 def get_channels_documentation() -> str:
     """Documentation of available OSCAR data channels."""
-    channels_info = {"description": "OSCAR data channels and their properties", "channels": []}
+    channels_info: dict[str, Any] = {
+        "description": "OSCAR data channels and their properties",
+        "channels": [],
+    }
 
     for channel_id, definition in CHANNEL_DEFINITIONS.items():
         channels_info["channels"].append(

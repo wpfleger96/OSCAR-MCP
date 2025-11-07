@@ -5,6 +5,8 @@ AHI severity, SpO2 ranges, leak thresholds, and compliance criteria
 from AASM guidelines and clinical practice standards.
 """
 
+from typing import Dict, Any, cast
+
 # AHI (Apnea-Hypopnea Index) Severity Classification
 # Events per hour of sleep
 AHI_SEVERITY = {
@@ -173,9 +175,11 @@ def classify_ahi(ahi_value: float) -> dict:
         Dictionary with severity level and details
     """
     for severity, data in AHI_SEVERITY.items():
-        min_val, max_val = data["range"]
+        data_dict = cast(Dict[str, Any], data)
+        range_tuple = data_dict["range"]
+        min_val, max_val = int(range_tuple[0]), int(range_tuple[1])
         if min_val <= ahi_value < max_val:
-            return {"severity": severity, "value": ahi_value, **data}
+            return {"severity": severity, "value": ahi_value, **data_dict}
     return {
         "severity": "unknown",
         "value": ahi_value,
@@ -195,9 +199,11 @@ def classify_spo2(spo2_value: float) -> dict:
         Dictionary with range category and details
     """
     for category, data in SPO2_RANGES.items():
-        min_val, max_val = data["range"]
+        data_dict = cast(Dict[str, Any], data)
+        range_tuple = data_dict["range"]
+        min_val, max_val = int(range_tuple[0]), int(range_tuple[1])
         if min_val <= spo2_value <= max_val:
-            return {"category": category, "value": spo2_value, **data}
+            return {"category": category, "value": spo2_value, **data_dict}
     return {
         "category": "unknown",
         "value": spo2_value,

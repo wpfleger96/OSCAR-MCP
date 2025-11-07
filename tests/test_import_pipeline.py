@@ -69,65 +69,65 @@ class TestImportPipeline:
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session = sessions[0]
 
-        db = DatabaseManager(db_path=temp_db)
-        importer = SessionImporter(db)
+        with DatabaseManager(db_path=temp_db) as db:
+            importer = SessionImporter(db)
 
-        # First import should succeed
-        result1 = importer.import_session(session)
-        assert result1 is True
+            # First import should succeed
+            result1 = importer.import_session(session)
+            assert result1 is True
 
-        # Second import should be skipped
-        result2 = importer.import_session(session)
-        assert result2 is False
+            # Second import should be skipped
+            result2 = importer.import_session(session)
+            assert result2 is False
 
-        # Verify only one session exists
-        with db.get_connection() as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM sessions")
-            assert cursor.fetchone()[0] == 1
+            # Verify only one session exists
+            with db.get_connection() as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM sessions")
+                assert cursor.fetchone()[0] == 1
 
     def test_force_reimport(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test force re-import of existing session."""
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session = sessions[0]
 
-        db = DatabaseManager(db_path=temp_db)
-        importer = SessionImporter(db)
+        with DatabaseManager(db_path=temp_db) as db:
+            importer = SessionImporter(db)
 
-        # First import
-        importer.import_session(session)
+            # First import
+            importer.import_session(session)
 
-        # Force re-import
-        result = importer.import_session(session, force=True)
-        assert result is True
+            # Force re-import
+            result = importer.import_session(session, force=True)
+            assert result is True
 
-        # Should still have only one session
-        with db.get_connection() as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM sessions")
-            assert cursor.fetchone()[0] == 1
+            # Should still have only one session
+            with db.get_connection() as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM sessions")
+                assert cursor.fetchone()[0] == 1
 
     def test_waveform_storage(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test that waveforms are stored correctly."""
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session = sessions[0]
 
-        db = DatabaseManager(db_path=temp_db)
-        importer = SessionImporter(db)
-        importer.import_session(session)
+        with DatabaseManager(db_path=temp_db) as db:
+            importer = SessionImporter(db)
+            importer.import_session(session)
 
-        # Verify waveforms were stored
-        with db.get_connection() as conn:
-            cursor = conn.execute("SELECT * FROM waveforms")
-            waveforms = cursor.fetchall()
+            # Verify waveforms were stored
+            with db.get_connection() as conn:
+                cursor = conn.execute("SELECT * FROM waveforms")
+                waveforms = cursor.fetchall()
 
-        assert len(waveforms) > 0
+            assert len(waveforms) > 0
 
-        # Check waveform data
-        for wf in waveforms:
-            assert wf["data_blob"] is not None
-            assert wf["sample_count"] > 0
-            assert wf["sample_rate"] > 0
-            # BLOB should contain data
-            assert len(wf["data_blob"]) > 0
+            # Check waveform data
+            for wf in waveforms:
+                assert wf["data_blob"] is not None
+                assert wf["sample_count"] > 0
+                assert wf["sample_rate"] > 0
+                # BLOB should contain data
+                assert len(wf["data_blob"]) > 0
 
     def test_event_storage(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test that events are stored correctly."""
@@ -138,64 +138,63 @@ class TestImportPipeline:
         if not session.has_event_data or len(session.events) == 0:
             pytest.skip("Test session has no events")
 
-        db = DatabaseManager(db_path=temp_db)
-        importer = SessionImporter(db)
-        importer.import_session(session)
+        with DatabaseManager(db_path=temp_db) as db:
+            importer = SessionImporter(db)
+            importer.import_session(session)
 
-        # Verify events were stored
-        with db.get_connection() as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM events")
-            event_count = cursor.fetchone()[0]
+            # Verify events were stored
+            with db.get_connection() as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM events")
+                event_count = cursor.fetchone()[0]
 
-        assert event_count == len(session.events)
+            assert event_count == len(session.events)
 
     def test_statistics_storage(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test that statistics are stored correctly."""
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session = sessions[0]
 
-        db = DatabaseManager(db_path=temp_db)
-        importer = SessionImporter(db)
-        importer.import_session(session)
+        with DatabaseManager(db_path=temp_db) as db:
+            importer = SessionImporter(db)
+            importer.import_session(session)
 
-        # Verify statistics were stored
-        with db.get_connection() as conn:
-            cursor = conn.execute("SELECT * FROM statistics")
-            stats = cursor.fetchone()
+            # Verify statistics were stored
+            with db.get_connection() as conn:
+                cursor = conn.execute("SELECT * FROM statistics")
+                stats = cursor.fetchone()
 
-        if session.has_statistics:
-            assert stats is not None
-        # If no statistics, that's okay too
+            if session.has_statistics:
+                assert stats is not None
+            # If no statistics, that's okay too
 
     def test_database_stats(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test database statistics reporting."""
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
 
-        db = DatabaseManager(db_path=temp_db)
-        importer = SessionImporter(db)
+        with DatabaseManager(db_path=temp_db) as db:
+            importer = SessionImporter(db)
 
-        # Import all sessions
-        for session in sessions:
-            importer.import_session(session)
+            # Import all sessions
+            for session in sessions:
+                importer.import_session(session)
 
-        # Get stats
-        stats = db.get_stats()
+            # Get stats
+            stats = db.get_stats()
 
-        assert stats["devices"] >= 1
-        assert stats["sessions"] == len(sessions)
-        assert stats["size_mb"] > 0
+            assert stats["devices"] >= 1
+            assert stats["sessions"] == len(sessions)
+            assert stats["size_mb"] > 0
 
     def test_multiple_devices(self, temp_db):
         """Test handling multiple devices."""
         # This would require fixtures from multiple manufacturers
         # For now, just verify the structure supports it
-        db = DatabaseManager(db_path=temp_db)
-
-        # Verify devices table exists and has unique constraint
-        with db.get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'"
-            )
-            schema = cursor.fetchone()[0]
-            assert "UNIQUE" in schema
-            assert "serial_number" in schema
+        with DatabaseManager(db_path=temp_db) as db:
+            # Verify devices table exists and has unique constraint
+            with db.get_connection() as conn:
+                cursor = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'"
+                )
+                schema = cursor.fetchone()[0]
+                assert "UNIQUE" in schema
+                assert "serial_number" in schema

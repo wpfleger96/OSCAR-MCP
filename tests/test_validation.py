@@ -15,7 +15,6 @@ from oscar_mcp.utils.validation import (
 )
 
 
-@pytest.mark.business_logic
 class TestProfileValidation:
     """Test profile existence validation."""
 
@@ -64,7 +63,6 @@ class TestProfileValidation:
             validate_profile_exists("testuser")
 
 
-@pytest.mark.business_logic
 class TestDateValidation:
     """Test date format and range validation."""
 
@@ -139,7 +137,6 @@ class TestDateValidation:
         assert str(end) in error_msg
 
 
-@pytest.mark.business_logic
 class TestPeriodTypeValidation:
     """Test period type validation."""
 

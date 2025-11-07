@@ -26,7 +26,7 @@ class ParserMetadata:
     supported_formats: List[str]  # File formats this parser handles
     supported_models: List[str]  # Device models supported
     description: str  # Human-readable description
-    requires_libraries: List[str] = None  # External dependencies
+    requires_libraries: List[str] | None = None  # External dependencies
 
 
 class ParserDetectionResult:

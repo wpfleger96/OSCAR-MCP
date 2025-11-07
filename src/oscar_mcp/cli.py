@@ -8,7 +8,7 @@ import click
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 from oscar_mcp.database import DatabaseManager, SessionImporter
 from oscar_mcp.parsers.registry import parser_registry
@@ -60,14 +60,14 @@ def import_data(
     dry_run: bool,
 ):
     """Import CPAP data from device SD card or directory."""
-    path = Path(path)
+    data_path = Path(path)
 
     # Register parsers
     register_all_parsers()
 
     # Auto-detect parser
-    click.echo(f"📂 Scanning {path}...")
-    parser = parser_registry.detect_parser(path)
+    click.echo(f"📂 Scanning {data_path}...")
+    parser = parser_registry.detect_parser(data_path)
 
     if not parser:
         click.echo("❌ Error: No compatible parser found for this data", err=True)
@@ -100,7 +100,7 @@ def import_data(
     try:
         sessions = list(
             parser.parse_sessions(
-                path,
+                data_path,
                 date_from=date_from_str,
                 date_to=date_to_str,
                 limit=limit,
@@ -125,7 +125,7 @@ def import_data(
         click.echo(f"{'Date':<12} {'Time':<8} {'Duration':<10} {'AHI':<6} {'Events':<8}")
         click.echo("=" * 55)
 
-        total_duration = 0
+        total_duration = 0.0
         total_events = 0
 
         # Sort sessions by date descending for display
@@ -241,7 +241,7 @@ def list_sessions(
 
     # Build query
     query = "SELECT * FROM sessions JOIN devices ON sessions.device_id = devices.id"
-    params = []
+    params: list[Any] = []
     conditions = []
 
     if from_date:
@@ -347,7 +347,7 @@ def delete_sessions(
         FROM sessions
         JOIN devices ON sessions.device_id = devices.id
     """
-    params = []
+    params: list[Any] = []
     conditions = []
 
     # Apply filters

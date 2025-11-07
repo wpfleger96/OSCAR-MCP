@@ -406,7 +406,7 @@ class OscarEventsParser:
         Returns:
             Dictionary mapping channel IDs to lists of EventLists
         """
-        result = {}
+        result: Dict[int, List[EventList]] = {}
 
         for metadata in metadata_list:
             # Read primary data array

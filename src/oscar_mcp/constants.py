@@ -132,7 +132,7 @@ class ChannelDefinition:
         channel_type: ChannelType,
         unit: str = "",
         default_color: str = "#ffffff",
-        calculations: List[CalculationType] = None,
+        calculations: List[CalculationType] | None = None,
     ):
         self.channel_id = channel_id
         self.code = code

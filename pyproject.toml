@@ -63,3 +63,21 @@ target-version = ["py313"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+
+[tool.mypy]
+python_version = "3.13"
+mypy_path = "src"
+namespace_packages = true
+explicit_package_bases = true
+no_implicit_optional = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+warn_return_any = false
+disallow_untyped_defs = false
+
+[dependency-groups]
+dev = [
+    "scipy-stubs>=1.16.3.0",
+]

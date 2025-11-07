@@ -10,10 +10,36 @@ import logging
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Optional, Dict, Any
+from datetime import datetime
 
 from oscar_mcp.models.unified import DeviceInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _register_sqlite_adapters():
+    """
+    Register datetime adapters for SQLite to suppress Python 3.12+ deprecation warnings.
+
+    Python 3.12+ deprecated the default datetime adapter. This function registers
+    explicit adapters and converters per the sqlite3 documentation recommendations.
+    """
+
+    def adapt_datetime_iso(val):
+        return val.isoformat()
+
+    def convert_datetime(val):
+        return datetime.fromisoformat(val.decode())
+
+    def convert_timestamp(val):
+        return datetime.fromisoformat(val.decode())
+
+    sqlite3.register_adapter(datetime, adapt_datetime_iso)
+    sqlite3.register_converter("datetime", convert_datetime)
+    sqlite3.register_converter("timestamp", convert_timestamp)
+
+
+_register_sqlite_adapters()
 
 
 class DatabaseManager:
@@ -30,7 +56,7 @@ class DatabaseManager:
         """
         self.db_path = db_path or self._get_default_path()
         self.db_path = Path(self.db_path)
-        self._connection = None
+        self._connection: Optional[sqlite3.Connection] = None
 
         # Ensure database exists and is initialized
         self.ensure_database()
@@ -96,15 +122,16 @@ class DatabaseManager:
             SQLite connection
         """
         if self._connection is None:
-            self._connection = sqlite3.connect(
+            conn = sqlite3.connect(
                 self.db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
             )
             # Enable foreign keys
-            self._connection.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA foreign_keys = ON")
             # Use WAL mode for better concurrency
-            self._connection.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA journal_mode = WAL")
             # Row factory for dict-like access
-            self._connection.row_factory = sqlite3.Row
+            conn.row_factory = sqlite3.Row
+            self._connection = conn
 
         return self._connection
 

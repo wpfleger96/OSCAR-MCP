@@ -96,7 +96,7 @@ class QDataStreamReader:
         """Read 64-bit double."""
         return struct.unpack(f"{self.byte_order}d", self.read_bytes(8))[0]
 
-    def read_qstring(self) -> str:
+    def read_qstring(self) -> str | None:
         """
         Read QString (Qt string format).
 
