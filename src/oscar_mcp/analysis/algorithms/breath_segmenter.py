@@ -451,7 +451,7 @@ class BreathSegmenter:
             flow_L_per_s = phases.inspiration_values / 60.0
             time_steps = 1.0 / sample_rate  # Time between samples
             tidal_volume_L = np.trapezoid(flow_L_per_s, dx=time_steps)  # Liters
-            tidal_volume = tidal_volume_L * 1000.0  # Convert to mL
+            tidal_volume = float(tidal_volume_L * 1000.0)  # Convert to mL
         else:
             tidal_volume = 0.0
 

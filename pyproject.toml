@@ -73,11 +73,26 @@ no_implicit_optional = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "oscar_mcp.analysis.algorithms.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "oscar_mcp.analysis.engines.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
 module = "tests.*"
 warn_return_any = false
 disallow_untyped_defs = false
 
 [dependency-groups]
 dev = [
+    "mypy>=1.18.2",
     "scipy-stubs>=1.16.3.0",
 ]

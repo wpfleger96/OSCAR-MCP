@@ -5,9 +5,53 @@ Flow limitation classes, respiratory events, and pattern characteristics
 extracted from OSCAR Guide and clinical guidelines.
 """
 
+from typing import Dict, List, Tuple, TypedDict
+
+
+class FlowLimitationClassInfo(TypedDict):
+    """Type definition for flow limitation class information."""
+
+    name: str
+    description: str
+    visual_characteristics: str
+    clinical_significance: str
+    severity: str
+    weight: float
+    reference_image: str
+    reference_section: str
+
+
+class RespiratoryEventInfo(TypedDict, total=False):
+    """Type definition for respiratory event information."""
+
+    name: str
+    abbreviation: str
+    criteria: str
+    characteristics: str
+    clinical_significance: str
+    severity: str
+    min_duration_seconds: int
+    flow_reduction_percent: int
+    flow_reduction_percent_min: int
+    flow_reduction_percent_max: int
+
+
+class ComplexPatternInfo(TypedDict, total=False):
+    """Type definition for complex pattern information."""
+
+    name: str
+    abbreviation: str
+    description: str
+    characteristics: str
+    clinical_significance: str
+    severity: str
+    cycle_length_range: Tuple[int, int]
+    reference_images: List[str]
+
+
 # Flow Limitation Classes (1-7)
 # Based on OSCAR Guide classification system
-FLOW_LIMITATION_CLASSES = {
+FLOW_LIMITATION_CLASSES: Dict[int, FlowLimitationClassInfo] = {
     1: {
         "name": "Sinusoidal",
         "description": "Normal, rounded inspiration with smooth sinusoidal curve",
@@ -82,7 +126,7 @@ FLOW_LIMITATION_CLASSES = {
 
 
 # Respiratory Event Types
-RESPIRATORY_EVENTS = {
+RESPIRATORY_EVENTS: Dict[str, RespiratoryEventInfo] = {
     "obstructive_apnea": {
         "name": "Obstructive Apnea (OA)",
         "abbreviation": "OA",
@@ -137,7 +181,7 @@ RESPIRATORY_EVENTS = {
 
 
 # Complex Breathing Patterns
-COMPLEX_PATTERNS = {
+COMPLEX_PATTERNS: Dict[str, ComplexPatternInfo] = {
     "cheyne_stokes_respiration": {
         "name": "Cheyne-Stokes Respiration (CSR)",
         "abbreviation": "CSR",

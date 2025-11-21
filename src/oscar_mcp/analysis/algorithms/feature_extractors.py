@@ -223,8 +223,8 @@ class WaveformFeatureExtractor:
             kurtosis_value = 0.0
         else:
             raw_skewness = stats.skew(waveform)
-            symmetry_score = np.clip(raw_skewness / 3.0, -1.0, 1.0)
-            kurtosis_value = stats.kurtosis(waveform)
+            symmetry_score = float(np.clip(raw_skewness / 3.0, -1.0, 1.0))
+            kurtosis_value = float(stats.kurtosis(waveform))
 
         # Rise and fall times
         rise_time = self._calculate_rise_time(waveform, peak_flow, sample_rate)
@@ -267,7 +267,7 @@ class WaveformFeatureExtractor:
         run_lengths = ends - starts
         max_length = np.max(run_lengths)
 
-        return max_length / sample_rate
+        return float(max_length / sample_rate)
 
     def _calculate_rise_time(
         self, waveform: np.ndarray, peak_flow: float, sample_rate: float
@@ -298,7 +298,7 @@ class WaveformFeatureExtractor:
             return 0.0
         idx_90 = idx_10 + above_90[0]
 
-        return (idx_90 - idx_10) / sample_rate
+        return float((idx_90 - idx_10) / sample_rate)
 
     def _calculate_fall_time(
         self, waveform: np.ndarray, peak_flow: float, sample_rate: float
@@ -334,7 +334,7 @@ class WaveformFeatureExtractor:
             return 0.0
         idx_10 = idx_90 + below_10[0]
 
-        return (idx_10 - idx_90) / sample_rate
+        return float((idx_10 - idx_90) / sample_rate)
 
     def extract_peak_features(self, waveform: np.ndarray, sample_rate: float) -> PeakFeatures:
         """
