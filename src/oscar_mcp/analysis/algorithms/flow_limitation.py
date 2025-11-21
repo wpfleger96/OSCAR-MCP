@@ -17,6 +17,7 @@ from oscar_mcp.analysis.algorithms.feature_extractors import (
     ShapeFeatures,
     StatisticalFeatures,
 )
+from oscar_mcp.constants import FlowLimitationConstants as FLC
 from oscar_mcp.knowledge.patterns import FLOW_LIMITATION_CLASSES
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ class FlowLimitationClassifier:
         >>> print(f"Class {pattern.flow_class}: {pattern.class_name}")
     """
 
-    def __init__(self, confidence_threshold: float = 0.6):
+    def __init__(self, confidence_threshold: float = FLC.CONFIDENCE_THRESHOLD):
         """
         Initialize the classifier.
 
@@ -160,46 +161,63 @@ class FlowLimitationClassifier:
 
         peak_position = peak_positions[0] if peak_positions else 0.5
 
-        if flatness > 0.9 and plateau > 0.8:
+        if flatness > FLC.FL_CLASS7_FLATNESS_MIN and plateau > FLC.FL_CLASS7_PLATEAU_MIN:
             matched_features["flatness_very_high"] = flatness
             matched_features["plateau_extensive"] = plateau
             return 7
 
-        if peak_position > 0.7 and flatness > 0.6 and plateau > 0.4:
+        if (
+            peak_position > FLC.FL_CLASS6_PEAK_POSITION_MIN
+            and flatness > FLC.FL_CLASS6_FLATNESS_MIN
+            and plateau > FLC.FL_CLASS6_PLATEAU_MIN
+        ):
             matched_features["late_peak"] = peak_position
             matched_features["flatness_high"] = flatness
             matched_features["plateau_present"] = plateau
             return 6
 
-        if flatness > 0.7 and peak_count == 1 and 0.4 <= peak_position <= 0.6 and plateau > 0.3:
+        if (
+            flatness > FLC.FL_CLASS5_FLATNESS_MIN
+            and peak_count == 1
+            and FLC.FL_CLASS5_PEAK_POSITION_MIN <= peak_position <= FLC.FL_CLASS5_PEAK_POSITION_MAX
+            and plateau > FLC.FL_CLASS5_PLATEAU_MIN
+        ):
             matched_features["flatness_high"] = flatness
             matched_features["central_peak"] = peak_position
             matched_features["plateau_both_sides"] = plateau
             return 5
 
-        if flatness > 0.4 and peak_position < 0.3 and plateau > 0.5:
+        if (
+            flatness > FLC.FL_CLASS4_FLATNESS_MIN
+            and peak_position < FLC.FL_CLASS4_PEAK_POSITION_MAX
+            and plateau > FLC.FL_CLASS4_PLATEAU_MIN
+        ):
             matched_features["early_peak"] = peak_position
             matched_features["plateau_sustained"] = plateau
             matched_features["flatness_moderate"] = flatness
             return 4
 
-        if peak_count >= 3 and flatness > 0.3:
+        if peak_count >= FLC.FL_CLASS3_PEAK_COUNT_MIN and flatness > FLC.FL_CLASS3_FLATNESS_MIN:
             max_prominence = max(peaks.peak_prominences) if peaks.peak_prominences else 0
-            if max_prominence < 0.3:
+            if max_prominence < FLC.FL_CLASS3_PROMINENCE_MAX:
                 matched_features["multiple_small_peaks"] = peak_count
                 matched_features["low_prominence"] = max_prominence
                 matched_features["flatness_mild"] = flatness
                 return 3
 
-        if peak_count == 2:
+        if peak_count == FLC.FL_CLASS2_PEAK_COUNT:
             if len(peaks.inter_peak_intervals) > 0:
                 spacing = peaks.inter_peak_intervals[0]
-                if spacing > 0.3:
+                if spacing > FLC.FL_CLASS2_PEAK_SPACING_MIN:
                     matched_features["double_peak"] = peak_count
                     matched_features["peak_spacing"] = spacing
                     return 2
 
-        if flatness < 0.3 and abs(symmetry) < 0.3 and kurtosis > 2.0:
+        if (
+            flatness < FLC.FL_CLASS1_FLATNESS_MAX
+            and abs(symmetry) < FLC.FL_CLASS1_SYMMETRY_MAX
+            and kurtosis > FLC.FL_CLASS1_KURTOSIS_MIN
+        ):
             matched_features["low_flatness"] = flatness
             matched_features["symmetric"] = symmetry
             matched_features["high_kurtosis"] = kurtosis
@@ -230,25 +248,25 @@ class FlowLimitationClassifier:
             Confidence score (0-1)
         """
         if "default_classification" in matched_features:
-            return 0.5
+            return FLC.FL_DEFAULT_CONFIDENCE
 
         feature_count = len(matched_features)
 
-        if feature_count >= 3:
-            base_confidence = 0.9
-        elif feature_count == 2:
-            base_confidence = 0.7
+        if feature_count >= FLC.FL_HIGH_FEATURE_COUNT:
+            base_confidence = FLC.FL_HIGH_CONFIDENCE
+        elif feature_count == FLC.FL_MEDIUM_FEATURE_COUNT:
+            base_confidence = FLC.FL_MEDIUM_CONFIDENCE
         else:
-            base_confidence = 0.6
+            base_confidence = FLC.FL_LOW_CONFIDENCE
 
         if "flatness_very_high" in matched_features:
-            if matched_features["flatness_very_high"] > 0.95:
-                base_confidence = min(1.0, base_confidence + 0.05)
+            if matched_features["flatness_very_high"] > FLC.FL_VERY_HIGH_FLATNESS:
+                base_confidence = min(1.0, base_confidence + FLC.FL_CONFIDENCE_BONUS)
 
         if "double_peak" in matched_features:
             spacing = matched_features.get("peak_spacing", 0)
-            if spacing > 0.4:
-                base_confidence = min(1.0, base_confidence + 0.05)
+            if spacing > FLC.FL_HIGH_PEAK_SPACING:
+                base_confidence = min(1.0, base_confidence + FLC.FL_CONFIDENCE_BONUS)
 
         return base_confidence
 

@@ -28,6 +28,7 @@ from oscar_mcp.analysis.algorithms.pattern_detector import (
     PeriodicBreathingDetection,
     PositionalAnalysis,
 )
+from oscar_mcp.constants import AnalysisEngineConstants as AEC
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +94,9 @@ class ProgrammaticAnalysisEngine:
 
     def __init__(
         self,
-        min_breath_duration: float = 1.0,
-        min_event_duration: float = 10.0,
-        confidence_threshold: float = 0.6,
+        min_breath_duration: float = AEC.MIN_BREATH_DURATION,
+        min_event_duration: float = AEC.MIN_EVENT_DURATION,
+        confidence_threshold: float = AEC.CONFIDENCE_THRESHOLD,
     ):
         """
         Initialize the programmatic analysis engine.
@@ -118,7 +119,7 @@ class ProgrammaticAnalysisEngine:
         session_id: int,
         timestamps: np.ndarray,
         flow_values: np.ndarray,
-        sample_rate: float = 25.0,
+        sample_rate: float = AEC.DEFAULT_SAMPLE_RATE,
         spo2_values: Optional[np.ndarray] = None,
     ) -> ProgrammaticAnalysisResult:
         """
@@ -294,11 +295,11 @@ class ProgrammaticAnalysisEngine:
 
         if flow_analysis:
             fli = flow_analysis.flow_limitation_index
-            if fli < 0.2:
+            if fli < AEC.FLI_SEVERITY_MINIMAL:
                 severity = "minimal"
-            elif fli < 0.4:
+            elif fli < AEC.FLI_SEVERITY_MILD:
                 severity = "mild"
-            elif fli < 0.6:
+            elif fli < AEC.FLI_SEVERITY_MODERATE:
                 severity = "moderate"
             else:
                 severity = "severe"
@@ -328,18 +329,18 @@ class ProgrammaticAnalysisEngine:
             lines.append(f"  Hypopneas: {len(event_timeline.hypopneas)}")
             lines.append(f"  RERAs: {len(event_timeline.reras)}")
 
-        if csr and csr.confidence > 0.6:
+        if csr and csr.confidence > AEC.CSR_MIN_CONFIDENCE:
             lines.append("\nCheyne-Stokes Respiration DETECTED")
             lines.append(f"  Cycle length: {csr.cycle_length:.1f}s")
             lines.append(f"  CSR index: {csr.csr_index * 100:.1f}%")
             lines.append(f"  Confidence: {csr.confidence:.2f}")
 
-        if periodic and periodic.confidence > 0.6:
+        if periodic and periodic.confidence > AEC.PERIODIC_MIN_CONFIDENCE:
             lines.append("\nPeriodic Breathing DETECTED")
             lines.append(f"  Cycle length: {periodic.cycle_length:.1f}s")
             lines.append(f"  Regularity: {periodic.regularity_score:.2f}")
 
-        if positional and positional.confidence > 0.6:
+        if positional and positional.confidence > AEC.POSITIONAL_MIN_CONFIDENCE:
             lines.append("\nPositional Events DETECTED")
             lines.append("  Event clustering suggests position-dependent apnea")
             lines.append(f"  Likelihood: {positional.positional_likelihood:.2f}")

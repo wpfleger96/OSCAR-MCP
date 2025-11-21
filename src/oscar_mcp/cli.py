@@ -16,6 +16,7 @@ from oscar_mcp.database import models
 from oscar_mcp.analysis.service import AnalysisService
 from oscar_mcp.parsers.registry import parser_registry
 from oscar_mcp.parsers.register_all import register_all_parsers
+from sqlalchemy import text
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -224,6 +225,60 @@ def import_data(
     return 0
 
 
+@cli.command("list-profiles")
+@click.option("--db", type=click.Path(), help="Database path")
+def list_profiles(db: Optional[str]):
+    """List all available profiles in the database."""
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as session:
+        profiles = session.query(models.Profile).all()
+
+        if not profiles:
+            click.echo("No profiles found in database")
+            return
+
+        click.echo("\nAvailable Profiles:\n")
+
+        for profile in profiles:
+            click.echo(f"Profile: {profile.username}")
+
+            if profile.first_name or profile.last_name:
+                name_parts = [profile.first_name, profile.last_name]
+                full_name = " ".join(part for part in name_parts if part)
+                click.echo(f"  Name: {full_name}")
+
+            session_count = (
+                session.query(models.Session)
+                .join(models.Day)
+                .filter(models.Day.profile_id == profile.id)
+                .count()
+            )
+
+            day_count = (
+                session.query(models.Day).filter(models.Day.profile_id == profile.id).count()
+            )
+
+            click.echo(f"  Sessions: {session_count}")
+            click.echo(f"  Days with data: {day_count}")
+
+            if day_count > 0:
+                days = (
+                    session.query(models.Day)
+                    .filter(models.Day.profile_id == profile.id)
+                    .order_by(models.Day.date)
+                    .all()
+                )
+                first_date = days[0].date
+                last_date = days[-1].date
+                click.echo(f"  Date range: {first_date} to {last_date}")
+
+            click.echo()
+
+
 @cli.command("list-sessions")
 @click.option(
     "--from-date",
@@ -240,57 +295,68 @@ def list_sessions(
     from_date: Optional[datetime], to_date: Optional[datetime], limit: int, db: Optional[str]
 ):
     """List imported sessions."""
-    db_manager = DatabaseManager(db_path=Path(db) if db else None)
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
 
-    # Build query
-    query = "SELECT * FROM sessions JOIN devices ON sessions.device_id = devices.id"
-    params: list[Any] = []
-    conditions = []
+    with session_scope() as session:
+        # Build query - note: may not have profiles in older databases
+        query = """
+            SELECT
+                sessions.id as session_id,
+                sessions.start_time,
+                sessions.duration_seconds,
+                devices.manufacturer,
+                devices.model
+            FROM sessions
+            JOIN devices ON sessions.device_id = devices.id
+            WHERE 1=1
+        """
+        params = {}
 
-    if from_date:
-        conditions.append("start_time >= ?")
-        params.append(from_date)
+        if from_date:
+            query += " AND sessions.start_time >= :from_date"
+            params["from_date"] = from_date
 
-    if to_date:
-        conditions.append("start_time <= ?")
-        params.append(to_date)
+        if to_date:
+            query += " AND sessions.start_time <= :to_date"
+            params["to_date"] = to_date
 
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY sessions.start_time DESC LIMIT :limit"
+        params["limit"] = limit
 
-    query += " ORDER BY start_time DESC LIMIT ?"
-    params.append(limit)
+        # Execute query
+        result = session.execute(text(query), params)
+        sessions = result.fetchall()
 
-    # Execute query
-    with db_manager.get_connection() as conn:
-        cursor = conn.execute(query, params)
-        sessions = cursor.fetchall()
+        if not sessions:
+            click.echo("No sessions found")
+            return
 
-    if not sessions:
-        click.echo("No sessions found")
-        return
+        # Display sessions
+        click.echo(f"\n{'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<20} {'AHI':<6}")
+        click.echo("=" * 70)
 
-    # Display sessions
-    click.echo(f"\n{'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<20} {'AHI':<6}")
-    click.echo("=" * 70)
+        for sess in sessions:
+            start = sess.start_time
+            duration_hours = sess.duration_seconds / 3600 if sess.duration_seconds else 0
+            device_name = f"{sess.manufacturer} {sess.model}"
 
-    for session in sessions:
-        start = session["start_time"]
-        duration_hours = session["duration_seconds"] / 3600 if session["duration_seconds"] else 0
-        device_name = f"{session['manufacturer']} {session['model']}"
+            # Get AHI from statistics if available
+            stats_result = session.execute(
+                text("SELECT ahi FROM statistics WHERE session_id = :session_id"),
+                {"session_id": sess.session_id},
+            )
+            stats = stats_result.fetchone()
+            ahi = f"{stats.ahi:.1f}" if stats and stats.ahi is not None else "N/A"
 
-        # Get AHI from statistics if available
-        stats_query = "SELECT ahi FROM statistics WHERE session_id = ?"
-        cursor = db_manager.get_connection().execute(stats_query, (session["id"],))
-        stats = cursor.fetchone()
-        ahi = f"{stats['ahi']:.1f}" if stats and stats["ahi"] is not None else "N/A"
-
-        click.echo(
-            f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-            f"{duration_hours:>6.1f}h    "
-            f"{device_name:<20} "
-            f"{ahi:>5}"
-        )
+            click.echo(
+                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
+                f"{duration_hours:>6.1f}h    "
+                f"{device_name:<20} "
+                f"{ahi:>5}"
+            )
 
 
 @cli.command("delete-sessions")
@@ -326,7 +392,10 @@ def delete_sessions(
     db: Optional[str],
 ):
     """Delete sessions from the database."""
-    db_manager = DatabaseManager(db_path=Path(db) if db else None)
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
 
     # Validate that at least one filter is provided
     if not any([session_ids, from_date, to_date, delete_all]):
@@ -337,156 +406,124 @@ def delete_sessions(
         click.echo("  • --all")
         return 1
 
-    # Build query to select sessions
-    query = """
-        SELECT
-            sessions.id,
-            sessions.device_session_id,
-            sessions.start_time,
-            sessions.duration_seconds,
-            devices.manufacturer,
-            devices.model,
-            devices.serial_number
-        FROM sessions
-        JOIN devices ON sessions.device_id = devices.id
-    """
-    params: list[Any] = []
-    conditions = []
+    with session_scope() as session:
+        # Build query to select sessions
+        query = """
+            SELECT
+                sessions.id,
+                sessions.device_session_id,
+                sessions.start_time,
+                sessions.duration_seconds,
+                devices.manufacturer,
+                devices.model,
+                devices.serial_number
+            FROM sessions
+            JOIN devices ON sessions.device_id = devices.id
+            WHERE 1=1
+        """
+        params = {}
 
-    # Apply filters
-    if session_ids:
-        # Parse comma-separated IDs
-        try:
-            id_list = [int(sid.strip()) for sid in session_ids.split(",")]
-            placeholders = ",".join("?" * len(id_list))
-            conditions.append(f"sessions.id IN ({placeholders})")
-            params.extend(id_list)
-        except ValueError:
-            click.echo(
-                "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
-                err=True,
-            )
-            return 1
+        # Apply filters
+        if session_ids:
+            # Parse comma-separated IDs
+            try:
+                id_list = [int(sid.strip()) for sid in session_ids.split(",")]
+                query += " AND sessions.id IN :session_ids"
+                params["session_ids"] = tuple(id_list)
+            except ValueError:
+                click.echo(
+                    "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
+                    err=True,
+                )
+                return 1
 
-    if from_date:
-        conditions.append("sessions.start_time >= ?")
-        params.append(from_date)
+        if from_date:
+            query += " AND sessions.start_time >= :from_date"
+            params["from_date"] = from_date
 
-    if to_date:
-        conditions.append("sessions.start_time <= ?")
-        params.append(to_date)
+        if to_date:
+            query += " AND sessions.start_time <= :to_date"
+            params["to_date"] = to_date
 
-    # Add WHERE clause if conditions exist
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY sessions.start_time DESC"
 
-    query += " ORDER BY sessions.start_time DESC"
+        # Execute query to get sessions
+        result = session.execute(text(query), params)
+        sessions = result.fetchall()
 
-    # Execute query to get sessions
-    with db_manager.get_connection() as conn:
-        cursor = conn.execute(query, params)
-        sessions = cursor.fetchall()
-
-    if not sessions:
-        click.echo("⚠️  No sessions found matching the specified criteria")
-        return 0
-
-    # Count related data
-    session_ids_to_delete = [s["id"] for s in sessions]
-    placeholders = ",".join("?" * len(session_ids_to_delete))
-
-    with db_manager.get_connection() as conn:
-        # Count events
-        cursor = conn.execute(
-            f"SELECT COUNT(*) as count FROM events WHERE session_id IN ({placeholders})",
-            session_ids_to_delete,
-        )
-        event_count = cursor.fetchone()["count"]
-
-        # Count waveforms
-        cursor = conn.execute(
-            f"SELECT COUNT(*) as count FROM waveforms WHERE session_id IN ({placeholders})",
-            session_ids_to_delete,
-        )
-        waveform_count = cursor.fetchone()["count"]
-
-        # Count statistics
-        cursor = conn.execute(
-            f"SELECT COUNT(*) as count FROM statistics WHERE session_id IN ({placeholders})",
-            session_ids_to_delete,
-        )
-        stats_count = cursor.fetchone()["count"]
-
-    # Display sessions to be deleted
-    click.echo(f"\n{'=' * 70}")
-    if dry_run:
-        click.echo("🔍 DRY RUN MODE - No data will be deleted")
-    else:
-        click.echo("⚠️  Sessions to be DELETED")
-    click.echo(f"{'=' * 70}\n")
-
-    click.echo(f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<25}")
-    click.echo("-" * 70)
-
-    for session in sessions:
-        start = session["start_time"]
-        duration_hours = session["duration_seconds"] / 3600 if session["duration_seconds"] else 0
-        device_name = f"{session['manufacturer']} {session['model']}"
-
-        click.echo(
-            f"{session['id']:<5} "
-            f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-            f"{duration_hours:>6.1f}h    "
-            f"{device_name:<25}"
-        )
-
-    # Display summary
-    click.echo("\n" + "=" * 70)
-    click.echo("📊 Deletion Summary")
-    click.echo("=" * 70)
-    click.echo(f"Sessions:    {len(sessions)}")
-    click.echo(f"Events:      {event_count}")
-    click.echo(f"Waveforms:   {waveform_count}")
-    click.echo(f"Statistics:  {stats_count}")
-    click.echo("=" * 70 + "\n")
-
-    # Dry-run mode: exit without deleting
-    if dry_run:
-        click.echo("✓ Dry run complete. Use without --dry-run to delete.")
-        return 0
-
-    # Confirmation prompt (unless --force)
-    if not force:
-        click.echo("⚠️  WARNING: This action cannot be undone!")
-        if not click.confirm("Are you sure you want to delete these sessions?"):
-            click.echo("Deletion cancelled")
+        if not sessions:
+            click.echo("⚠️  No sessions found matching the specified criteria")
             return 0
 
-    # Perform deletion with transaction
-    try:
-        with db_manager.transaction() as conn:
-            # Delete related data first (though CASCADE should handle this)
-            conn.execute(
-                f"DELETE FROM events WHERE session_id IN ({placeholders})",
-                session_ids_to_delete,
+        # Count related data
+        session_ids_to_delete = [s.id for s in sessions]
+
+        event_count = session.execute(
+            text("SELECT COUNT(*) as count FROM events WHERE session_id IN :session_ids"),
+            {"session_ids": tuple(session_ids_to_delete)},
+        ).scalar()
+
+        waveform_count = session.execute(
+            text("SELECT COUNT(*) as count FROM waveforms WHERE session_id IN :session_ids"),
+            {"session_ids": tuple(session_ids_to_delete)},
+        ).scalar()
+
+        stats_count = session.execute(
+            text("SELECT COUNT(*) as count FROM statistics WHERE session_id IN :session_ids"),
+            {"session_ids": tuple(session_ids_to_delete)},
+        ).scalar()
+
+        # Display sessions to be deleted
+        click.echo(f"\n{'=' * 70}")
+        if dry_run:
+            click.echo("🔍 DRY RUN MODE - No data will be deleted")
+        else:
+            click.echo("⚠️  Sessions to be DELETED")
+        click.echo(f"{'=' * 70}\n")
+
+        click.echo(f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<25}")
+        click.echo("-" * 70)
+
+        for sess in sessions:
+            start = sess.start_time
+            duration_hours = sess.duration_seconds / 3600 if sess.duration_seconds else 0
+            device_name = f"{sess.manufacturer} {sess.model}"
+
+            click.echo(
+                f"{sess.id:<5} "
+                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
+                f"{duration_hours:>6.1f}h    "
+                f"{device_name:<25}"
             )
-            conn.execute(
-                f"DELETE FROM waveforms WHERE session_id IN ({placeholders})",
-                session_ids_to_delete,
-            )
-            conn.execute(
-                f"DELETE FROM statistics WHERE session_id IN ({placeholders})",
-                session_ids_to_delete,
-            )
-            conn.execute(
-                f"DELETE FROM settings WHERE session_id IN ({placeholders})",
-                session_ids_to_delete,
-            )
-            # Finally delete the sessions
-            conn.execute(
-                f"DELETE FROM sessions WHERE id IN ({placeholders})",
-                session_ids_to_delete,
-            )
+
+        # Display summary
+        click.echo("\n" + "=" * 70)
+        click.echo("📊 Deletion Summary")
+        click.echo("=" * 70)
+        click.echo(f"Sessions:    {len(sessions)}")
+        click.echo(f"Events:      {event_count}")
+        click.echo(f"Waveforms:   {waveform_count}")
+        click.echo(f"Statistics:  {stats_count}")
+        click.echo("=" * 70 + "\n")
+
+        # Dry-run mode: exit without deleting
+        if dry_run:
+            click.echo("✓ Dry run complete. Use without --dry-run to delete.")
+            return 0
+
+        # Confirmation prompt (unless --force)
+        if not force:
+            click.echo("⚠️  WARNING: This action cannot be undone!")
+            if not click.confirm("Are you sure you want to delete these sessions?"):
+                click.echo("Deletion cancelled")
+                return 0
+
+        # Perform deletion (CASCADE should handle related data)
+        session.execute(
+            text("DELETE FROM sessions WHERE id IN :session_ids"),
+            {"session_ids": tuple(session_ids_to_delete)},
+        )
+        session.commit()
 
         click.echo(f"\n✓ Successfully deleted {len(sessions)} session(s) and related data")
 
@@ -494,12 +531,7 @@ def delete_sessions(
         if len(sessions) > 10:
             click.echo("\n💡 Tip: Run 'oscar-mcp db vacuum' to reclaim disk space")
 
-    except Exception as e:
-        click.echo(f"\n❌ Error during deletion: {e}", err=True)
-        logger.exception("Deletion failed")
-        return 1
-
-    return 0
+        return 0
 
 
 @cli.group()
@@ -512,33 +544,59 @@ def db():
 @click.option("--db", type=click.Path(), help="Database path")
 def init(db: Optional[str]):
     """Initialize database (creates tables if needed)."""
-    db_path = Path(db) if db else None
-    db_manager = DatabaseManager(db_path=db_path)
-    click.echo(f"✓ Database initialized at {db_manager.db_path}")
+    from oscar_mcp.constants import DEFAULT_DATABASE_PATH
+
+    if db:
+        db_path = str(Path(db))
+    else:
+        db_path = DEFAULT_DATABASE_PATH
+
+    init_database(db_path)
+    click.echo(f"✓ Database initialized at {db_path}")
 
 
 @db.command()
 @click.option("--db", type=click.Path(), help="Database path")
 def stats(db: Optional[str]):
     """Show database statistics."""
-    db_manager = DatabaseManager(db_path=Path(db) if db else None)
+    from oscar_mcp.constants import DEFAULT_DATABASE_PATH
+    import os
 
-    stats = db_manager.get_stats()
+    if db:
+        init_database(str(Path(db)))
+        db_path = Path(db)
+    else:
+        init_database()
+        db_path = Path(DEFAULT_DATABASE_PATH)
 
-    click.echo("\n📊 Database Statistics")
-    click.echo(f"{'=' * 50}")
-    click.echo(f"Database: {db_manager.db_path}")
-    click.echo(f"Size: {stats['size_mb']:.1f} MB")
-    click.echo(f"\nDevices: {stats['devices']}")
-    click.echo(f"Sessions: {stats['sessions']}")
-    click.echo(f"Events: {stats['events']}")
+    with session_scope() as session:
+        device_count = session.query(models.Device).count()
+        session_count = session.query(models.Session).count()
+        event_count = session.execute(text("SELECT COUNT(*) FROM events")).scalar()
 
-    if stats["first_session"] and stats["last_session"]:
-        first = stats["first_session"]
-        last = stats["last_session"]
-        click.echo(f"\nDate range: {first:%Y-%m-%d} to {last:%Y-%m-%d}")
+        first_session = session.execute(
+            text("SELECT MIN(start_time) as first FROM sessions")
+        ).scalar()
 
-    click.echo(f"{'=' * 50}\n")
+        last_session = session.execute(
+            text("SELECT MAX(start_time) as last FROM sessions")
+        ).scalar()
+
+        size_bytes = os.path.getsize(db_path) if db_path.exists() else 0
+        size_mb = size_bytes / (1024 * 1024)
+
+        click.echo("\n📊 Database Statistics")
+        click.echo(f"{'=' * 50}")
+        click.echo(f"Database: {db_path}")
+        click.echo(f"Size: {size_mb:.1f} MB")
+        click.echo(f"\nDevices: {device_count}")
+        click.echo(f"Sessions: {session_count}")
+        click.echo(f"Events: {event_count}")
+
+        if first_session and last_session:
+            click.echo(f"\nDate range: {first_session:%Y-%m-%d} to {last_session:%Y-%m-%d}")
+
+        click.echo(f"{'=' * 50}\n")
 
 
 @db.command()
@@ -546,11 +604,16 @@ def stats(db: Optional[str]):
 @click.confirmation_option(prompt="Are you sure you want to vacuum the database?")
 def vacuum(db: Optional[str]):
     """Optimize database (reclaim space after deletions)."""
-    db_manager = DatabaseManager(db_path=Path(db) if db else None)
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
 
     click.echo("Vacuuming database...")
-    with db_manager.get_connection() as conn:
-        conn.execute("VACUUM")
+
+    with session_scope() as session:
+        session.execute(text("VACUUM"))
+        session.commit()
 
     click.echo("✓ Database vacuumed successfully")
 
@@ -579,8 +642,10 @@ def analyze_session(
         click.echo("Error: Must provide either --date or --session-id", err=True)
         return 1
 
-    db_manager = DatabaseManager(db_path=Path(db) if db else None)
-    init_database(str(db_manager.db_path))
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
 
     with session_scope() as session:
         prof = session.query(models.Profile).filter_by(username=profile).first()
@@ -697,8 +762,10 @@ def analyze_sessions(
     no_store: bool,
 ):
     """Analyze multiple CPAP sessions in a date range."""
-    db_manager = DatabaseManager(db_path=Path(db) if db else None)
-    init_database(str(db_manager.db_path))
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
 
     with session_scope() as session:
         prof = session.query(models.Profile).filter_by(username=profile).first()
@@ -757,8 +824,10 @@ def list_sessions(
     analyzed_only: bool,
 ):
     """List sessions and their analysis status."""
-    db_manager = DatabaseManager(db_path=Path(db) if db else None)
-    init_database(str(db_manager.db_path))
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
 
     with session_scope() as session:
         prof = session.query(models.Profile).filter_by(username=profile).first()
