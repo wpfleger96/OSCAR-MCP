@@ -12,6 +12,7 @@ from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 
+from oscar_mcp.constants import EventDetectionConstants as EDC
 from oscar_mcp.knowledge.patterns import RESPIRATORY_EVENTS
 
 logger = logging.getLogger(__name__)
@@ -128,9 +129,9 @@ class RespiratoryEventDetector:
 
     def __init__(
         self,
-        min_event_duration: float = 10.0,
-        baseline_window: float = 30.0,
-        merge_gap: float = 2.0,
+        min_event_duration: float = EDC.MIN_EVENT_DURATION,
+        baseline_window: float = EDC.BASELINE_WINDOW_SECONDS,
+        merge_gap: float = EDC.MERGE_GAP_SECONDS,
     ):
         """
         Initialize the event detector.
@@ -284,10 +285,10 @@ class RespiratoryEventDetector:
         if baseline_flow is None:
             baseline_flow = self._calculate_baseline_flow(flow_values)
 
-        is_flow_limited = flatness_indices > 0.7
+        is_flow_limited = flatness_indices > EDC.RERA_FLATNESS_THRESHOLD
 
         flow_reduction = self._calculate_flow_reduction(flow_values, baseline_flow)
-        is_not_apnea_hypopnea = flow_reduction < 0.3
+        is_not_apnea_hypopnea = flow_reduction < EDC.RERA_MAX_FLOW_REDUCTION
 
         is_rera = is_flow_limited & is_not_apnea_hypopnea
 
@@ -402,9 +403,9 @@ class RespiratoryEventDetector:
 
         effort_magnitude = np.std(effort_signal)
 
-        if effort_magnitude > 0.5:
+        if effort_magnitude > EDC.APNEA_EFFORT_HIGH_THRESHOLD:
             return "OA"
-        elif effort_magnitude < 0.1:
+        elif effort_magnitude < EDC.APNEA_EFFORT_LOW_THRESHOLD:
             return "CA"
         else:
             return "MA"
@@ -418,20 +419,20 @@ class RespiratoryEventDetector:
         min_spo2 = np.min(spo2_values)
         drop = max_spo2 - min_spo2
 
-        return bool(drop >= 3.0)
+        return bool(drop >= EDC.SPO2_DESATURATION_DROP)
 
     def _calculate_apnea_confidence(
         self, reduction: float, duration: float, baseline: float
     ) -> float:
         """Calculate confidence score for apnea detection."""
-        confidence = 0.7
+        confidence = EDC.APNEA_BASE_CONFIDENCE
 
-        if reduction > 0.95:
-            confidence += 0.1
-        if duration > 15.0:
-            confidence += 0.1
-        if baseline > 20.0:
-            confidence += 0.1
+        if reduction > EDC.APNEA_HIGH_REDUCTION_THRESHOLD:
+            confidence += EDC.APNEA_HIGH_REDUCTION_BONUS
+        if duration > EDC.APNEA_LONG_DURATION_THRESHOLD:
+            confidence += EDC.APNEA_LONG_DURATION_BONUS
+        if baseline > EDC.APNEA_HIGH_BASELINE_THRESHOLD:
+            confidence += EDC.APNEA_BASELINE_FLOW_BONUS
 
         return min(1.0, confidence)
 
@@ -439,24 +440,24 @@ class RespiratoryEventDetector:
         self, reduction: float, duration: float, has_desaturation: Optional[bool]
     ) -> float:
         """Calculate confidence score for hypopnea detection."""
-        confidence = 0.6
+        confidence = EDC.HYPOPNEA_BASE_CONFIDENCE
 
-        if 0.5 <= reduction <= 0.7:
+        if EDC.HYPOPNEA_IDEAL_MIN_REDUCTION <= reduction <= EDC.HYPOPNEA_IDEAL_MAX_REDUCTION:
             confidence += 0.1
-        if duration > 15.0:
+        if duration > EDC.HYPOPNEA_LONG_DURATION_THRESHOLD:
             confidence += 0.1
         if has_desaturation:
-            confidence += 0.2
+            confidence += EDC.HYPOPNEA_DESATURATION_BONUS
 
         return min(1.0, confidence)
 
     def _calculate_rera_confidence(self, flatness: float, duration: float) -> float:
         """Calculate confidence score for RERA detection."""
-        confidence = 0.5
+        confidence = EDC.RERA_BASE_CONFIDENCE
 
-        if flatness > 0.8:
-            confidence += 0.2
-        if duration > 15.0:
+        if flatness > EDC.RERA_HIGH_FLATNESS_THRESHOLD:
+            confidence += EDC.RERA_HIGH_FLATNESS_BONUS
+        if duration > EDC.APNEA_LONG_DURATION_THRESHOLD:
             confidence += 0.1
 
         return min(1.0, confidence)

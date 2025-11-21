@@ -35,6 +35,12 @@ from oscar_mcp.analysis.calculations import (
     calculate_average_hours_per_day,
     get_date_range,
 )
+from oscar_mcp.analysis.service import AnalysisService
+from oscar_mcp.models.analysis import (
+    AnalysisSummary,
+    DetailedAnalysisResult,
+    SessionAnalysisStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +62,16 @@ AVAILABLE TOOLS:
 - get_day_report: Get detailed report for a specific day
 - get_compliance: Get compliance report for a date range
 - list_machines: List devices for a profile
+- analyze_session: Run comprehensive programmatic analysis on a session
+- get_analysis_results: Retrieve detailed analysis results
+- list_analysis_sessions: List sessions with their analysis status
 
 WORKFLOW:
 1. Use list_profiles to find available profiles
 2. Use get_therapy_summary for overall analysis
 3. Use get_day_report for specific date analysis
-4. Use get_compliance for compliance reports
+4. Use analyze_session to detect apneas, hypopneas, flow limitation, and patterns
+5. Use get_analysis_results to view detailed analysis findings
 
 CHANNEL INFORMATION:
 OSCAR tracks various data channels including:
@@ -432,3 +442,258 @@ def list_machines(*, profile_name: str) -> List[MachineSummary]:
     except Exception as e:
         logger.error(f"Error listing machines: {e}", exc_info=True)
         raise ValueError(f"Error listing machines: {e}")
+
+
+@server.tool("analyze_session")
+def analyze_session(
+    profile_name: str, session_date: Optional[str] = None, session_id: Optional[int] = None
+) -> AnalysisSummary:
+    """
+    Run comprehensive programmatic analysis on a CPAP session.
+
+    This tool performs breath-by-breath analysis to detect:
+    - Flow limitation patterns (7-class system)
+    - Respiratory events (apneas, hypopneas, RERAs)
+    - Complex patterns (Cheyne-Stokes Respiration, periodic breathing)
+    - Clinical indices (AHI, RDI, Flow Limitation Index)
+
+    Args:
+        profile_name: Profile username
+        session_date: Session date in YYYY-MM-DD format (use this OR session_id)
+        session_id: Database session ID (use this OR session_date)
+
+    Returns:
+        AnalysisSummary with key metrics and findings
+    """
+    try:
+        validate_profile_exists(profile_name)
+
+        if session_date:
+            validate_date_format(session_date)
+
+        if not session_date and not session_id:
+            raise ValueError("Must provide either session_date or session_id")
+
+        with session_scope() as session:
+            profile = session.query(models.Profile).filter_by(username=profile_name).first()
+
+            if session_date:
+                parsed_date = date.fromisoformat(session_date)
+                db_session = (
+                    session.query(models.Session)
+                    .join(models.Day)
+                    .filter(models.Day.profile_id == profile.id, models.Day.date == parsed_date)
+                    .first()
+                )
+
+                if not db_session:
+                    raise ValueError(f"No session found for {session_date}")
+
+                session_id = db_session.id
+
+            analysis_service = AnalysisService(session)
+            result = analysis_service.analyze_session(session_id=session_id, store_results=True)
+
+            flow_analysis = result.flow_analysis
+            event_timeline = result.event_timeline
+            fli = flow_analysis["fl_index"]
+
+            if fli < 0.2:
+                severity = "minimal"
+            elif fli < 0.4:
+                severity = "mild"
+            elif fli < 0.6:
+                severity = "moderate"
+            else:
+                severity = "severe"
+
+            if event_timeline["ahi"] < 5:
+                if severity == "minimal":
+                    overall_severity = "normal"
+                else:
+                    overall_severity = severity
+            elif event_timeline["ahi"] < 15:
+                overall_severity = "mild"
+            elif event_timeline["ahi"] < 30:
+                overall_severity = "moderate"
+            else:
+                overall_severity = "severe"
+
+            summary = AnalysisSummary(
+                session_id=result.session_id,
+                timestamp_start=datetime.fromtimestamp(result.timestamp_start),
+                timestamp_end=datetime.fromtimestamp(result.timestamp_end),
+                duration_hours=result.duration_hours,
+                ahi=event_timeline["ahi"],
+                rdi=event_timeline["rdi"],
+                flow_limitation_index=fli,
+                total_breaths=result.total_breaths,
+                total_events=event_timeline["total_events"],
+                apnea_count=len(event_timeline["apneas"]),
+                hypopnea_count=len(event_timeline["hypopneas"]),
+                rera_count=len(event_timeline["reras"]),
+                csr_detected=result.csr_detection is not None,
+                periodic_breathing_detected=result.periodic_breathing is not None,
+                positional_events_detected=result.positional_analysis is not None,
+                severity_assessment=overall_severity,
+                processing_time_ms=result.processing_time_ms,
+            )
+
+            stored_result = analysis_service.get_analysis_result(session_id)
+            if stored_result:
+                summary.analysis_id = stored_result["analysis_id"]
+
+            return summary
+
+    except ValueError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error analyzing session: {e}", exc_info=True)
+        raise ValueError(f"Error analyzing session: {e}")
+
+
+@server.tool("get_analysis_results")
+def get_analysis_results(session_id: int) -> DetailedAnalysisResult:
+    """
+    Retrieve detailed analysis results for a session.
+
+    Returns comprehensive analysis including all detected events, patterns,
+    breath-by-breath classifications, and clinical summaries.
+
+    Args:
+        session_id: Database session ID
+
+    Returns:
+        DetailedAnalysisResult with complete analysis data
+    """
+    try:
+        with session_scope() as session:
+            analysis_service = AnalysisService(session)
+            stored = analysis_service.get_analysis_result(session_id)
+
+            if not stored:
+                raise ValueError(
+                    f"No analysis found for session {session_id}. Run analyze_session first."
+                )
+
+            prog_result = stored["programmatic_result"]
+
+            return DetailedAnalysisResult(
+                summary=AnalysisSummary(
+                    session_id=session_id,
+                    analysis_id=stored["analysis_id"],
+                    timestamp_start=datetime.fromisoformat(stored["timestamp_start"]),
+                    timestamp_end=datetime.fromisoformat(stored["timestamp_end"]),
+                    duration_hours=(
+                        datetime.fromisoformat(stored["timestamp_end"])
+                        - datetime.fromisoformat(stored["timestamp_start"])
+                    ).total_seconds()
+                    / 3600,
+                    ahi=prog_result["event_timeline"]["ahi"],
+                    rdi=prog_result["event_timeline"]["rdi"],
+                    flow_limitation_index=prog_result["flow_analysis"]["fl_index"],
+                    total_breaths=prog_result["total_breaths"],
+                    total_events=prog_result["event_timeline"]["total_events"],
+                    apnea_count=len(prog_result["event_timeline"]["apneas"]),
+                    hypopnea_count=len(prog_result["event_timeline"]["hypopneas"]),
+                    rera_count=len(prog_result["event_timeline"]["reras"]),
+                    csr_detected=prog_result["csr_detection"] is not None,
+                    periodic_breathing_detected=prog_result["periodic_breathing"] is not None,
+                    positional_events_detected=prog_result["positional_analysis"] is not None,
+                    severity_assessment="",
+                    processing_time_ms=stored["processing_time_ms"],
+                ),
+                event_timeline=prog_result["event_timeline"],
+                flow_limitation={
+                    "flow_limitation_index": prog_result["flow_analysis"]["fl_index"],
+                    "total_breaths": prog_result["flow_analysis"]["total_breaths"],
+                    "class_distribution": prog_result["flow_analysis"]["class_distribution"],
+                    "average_confidence": prog_result["flow_analysis"]["average_confidence"],
+                    "severity": "",
+                },
+                csr_detection=prog_result["csr_detection"],
+                periodic_breathing=prog_result["periodic_breathing"],
+                positional_analysis=prog_result["positional_analysis"],
+                confidence_scores=prog_result["confidence_summary"],
+                clinical_summary=prog_result["clinical_summary"],
+            )
+
+    except ValueError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving analysis results: {e}", exc_info=True)
+        raise ValueError(f"Error retrieving analysis results: {e}")
+
+
+@server.tool("list_analysis_sessions")
+def list_analysis_sessions(
+    profile_name: str, start_date: Optional[str] = None, end_date: Optional[str] = None
+) -> List[SessionAnalysisStatus]:
+    """
+    List sessions with their analysis status.
+
+    Shows which sessions have been analyzed and which are available for analysis.
+
+    Args:
+        profile_name: Profile username
+        start_date: Optional start date filter (YYYY-MM-DD)
+        end_date: Optional end date filter (YYYY-MM-DD)
+
+    Returns:
+        List of sessions with analysis status
+    """
+    try:
+        validate_profile_exists(profile_name)
+
+        if start_date:
+            validate_date_format(start_date)
+        if end_date:
+            validate_date_format(end_date)
+
+        with session_scope() as session:
+            profile = session.query(models.Profile).filter_by(username=profile_name).first()
+
+            query = (
+                session.query(models.Session)
+                .join(models.Day)
+                .filter(models.Day.profile_id == profile.id)
+            )
+
+            if start_date:
+                query = query.filter(models.Day.date >= date.fromisoformat(start_date))
+            if end_date:
+                query = query.filter(models.Day.date <= date.fromisoformat(end_date))
+
+            sessions = query.order_by(models.Day.date.desc()).all()
+
+            result = []
+            for db_session in sessions:
+                analysis = (
+                    session.query(models.AnalysisResult)
+                    .filter_by(session_id=db_session.id)
+                    .order_by(models.AnalysisResult.created_at.desc())
+                    .first()
+                )
+
+                duration_hours = (
+                    db_session.duration_seconds / 3600 if db_session.duration_seconds else 0.0
+                )
+
+                result.append(
+                    SessionAnalysisStatus(
+                        session_id=db_session.id,
+                        session_date=db_session.start_time,
+                        duration_hours=duration_hours,
+                        has_analysis=analysis is not None,
+                        analysis_id=analysis.id if analysis else None,
+                        analyzed_at=analysis.created_at if analysis else None,
+                    )
+                )
+
+            return result
+
+    except ValueError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error listing analysis sessions: {e}", exc_info=True)
+        raise ValueError(f"Error listing analysis sessions: {e}")

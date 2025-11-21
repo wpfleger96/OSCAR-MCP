@@ -11,6 +11,9 @@ from datetime import datetime
 from typing import Optional, Any
 
 from oscar_mcp.database import DatabaseManager, SessionImporter
+from oscar_mcp.database.session import session_scope, init_database
+from oscar_mcp.database import models
+from oscar_mcp.analysis.service import AnalysisService
 from oscar_mcp.parsers.registry import parser_registry
 from oscar_mcp.parsers.register_all import register_all_parsers
 
@@ -550,6 +553,263 @@ def vacuum(db: Optional[str]):
         conn.execute("VACUUM")
 
     click.echo("✓ Database vacuumed successfully")
+
+
+@cli.group()
+def analyze():
+    """Run programmatic analysis on CPAP sessions."""
+    pass
+
+
+@analyze.command("session")
+@click.option("--profile", required=True, help="Profile username")
+@click.option("--date", type=click.DateTime(formats=["%Y-%m-%d"]), help="Session date (YYYY-MM-DD)")
+@click.option("--session-id", type=int, help="Session ID (alternative to --date)")
+@click.option("--db", type=click.Path(), help="Database path")
+@click.option("--no-store", is_flag=True, help="Don't store results in database")
+def analyze_session(
+    profile: str,
+    date: Optional[datetime],
+    session_id: Optional[int],
+    db: Optional[str],
+    no_store: bool,
+):
+    """Analyze a single CPAP session for events and patterns."""
+    if not date and not session_id:
+        click.echo("Error: Must provide either --date or --session-id", err=True)
+        return 1
+
+    db_manager = DatabaseManager(db_path=Path(db) if db else None)
+    init_database(str(db_manager.db_path))
+
+    with session_scope() as session:
+        prof = session.query(models.Profile).filter_by(username=profile).first()
+        if not prof:
+            click.echo(f"Error: Profile '{profile}' not found", err=True)
+            return 1
+
+        if date:
+            db_session = (
+                session.query(models.Session)
+                .join(models.Day)
+                .filter(models.Day.profile_id == prof.id, models.Day.date == date.date())
+                .first()
+            )
+            if not db_session:
+                click.echo(f"Error: No session found for {date.date()}", err=True)
+                return 1
+            session_id = db_session.id
+            session_date_str = date.date().isoformat()
+        else:
+            db_session = session.query(models.Session).filter_by(id=session_id).first()
+            if not db_session:
+                click.echo(f"Error: Session {session_id} not found", err=True)
+                return 1
+            session_date_str = db_session.start_time.date().isoformat()
+
+        click.echo(f"\n📊 Analyzing session {session_date_str} (ID: {session_id})...")
+
+        analysis_service = AnalysisService(session)
+
+        try:
+            result = analysis_service.analyze_session(
+                session_id=session_id, store_results=not no_store
+            )
+
+            click.echo(f"✓ Analysis complete in {result.processing_time_ms}ms\n")
+
+            click.echo("=" * 60)
+            click.echo("ANALYSIS SUMMARY")
+            click.echo("=" * 60)
+
+            flow_analysis = result.flow_analysis
+            event_timeline = result.event_timeline
+
+            click.echo(f"\nSession Duration: {result.duration_hours:.1f} hours")
+            click.echo(f"Total Breaths: {result.total_breaths:,}")
+
+            click.echo(f"\n📈 RESPIRATORY INDICES")
+            click.echo(f"  AHI (Apnea-Hypopnea Index): {event_timeline['ahi']:.1f} events/hour")
+            click.echo(
+                f"  RDI (Respiratory Disturbance Index): {event_timeline['rdi']:.1f} events/hour"
+            )
+            click.echo(f"  Flow Limitation Index: {flow_analysis['fl_index']:.2f}")
+
+            click.echo(f"\n🫁 RESPIRATORY EVENTS (Total: {event_timeline['total_events']})")
+            click.echo(f"  Apneas: {len(event_timeline['apneas'])}")
+            for apnea_type in ["OA", "CA", "MA", "UA"]:
+                count = sum(1 for a in event_timeline["apneas"] if a["event_type"] == apnea_type)
+                if count > 0:
+                    click.echo(f"    - {apnea_type}: {count}")
+            click.echo(f"  Hypopneas: {len(event_timeline['hypopneas'])}")
+            click.echo(f"  RERAs: {len(event_timeline['reras'])}")
+
+            click.echo(f"\n💨 FLOW LIMITATION CLASSES")
+            for fl_class, count in sorted(flow_analysis["class_distribution"].items()):
+                if count > 0:
+                    pct = (count / result.total_breaths) * 100
+                    click.echo(f"  Class {fl_class}: {count:,} breaths ({pct:.1f}%)")
+
+            if result.csr_detection:
+                csr = result.csr_detection
+                click.echo(f"\n🌊 CHEYNE-STOKES RESPIRATION")
+                click.echo(f"  Detected: Yes (confidence: {csr['confidence']:.2f})")
+                click.echo(f"  Cycle Length: {csr['cycle_length']:.0f}s")
+                click.echo(f"  CSR Index: {csr['csr_index']:.1%}")
+
+            if result.periodic_breathing:
+                periodic = result.periodic_breathing
+                click.echo(f"\n🔄 PERIODIC BREATHING")
+                click.echo(f"  Detected: Yes (confidence: {periodic['confidence']:.2f})")
+                click.echo(f"  Cycle Length: {periodic['cycle_length']:.0f}s")
+                click.echo(f"  Regularity: {periodic['regularity_score']:.2f}")
+
+            if result.positional_analysis:
+                positional = result.positional_analysis
+                click.echo(f"\n🛏️  POSITIONAL ANALYSIS")
+                click.echo(f"  Event Clustering: {positional['cluster_count']} clusters")
+                click.echo(f"  Positional Likelihood: {positional['positional_likelihood']:.2f}")
+
+            if not no_store:
+                stored = analysis_service.get_analysis_result(session_id)
+                if stored:
+                    click.echo(f"\n💾 Results stored with analysis ID: {stored['analysis_id']}")
+
+            click.echo("\n" + "=" * 60)
+
+        except Exception as e:
+            click.echo(f"\n❌ Analysis failed: {e}", err=True)
+            logger.error("Analysis error", exc_info=True)
+            return 1
+
+
+@analyze.command("sessions")
+@click.option("--profile", required=True, help="Profile username")
+@click.option("--start", type=click.DateTime(formats=["%Y-%m-%d"]), help="Start date (YYYY-MM-DD)")
+@click.option("--end", type=click.DateTime(formats=["%Y-%m-%d"]), help="End date (YYYY-MM-DD)")
+@click.option("--db", type=click.Path(), help="Database path")
+@click.option("--no-store", is_flag=True, help="Don't store results in database")
+def analyze_sessions(
+    profile: str,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    db: Optional[str],
+    no_store: bool,
+):
+    """Analyze multiple CPAP sessions in a date range."""
+    db_manager = DatabaseManager(db_path=Path(db) if db else None)
+    init_database(str(db_manager.db_path))
+
+    with session_scope() as session:
+        prof = session.query(models.Profile).filter_by(username=profile).first()
+        if not prof:
+            click.echo(f"Error: Profile '{profile}' not found", err=True)
+            return 1
+
+        query = (
+            session.query(models.Session).join(models.Day).filter(models.Day.profile_id == prof.id)
+        )
+
+        if start:
+            query = query.filter(models.Day.date >= start.date())
+        if end:
+            query = query.filter(models.Day.date <= end.date())
+
+        sessions = query.order_by(models.Day.date).all()
+
+        if not sessions:
+            click.echo("No sessions found for the specified criteria")
+            return 0
+
+        click.echo(f"\n📊 Analyzing {len(sessions)} sessions...")
+
+        analysis_service = AnalysisService(session)
+        successful = 0
+        failed = 0
+
+        with click.progressbar(sessions, label="Analyzing") as bar:
+            for db_session in bar:
+                try:
+                    analysis_service.analyze_session(
+                        session_id=db_session.id, store_results=not no_store
+                    )
+                    successful += 1
+                except Exception as e:
+                    failed += 1
+                    logger.debug(f"Failed to analyze session {db_session.id}: {e}")
+
+        click.echo(f"\n✓ Analysis complete")
+        click.echo(f"  Successful: {successful}")
+        click.echo(f"  Failed: {failed}")
+
+
+@analyze.command("list")
+@click.option("--profile", required=True, help="Profile username")
+@click.option("--start", type=click.DateTime(formats=["%Y-%m-%d"]), help="Start date (YYYY-MM-DD)")
+@click.option("--end", type=click.DateTime(formats=["%Y-%m-%d"]), help="End date (YYYY-MM-DD)")
+@click.option("--db", type=click.Path(), help="Database path")
+@click.option("--analyzed-only", is_flag=True, help="Show only analyzed sessions")
+def list_sessions(
+    profile: str,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    db: Optional[str],
+    analyzed_only: bool,
+):
+    """List sessions and their analysis status."""
+    db_manager = DatabaseManager(db_path=Path(db) if db else None)
+    init_database(str(db_manager.db_path))
+
+    with session_scope() as session:
+        prof = session.query(models.Profile).filter_by(username=profile).first()
+        if not prof:
+            click.echo(f"Error: Profile '{profile}' not found", err=True)
+            return 1
+
+        query = (
+            session.query(models.Session).join(models.Day).filter(models.Day.profile_id == prof.id)
+        )
+
+        if start:
+            query = query.filter(models.Day.date >= start.date())
+        if end:
+            query = query.filter(models.Day.date <= end.date())
+
+        sessions = query.order_by(models.Day.date.desc()).all()
+
+        if not sessions:
+            click.echo("No sessions found")
+            return 0
+
+        click.echo(f"\nSession Analysis Status ({len(sessions)} sessions)\n")
+        click.echo(f"{'Date':<12} {'ID':<6} {'Duration':<10} {'Analyzed':<10} {'Analysis ID':<12}")
+        click.echo("-" * 60)
+
+        for db_session in sessions:
+            analysis = (
+                session.query(models.AnalysisResult)
+                .filter_by(session_id=db_session.id)
+                .order_by(models.AnalysisResult.created_at.desc())
+                .first()
+            )
+
+            has_analysis = analysis is not None
+
+            if analyzed_only and not has_analysis:
+                continue
+
+            duration = (
+                f"{db_session.duration_seconds / 3600:.1f}h"
+                if db_session.duration_seconds
+                else "N/A"
+            )
+            analyzed_str = "✓" if has_analysis else "✗"
+            analysis_id_str = str(analysis.id) if analysis else "-"
+
+            click.echo(
+                f"{db_session.start_time.date()!s:<12} {db_session.id:<6} {duration:<10} "
+                f"{analyzed_str:<10} {analysis_id_str:<12}"
+            )
 
 
 def main():

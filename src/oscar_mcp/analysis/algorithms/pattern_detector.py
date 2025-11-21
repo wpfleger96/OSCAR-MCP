@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 from scipy import signal, stats
 
+from oscar_mcp.constants import PatternDetectionConstants as PDC
 from oscar_mcp.knowledge.patterns import COMPLEX_PATTERNS
 
 logger = logging.getLogger(__name__)
@@ -102,8 +103,8 @@ class ComplexPatternDetector:
 
     def __init__(
         self,
-        min_cycle_count: int = 3,
-        autocorr_threshold: float = 0.6,
+        min_cycle_count: int = PDC.MIN_CYCLE_COUNT,
+        autocorr_threshold: float = PDC.AUTOCORR_THRESHOLD,
     ):
         """
         Initialize the pattern detector.
@@ -137,10 +138,10 @@ class ComplexPatternDetector:
         Returns:
             CSRDetection if pattern found, None otherwise
         """
-        csr_criteria = self.patterns["cheyne_stokes_respiration"]
-        min_cycle, max_cycle = csr_criteria["cycle_length_range"]
+        min_cycle = PDC.CSR_MIN_CYCLE_LENGTH
+        max_cycle = PDC.CSR_MAX_CYCLE_LENGTH
 
-        smoothed_tv = self._smooth_signal(tidal_volumes, window_size=5)
+        smoothed_tv = self._smooth_signal(tidal_volumes, window_size=PDC.SIGNAL_SMOOTHING_WINDOW)
 
         autocorr = self._calculate_autocorrelation(smoothed_tv)
 
@@ -153,7 +154,7 @@ class ComplexPatternDetector:
 
         waxing_waning_score = self._detect_waxing_waning(smoothed_tv, cycle_length)
 
-        if waxing_waning_score < 0.5:
+        if waxing_waning_score < PDC.WAXING_WANING_MIN_SCORE:
             return None
 
         cycle_count = int((timestamps[-1] - timestamps[0]) / cycle_length)
@@ -197,9 +198,10 @@ class ComplexPatternDetector:
         Returns:
             PeriodicBreathingDetection if pattern found, None otherwise
         """
-        min_cycle, max_cycle = 30.0, 120.0
+        min_cycle = PDC.PERIODIC_MIN_CYCLE
+        max_cycle = PDC.PERIODIC_MAX_CYCLE
 
-        smoothed_tv = self._smooth_signal(tidal_volumes, window_size=5)
+        smoothed_tv = self._smooth_signal(tidal_volumes, window_size=PDC.SIGNAL_SMOOTHING_WINDOW)
 
         autocorr = self._calculate_autocorrelation(smoothed_tv)
 
@@ -210,7 +212,7 @@ class ComplexPatternDetector:
 
         regularity = self._calculate_regularity_score(smoothed_tv, cycle_length)
 
-        if regularity < 0.5:
+        if regularity < PDC.REGULARITY_MIN_SCORE:
             return None
 
         has_apneas = self._check_for_apneas(tidal_volumes)
@@ -230,7 +232,7 @@ class ComplexPatternDetector:
         self,
         event_timestamps: List[float],
         session_duration: float,
-        cluster_threshold: float = 300.0,
+        cluster_threshold: float = PDC.CLUSTER_THRESHOLD_SECONDS,
     ) -> Optional[PositionalAnalysis]:
         """
         Detect temporal clustering of events suggesting positional apnea.
@@ -243,7 +245,7 @@ class ComplexPatternDetector:
         Returns:
             PositionalAnalysis if clustering detected, None otherwise
         """
-        if len(event_timestamps) < 5:
+        if len(event_timestamps) < PDC.MIN_EVENTS_FOR_POSITIONAL:
             return None
 
         event_times = np.array(sorted(event_timestamps))
@@ -257,7 +259,7 @@ class ComplexPatternDetector:
         cluster_counts = []
 
         for cluster in clusters:
-            if len(cluster) >= 3:
+            if len(cluster) >= PDC.MIN_CLUSTER_SIZE:
                 cluster_times.append((float(cluster[0]), float(cluster[-1])))
                 cluster_counts.append(len(cluster))
 
@@ -344,7 +346,7 @@ class ComplexPatternDetector:
 
         envelope_variation = np.std(envelope_upper) / np.mean(envelope_upper)
 
-        if envelope_variation < 0.2:
+        if envelope_variation < PDC.ENVELOPE_VARIATION_MIN:
             return 0.0
 
         gradients = np.gradient(envelope_upper)
@@ -372,7 +374,7 @@ class ComplexPatternDetector:
     def _calculate_csr_time_percentage(self, signal_data: np.ndarray, cycle_length: float) -> float:
         """Calculate percentage of time spent in CSR pattern."""
         envelope = self._extract_envelope(signal_data, upper=True)
-        threshold = np.median(envelope) * 0.5
+        threshold = np.median(envelope) * PDC.CSR_THRESHOLD_FACTOR
 
         in_csr = envelope < threshold
 
@@ -398,10 +400,10 @@ class ComplexPatternDetector:
     def _check_for_apneas(self, tidal_volumes: np.ndarray) -> bool:
         """Check if pattern includes near-zero tidal volumes (apneas)."""
         median_tv = np.median(tidal_volumes)
-        low_tv_threshold = median_tv * 0.1
+        low_tv_threshold = median_tv * PDC.LOW_TV_THRESHOLD_FACTOR
 
         low_tv_breaths = tidal_volumes < low_tv_threshold
-        has_apneas = np.mean(low_tv_breaths) > 0.1
+        has_apneas = np.mean(low_tv_breaths) > PDC.APNEA_PRESENCE_THRESHOLD
 
         return bool(has_apneas)
 
@@ -459,16 +461,16 @@ class ComplexPatternDetector:
         """Calculate confidence score for CSR detection."""
         confidence = 0.5
 
-        if 45 <= cycle_length <= 90:
+        if PDC.CSR_MIN_CYCLE_LENGTH <= cycle_length <= PDC.CSR_MAX_CYCLE_LENGTH:
             confidence += 0.2
 
-        if amplitude_var > 0.3:
+        if amplitude_var > PDC.CSR_MIN_AMPLITUDE_VAR:
             confidence += 0.1
 
-        if waxing_waning > 0.7:
+        if waxing_waning > PDC.CSR_MIN_WAXING_WANING:
             confidence += 0.1
 
-        if cycle_count >= 5:
+        if cycle_count >= PDC.CSR_MIN_CYCLES_HIGH_CONF:
             confidence += 0.1
 
         return min(1.0, confidence)
@@ -482,10 +484,10 @@ class ComplexPatternDetector:
         """Calculate confidence score for periodic breathing detection."""
         confidence = 0.5
 
-        if 30 <= cycle_length <= 120:
+        if PDC.PERIODIC_MIN_CYCLE <= cycle_length <= PDC.PERIODIC_MAX_CYCLE:
             confidence += 0.1
 
-        if regularity > 0.7:
+        if regularity > PDC.PERIODIC_HIGH_REGULARITY:
             confidence += 0.2
 
         if has_apneas:

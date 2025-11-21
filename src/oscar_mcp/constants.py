@@ -379,6 +379,160 @@ COMPLIANCE_MIN_DAYS = 21  # Minimum days per month (70% of 30)
 
 
 # ============================================================================
+# Analysis Algorithm Constants
+# ============================================================================
+
+
+class BreathSegmentationConstants:
+    """Constants for breath segmentation (breath_segmenter.py)."""
+
+    MIN_BREATH_DURATION = 1.0
+    MAX_BREATH_DURATION = 20.0
+    ZERO_CROSSING_HYSTERESIS = 2.0
+
+    TIDAL_VOLUME_SMOOTHING_POINTS = 5
+    RESPIRATORY_RATE_WINDOW_SECONDS = 60.0
+
+
+class EventDetectionConstants:
+    """Constants for respiratory event detection (event_detector.py)."""
+
+    MIN_EVENT_DURATION = 10.0
+    BASELINE_WINDOW_SECONDS = 30.0
+    MERGE_GAP_SECONDS = 2.0
+
+    APNEA_FLOW_REDUCTION_THRESHOLD = 0.9
+    HYPOPNEA_MIN_REDUCTION = 0.3
+    HYPOPNEA_MAX_REDUCTION = 0.9
+
+    RERA_FLATNESS_THRESHOLD = 0.7
+    RERA_MAX_FLOW_REDUCTION = 0.3
+
+    APNEA_EFFORT_HIGH_THRESHOLD = 0.5
+    APNEA_EFFORT_LOW_THRESHOLD = 0.1
+
+    SPO2_DESATURATION_DROP = 3.0
+
+    APNEA_BASE_CONFIDENCE = 0.7
+    APNEA_HIGH_REDUCTION_BONUS = 0.1
+    APNEA_LONG_DURATION_BONUS = 0.1
+    APNEA_BASELINE_FLOW_BONUS = 0.1
+    APNEA_HIGH_REDUCTION_THRESHOLD = 0.95
+    APNEA_LONG_DURATION_THRESHOLD = 15.0
+    APNEA_HIGH_BASELINE_THRESHOLD = 20.0
+
+    HYPOPNEA_BASE_CONFIDENCE = 0.6
+    HYPOPNEA_IDEAL_MIN_REDUCTION = 0.5
+    HYPOPNEA_IDEAL_MAX_REDUCTION = 0.7
+    HYPOPNEA_LONG_DURATION_THRESHOLD = 15.0
+    HYPOPNEA_DESATURATION_BONUS = 0.2
+
+    RERA_BASE_CONFIDENCE = 0.5
+    RERA_HIGH_FLATNESS_THRESHOLD = 0.8
+    RERA_HIGH_FLATNESS_BONUS = 0.2
+
+
+class PatternDetectionConstants:
+    """Constants for complex pattern detection (pattern_detector.py)."""
+
+    MIN_CYCLE_COUNT = 3
+    AUTOCORR_THRESHOLD = 0.6
+
+    CSR_MIN_CYCLE_LENGTH = 45.0
+    CSR_MAX_CYCLE_LENGTH = 90.0
+    CSR_WINDOW_MINUTES = 10.0
+
+    SIGNAL_SMOOTHING_WINDOW = 5
+    WAXING_WANING_MIN_SCORE = 0.5
+
+    PERIODIC_MIN_CYCLE = 30.0
+    PERIODIC_MAX_CYCLE = 120.0
+
+    REGULARITY_MIN_SCORE = 0.5
+
+    CLUSTER_THRESHOLD_SECONDS = 300.0
+    MIN_EVENTS_FOR_POSITIONAL = 5
+    MIN_CLUSTER_SIZE = 3
+
+    ENVELOPE_VARIATION_MIN = 0.2
+
+    CSR_THRESHOLD_FACTOR = 0.5
+
+    LOW_TV_THRESHOLD_FACTOR = 0.1
+    APNEA_PRESENCE_THRESHOLD = 0.1
+
+    CSR_MIN_AMPLITUDE_VAR = 0.3
+    CSR_MIN_WAXING_WANING = 0.7
+    CSR_MIN_CYCLES_HIGH_CONF = 5
+
+    PERIODIC_HIGH_REGULARITY = 0.7
+
+
+class FlowLimitationConstants:
+    """Constants for flow limitation classification (flow_limitation.py)."""
+
+    CONFIDENCE_THRESHOLD = 0.6
+
+    FL_CLASS7_FLATNESS_MIN = 0.9
+    FL_CLASS7_PLATEAU_MIN = 0.8
+
+    FL_CLASS6_PEAK_POSITION_MIN = 0.7
+    FL_CLASS6_FLATNESS_MIN = 0.6
+    FL_CLASS6_PLATEAU_MIN = 0.4
+
+    FL_CLASS5_FLATNESS_MIN = 0.7
+    FL_CLASS5_PEAK_POSITION_MIN = 0.4
+    FL_CLASS5_PEAK_POSITION_MAX = 0.6
+    FL_CLASS5_PLATEAU_MIN = 0.3
+
+    FL_CLASS4_FLATNESS_MIN = 0.4
+    FL_CLASS4_PEAK_POSITION_MAX = 0.3
+    FL_CLASS4_PLATEAU_MIN = 0.5
+
+    FL_CLASS3_PEAK_COUNT_MIN = 3
+    FL_CLASS3_FLATNESS_MIN = 0.3
+    FL_CLASS3_PROMINENCE_MAX = 0.3
+
+    FL_CLASS2_PEAK_COUNT = 2
+    FL_CLASS2_PEAK_SPACING_MIN = 0.3
+
+    FL_CLASS1_FLATNESS_MAX = 0.3
+    FL_CLASS1_SYMMETRY_MAX = 0.3
+    FL_CLASS1_KURTOSIS_MIN = 2.0
+
+    FL_DEFAULT_CONFIDENCE = 0.5
+    FL_HIGH_FEATURE_COUNT = 3
+    FL_MEDIUM_FEATURE_COUNT = 2
+    FL_HIGH_CONFIDENCE = 0.9
+    FL_MEDIUM_CONFIDENCE = 0.7
+    FL_LOW_CONFIDENCE = 0.6
+
+    FL_VERY_HIGH_FLATNESS = 0.95
+    FL_HIGH_PEAK_SPACING = 0.4
+    FL_CONFIDENCE_BONUS = 0.05
+
+
+class AnalysisEngineConstants:
+    """Constants for analysis engine coordination (programmatic_engine.py)."""
+
+    MIN_BREATH_DURATION = 1.0
+    MIN_EVENT_DURATION = 10.0
+    CONFIDENCE_THRESHOLD = 0.6
+
+    DEFAULT_SAMPLE_RATE = 25.0
+
+    MIN_INSPIRATORY_SAMPLES = 10
+
+    FLI_SEVERITY_MINIMAL = 0.2
+    FLI_SEVERITY_MILD = 0.4
+    FLI_SEVERITY_MODERATE = 0.6
+
+    CSR_MIN_CONFIDENCE = 0.6
+    PERIODIC_MIN_CONFIDENCE = 0.6
+    POSITIONAL_MIN_CONFIDENCE = 0.6
+
+
+# ============================================================================
 # File Format Constants
 # ============================================================================
 
