@@ -152,7 +152,7 @@ class RERAEvent(BaseModel):
         end_time: Event end timestamp (seconds)
         duration: Event duration (seconds)
         obstructed_breath_count: Number of breaths showing flow limitation
-        recovery_breath_amplitude: Recovery breath amplitude increase (% vs baseline)
+        recovery_amplitude_increase_pct: Recovery breath amplitude increase (% vs baseline)
         confidence: Detection confidence (0-1, lower without EEG)
         baseline_flow: Baseline flow before event (L/min)
     """
@@ -163,7 +163,7 @@ class RERAEvent(BaseModel):
     obstructed_breath_count: int = Field(
         ge=2, description="Breaths showing flow limitation"
     )
-    recovery_breath_amplitude: float = Field(
+    recovery_amplitude_increase_pct: float = Field(
         ge=0, description="Recovery breath amplitude increase (%)"
     )
     confidence: float = Field(

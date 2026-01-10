@@ -75,7 +75,8 @@ class EventDetector:
     def _detect_events_resmed(
         self,
         breaths: list[BreathMetrics],
-        flow_data: tuple[np.ndarray, np.ndarray] | None,
+        flow_data: tuple[np.ndarray, np.ndarray],
+        sample_rate: float,
     ) -> list[ApneaEvent]:
         """
         ResMed-style detection combining multiple strategies.
@@ -88,7 +89,8 @@ class EventDetector:
 
         Args:
             breaths: List of BreathMetrics objects
-            flow_data: Optional tuple of (timestamps, flow_values)
+            flow_data: Tuple of (timestamps, flow_values)
+            sample_rate: Sampling rate in Hz
 
         Returns:
             List of deduplicated and merged apnea events
@@ -100,15 +102,14 @@ class EventDetector:
         gap_events = self._detect_breath_gaps(breaths, min_gap_seconds=10.0)
         all_events.extend(gap_events)
 
-        if flow_data is not None:
-            timestamps, flow_values = flow_data
-            if len(timestamps) > 1:
-                zero_events = self._detect_near_zero_flow(
-                    flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
-                )
-                all_events.extend(zero_events)
+        timestamps, flow_values = flow_data
+        if len(timestamps) > 1:
+            zero_events = self._detect_near_zero_flow(
+                flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+            )
+            all_events.extend(zero_events)
 
-        amplitude_events = self._detect_apneas(breaths, flow_data)
+        amplitude_events = self._detect_apneas(breaths, flow_data, sample_rate)
         all_events.extend(amplitude_events)
 
         logger.info(
@@ -127,7 +128,8 @@ class EventDetector:
     def detect_events(
         self,
         breaths: list[BreathMetrics],
-        flow_data: tuple[np.ndarray, np.ndarray] | None,
+        flow_data: tuple[np.ndarray, np.ndarray],
+        sample_rate: float,
         session_duration_hours: float,
     ) -> ModeResult:
         """
@@ -139,16 +141,17 @@ class EventDetector:
 
         Args:
             breaths: List of BreathMetrics objects
-            flow_data: Optional tuple of (timestamps, flow_values)
+            flow_data: Tuple of (timestamps, flow_values)
+            sample_rate: Sampling rate in Hz (from waveform metadata)
             session_duration_hours: Total session duration in hours
 
         Returns:
             ModeResult with detected events and metrics
         """
         if self.config.name == "resmed":
-            apneas = self._detect_events_resmed(breaths, flow_data)
+            apneas = self._detect_events_resmed(breaths, flow_data, sample_rate)
         else:
-            apneas = self._detect_apneas(breaths, flow_data)
+            apneas = self._detect_apneas(breaths, flow_data, sample_rate)
 
         hypopneas = self._detect_hypopneas(breaths, flow_data, spo2_signal=None)
 
@@ -190,14 +193,16 @@ class EventDetector:
     def _detect_apneas(
         self,
         breaths: list[BreathMetrics],
-        flow_data: tuple[np.ndarray, np.ndarray] | None = None,
+        flow_data: tuple[np.ndarray, np.ndarray],
+        sample_rate: float,
     ) -> list[ApneaEvent]:
         """
         Detect apnea events using configured thresholds.
 
         Args:
             breaths: List of BreathMetrics objects
-            flow_data: Optional tuple of (timestamps, flow_values)
+            flow_data: Tuple of (timestamps, flow_values)
+            sample_rate: Sampling rate in Hz
 
         Returns:
             List of detected apnea events
@@ -269,13 +274,12 @@ class EventDetector:
             avg_baseline = float(np.mean(event_baselines))
 
             flow_signal = None
-            if flow_data is not None:
-                timestamps, flow_values = flow_data
-                mask = (timestamps >= start_time) & (timestamps <= end_time)
-                flow_signal = flow_values[mask]
+            timestamps, flow_values = flow_data
+            mask = (timestamps >= start_time) & (timestamps <= end_time)
+            flow_signal = flow_values[mask]
 
             event_type, classification_confidence = self._classify_apnea_type(
-                flow_signal=flow_signal
+                flow_signal=flow_signal, sample_rate=sample_rate
             )
             confidence = self._calculate_apnea_confidence(
                 avg_reduction, duration, avg_baseline
@@ -569,6 +573,11 @@ class EventDetector:
                     i += 1
 
                 if seq_count >= 2 and i < len(breaths):
+                    seq_end_time = breaths[i - 1].end_time
+                    min_duration = seq_end_time - breaths[seq_start].start_time
+                    if min_duration < self.config.min_event_duration * 0.5:
+                        continue
+
                     recovery_found = False
                     recovery_idx = -1
 
@@ -627,7 +636,7 @@ class EventDetector:
                                     end_time=float(end_time),
                                     duration=float(duration),
                                     obstructed_breath_count=seq_count,
-                                    recovery_breath_amplitude=float(
+                                    recovery_amplitude_increase_pct=float(
                                         amplitude_increase * 100
                                     ),
                                     confidence=float(confidence),
@@ -1095,7 +1104,12 @@ class EventDetector:
                 start_time=event1.start_time,
                 end_time=event2.end_time,
                 duration=merged_duration,
-                event_type=event1.event_type,
+                event_type=(
+                    event1.event_type
+                    if event1.classification_confidence
+                    >= event2.classification_confidence
+                    else event2.event_type
+                ),
                 flow_reduction=(event1.flow_reduction + event2.flow_reduction) / 2,
                 confidence=min(event1.confidence, event2.confidence),
                 classification_confidence=min(
@@ -1121,7 +1135,8 @@ class EventDetector:
 
     def _classify_apnea_type(
         self,
-        flow_signal: np.ndarray | None = None,
+        flow_signal: np.ndarray | None,
+        sample_rate: float,
     ) -> tuple[Literal["OA", "CA", "MA", "UA"], float]:
         """
         Classify apnea as obstructive, central, or unclassified.
@@ -1130,6 +1145,7 @@ class EventDetector:
 
         Args:
             flow_signal: Flow values during the apnea event
+            sample_rate: Sampling rate in Hz
 
         Returns:
             Tuple of (event_type, classification_confidence)
@@ -1137,7 +1153,7 @@ class EventDetector:
             - classification_confidence: 0-1 score based on effort score distinctiveness
         """
         if flow_signal is not None and len(flow_signal) > 5:
-            effort_from_flow = self._estimate_effort_from_flow(flow_signal)
+            effort_from_flow = self._estimate_effort_from_flow(flow_signal, sample_rate)
 
             if effort_from_flow > 0.15:
                 distance_from_boundary = min(effort_from_flow - 0.15, 0.35)
@@ -1156,12 +1172,15 @@ class EventDetector:
 
         return "UA", 0.2
 
-    def _estimate_effort_from_flow(self, flow_signal: np.ndarray) -> float:
+    def _estimate_effort_from_flow(
+        self, flow_signal: np.ndarray, sample_rate: float
+    ) -> float:
         """
         Estimate respiratory effort from flow signal characteristics.
 
         Args:
             flow_signal: Flow values during the event
+            sample_rate: Sampling rate in Hz
 
         Returns:
             Estimated effort magnitude (0.0 = no effort, higher = more effort)
@@ -1176,7 +1195,7 @@ class EventDetector:
         variations = np.abs(np.diff(detrended))
         avg_variation = np.mean(variations) if len(variations) > 0 else 0.0
 
-        spectral_power = self._calculate_spectral_effort(flow_signal)
+        spectral_power = self._calculate_spectral_effort(flow_signal, sample_rate)
 
         effort_score = (
             flow_std * 0.3
@@ -1190,7 +1209,7 @@ class EventDetector:
     def _calculate_spectral_effort(
         self,
         flow_signal: np.ndarray,
-        sample_rate: float = 25.0,
+        sample_rate: float,
     ) -> float:
         """
         Calculate spectral power in breathing frequency range (0.1-0.5 Hz).
@@ -1392,7 +1411,7 @@ class EventDetector:
             false_negatives = machine_count - matched
 
             if machine_count == 0:
-                sensitivity = 1.0 if programmatic_count == 0 else 0.0
+                sensitivity = 1.0
             elif matched + false_negatives > 0:
                 sensitivity = matched / (matched + false_negatives)
             else:

@@ -220,6 +220,7 @@ class AnalysisService:
                 mode_result = mode.detect_events(
                     breaths=breaths,
                     flow_data=(timestamps, flow_values),
+                    sample_rate=sample_rate,
                     session_duration_hours=session_duration_hours,
                 )
                 mode_results[mode_name] = mode_result
