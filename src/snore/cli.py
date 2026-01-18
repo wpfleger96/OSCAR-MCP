@@ -31,12 +31,6 @@ from snore.config import (
 )
 from snore.constants import (
     DEFAULT_LIST_SESSIONS_LIMIT,
-    EVENT_TYPE_CENTRAL_APNEA,
-    EVENT_TYPE_CLEAR_AIRWAY,
-    EVENT_TYPE_HYPOPNEA,
-    EVENT_TYPE_MIXED_APNEA,
-    EVENT_TYPE_OBSTRUCTIVE_APNEA,
-    FLOW_LIMITATION_CLASSES,
     abbreviate_event_type,
 )
 from snore.database import models
@@ -1470,6 +1464,11 @@ def analyze() -> None:
     is_flag=True,
     help="Run all available detection modes",
 )
+@click.option(
+    "--plain",
+    is_flag=True,
+    help="Plain output without colors/borders",
+)
 def run(
     profile: str | None,
     session_id: int | None,
@@ -1481,6 +1480,7 @@ def run(
     debug_events: bool,
     mode: tuple[str, ...],
     all_modes: bool,
+    plain: bool,
 ) -> int | None:
     """Run analysis on CPAP sessions."""
     if db:
@@ -1538,7 +1538,15 @@ def run(
                 )
                 sys.exit(1)
             _analyze_single_session(
-                session, prof, session_id, date, no_store, debug_events, mode, all_modes
+                session,
+                prof,
+                session_id,
+                date,
+                no_store,
+                debug_events,
+                mode,
+                all_modes,
+                plain,
             )
         else:
             if prof is None:
@@ -1554,6 +1562,7 @@ def run(
                 debug_events,
                 mode,
                 all_modes,
+                plain,
             )
 
     return None
@@ -1620,11 +1629,17 @@ def list_cmd(
     help="Show analysis for session on date (YYYY-MM-DD)",
 )
 @click.option("--db", type=click.Path(), help="Database path")
+@click.option(
+    "--plain",
+    is_flag=True,
+    help="Plain output without colors/borders",
+)
 def show(
     profile: str | None,
     session_id: int | None,
     date: datetime | None,
     db: str | None,
+    plain: bool,
 ) -> None:
     """Display stored analysis results."""
     if db:
@@ -1681,6 +1696,16 @@ def show(
 
         assert session_id is not None, "session_id should not be None"
 
+        db_session = session.query(models.Session).filter_by(id=session_id).first()
+        if not db_session:
+            click.echo(f"Error: Session {session_id} not found", err=True)
+            sys.exit(1)
+
+        day_date = (
+            db_session.day.date if db_session.day else db_session.start_time.date()
+        )
+        session_date_str = day_date.isoformat()
+
         analysis_service = AnalysisService(session)
         result = analysis_service.get_analysis_result(session_id)
 
@@ -1689,21 +1714,24 @@ def show(
             sys.exit(1)
 
         click.echo(f"Displaying stored analysis for session {session_id}...\n")
-        _display_analysis_result(result)
+        _display_analysis_result(result, plain, session_date_str)
 
 
-def _display_validation_metrics(
+def _get_validation_metrics(
     mode_result: ModeResult,
     machine_events: list[AnalysisEvent],
     mode: str,
-) -> None:
+) -> dict[str, Any]:
     """
-    Display comprehensive validation metrics comparing programmatic vs machine events.
+    Get validation metrics comparing programmatic vs machine events.
 
     Args:
         mode_result: Detection mode results with programmatic events
         machine_events: Machine-detected events from CPAP device
         mode: Detection mode name (for looking up correct config)
+
+    Returns:
+        Dictionary with validation results including false positives/negatives
     """
     from snore.analysis.modes.config import AASM_CONFIG
     from snore.analysis.modes.detector import EventDetector
@@ -1721,30 +1749,6 @@ def _display_validation_metrics(
         machine_apneas,
         machine_hypopneas,
     )
-
-    click.echo("\n  Validation vs Machine Events:")
-
-    apnea_val = validation["apnea_validation"]
-    hypopnea_val = validation["hypopnea_validation"]
-
-    if apnea_val.machine_event_count > 0 or apnea_val.programmatic_event_count > 0:
-        click.echo(
-            f"    Apneas:     "
-            f"Sens: {apnea_val.sensitivity * 100:.0f}% ({apnea_val.matched_events}/{apnea_val.machine_event_count})  "
-            f"Prec: {apnea_val.precision * 100:.0f}% ({apnea_val.matched_events}/{apnea_val.programmatic_event_count})  "
-            f"F1: {apnea_val.f1_score:.2f}"
-        )
-
-    if (
-        hypopnea_val.machine_event_count > 0
-        or hypopnea_val.programmatic_event_count > 0
-    ):
-        click.echo(
-            f"    Hypopneas:  "
-            f"Sens: {hypopnea_val.sensitivity * 100:.0f}% ({hypopnea_val.matched_events}/{hypopnea_val.machine_event_count})  "
-            f"Prec: {hypopnea_val.precision * 100:.0f}% ({hypopnea_val.matched_events}/{hypopnea_val.programmatic_event_count})  "
-            f"F1: {hypopnea_val.f1_score:.2f}"
-        )
 
     false_negatives: list[AnalysisEvent] = []
 
@@ -1777,126 +1781,96 @@ def _display_validation_metrics(
         if not is_matched:
             false_positives.append(prog_event)
 
-    if false_negatives:
-        fn_strs = []
-        for event in false_negatives:
-            time_offset = event.start_time - machine_session_start
-            event_abbr = abbreviate_event_type(event.event_type)
-            fn_strs.append(f"{_format_time_offset(time_offset)} ({event_abbr})")
-
-        click.echo(f"    False Negatives (missed): {', '.join(fn_strs)}")
-
-    if false_positives:
-        fp_strs = []
-        fp_event: ApneaEvent | HypopneaEvent
-        for fp_event in false_positives:
-            time_offset = fp_event.start_time
-
-            if isinstance(fp_event, ApneaEvent):
-                event_abbr = fp_event.event_type
-            else:
-                event_abbr = "H"
-
-            fp_strs.append(f"{_format_time_offset(time_offset)} ({event_abbr})")
-
-        click.echo(f"    False Positives (extra):  {', '.join(fp_strs)}")
+    return {
+        "apnea_validation": validation["apnea_validation"],
+        "hypopnea_validation": validation["hypopnea_validation"],
+        "false_negatives": false_negatives,
+        "false_positives": false_positives,
+        "machine_session_start": machine_session_start,
+    }
 
 
-def _display_analysis_result(result: AnalysisResult) -> None:
+def _display_analysis_result(
+    result: AnalysisResult, plain: bool, session_date: str
+) -> None:
     """Display analysis results with machine comparison."""
-    click.echo("✓ Analysis complete\n")
-
-    click.echo("=" * 60)
-    click.echo("ANALYSIS SUMMARY")
-    click.echo("=" * 60)
-    click.echo(
-        "\nLegend: OA=Obstructive Apnea, CA=Central Apnea, MA=Mixed Apnea, "
-        "UA=Unclassified Apnea, H=Hypopnea, RE=RERA"
+    from snore.utils.display import (
+        create_console,
+        create_flow_limitation_panel,
+        create_header_panel,
+        create_machine_events_table,
+        create_mode_comparison_table,
+        create_validation_table,
+        format_event_list,
     )
 
-    click.echo(f"\nSession Duration: {result.session_duration_hours:.1f} hours")
+    con = create_console(plain)
+    con.print("✓ Analysis complete\n")
+
+    header = create_header_panel(session_date, result.session_duration_hours, plain)
+    con.print(header)
+    con.print()
 
     machine_events = result.machine_events
     if machine_events:
-        machine_event_counts: dict[str, int] = {}
-        for event in machine_events:
-            machine_event_counts[event.event_type] = (
-                machine_event_counts.get(event.event_type, 0) + 1
+        machine_table = create_machine_events_table(
+            machine_events, result.session_duration_hours, plain
+        )
+        con.print(machine_table)
+        con.print()
+
+    if result.mode_results:
+        mode_table = create_mode_comparison_table(result.mode_results, plain)
+        con.print(mode_table)
+        con.print()
+
+    if machine_events and result.mode_results:
+        con.print(
+            "[bold]VALIDATION vs MACHINE EVENTS[/bold]"
+            if not plain
+            else "VALIDATION vs MACHINE EVENTS"
+        )
+        con.print()
+
+        for mode_name, mode_result in result.mode_results.items():
+            validation = _get_validation_metrics(mode_result, machine_events, mode_name)
+
+            val_table = create_validation_table(
+                mode_name,
+                validation["apnea_validation"],
+                validation["hypopnea_validation"],
+                machine_events,
+                plain,
             )
+            con.print(val_table)
 
-        total_machine = len(machine_events)
-        oa_count = machine_event_counts.get(EVENT_TYPE_OBSTRUCTIVE_APNEA, 0)
-        ca_count = machine_event_counts.get(EVENT_TYPE_CENTRAL_APNEA, 0)
-        caa_count = machine_event_counts.get(EVENT_TYPE_CLEAR_AIRWAY, 0)
-        ma_count = machine_event_counts.get(EVENT_TYPE_MIXED_APNEA, 0)
-        h_count = machine_event_counts.get(EVENT_TYPE_HYPOPNEA, 0)
+            if validation["false_negatives"]:
+                fn_text = format_event_list(
+                    validation["false_negatives"],
+                    "  Missed events",
+                    _format_time_offset,
+                    is_false_negatives=True,
+                    machine_session_start=validation["machine_session_start"],
+                )
+                con.print(fn_text)
 
-        machine_ahi_count = oa_count + ca_count + caa_count + ma_count + h_count
-        machine_ahi = machine_ahi_count / result.session_duration_hours
-        machine_rdi = machine_ahi  # Same without RERA
+            if validation["false_positives"]:
+                fp_text = format_event_list(
+                    validation["false_positives"],
+                    "  Extra events",
+                    _format_time_offset,
+                )
+                con.print(fp_text)
 
-        click.echo("\nMACHINE-DETECTED EVENTS (from CPAP device)")
-        click.echo(f"  AHI: {machine_ahi:.1f} events/hour")
-        click.echo(f"  RDI: {machine_rdi:.1f} events/hour")
-        click.echo(f"  Total Events: {total_machine}")
-        if oa_count > 0:
-            click.echo(f"    - Obstructive Apneas (OA): {oa_count}")
-        if caa_count > 0 or ca_count > 0:
-            clear_airway_total = caa_count + ca_count
-            click.echo(f"    - Clear Airway / Central Apnea (CA): {clear_airway_total}")
-        if ma_count > 0:
-            click.echo(f"    - Mixed Apneas (MA): {ma_count}")
-        if h_count > 0:
-            click.echo(f"    - Hypopneas (H): {h_count}")
-
-    for mode_name, mode_result in result.mode_results.items():
-        click.echo("\n" + "─" * 60)
-        click.echo(f"MODE: {mode_name}")
-        click.echo(f"  AHI: {mode_result.ahi:.1f} events/hour")
-        click.echo(f"  RDI: {mode_result.rdi:.1f} events/hour")
-
-        total_events = len(mode_result.apneas) + len(mode_result.hypopneas)
-        click.echo(f"  Total Events: {total_events}")
-
-        if mode_result.apneas:
-            click.echo(f"    - Apneas: {len(mode_result.apneas)}")
-            for apnea_type in ["OA", "CA", "MA", "UA"]:
-                count = sum(1 for a in mode_result.apneas if a.event_type == apnea_type)
-                if count > 0:
-                    click.echo(f"      • {apnea_type}: {count}")
-
-        if mode_result.hypopneas:
-            click.echo(f"    - Hypopneas: {len(mode_result.hypopneas)}")
-
-        if machine_events:
-            _display_validation_metrics(mode_result, machine_events, mode_name)
+            con.print()
 
     if result.flow_analysis:
-        click.echo("\n" + "─" * 60)
-        click.echo("FLOW LIMITATION ANALYSIS")
-        click.echo(
-            f"  Flow Limitation Index: {result.flow_analysis['flow_limitation_index']:.2f}"
+        flow_panel, flow_table = create_flow_limitation_panel(
+            result.flow_analysis, plain
         )
-
-        total_breaths = result.flow_analysis["total_breaths"]
-        click.echo(f"  Total Breaths: {total_breaths}")
-
-        if total_breaths > 0:
-            click.echo("  Class Distribution:")
-            class_distribution = result.flow_analysis["class_distribution"]
-
-            for class_num in range(1, 8):
-                class_info = FLOW_LIMITATION_CLASSES[class_num]
-                count = class_distribution.get(class_num, 0) or class_distribution.get(
-                    str(class_num), 0
-                )
-                percentage = (count / total_breaths * 100) if total_breaths > 0 else 0.0
-                click.echo(
-                    f"    Class {class_num} ({class_info['name']}): "
-                    f"{count} ({percentage:.1f}%) - {class_info['severity']}"
-                )
-
-    click.echo("\n" + "=" * 60)
+        con.print(flow_panel)
+        con.print(flow_table)
+        con.print()
 
 
 def _analyze_single_session(
@@ -1908,6 +1882,7 @@ def _analyze_single_session(
     debug_events: bool,
     mode: tuple[str, ...],
     all_modes: bool,
+    plain: bool,
 ) -> None:
     """Analyze a single session and display detailed report."""
     if date:
@@ -1951,7 +1926,7 @@ def _analyze_single_session(
             store_results=not no_store,
             debug=debug_events,
         )
-        _display_analysis_result(result)
+        _display_analysis_result(result, plain, session_date_str)
 
     except Exception as e:
         click.echo(f"\nAnalysis failed: {e}", err=True)
@@ -1969,6 +1944,7 @@ def _analyze_batch(
     debug_events: bool,
     mode: tuple[str, ...],
     all_modes: bool,
+    plain: bool,
 ) -> None:
     """Analyze multiple sessions with progress bar."""
     query = (
