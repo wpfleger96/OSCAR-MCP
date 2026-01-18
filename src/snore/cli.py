@@ -11,18 +11,17 @@ from datetime import datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from snore.analysis.modes.types import ModeResult
+    from snore.analysis.service import AnalysisResult
+    from snore.analysis.types import AnalysisEvent
 
 import click
 
-from sqlalchemy import bindparam, text
-from sqlalchemy.orm import Session
-
-from snore.analysis.modes import AVAILABLE_CONFIGS
-from snore.analysis.modes.types import ModeResult
-from snore.analysis.service import AnalysisResult, AnalysisService
-from snore.analysis.types import AnalysisEvent
-from snore.analysis.utils import convert_machine_events
 from snore.config import (
     get_config_path,
     get_default_profile,
@@ -33,14 +32,9 @@ from snore.constants import (
     DEFAULT_LIST_SESSIONS_LIMIT,
     abbreviate_event_type,
 )
-from snore.database import models
-from snore.database.importers import SessionImporter
-from snore.database.session import cleanup_database, init_database, session_scope
 from snore.logging_config import setup_logging
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
-from snore.waveform import AsciiWaveformRenderer, WaveformInspector
-from snore.waveform.inspector import parse_time_offset
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +46,9 @@ except PackageNotFoundError:
 
 def ensure_profile(username: str) -> int:
     """Get or create profile by username, return profile_id."""
+    from snore.database import models
+    from snore.database.session import session_scope
+
     with session_scope() as session:
         profile = session.query(models.Profile).filter_by(username=username).first()
         if not profile:
@@ -63,7 +60,7 @@ def ensure_profile(username: str) -> int:
         return profile.id
 
 
-def resolve_profile(explicit_profile: str | None, db_session: Session) -> str:
+def resolve_profile(explicit_profile: str | None, db_session: "Session") -> str:
     """
     Resolve profile using precedence: CLI > config > auto-detect.
 
@@ -77,6 +74,8 @@ def resolve_profile(explicit_profile: str | None, db_session: Session) -> str:
     Raises:
         click.ClickException: If profile cannot be resolved
     """
+    from snore.database import models
+
     if explicit_profile:
         return explicit_profile
 
@@ -275,6 +274,9 @@ def import_data(
     dry_run: bool,
 ) -> int:
     """Import CPAP data from device SD card or directory."""
+    from snore.database.importers import SessionImporter
+    from snore.database.session import init_database, session_scope
+
     data_path = Path(path)
 
     register_all_parsers()
@@ -520,6 +522,9 @@ def import_data(
 @click.option("--db", type=click.Path(), help="Database path")
 def list_profiles(db: str | None) -> None:
     """List all available profiles in the database."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -596,6 +601,10 @@ def list_sessions(
     from_date: datetime | None, to_date: datetime | None, limit: int, db: str | None
 ) -> None:
     """List imported sessions."""
+    from sqlalchemy import text
+
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -730,6 +739,10 @@ def delete_sessions(
     db: str | None,
 ) -> int | None:
     """Delete sessions from the database."""
+    from sqlalchemy import bindparam, text
+
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -924,6 +937,10 @@ def delete_analysis(
     db: str | None,
 ) -> int | None:
     """Delete analysis results without deleting the sessions themselves."""
+    from sqlalchemy import bindparam, text
+
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -1145,6 +1162,7 @@ def init(db: str | None) -> int | None:
     """Initialize database (creates tables if needed)."""
     from snore.constants import DEFAULT_DATABASE_PATH
     from snore.database.models import Base
+    from snore.database.session import init_database
 
     if db:
         db_path = Path(db)
@@ -1181,7 +1199,11 @@ def stats(db: str | None) -> None:
     """Show database statistics."""
     import os
 
+    from sqlalchemy import text
+
     from snore.constants import DEFAULT_DATABASE_PATH
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
 
     if db:
         init_database(str(Path(db)))
@@ -1235,6 +1257,10 @@ def stats(db: str | None) -> None:
 @click.confirmation_option(prompt="Are you sure you want to vacuum the database?")
 def vacuum(db: str | None) -> None:
     """Optimize database (reclaim space after deletions)."""
+    from sqlalchemy import text
+
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -1256,7 +1282,11 @@ def drop(db: str | None, force: bool) -> None:
     """Drop database (permanently delete all CPAP data)."""
     import os
 
+    from sqlalchemy import text
+
     from snore.constants import DEFAULT_DATABASE_PATH
+    from snore.database import models
+    from snore.database.session import cleanup_database, init_database, session_scope
 
     if db:
         db_path = Path(db)
@@ -1349,6 +1379,8 @@ def config() -> None:
 @click.option("--db", type=click.Path(), help="Database path")
 def set_default_profile_cmd(username: str, db: str | None) -> None:
     """Set default profile for CLI commands (must exist in database)."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
 
     if db:
         init_database(str(Path(db)))
@@ -1483,6 +1515,9 @@ def run(
     plain: bool,
 ) -> int | None:
     """Run analysis on CPAP sessions."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -1599,6 +1634,9 @@ def list_cmd(
     db: str | None,
 ) -> None:
     """List sessions with analysis status."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -1642,6 +1680,10 @@ def show(
     plain: bool,
 ) -> None:
     """Display stored analysis results."""
+    from snore.analysis.service import AnalysisService
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
     if db:
         init_database(str(Path(db)))
     else:
@@ -1718,8 +1760,8 @@ def show(
 
 
 def _get_validation_metrics(
-    mode_result: ModeResult,
-    machine_events: list[AnalysisEvent],
+    mode_result: "ModeResult",
+    machine_events: "list[AnalysisEvent]",
     mode: str,
 ) -> dict[str, Any]:
     """
@@ -1733,9 +1775,11 @@ def _get_validation_metrics(
     Returns:
         Dictionary with validation results including false positives/negatives
     """
+    from snore.analysis.modes import AVAILABLE_CONFIGS
     from snore.analysis.modes.config import AASM_CONFIG
     from snore.analysis.modes.detector import EventDetector
     from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
+    from snore.analysis.utils import convert_machine_events
 
     machine_apneas, machine_hypopneas, machine_session_start = convert_machine_events(
         machine_events
@@ -1791,7 +1835,7 @@ def _get_validation_metrics(
 
 
 def _display_analysis_result(
-    result: AnalysisResult, plain: bool, session_date: str
+    result: "AnalysisResult", plain: bool, session_date: str
 ) -> None:
     """Display analysis results with machine comparison."""
     from snore.utils.display import (
@@ -1885,6 +1929,10 @@ def _analyze_single_session(
     plain: bool,
 ) -> None:
     """Analyze a single session and display detailed report."""
+    from snore.analysis.modes import AVAILABLE_CONFIGS
+    from snore.analysis.service import AnalysisService
+    from snore.database import models
+
     if date:
         db_session = (
             session.query(models.Session)
@@ -1947,6 +1995,10 @@ def _analyze_batch(
     plain: bool,
 ) -> None:
     """Analyze multiple sessions with progress bar."""
+    from snore.analysis.modes import AVAILABLE_CONFIGS
+    from snore.analysis.service import AnalysisService
+    from snore.database import models
+
     query = (
         session.query(models.Session)
         .join(models.Day)
@@ -2011,6 +2063,8 @@ def _list_sessions(
     Args:
         limit: Maximum sessions to show (0 for unlimited)
     """
+    from snore.database import models
+
     query = (
         session.query(models.Session)
         .join(models.Day)
@@ -2092,9 +2146,7 @@ def completions() -> None:
     pass
 
 
-from snore.completions import get_supported_shells
-
-_SUPPORTED_SHELLS = list(get_supported_shells())
+_SUPPORTED_SHELLS = ["bash", "zsh"]
 
 
 @completions.command(name="bash")
@@ -2337,6 +2389,7 @@ def validate(
     """
     from pathlib import Path
 
+    from snore.database.session import init_database, session_scope
     from snore.validation import BatchValidator, export_report_csv, export_report_json
 
     if date_from > date_to:
@@ -2504,6 +2557,10 @@ def export_events(
 
     from pathlib import Path
 
+    from snore.analysis.service import AnalysisService
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
     if not session_id and not date:
         click.echo("Error: Must specify either --session-id or --date", err=True)
         sys.exit(1)
@@ -2526,8 +2583,6 @@ def export_events(
     with session_scope() as db_session:
         try:
             if date:
-                from snore.database import models
-
                 sessions = (
                     db_session.query(models.Session)
                     .filter(
@@ -2549,8 +2604,6 @@ def export_events(
                 session_id = sessions[0].id
 
             assert session_id is not None, "session_id must be set"
-
-            from snore.analysis.service import AnalysisService
 
             analysis_service = AnalysisService(db_session)
             result = analysis_service.get_analysis_result(session_id)
@@ -2767,6 +2820,12 @@ def show_waveform(
         snore waveform show --session-id 37 --time 05:56:22 --window 30
         snore waveform show --date 2025-10-25 --time 01:25:16 --format csv --output waveform.csv
     """
+    from snore.analysis.service import AnalysisService
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+    from snore.waveform import AsciiWaveformRenderer, WaveformInspector
+    from snore.waveform.inspector import parse_time_offset
+
     if session_id is None and date is None:
         click.echo("Error: Either --session-id or --date must be provided", err=True)
         sys.exit(1)
@@ -2922,6 +2981,11 @@ def compare_events(
         snore waveform compare --session-id 37 --mode aasm
         snore waveform compare --date 2025-10-25 --mode resmed --show-unmatched
     """
+    from snore.analysis.service import AnalysisService
+    from snore.analysis.utils import convert_machine_events
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
     if session_id is None and date is None:
         click.echo("Error: Either --session-id or --date must be provided", err=True)
         sys.exit(1)
