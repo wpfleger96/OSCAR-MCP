@@ -1,8 +1,11 @@
 """Analysis pipeline type definitions."""
 
-from typing import Any
+from typing import Any, NewType
 
 from pydantic import BaseModel, Field
+
+UnixTimestamp = NewType("UnixTimestamp", float)
+SessionOffset = NewType("SessionOffset", float)
 
 from snore.analysis.modes.types import ModeResult
 
@@ -17,7 +20,7 @@ class AnalysisEvent(BaseModel):
     """
 
     event_type: str = Field(description="Event type")
-    start_time: float = Field(description="Unix timestamp")
+    start_time: float = Field(description="Session offset (seconds from session start)")
     duration: float = Field(ge=0, description="Event duration (seconds)")
     source: str = Field(description="Event source (machine/programmatic)")
     confidence: float | None = Field(

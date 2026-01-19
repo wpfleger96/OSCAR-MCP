@@ -299,10 +299,7 @@ def format_event_list(
     event_strs = []
     for event in events:
         if isinstance(event, AnalysisEvent):
-            if is_false_negatives:
-                time_offset = event.start_time - machine_session_start
-            else:
-                time_offset = event.start_time
+            time_offset = event.start_time
             event_abbr = abbreviate_event_type(event.event_type)
         elif hasattr(event, "event_type"):
             time_offset = event.start_time

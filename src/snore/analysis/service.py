@@ -78,8 +78,14 @@ class AnalysisService:
             session_id: Database session ID
 
         Returns:
-            List of respiratory events flagged by the CPAP device
+            List of respiratory events with session-relative timestamps
         """
+        session = self.db_session.query(models.Session).filter_by(id=session_id).first()
+        if not session:
+            return []
+
+        session_start_ts = session.start_time.timestamp()
+
         events = (
             self.db_session.query(models.Event)
             .filter_by(session_id=session_id)
@@ -89,12 +95,12 @@ class AnalysisService:
 
         respiratory_events = []
         for event in events:
-            start_timestamp = event.start_time.timestamp()
+            offset_seconds = event.start_time.timestamp() - session_start_ts
 
             respiratory_events.append(
                 AnalysisEvent(
                     event_type=event.event_type,
-                    start_time=start_timestamp,
+                    start_time=offset_seconds,
                     duration=event.duration_seconds or 10.0,
                     source="machine",
                     confidence=1.0,

@@ -2784,9 +2784,9 @@ def waveform() -> None:
 @click.option(
     "--format",
     "output_format",
-    type=click.Choice(["ascii", "csv"]),
-    default="ascii",
-    help="Output format",
+    type=click.Choice(["plot", "csv"]),
+    default="plot",
+    help="Output format (plot=interactive graph, csv=data export)",
 )
 @click.option(
     "--output",
@@ -2799,6 +2799,12 @@ def waveform() -> None:
 @click.option(
     "--mode", "-m", default="aasm", help="Detection mode to compare (default: aasm)"
 )
+@click.option(
+    "--interactive",
+    "-i",
+    is_flag=True,
+    help="Enable interactive zoom/pan mode (vim-style h/j/k/l or arrows, q to quit)",
+)
 def show_waveform(
     session_id: int | None,
     date: datetime | None,
@@ -2809,6 +2815,7 @@ def show_waveform(
     profile: str | None,
     db: str | None,
     mode: str,
+    interactive: bool,
 ) -> None:
     """
     Display flow waveform at a specific time.
@@ -2823,7 +2830,7 @@ def show_waveform(
     from snore.analysis.service import AnalysisService
     from snore.database import models
     from snore.database.session import init_database, session_scope
-    from snore.waveform import AsciiWaveformRenderer, WaveformInspector
+    from snore.waveform import UniplotWaveformRenderer, WaveformInspector
     from snore.waveform.inspector import parse_time_offset
 
     if session_id is None and date is None:
@@ -2847,13 +2854,7 @@ def show_waveform(
 
     with session_scope() as db_session:
         if session_id is None:
-            if not profile:
-                profile = get_default_profile()
-                if not profile:
-                    click.echo(
-                        "Error: No default profile set. Use --profile.", err=True
-                    )
-                    sys.exit(1)
+            profile = resolve_profile(profile, db_session)
 
             if date is None:
                 click.echo(
@@ -2923,9 +2924,11 @@ def show_waveform(
                     all_prog_events, start_time, end_time
                 )
 
-        if output_format == "ascii":
-            renderer = AsciiWaveformRenderer(width=80, height=20, show_events=True)
-            output_str = renderer.render(
+        if output_format == "plot":
+            renderer = UniplotWaveformRenderer(
+                width=80, height=20, show_events=True, interactive=interactive
+            )
+            renderer.render(
                 timestamps=timestamps,
                 flow_values=flow_values,
                 machine_events=machine_events,
@@ -2933,7 +2936,6 @@ def show_waveform(
                 session_id=session_id,
                 center_time=time,
             )
-            click.echo(output_str)
 
         elif output_format == "csv":
             import csv
@@ -2997,13 +2999,7 @@ def compare_events(
 
     with session_scope() as db_session:
         if session_id is None:
-            if not profile:
-                profile = get_default_profile()
-                if not profile:
-                    click.echo(
-                        "Error: No default profile set. Use --profile.", err=True
-                    )
-                    sys.exit(1)
+            profile = resolve_profile(profile, db_session)
 
             if date is None:
                 click.echo(
@@ -3065,7 +3061,7 @@ def compare_events(
         false_positives_hypopnea = []
 
         for m_event in machine_apneas + machine_hypopneas:
-            machine_relative_time = m_event.start_time + machine_session_start
+            machine_relative_time = m_event.start_time
             is_matched = False
 
             for p_event in prog_apneas + prog_hypopneas:
@@ -3080,7 +3076,7 @@ def compare_events(
             is_matched = False
 
             for m_event in machine_apneas + machine_hypopneas:
-                machine_relative_time = m_event.start_time + machine_session_start
+                machine_relative_time = m_event.start_time
                 if abs(p_event.start_time - machine_relative_time) <= 5.0:
                     is_matched = True
                     break
@@ -3092,7 +3088,7 @@ def compare_events(
             is_matched = False
 
             for m_event in machine_apneas + machine_hypopneas:
-                machine_relative_time = m_event.start_time + machine_session_start
+                machine_relative_time = m_event.start_time
                 if abs(p_event.start_time - machine_relative_time) <= 5.0:
                     is_matched = True
                     break
