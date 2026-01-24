@@ -533,8 +533,6 @@ def stats(db: str | None, profile: str | None, days: int | None) -> None:
     from snore.analysis.calculations import (
         assess_therapy_effectiveness,
         calculate_average_ahi,
-        calculate_average_hours_per_day,
-        calculate_total_hours,
     )
     from snore.database import models
     from snore.database.session import init_database, session_scope
@@ -566,8 +564,8 @@ def stats(db: str | None, profile: str | None, days: int | None) -> None:
             text("""
             SELECT p.username, COUNT(s.id) as session_count
             FROM profiles p
-            LEFT JOIN devices d ON d.profile_id = p.id
-            LEFT JOIN sessions s ON s.device_id = d.id
+            LEFT JOIN days d ON d.profile_id = p.id
+            LEFT JOIN sessions s ON s.day_id = d.id
             GROUP BY p.id, p.username
             ORDER BY session_count DESC
         """)
@@ -578,9 +576,17 @@ def stats(db: str | None, profile: str | None, days: int | None) -> None:
         last_date = max(dates)
         days_since_last = (date.today() - last_date).days
 
-        total_hours = calculate_total_hours(day_records)
-        avg_hours = calculate_average_hours_per_day(day_records)
+        day_ids = [d.id for d in day_records]
         days_with_data = len(day_records)
+
+        total_duration = (
+            session.query(func.sum(models.Session.duration_seconds))
+            .join(models.Day)
+            .filter(models.Day.id.in_(day_ids))
+            .scalar()
+        )
+        total_hours = (total_duration or 0) / 3600
+        avg_hours = total_hours / days_with_data if days_with_data > 0 else 0
 
         avg_ahi = calculate_average_ahi(day_records)
         effectiveness = assess_therapy_effectiveness(avg_ahi) if avg_ahi else "unknown"
@@ -601,8 +607,6 @@ def stats(db: str | None, profile: str | None, days: int | None) -> None:
         avg_spo2 = sum(spo2_values) / len(spo2_values) if spo2_values else None
         spo2_mins = [d.spo2_min for d in day_records if d.spo2_min is not None]
         min_spo2 = min(spo2_mins) if spo2_mins else None
-
-        day_ids = [d.id for d in day_records]
 
         event_counts = (
             session.query(
