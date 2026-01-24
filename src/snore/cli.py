@@ -1781,9 +1781,7 @@ def _get_validation_metrics(
     from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
     from snore.analysis.utils import convert_machine_events
 
-    machine_apneas, machine_hypopneas, machine_session_start = convert_machine_events(
-        machine_events
-    )
+    machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
 
     config = AVAILABLE_CONFIGS.get(mode, AASM_CONFIG)
     detector = EventDetector(config)
@@ -1798,7 +1796,7 @@ def _get_validation_metrics(
 
     for machine_event in machine_events:
         is_matched = False
-        machine_relative_time = machine_event.start_time - machine_session_start
+        machine_relative_time = machine_event.start_time
         all_programmatic = list(mode_result.apneas) + list(mode_result.hypopneas)
 
         for prog_event in all_programmatic:
@@ -1816,7 +1814,7 @@ def _get_validation_metrics(
         is_matched = False
 
         for machine_event in machine_events:
-            machine_relative_time = machine_event.start_time - machine_session_start
+            machine_relative_time = machine_event.start_time
             time_diff = abs(prog_event.start_time - machine_relative_time)
             if time_diff <= 5.0:
                 is_matched = True
@@ -1830,7 +1828,6 @@ def _get_validation_metrics(
         "hypopnea_validation": validation["hypopnea_validation"],
         "false_negatives": false_negatives,
         "false_positives": false_positives,
-        "machine_session_start": machine_session_start,
     }
 
 
@@ -1893,8 +1890,6 @@ def _display_analysis_result(
                     validation["false_negatives"],
                     "  Missed events",
                     _format_time_offset,
-                    is_false_negatives=True,
-                    machine_session_start=validation["machine_session_start"],
                 )
                 con.print(fn_text)
 
@@ -2628,24 +2623,14 @@ def export_events(
                 click.echo(f"Error: Session {session_id} not found", err=True)
                 sys.exit(1)
 
-            session_start_unix = session.start_time.timestamp()
-
-            if machine_events:
-                machine_session_start = min(
-                    event.start_time for event in machine_events
-                )
-            else:
-                machine_session_start = 0.0
-
             export_events_list = []
 
             for event in machine_events:
-                time_offset = event.start_time - machine_session_start
+                time_offset = event.start_time
+                absolute_time = session.start_time + timedelta(seconds=time_offset)
                 export_events_list.append(
                     {
-                        "timestamp": datetime.fromtimestamp(event.start_time).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
+                        "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "time_into_session": _format_time_offset(time_offset),
                         "event_type": abbreviate_event_type(event.event_type),
                         "duration_sec": f"{event.duration:.1f}",
@@ -2656,12 +2641,10 @@ def export_events(
 
             for apnea in mode_result.apneas:
                 time_offset = apnea.start_time
-                timestamp_unix = session_start_unix + time_offset
+                absolute_time = session.start_time + timedelta(seconds=time_offset)
                 export_events_list.append(
                     {
-                        "timestamp": datetime.fromtimestamp(timestamp_unix).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
+                        "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "time_into_session": _format_time_offset(time_offset),
                         "event_type": apnea.event_type,
                         "duration_sec": f"{apnea.duration:.1f}",
@@ -2672,12 +2655,10 @@ def export_events(
 
             for hypopnea in mode_result.hypopneas:
                 time_offset = hypopnea.start_time
-                timestamp_unix = session_start_unix + time_offset
+                absolute_time = session.start_time + timedelta(seconds=time_offset)
                 export_events_list.append(
                     {
-                        "timestamp": datetime.fromtimestamp(timestamp_unix).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
+                        "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "time_into_session": _format_time_offset(time_offset),
                         "event_type": "H",
                         "duration_sec": f"{hypopnea.duration:.1f}",
@@ -2830,7 +2811,7 @@ def show_waveform(
     from snore.analysis.service import AnalysisService
     from snore.database import models
     from snore.database.session import init_database, session_scope
-    from snore.waveform import WaveformRenderer, WaveformInspector
+    from snore.waveform import WaveformInspector, WaveformRenderer
     from snore.waveform.inspector import parse_time_offset
 
     if session_id is None and date is None:
@@ -2925,9 +2906,7 @@ def show_waveform(
                 )
 
         if output_format == "plot":
-            renderer = WaveformRenderer(
-                width=80, height=20, show_events=True
-            )
+            renderer = WaveformRenderer(width=80, height=20, show_events=True)
             renderer.render(
                 timestamps=timestamps,
                 flow_values=flow_values,
@@ -3049,9 +3028,7 @@ def compare_events(
         mode_result = result.mode_results[mode]
 
         machine_events = result.machine_events or []
-        machine_apneas, machine_hypopneas, machine_session_start = (
-            convert_machine_events(machine_events)
-        )
+        machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
 
         prog_apneas = list(mode_result.apneas)
         prog_hypopneas = list(mode_result.hypopneas)

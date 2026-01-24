@@ -71,7 +71,6 @@ def upgrade() -> None:
         sa.Column("spo2_min", sa.Float(), nullable=True),
         sa.Column("spo2_max", sa.Float(), nullable=True),
         sa.Column("spo2_mean", sa.Float(), nullable=True),
-        sa.Column("spo2_avg", sa.Float(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["profile_id"], ["profiles.id"], ondelete="CASCADE"),

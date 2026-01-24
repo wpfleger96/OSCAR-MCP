@@ -124,7 +124,7 @@ class BatchValidator:
         mode_result = analysis_result.mode_results[mode]
         machine_events = analysis_result.machine_events
 
-        machine_apneas, machine_hypopneas, _ = convert_machine_events(machine_events)
+        machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
 
         detector = EventDetector(AASM_CONFIG)
         validation = detector.validate_against_machine_events(

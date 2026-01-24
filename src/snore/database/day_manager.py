@@ -130,7 +130,6 @@ class DayManager:
             day.spo2_min = None
             day.spo2_max = None
             day.spo2_mean = None
-            day.spo2_avg = None
             return
 
         day.session_count = len(sessions)
@@ -198,7 +197,6 @@ class DayManager:
                 day.spo2_mean = cls._weighted_average(
                     stats_records, sessions, "spo2_mean"
                 )
-                day.spo2_avg = day.spo2_mean  # Alias for compatibility
 
     @classmethod
     def link_session_to_day(

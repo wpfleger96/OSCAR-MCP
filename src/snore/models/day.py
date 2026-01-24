@@ -67,7 +67,7 @@ class DayReport(BaseModel):
         default=None, description="Maximum leak rate (L/min)"
     )
 
-    spo2_avg: float | None = Field(default=None, description="Average SpO₂ (%)")
+    spo2_mean: float | None = Field(default=None, description="Mean SpO₂ (%)")
     spo2_min: float | None = Field(default=None, description="Minimum SpO₂ (%)")
     spo2_median: float | None = Field(default=None, description="Median SpO₂ (%)")
     pulse_avg: float | None = Field(
@@ -98,7 +98,7 @@ class DayReport(BaseModel):
                 "leak_median": 8.5,
                 "leak_95th": 18.2,
                 "leak_max": 24.0,
-                "spo2_avg": 96.5,
+                "spo2_mean": 96.5,
                 "spo2_min": 91,
                 "spo2_median": 97,
                 "pulse_avg": 68,

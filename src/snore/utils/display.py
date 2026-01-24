@@ -274,18 +274,14 @@ def format_event_list(
     events: list[Any],
     label: str,
     format_time_fn: Any,
-    is_false_negatives: bool = False,
-    machine_session_start: float = 0.0,
 ) -> Text:
     """
-    Format false positives/negatives with wrapping.
+    Format event list for display.
 
     Args:
         events: List of events
         label: Label for the list (e.g., "Missed events")
         format_time_fn: Function to format time offsets
-        is_false_negatives: True if these are false negatives (machine events)
-        machine_session_start: Session start timestamp for machine events
 
     Returns:
         Rich Text with formatted event list

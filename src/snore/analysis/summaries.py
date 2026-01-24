@@ -93,10 +93,10 @@ def generate_day_summary(day: models.Day) -> str:
             f" Leak rates were {leak_assessment} with a median of {format_leak(day.leak_median)}."
         )
 
-    if day.spo2_avg is not None:
-        spo2_assessment = "healthy" if day.spo2_avg >= 95 else "concerning"
+    if day.spo2_mean is not None:
+        spo2_assessment = "healthy" if day.spo2_mean >= 95 else "concerning"
         summary_parts.append(
-            f" Average SpO₂ was {day.spo2_avg:.1f}% ({spo2_assessment})"
+            f" Average SpO₂ was {day.spo2_mean:.1f}% ({spo2_assessment})"
         )
         if day.spo2_min is not None:
             summary_parts.append(f" with a minimum of {day.spo2_min:.0f}%.")
@@ -206,7 +206,7 @@ def generate_period_summary(
         else:
             summary_parts.append(".")
 
-    spo2_values = [day.spo2_avg for day in days if day.spo2_avg is not None]
+    spo2_values = [day.spo2_mean for day in days if day.spo2_mean is not None]
     if spo2_values:
         avg_spo2 = sum(spo2_values) / len(spo2_values)
         spo2_mins = [day.spo2_min for day in days if day.spo2_min is not None]

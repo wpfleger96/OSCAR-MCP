@@ -140,7 +140,6 @@ class Day(Base):
     spo2_min: Mapped[float | None] = mapped_column(Float)
     spo2_max: Mapped[float | None] = mapped_column(Float)
     spo2_mean: Mapped[float | None] = mapped_column(Float)
-    spo2_avg: Mapped[float | None] = mapped_column(Float)  # Alias for compatibility
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now

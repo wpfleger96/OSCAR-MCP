@@ -76,7 +76,7 @@ class SessionDetail(BaseModel):
     tidal_volume_avg: float | None = None
     minute_vent_avg: float | None = None
 
-    spo2_avg: float | None = None
+    spo2_mean: float | None = None
     spo2_min: float | None = None
     pulse_avg: float | None = None
 
