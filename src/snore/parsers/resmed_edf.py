@@ -543,7 +543,6 @@ class ResmedEDFParser(DeviceParser):
                 segment_sessions.append(segment_session)
             except ValueError as e:
                 if "No valid data records" in str(e):
-                    logger.info(f"Skipping zero-record segment {segment_id}")
                     continue
                 raise
             except Exception as e:
@@ -686,10 +685,6 @@ class ResmedEDFParser(DeviceParser):
                     continue
 
         if session_duration_seconds is None or session_duration_seconds == 0:
-            logger.info(
-                f"Session {session_id}: All files have 0 data records "
-                f"(device turned on briefly but not used) - skipping"
-            )
             raise ValueError("No valid data records in any files for this session")
 
         session = UnifiedSession(
