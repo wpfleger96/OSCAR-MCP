@@ -153,7 +153,9 @@ class EventDetector:
         else:
             apneas = self._detect_apneas(breaths, flow_data, sample_rate)
 
-        hypopneas = self._detect_hypopneas(breaths, flow_data, spo2_signal=None)
+        hypopneas = self._detect_hypopneas(
+            breaths, flow_data, spo2_signal=None, exclude_events=apneas
+        )
 
         reras: list[RERAEvent] = []
         if self.config.rera_detection_enabled:
@@ -332,6 +334,7 @@ class EventDetector:
         breaths: list[BreathMetrics],
         flow_data: tuple[np.ndarray, np.ndarray] | None = None,
         spo2_signal: np.ndarray | None = None,
+        exclude_events: list[ApneaEvent] | None = None,
     ) -> list[HypopneaEvent]:
         """
         Detect hypopnea events using configured mode.
@@ -347,6 +350,7 @@ class EventDetector:
             breaths: List of BreathMetrics objects
             flow_data: Optional tuple of (timestamps, flow_values)
             spo2_signal: SpO2 data for desaturation detection
+            exclude_events: List of apnea events to exclude from hypopnea detection
 
         Returns:
             List of detected hypopnea events
@@ -381,10 +385,7 @@ class EventDetector:
             f"{self.config.name}: Detecting hypopneas (mode: {actual_mode.value})"
         )
 
-        if actual_mode == HypopneaMode.FLOW_ONLY:
-            min_threshold = 0.40  # 40% reduction for flow-only
-        else:
-            min_threshold = self.config.hypopnea_min_threshold  # 30%
+        min_threshold = self.config.hypopnea_min_threshold
 
         baselines = np.zeros(len(breaths))
         reductions = np.zeros(len(breaths))
@@ -402,6 +403,22 @@ class EventDetector:
                 reductions[i] = max(0.0, min(1.0, reduction))
             else:
                 reductions[i] = 0.0
+
+        if exclude_events:
+            excluded_count = 0
+            for i, breath in enumerate(breaths):
+                for apnea in exclude_events:
+                    if (
+                        breath.start_time < apnea.end_time
+                        and breath.end_time > apnea.start_time
+                    ):
+                        reductions[i] = 0.0
+                        excluded_count += 1
+                        break
+            if excluded_count > 0:
+                logger.debug(
+                    f"Excluded {excluded_count} breaths overlapping with apnea events"
+                )
 
         breaths_in_range = np.sum(
             (reductions >= min_threshold)
@@ -1183,7 +1200,7 @@ class EventDetector:
             sample_rate: Sampling rate in Hz
 
         Returns:
-            Estimated effort magnitude (0.0 = no effort, higher = more effort)
+            Normalized effort magnitude (0.0-1.0, where 0.0 = no effort, 1.0 = maximum effort)
         """
         if len(flow_signal) < 5:
             return 0.0
@@ -1197,10 +1214,14 @@ class EventDetector:
 
         spectral_power = self._calculate_spectral_effort(flow_signal, sample_rate)
 
+        normalized_std = min(flow_std / 30.0, 1.0)
+        normalized_range = min(flow_range / 100.0, 1.0)
+        normalized_variation = min(avg_variation / 20.0, 1.0)
+
         effort_score = (
-            flow_std * 0.3
-            + flow_range * 0.3
-            + avg_variation * 0.2
+            normalized_std * 0.3
+            + normalized_range * 0.3
+            + normalized_variation * 0.2
             + spectral_power * 0.2
         )
 
