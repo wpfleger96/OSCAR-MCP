@@ -92,7 +92,7 @@ def resolve_profile(explicit_profile: str | None, db_session: "Session") -> str:
                 err=True,
             )
             click.echo(
-                "Update with: snore config set-default-profile <name>",
+                "Update with: snore profile set-default <name>",
                 err=True,
             )
 
@@ -103,14 +103,14 @@ def resolve_profile(explicit_profile: str | None, db_session: "Session") -> str:
 
     if len(profiles) == 0:
         raise click.ClickException(
-            "No profiles found. Import data first: snore import-data <path>"
+            "No profiles found. Import data first: snore import <path>"
         )
     else:
         profile_list = ", ".join([p.username for p in profiles])
         raise click.ClickException(
             f"Multiple profiles found ({profile_list}). "
             "Specify --profile <name> or set default: "
-            "snore config set-default-profile <name>"
+            "snore profile set-default <name>"
         )
 
 
@@ -237,7 +237,7 @@ def upgrade(check: bool, force: bool) -> None:
         click.echo("✓ Already up to date")
 
 
-@cli.command()
+@cli.command("import")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--force", is_flag=True, help="Re-import existing sessions")
 @click.option(
@@ -251,12 +251,14 @@ def upgrade(check: bool, force: bool) -> None:
     help="Session sort order (default: filesystem)",
 )
 @click.option(
-    "--date-from",
+    "--from",
+    "date_from",
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="Import sessions from this date (YYYY-MM-DD)",
 )
 @click.option(
-    "--date-to",
+    "--to",
+    "date_to",
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="Import sessions up to this date (YYYY-MM-DD)",
 )
@@ -518,638 +520,6 @@ def import_data(
     return 0
 
 
-@cli.command("list-profiles")
-@click.option("--db", type=click.Path(), help="Database path")
-def list_profiles(db: str | None) -> None:
-    """List all available profiles in the database."""
-    from snore.database import models
-    from snore.database.session import init_database, session_scope
-
-    if db:
-        init_database(str(Path(db)))
-    else:
-        init_database()
-
-    with session_scope() as session:
-        profiles = session.query(models.Profile).all()
-
-        if not profiles:
-            click.echo("No profiles found in database")
-            return
-
-        click.echo("\nAvailable Profiles:\n")
-
-        for profile in profiles:
-            click.echo(f"Profile: {profile.username}")
-
-            if profile.first_name or profile.last_name:
-                name_parts = [profile.first_name, profile.last_name]
-                full_name = " ".join(part for part in name_parts if part)
-                click.echo(f"  Name: {full_name}")
-
-            session_count = (
-                session.query(models.Session)
-                .join(models.Day)
-                .filter(models.Day.profile_id == profile.id)
-                .count()
-            )
-
-            day_count = (
-                session.query(models.Day)
-                .filter(models.Day.profile_id == profile.id)
-                .count()
-            )
-
-            click.echo(f"  Sessions: {session_count}")
-            click.echo(f"  Days with data: {day_count}")
-
-            if day_count > 0:
-                days = (
-                    session.query(models.Day)
-                    .filter(models.Day.profile_id == profile.id)
-                    .order_by(models.Day.date)
-                    .all()
-                )
-                first_date = days[0].date
-                last_date = days[-1].date
-                click.echo(f"  Date range: {first_date} to {last_date}")
-
-            click.echo()
-
-
-@cli.command("list-sessions")
-@click.option(
-    "--from-date",
-    "from_date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Start date (YYYY-MM-DD)",
-)
-@click.option(
-    "--to-date",
-    "to_date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="End date (YYYY-MM-DD)",
-)
-@click.option(
-    "--limit",
-    type=int,
-    default=DEFAULT_LIST_SESSIONS_LIMIT,
-    help="Max sessions to show (use 0 for all)",
-)
-@click.option("--db", type=click.Path(), help="Database path")
-def list_sessions(
-    from_date: datetime | None, to_date: datetime | None, limit: int, db: str | None
-) -> None:
-    """List imported sessions."""
-    from sqlalchemy import text
-
-    from snore.database.session import init_database, session_scope
-
-    if db:
-        init_database(str(Path(db)))
-    else:
-        init_database()
-
-    with session_scope() as session:
-        where_clause = "WHERE 1=1"
-        params: dict[str, Any] = {}
-
-        if from_date:
-            where_clause += " AND sessions.start_time >= :from_date"
-            params["from_date"] = from_date
-
-        if to_date:
-            where_clause += " AND sessions.start_time <= :to_date"
-            params["to_date"] = to_date
-
-        count_query = f"""
-            SELECT COUNT(*) as total
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            LEFT JOIN profiles ON devices.profile_id = profiles.id
-            {where_clause}
-        """
-        total_sessions = session.execute(text(count_query), params).scalar() or 0
-
-        query = f"""
-            SELECT
-                sessions.id as session_id,
-                sessions.start_time,
-                sessions.duration_seconds,
-                devices.manufacturer,
-                devices.model,
-                profiles.username as profile_name,
-                days.date as day_date
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            LEFT JOIN profiles ON devices.profile_id = profiles.id
-            LEFT JOIN days ON sessions.day_id = days.id
-            {where_clause}
-            ORDER BY COALESCE(days.date, DATE(sessions.start_time)) DESC, sessions.start_time DESC
-        """
-
-        if limit > 0:
-            query += " LIMIT :limit"
-            params["limit"] = limit
-
-        result = session.execute(text(query), params)
-        sessions = result.fetchall()
-
-        if not sessions:
-            click.echo("No sessions found")
-            return
-
-        click.echo(
-            f"\n{'Date':<12} {'ID':<6} {'Time':<8} {'Duration':<10} {'Profile':<15} {'Device':<20} {'AHI':<6}"
-        )
-        click.echo("=" * 91)
-
-        for sess in sessions:
-            start = (
-                datetime.fromisoformat(sess.start_time)
-                if isinstance(sess.start_time, str)
-                else sess.start_time
-            )
-            display_date = sess.day_date if sess.day_date else start.date()
-            duration_hours = (
-                sess.duration_seconds / 3600 if sess.duration_seconds else 0
-            )
-            device_name = f"{sess.manufacturer} {sess.model}"
-            profile_name = sess.profile_name or "N/A"
-
-            stats_result = session.execute(
-                text("SELECT ahi FROM statistics WHERE session_id = :session_id"),
-                {"session_id": sess.session_id},
-            )
-            stats = stats_result.fetchone()
-            ahi = f"{stats.ahi:.1f}" if stats and stats.ahi is not None else "N/A"
-
-            click.echo(
-                f"{display_date}   {sess.session_id:<6} {start:%H:%M:%S}  "
-                f"{duration_hours:>6.1f}h    "
-                f"{profile_name:<15} "
-                f"{device_name:<20} "
-                f"{ahi:>5}"
-            )
-
-        displayed_count = len(sessions)
-        if limit > 0 and displayed_count < total_sessions:
-            click.echo(
-                f"\nShowing {displayed_count} of {total_sessions} sessions (most recent first)"
-            )
-            click.echo(
-                "💡 Tip: Use --limit <number> to see more sessions, or --limit 0 to see all"
-            )
-        elif limit == 0 and total_sessions > DEFAULT_LIST_SESSIONS_LIMIT:
-            click.echo(f"\nShowing all {total_sessions} sessions")
-
-
-@cli.command("delete-sessions")
-@click.option(
-    "--session-id",
-    "session_ids",
-    type=str,
-    help="Comma-separated session IDs to delete (e.g., '1,2,3')",
-)
-@click.option(
-    "--from-date",
-    "from_date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Delete sessions from this date (YYYY-MM-DD)",
-)
-@click.option(
-    "--to-date",
-    "to_date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Delete sessions up to this date (YYYY-MM-DD)",
-)
-@click.option("--all", "delete_all", is_flag=True, help="Delete all sessions")
-@click.option(
-    "--dry-run", is_flag=True, help="Preview what would be deleted without deleting"
-)
-@click.option("--force", is_flag=True, help="Skip confirmation prompt")
-@click.option("--db", type=click.Path(), help="Database path")
-def delete_sessions(
-    session_ids: str | None,
-    from_date: datetime | None,
-    to_date: datetime | None,
-    delete_all: bool,
-    dry_run: bool,
-    force: bool,
-    db: str | None,
-) -> int | None:
-    """Delete sessions from the database."""
-    from sqlalchemy import bindparam, text
-
-    from snore.database.session import init_database, session_scope
-
-    if db:
-        init_database(str(Path(db)))
-    else:
-        init_database()
-
-    if not any([session_ids, from_date, to_date, delete_all]):
-        click.echo("❌ Error: You must specify at least one filter:", err=True)
-        click.echo("  • --session-id <ids>")
-        click.echo("  • --from-date <date>")
-        click.echo("  • --to-date <date>")
-        click.echo("  • --all")
-        return 1
-
-    with session_scope() as session:
-        query = """
-            SELECT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                sessions.duration_seconds,
-                devices.manufacturer,
-                devices.model,
-                devices.serial_number
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            WHERE 1=1
-        """
-        params: dict[str, Any] = {}
-
-        if session_ids:
-            try:
-                id_list = [int(sid.strip()) for sid in session_ids.split(",")]
-                query += " AND sessions.id IN :session_ids"
-                params["session_ids"] = id_list
-            except ValueError:
-                click.echo(
-                    "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
-                    err=True,
-                )
-                return 1
-
-        if from_date:
-            query += " AND sessions.start_time >= :from_date"
-            params["from_date"] = from_date
-
-        if to_date:
-            query += " AND sessions.start_time <= :to_date"
-            params["to_date"] = to_date
-
-        query += " ORDER BY sessions.start_time DESC"
-
-        if "session_ids" in params:
-            result = session.execute(
-                text(query).bindparams(bindparam("session_ids", expanding=True)), params
-            )
-        else:
-            result = session.execute(text(query), params)
-        sessions = result.fetchall()
-
-        if not sessions:
-            click.echo("⚠️  No sessions found matching the specified criteria")
-            return 0
-
-        session_ids_to_delete = [s.id for s in sessions]
-
-        event_count = session.execute(
-            text(
-                "SELECT COUNT(*) as count FROM events WHERE session_id IN :session_ids"
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_to_delete},
-        ).scalar()
-
-        waveform_count = session.execute(
-            text(
-                "SELECT COUNT(*) as count FROM waveforms WHERE session_id IN :session_ids"
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_to_delete},
-        ).scalar()
-
-        stats_count = session.execute(
-            text(
-                "SELECT COUNT(*) as count FROM statistics WHERE session_id IN :session_ids"
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_to_delete},
-        ).scalar()
-
-        click.echo(f"\n{'=' * 70}")
-        if dry_run:
-            click.echo("🔍 DRY RUN MODE - No data will be deleted")
-        else:
-            click.echo("⚠️  Sessions to be DELETED")
-        click.echo(f"{'=' * 70}\n")
-
-        click.echo(
-            f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<25}"
-        )
-        click.echo("-" * 70)
-
-        for sess in sessions:
-            start = (
-                datetime.fromisoformat(sess.start_time)
-                if isinstance(sess.start_time, str)
-                else sess.start_time
-            )
-            duration_hours = (
-                sess.duration_seconds / 3600 if sess.duration_seconds else 0
-            )
-            device_name = f"{sess.manufacturer} {sess.model}"
-
-            click.echo(
-                f"{sess.id:<5} "
-                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-                f"{duration_hours:>6.1f}h    "
-                f"{device_name:<25}"
-            )
-
-        click.echo("\n" + "=" * 70)
-        click.echo("📊 Deletion Summary")
-        click.echo("=" * 70)
-        click.echo(f"Sessions:    {len(sessions)}")
-        click.echo(f"Events:      {event_count}")
-        click.echo(f"Waveforms:   {waveform_count}")
-        click.echo(f"Statistics:  {stats_count}")
-        click.echo("=" * 70 + "\n")
-
-        if dry_run:
-            click.echo("✓ Dry run complete. Use without --dry-run to delete.")
-            return 0
-
-        if not force:
-            click.echo("⚠️  WARNING: This action cannot be undone!")
-            if not click.confirm("Are you sure you want to delete these sessions?"):
-                click.echo("Deletion cancelled")
-                return 0
-
-        session.execute(
-            text("DELETE FROM sessions WHERE id IN :session_ids").bindparams(
-                bindparam("session_ids", expanding=True)
-            ),
-            {"session_ids": session_ids_to_delete},
-        )
-        session.commit()
-
-        click.echo(
-            f"\n✓ Successfully deleted {len(sessions)} session(s) and related data"
-        )
-
-        if len(sessions) > 10:
-            click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
-
-        return 0
-
-
-@cli.command("delete-analysis")
-@click.option(
-    "--session-id",
-    "session_ids",
-    type=str,
-    help="Comma-separated session IDs to delete analysis for (e.g., '1,2,3')",
-)
-@click.option(
-    "--from-date",
-    "from_date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Delete analysis for sessions from this date (YYYY-MM-DD)",
-)
-@click.option(
-    "--to-date",
-    "to_date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Delete analysis for sessions up to this date (YYYY-MM-DD)",
-)
-@click.option("--all", "delete_all", is_flag=True, help="Delete all analysis results")
-@click.option(
-    "--all-versions",
-    is_flag=True,
-    help="Delete all analysis versions (default: only latest)",
-)
-@click.option(
-    "--dry-run", is_flag=True, help="Preview what would be deleted without deleting"
-)
-@click.option("--force", is_flag=True, help="Skip confirmation prompt")
-@click.option("--db", type=click.Path(), help="Database path")
-def delete_analysis(
-    session_ids: str | None,
-    from_date: datetime | None,
-    to_date: datetime | None,
-    delete_all: bool,
-    all_versions: bool,
-    dry_run: bool,
-    force: bool,
-    db: str | None,
-) -> int | None:
-    """Delete analysis results without deleting the sessions themselves."""
-    from sqlalchemy import bindparam, text
-
-    from snore.database.session import init_database, session_scope
-
-    if db:
-        init_database(str(Path(db)))
-    else:
-        init_database()
-
-    if not any([session_ids, from_date, to_date, delete_all]):
-        raise click.ClickException(
-            "You must specify at least one filter:\n"
-            "  • --session-id <ids>\n"
-            "  • --from-date <date>\n"
-            "  • --to-date <date>\n"
-            "  • --all"
-        )
-
-    with session_scope() as session:
-        query = """
-            SELECT DISTINCT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                devices.manufacturer,
-                devices.model
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            JOIN analysis_results ON sessions.id = analysis_results.session_id
-            WHERE 1=1
-        """
-        params: dict[str, Any] = {}
-
-        if session_ids:
-            try:
-                id_list = [int(sid.strip()) for sid in session_ids.split(",")]
-                query += " AND sessions.id IN :session_ids"
-                params["session_ids"] = id_list
-            except ValueError:
-                click.echo(
-                    "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
-                    err=True,
-                )
-                return 1
-
-        if from_date:
-            query += " AND sessions.start_time >= :from_date"
-            params["from_date"] = from_date
-
-        if to_date:
-            query += " AND sessions.start_time <= :to_date"
-            params["to_date"] = to_date
-
-        query += " ORDER BY sessions.start_time DESC"
-
-        if "session_ids" in params:
-            result = session.execute(
-                text(query).bindparams(bindparam("session_ids", expanding=True)), params
-            )
-        else:
-            result = session.execute(text(query), params)
-        sessions_with_analysis = result.fetchall()
-
-        if not sessions_with_analysis:
-            click.echo(
-                "⚠️  No sessions with analysis results found matching the specified criteria"
-            )
-            return 0
-
-        session_ids_list = [s.id for s in sessions_with_analysis]
-
-        analysis_counts = session.execute(
-            text(
-                """
-                SELECT session_id, COUNT(*) as count
-                FROM analysis_results
-                WHERE session_id IN :session_ids
-                GROUP BY session_id
-            """
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_list},
-        ).fetchall()
-
-        analysis_count_dict = {row[0]: int(row[1]) for row in analysis_counts}
-
-        total_analysis_records = sum(analysis_count_dict.values())
-        records_to_delete = (
-            total_analysis_records if all_versions else len(sessions_with_analysis)
-        )
-
-        patterns_count = session.execute(
-            text(
-                """
-                SELECT COUNT(*) as count
-                FROM detected_patterns
-                WHERE analysis_result_id IN (
-                    SELECT id FROM analysis_results WHERE session_id IN :session_ids
-                )
-            """
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_list},
-        ).scalar()
-
-        click.echo(f"\n{'=' * 80}")
-        if dry_run:
-            click.echo("🔍 DRY RUN MODE - No data will be deleted")
-        else:
-            click.echo("⚠️  Analysis Results to be DELETED")
-        click.echo(f"{'=' * 80}\n")
-
-        click.echo(
-            f"{'Sess ID':<8} {'Date':<12} {'Time':<8} {'Versions':<10} {'Device':<25}"
-        )
-        click.echo("-" * 80)
-
-        for sess in sessions_with_analysis:
-            start = (
-                datetime.fromisoformat(sess.start_time)
-                if isinstance(sess.start_time, str)
-                else sess.start_time
-            )
-            device_name = f"{sess.manufacturer} {sess.model}"
-            version_count = analysis_count_dict.get(sess.id, 0)
-
-            click.echo(
-                f"{sess.id:<8} "
-                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-                f"{version_count:<10} "
-                f"{device_name:<25}"
-            )
-
-        click.echo("\n" + "=" * 80)
-        click.echo("📊 Deletion Summary")
-        click.echo("=" * 80)
-        click.echo(f"Sessions with analysis:          {len(sessions_with_analysis)}")
-        click.echo(
-            f"Total analysis records:          {total_analysis_records}"
-            + (
-                " (all versions)"
-                if all_versions or total_analysis_records == len(sessions_with_analysis)
-                else ""
-            )
-        )
-        click.echo(
-            f"Analysis records to delete:      {records_to_delete}"
-            + (
-                " (latest only)"
-                if not all_versions
-                and total_analysis_records > len(sessions_with_analysis)
-                else ""
-            )
-        )
-        click.echo(
-            f"Detected patterns to delete:     {patterns_count} (cascade delete)"
-        )
-        click.echo("=" * 80 + "\n")
-
-        if dry_run:
-            click.echo("✓ Dry run complete. Use without --dry-run to delete.")
-            return 0
-
-        if not force:
-            click.echo(
-                "⚠️  WARNING: This will delete analysis results but keep the sessions!"
-            )
-            if not click.confirm(
-                "Are you sure you want to delete these analysis results?"
-            ):
-                click.echo("Deletion cancelled")
-                return 0
-
-        if all_versions:
-            session.execute(
-                text(
-                    "DELETE FROM analysis_results WHERE session_id IN :session_ids"
-                ).bindparams(bindparam("session_ids", expanding=True)),
-                {"session_ids": session_ids_list},
-            )
-            deleted_count = records_to_delete
-        else:
-            deleted_count = 0
-            for session_id in session_ids_list:
-                latest_result = session.execute(
-                    text(
-                        """
-                        SELECT id FROM analysis_results
-                        WHERE session_id = :session_id
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """
-                    ),
-                    {"session_id": session_id},
-                ).fetchone()
-
-                if latest_result:
-                    session.execute(
-                        text("DELETE FROM analysis_results WHERE id = :analysis_id"),
-                        {"analysis_id": latest_result.id},
-                    )
-                    deleted_count += 1
-
-        session.commit()
-
-        click.echo(
-            f"\n✓ Successfully deleted {deleted_count} analysis record(s) for {len(sessions_with_analysis)} session(s)"
-        )
-
-        if deleted_count > 10:
-            click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
-
-        return 0
-
-
 @cli.group()
 def db() -> None:
     """Database management commands."""
@@ -1369,15 +739,277 @@ def drop(db: str | None, force: bool) -> None:
 
 
 @cli.group()
-def config() -> None:
-    """Configuration management commands."""
+def profile() -> None:
+    """Profile management commands."""
     pass
 
 
-@config.command("set-default-profile")
+@profile.command("list")
+@click.option("--db", type=click.Path(), help="Database path")
+def profile_list(db: str | None) -> None:
+    """List all profiles in the database."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as session:
+        profiles = session.query(models.Profile).all()
+
+        if not profiles:
+            click.echo("No profiles found in database")
+            return
+
+        default_profile = get_default_profile()
+        click.echo("\nProfiles:\n")
+
+        for prof in profiles:
+            is_default = prof.username == default_profile
+            prefix = "* " if is_default else "  "
+            click.echo(f"{prefix}{prof.username}")
+
+            if prof.first_name or prof.last_name:
+                name_parts = [prof.first_name, prof.last_name]
+                full_name = " ".join(part for part in name_parts if part)
+                click.echo(f"    Name: {full_name}")
+
+            session_count = (
+                session.query(models.Session)
+                .join(models.Day)
+                .filter(models.Day.profile_id == prof.id)
+                .count()
+            )
+
+            day_count = (
+                session.query(models.Day)
+                .filter(models.Day.profile_id == prof.id)
+                .count()
+            )
+
+            click.echo(f"    Sessions: {session_count}")
+            click.echo(f"    Days with data: {day_count}")
+
+            if day_count > 0:
+                days = (
+                    session.query(models.Day)
+                    .filter(models.Day.profile_id == prof.id)
+                    .order_by(models.Day.date)
+                    .all()
+                )
+                first_date = days[0].date
+                last_date = days[-1].date
+                click.echo(f"    Date range: {first_date} to {last_date}")
+
+            click.echo()
+
+        if default_profile:
+            click.echo(f"Default profile: {default_profile} (marked with *)")
+
+
+@profile.command("show")
 @click.argument("username")
 @click.option("--db", type=click.Path(), help="Database path")
-def set_default_profile_cmd(username: str, db: str | None) -> None:
+def profile_show(username: str, db: str | None) -> None:
+    """Show details for a specific profile."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as session:
+        prof = session.query(models.Profile).filter_by(username=username).first()
+
+        if not prof:
+            click.echo(f"Error: Profile '{username}' not found", err=True)
+            sys.exit(1)
+
+        default_profile = get_default_profile()
+        is_default = prof.username == default_profile
+
+        click.echo(f"\nProfile: {prof.username}")
+        if is_default:
+            click.echo("  (default profile)")
+
+        if prof.first_name or prof.last_name:
+            name_parts = [prof.first_name, prof.last_name]
+            full_name = " ".join(part for part in name_parts if part)
+            click.echo(f"  Name: {full_name}")
+
+        if prof.date_of_birth:
+            click.echo(f"  Date of Birth: {prof.date_of_birth}")
+
+        if prof.height_cm:
+            click.echo(f"  Height: {prof.height_cm} cm")
+
+        click.echo(f"  Created: {prof.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        session_count = (
+            session.query(models.Session)
+            .join(models.Day)
+            .filter(models.Day.profile_id == prof.id)
+            .count()
+        )
+
+        day_count = (
+            session.query(models.Day).filter(models.Day.profile_id == prof.id).count()
+        )
+
+        analysis_count = (
+            session.query(models.AnalysisResult)
+            .join(models.Session)
+            .join(models.Day)
+            .filter(models.Day.profile_id == prof.id)
+            .count()
+        )
+
+        click.echo(f"\n  Sessions: {session_count}")
+        click.echo(f"  Days with data: {day_count}")
+        click.echo(f"  Analysis results: {analysis_count}")
+
+        if day_count > 0:
+            days = (
+                session.query(models.Day)
+                .filter(models.Day.profile_id == prof.id)
+                .order_by(models.Day.date)
+                .all()
+            )
+            first_date = days[0].date
+            last_date = days[-1].date
+            click.echo(f"  Date range: {first_date} to {last_date}")
+
+        click.echo()
+
+
+@profile.command("create")
+@click.argument("username")
+@click.option("--first-name", help="First name")
+@click.option("--last-name", help="Last name")
+@click.option("--db", type=click.Path(), help="Database path")
+def profile_create(
+    username: str, first_name: str | None, last_name: str | None, db: str | None
+) -> None:
+    """Create a new profile."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as session:
+        existing = session.query(models.Profile).filter_by(username=username).first()
+        if existing:
+            click.echo(f"Error: Profile '{username}' already exists", err=True)
+            sys.exit(1)
+
+        profile = models.Profile(
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            settings={"day_split_time": "12:00:00"},
+        )
+        session.add(profile)
+        session.commit()
+
+        click.echo(f"✓ Created profile: {username}")
+        if first_name or last_name:
+            name_parts = [first_name, last_name]
+            full_name = " ".join(part for part in name_parts if part)
+            click.echo(f"  Name: {full_name}")
+
+
+@profile.command("delete")
+@click.argument("username")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
+@click.option("--dry-run", is_flag=True, help="Preview what would be deleted")
+@click.option("--db", type=click.Path(), help="Database path")
+def profile_delete(username: str, force: bool, dry_run: bool, db: str | None) -> None:
+    """Delete a profile and all associated data (cascade delete)."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as session:
+        prof = session.query(models.Profile).filter_by(username=username).first()
+
+        if not prof:
+            click.echo(f"Error: Profile '{username}' not found", err=True)
+            sys.exit(1)
+
+        day_count = (
+            session.query(models.Day).filter(models.Day.profile_id == prof.id).count()
+        )
+
+        session_count = (
+            session.query(models.Session)
+            .join(models.Day)
+            .filter(models.Day.profile_id == prof.id)
+            .count()
+        )
+
+        analysis_count = (
+            session.query(models.AnalysisResult)
+            .join(models.Session)
+            .join(models.Day)
+            .filter(models.Day.profile_id == prof.id)
+            .count()
+        )
+
+        device_count = (
+            session.query(models.Device)
+            .filter(models.Device.profile_id == prof.id)
+            .count()
+        )
+
+        click.echo(f"\nProfile: {username}")
+        click.echo(f"  Days: {day_count}")
+        click.echo(f"  Sessions: {session_count}")
+        click.echo(f"  Devices: {device_count}")
+        click.echo(f"  Analysis results: {analysis_count}")
+
+        if dry_run:
+            click.echo("\n[DRY RUN] No data was deleted")
+            return
+
+        if not force:
+            click.echo(
+                "\n⚠️  WARNING: This will permanently delete all data for this profile!"
+            )
+            if not click.confirm(
+                f"Are you sure you want to delete profile '{username}'?", default=False
+            ):
+                click.echo("Deletion cancelled")
+                return
+
+        default_profile = get_default_profile()
+        if default_profile == username:
+            unset_default_profile()
+            click.echo(f"✓ Unset default profile: {username}")
+
+        session.delete(prof)
+        session.commit()
+
+        click.echo(f"\n✓ Deleted profile: {username}")
+        click.echo(
+            f"  Cascade deleted: {day_count} days, {session_count} sessions, {device_count} devices, {analysis_count} analyses"
+        )
+
+
+@profile.command("set-default")
+@click.argument("username")
+@click.option("--db", type=click.Path(), help="Database path")
+def profile_set_default(username: str, db: str | None) -> None:
     """Set default profile for CLI commands (must exist in database)."""
     from snore.database import models
     from snore.database.session import init_database, session_scope
@@ -1388,16 +1020,16 @@ def set_default_profile_cmd(username: str, db: str | None) -> None:
         init_database()
 
     with session_scope() as session:
-        profile = session.query(models.Profile).filter_by(username=username).first()
-        if not profile:
+        prof = session.query(models.Profile).filter_by(username=username).first()
+        if not prof:
             all_profiles = session.query(models.Profile).all()
             if all_profiles:
                 available = ", ".join([p.username for p in all_profiles])
-                click.echo(f"Error: Profile '{username}' not found.", err=True)
+                click.echo(f"Error: Profile '{username}' not found", err=True)
                 click.echo(f"Available profiles: {available}", err=True)
             else:
-                click.echo("Error: No profiles in database.", err=True)
-                click.echo("Import data first: snore import-data <path>", err=True)
+                click.echo("Error: No profiles in database", err=True)
+                click.echo("Import data first: snore import <path>", err=True)
             sys.exit(1)
 
     set_default_profile(username)
@@ -1405,27 +1037,470 @@ def set_default_profile_cmd(username: str, db: str | None) -> None:
     click.echo(f"  Config: {get_config_path()}")
 
 
-@config.command("get-default-profile")
-def get_default_profile_cmd() -> None:
-    """Show current default profile."""
-    default = get_default_profile()
-    if default:
-        click.echo(f"Default profile: {default}")
-        click.echo(f"  (from {get_config_path()})")
-    else:
-        click.echo("No default profile configured.")
-        click.echo("Set with: snore config set-default-profile <name>")
+@profile.command("unset-default")
+def profile_unset_default() -> None:
+    """Remove the default profile setting."""
+    from snore.config import get_config_path, unset_default_profile
+
+    unset_default_profile()
+    click.echo("✓ Default profile unset")
+    click.echo(f"  Config: {get_config_path()}")
 
 
-@config.command("unset-default-profile")
-def unset_default_profile_cmd() -> None:
-    """Remove default profile setting."""
-    default = get_default_profile()
-    if default:
-        unset_default_profile()
-        click.echo(f"✓ Removed default profile: {default}")
+@cli.group()
+def session() -> None:
+    """Session management commands."""
+    pass
+
+
+@session.command("list")
+@click.option("--profile", "-p", help="Filter by profile username")
+@click.option(
+    "--all-profiles", is_flag=True, help="Include all profiles (ignores --profile)"
+)
+@click.option(
+    "--from",
+    "from_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Start date (YYYY-MM-DD)",
+)
+@click.option(
+    "--to",
+    "to_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="End date (YYYY-MM-DD)",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=DEFAULT_LIST_SESSIONS_LIMIT,
+    help="Max sessions to show (use 0 for all)",
+)
+@click.option(
+    "--sort-by",
+    type=click.Choice(["date-asc", "date-desc", "profile", "session-id", "duration"]),
+    default="date-desc",
+    help="Sort order for results (default: date-desc)",
+)
+@click.option("--db", type=click.Path(), help="Database path")
+def session_list(
+    profile: str | None,
+    all_profiles: bool,
+    from_date: datetime | None,
+    to_date: datetime | None,
+    limit: int,
+    sort_by: str,
+    db: str | None,
+) -> None:
+    """List imported sessions."""
+    from sqlalchemy import text
+
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
     else:
-        click.echo("No default profile was configured.")
+        init_database()
+
+    with session_scope() as db_session:
+        where_clause = "WHERE 1=1"
+        params: dict[str, Any] = {}
+
+        if not all_profiles and profile:
+            where_clause += " AND profiles.username = :profile"
+            params["profile"] = profile
+
+        if from_date:
+            where_clause += " AND sessions.start_time >= :from_date"
+            params["from_date"] = from_date
+
+        if to_date:
+            where_clause += " AND sessions.start_time <= :to_date"
+            params["to_date"] = to_date
+
+        count_query = f"""
+            SELECT COUNT(*)
+            FROM sessions
+            JOIN devices ON sessions.device_id = devices.id
+            JOIN days ON sessions.day_id = days.id
+            JOIN profiles ON days.profile_id = profiles.id
+            {where_clause}
+        """
+
+        total_count = db_session.execute(text(count_query), params).scalar()
+
+        sort_clauses = {
+            "date-asc": "sessions.start_time ASC",
+            "date-desc": "sessions.start_time DESC",
+            "profile": "profiles.username ASC, sessions.start_time DESC",
+            "session-id": "sessions.id ASC",
+            "duration": "sessions.duration_seconds DESC",
+        }
+        order_by = sort_clauses.get(sort_by, "sessions.start_time DESC")
+
+        list_query = f"""
+            SELECT
+                sessions.id,
+                sessions.start_time,
+                sessions.duration_seconds,
+                devices.manufacturer,
+                devices.model,
+                profiles.username,
+                statistics.ahi
+            FROM sessions
+            JOIN devices ON sessions.device_id = devices.id
+            JOIN days ON sessions.day_id = days.id
+            JOIN profiles ON days.profile_id = profiles.id
+            LEFT JOIN statistics ON sessions.id = statistics.session_id
+            {where_clause}
+            ORDER BY {order_by}
+        """
+
+        if limit > 0:
+            list_query += f" LIMIT {limit}"
+
+        result = db_session.execute(text(list_query), params)
+        sessions = result.fetchall()
+
+        if not sessions:
+            click.echo("No sessions found")
+            return
+
+        click.echo(
+            f"\n{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Profile':<15} {'Device':<25} {'AHI':<8}"
+        )
+        click.echo("-" * 95)
+
+        for sess in sessions:
+            start = (
+                datetime.fromisoformat(sess.start_time)
+                if isinstance(sess.start_time, str)
+                else sess.start_time
+            )
+            duration_hours = (
+                sess.duration_seconds / 3600 if sess.duration_seconds else 0
+            )
+            device_name = f"{sess.manufacturer} {sess.model}"
+            ahi_str = f"{sess.ahi:.1f}" if sess.ahi is not None else "N/A"
+
+            click.echo(
+                f"{sess.id:<5} "
+                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
+                f"{duration_hours:>6.1f}h    "
+                f"{sess.username:<15} "
+                f"{device_name:<25} "
+                f"{ahi_str:<8}"
+            )
+
+        if total_count is not None and limit > 0 and total_count > limit:
+            click.echo(f"\nShowing {len(sessions)} of {total_count} sessions")
+            click.echo(f"Tip: Use '--limit {total_count}' or '--limit 0' to show all")
+        else:
+            click.echo(f"\nShowing all {len(sessions)} sessions")
+
+
+@session.command("show")
+@click.argument("session_id", type=int)
+@click.option("--db", type=click.Path(), help="Database path")
+def session_show(session_id: int, db: str | None) -> None:
+    """Show details for a specific session."""
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as db_session:
+        sess = (
+            db_session.query(models.Session)
+            .filter(models.Session.id == session_id)
+            .first()
+        )
+
+        if not sess:
+            click.echo(f"Error: Session {session_id} not found", err=True)
+            sys.exit(1)
+
+        device = (
+            db_session.query(models.Device)
+            .filter(models.Device.id == sess.device_id)
+            .first()
+        )
+        day = db_session.query(models.Day).filter(models.Day.id == sess.day_id).first()
+        profile = (
+            db_session.query(models.Profile)
+            .filter(models.Profile.id == day.profile_id)
+            .first()
+            if day
+            else None
+        )
+        stats = (
+            db_session.query(models.Statistics)
+            .filter(models.Statistics.session_id == sess.id)
+            .first()
+        )
+        event_count = (
+            db_session.query(models.Event)
+            .filter(models.Event.session_id == sess.id)
+            .count()
+        )
+        waveform_count = (
+            db_session.query(models.Waveform)
+            .filter(models.Waveform.session_id == sess.id)
+            .count()
+        )
+
+        click.echo(f"\nSession ID: {sess.id}")
+        click.echo(f"  Device Session ID: {sess.device_session_id}")
+
+        if profile:
+            click.echo(f"  Profile: {profile.username}")
+
+        if device:
+            click.echo(
+                f"  Device: {device.manufacturer} {device.model} (SN: {device.serial_number})"
+            )
+
+        click.echo(f"  Start: {sess.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo(f"  End: {sess.end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        duration_hours = sess.duration_seconds / 3600 if sess.duration_seconds else 0
+        click.echo(f"  Duration: {duration_hours:.2f}h ({sess.duration_seconds}s)")
+
+        if sess.therapy_mode:
+            click.echo(f"  Therapy Mode: {sess.therapy_mode}")
+
+        click.echo("\n  Data:")
+        click.echo(f"    Events: {event_count}")
+        click.echo(f"    Waveforms: {waveform_count}")
+        click.echo(f"    Has Statistics: {sess.has_statistics}")
+        click.echo(f"    Has Event Data: {sess.has_event_data}")
+
+        if stats:
+            click.echo("\n  Statistics:")
+            if stats.ahi is not None:
+                click.echo(f"    AHI: {stats.ahi:.1f}")
+            if stats.usage_hours is not None:
+                click.echo(f"    Usage: {stats.usage_hours:.1f}h")
+            if stats.leak_percentile_70 is not None:
+                click.echo(f"    Leak (70th): {stats.leak_percentile_70:.1f} L/min")
+
+        click.echo()
+
+
+@session.command("delete")
+@click.option("--profile", "-p", help="Filter by profile username")
+@click.option(
+    "--all-profiles", is_flag=True, help="Include all profiles (ignores --profile)"
+)
+@click.option(
+    "--session-id",
+    "session_ids",
+    type=str,
+    help="Comma-separated session IDs to delete (e.g., '1,2,3')",
+)
+@click.option(
+    "--from",
+    "from_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Delete sessions from this date (YYYY-MM-DD)",
+)
+@click.option(
+    "--to",
+    "to_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Delete sessions up to this date (YYYY-MM-DD)",
+)
+@click.option("--all", "delete_all", is_flag=True, help="Delete all sessions")
+@click.option(
+    "--dry-run", is_flag=True, help="Preview what would be deleted without deleting"
+)
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
+@click.option("--db", type=click.Path(), help="Database path")
+def session_delete(
+    profile: str | None,
+    all_profiles: bool,
+    session_ids: str | None,
+    from_date: datetime | None,
+    to_date: datetime | None,
+    delete_all: bool,
+    dry_run: bool,
+    force: bool,
+    db: str | None,
+) -> int | None:
+    """Delete sessions from the database."""
+    from sqlalchemy import bindparam, text
+
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    if not any([profile, all_profiles, session_ids, from_date, to_date, delete_all]):
+        click.echo("❌ Error: You must specify at least one filter:", err=True)
+        click.echo("  • --profile <username>")
+        click.echo("  • --all-profiles")
+        click.echo("  • --session-id <ids>")
+        click.echo("  • --from <date>")
+        click.echo("  • --to <date>")
+        click.echo("  • --all")
+        return 1
+
+    with session_scope() as db_session:
+        query = """
+            SELECT
+                sessions.id,
+                sessions.device_session_id,
+                sessions.start_time,
+                sessions.duration_seconds,
+                devices.manufacturer,
+                devices.model,
+                devices.serial_number,
+                profiles.username
+            FROM sessions
+            JOIN devices ON sessions.device_id = devices.id
+            JOIN days ON sessions.day_id = days.id
+            JOIN profiles ON days.profile_id = profiles.id
+            WHERE 1=1
+        """
+        params: dict[str, Any] = {}
+
+        if not all_profiles and profile:
+            query += " AND profiles.username = :profile"
+            params["profile"] = profile
+
+        if session_ids:
+            try:
+                id_list = [int(sid.strip()) for sid in session_ids.split(",")]
+                query += " AND sessions.id IN :session_ids"
+                params["session_ids"] = id_list
+            except ValueError:
+                click.echo(
+                    "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
+                    err=True,
+                )
+                return 1
+
+        if from_date:
+            query += " AND sessions.start_time >= :from_date"
+            params["from_date"] = from_date
+
+        if to_date:
+            query += " AND sessions.start_time <= :to_date"
+            params["to_date"] = to_date
+
+        query += " ORDER BY sessions.start_time DESC"
+
+        if "session_ids" in params:
+            result = db_session.execute(
+                text(query).bindparams(bindparam("session_ids", expanding=True)), params
+            )
+        else:
+            result = db_session.execute(text(query), params)
+        sessions = result.fetchall()
+
+        if not sessions:
+            click.echo("⚠️  No sessions found matching the specified criteria")
+            return 0
+
+        session_ids_to_delete = [s.id for s in sessions]
+
+        event_count = db_session.execute(
+            text(
+                "SELECT COUNT(*) as count FROM events WHERE session_id IN :session_ids"
+            ).bindparams(bindparam("session_ids", expanding=True)),
+            {"session_ids": session_ids_to_delete},
+        ).scalar()
+
+        waveform_count = db_session.execute(
+            text(
+                "SELECT COUNT(*) as count FROM waveforms WHERE session_id IN :session_ids"
+            ).bindparams(bindparam("session_ids", expanding=True)),
+            {"session_ids": session_ids_to_delete},
+        ).scalar()
+
+        stats_count = db_session.execute(
+            text(
+                "SELECT COUNT(*) as count FROM statistics WHERE session_id IN :session_ids"
+            ).bindparams(bindparam("session_ids", expanding=True)),
+            {"session_ids": session_ids_to_delete},
+        ).scalar()
+
+        click.echo(f"\n{'=' * 80}")
+        if dry_run:
+            click.echo("🔍 DRY RUN MODE - No data will be deleted")
+        else:
+            click.echo("⚠️  Sessions to be DELETED")
+        click.echo(f"{'=' * 80}\n")
+
+        click.echo(
+            f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Profile':<15} {'Device':<25}"
+        )
+        click.echo("-" * 80)
+
+        for sess in sessions:
+            start = (
+                datetime.fromisoformat(sess.start_time)
+                if isinstance(sess.start_time, str)
+                else sess.start_time
+            )
+            duration_hours = (
+                sess.duration_seconds / 3600 if sess.duration_seconds else 0
+            )
+            device_name = f"{sess.manufacturer} {sess.model}"
+
+            click.echo(
+                f"{sess.id:<5} "
+                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
+                f"{duration_hours:>6.1f}h    "
+                f"{sess.username:<15} "
+                f"{device_name:<25}"
+            )
+
+        click.echo("\n" + "=" * 80)
+        click.echo("📊 Deletion Summary")
+        click.echo("=" * 80)
+        click.echo(f"Sessions:    {len(sessions)}")
+        click.echo(f"Events:      {event_count}")
+        click.echo(f"Waveforms:   {waveform_count}")
+        click.echo(f"Statistics:  {stats_count}")
+        click.echo("=" * 80 + "\n")
+
+        if dry_run:
+            click.echo("✓ Dry run complete. Use without --dry-run to delete.")
+            return 0
+
+        if not force:
+            click.echo("⚠️  WARNING: This action cannot be undone!")
+            if not click.confirm("Are you sure you want to delete these sessions?"):
+                click.echo("Deletion cancelled")
+                return 0
+
+        db_session.execute(
+            text("DELETE FROM sessions WHERE id IN :session_ids").bindparams(
+                bindparam("session_ids", expanding=True)
+            ),
+            {"session_ids": session_ids_to_delete},
+        )
+        db_session.commit()
+
+        click.echo(
+            f"\n✓ Successfully deleted {len(sessions)} session(s) and related data"
+        )
+
+        if len(sessions) > 10:
+            click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
+
+        return 0
+
+
+@cli.group()
+def config() -> None:
+    """Configuration management commands."""
+    pass
 
 
 @config.command("show")
@@ -1452,12 +1527,12 @@ def show_config_cmd() -> None:
 
 
 @cli.group()
-def analyze() -> None:
+def analysis() -> None:
     """Analyze CPAP sessions and view results."""
     pass
 
 
-@analyze.command("run")
+@analysis.command("run")
 @click.option(
     "--profile", required=False, help="Profile username (optional if default set)"
 )
@@ -1468,12 +1543,14 @@ def analyze() -> None:
     help="Analyze single session by date (YYYY-MM-DD)",
 )
 @click.option(
-    "--start",
+    "--from",
+    "start",
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="Start date for batch analysis (YYYY-MM-DD)",
 )
 @click.option(
-    "--end",
+    "--to",
+    "end",
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="End date for batch analysis (YYYY-MM-DD)",
 )
@@ -1541,14 +1618,14 @@ def run(
 
     if single_count > 0 and batch_count > 0:
         click.echo(
-            "Error: Single session flags (--session-id, --date) cannot be used with batch flags (--start, --end)",
+            "Error: Single session flags (--session-id, --date) cannot be used with batch flags (--from, --to)",
             err=True,
         )
         sys.exit(1)
 
     if single_count == 0 and batch_count == 0:
         click.echo(
-            "Error: Must provide at least one selection flag (--session-id, --date, --start, or --end)",
+            "Error: Must provide at least one selection flag (--session-id, --date, --from, or --to)",
             err=True,
         )
         sys.exit(1)
@@ -1603,17 +1680,22 @@ def run(
     return None
 
 
-@analyze.command("list")
+@analysis.command("list")
 @click.option(
     "--profile", required=False, help="Profile username (optional if default set)"
 )
 @click.option(
-    "--start",
+    "--all-profiles", is_flag=True, help="Include all profiles (ignores --profile)"
+)
+@click.option(
+    "--from",
+    "start",
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="Start date for filtering (YYYY-MM-DD)",
 )
 @click.option(
-    "--end",
+    "--to",
+    "end",
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="End date for filtering (YYYY-MM-DD)",
 )
@@ -1624,13 +1706,21 @@ def run(
     help="Max sessions to show (use 0 for all)",
 )
 @click.option("--analyzed-only", is_flag=True, help="Show only analyzed sessions")
+@click.option(
+    "--sort-by",
+    type=click.Choice(["date-asc", "date-desc", "profile", "session-id"]),
+    default="date-desc",
+    help="Sort order for results (default: date-desc)",
+)
 @click.option("--db", type=click.Path(), help="Database path")
 def list_cmd(
     profile: str | None,
+    all_profiles: bool,
     start: datetime | None,
     end: datetime | None,
     limit: int,
     analyzed_only: bool,
+    sort_by: str,
     db: str | None,
 ) -> None:
     """List sessions with analysis status."""
@@ -1642,21 +1732,28 @@ def list_cmd(
     else:
         init_database()
 
-    with session_scope() as temp_session:
-        resolved_profile = resolve_profile(profile, temp_session)
+    if all_profiles:
+        profile_id = None
+    else:
+        with session_scope() as temp_session:
+            resolved_profile = resolve_profile(profile, temp_session)
+
+        with session_scope() as session:
+            prof = (
+                session.query(models.Profile)
+                .filter_by(username=resolved_profile)
+                .first()
+            )
+            if not prof:
+                click.echo(f"Error: Profile '{resolved_profile}' not found", err=True)
+                sys.exit(1)
+            profile_id = prof.id
 
     with session_scope() as session:
-        prof = (
-            session.query(models.Profile).filter_by(username=resolved_profile).first()
-        )
-        if not prof:
-            click.echo(f"Error: Profile '{resolved_profile}' not found", err=True)
-            sys.exit(1)
-
-        _list_sessions(session, prof, start, end, limit, analyzed_only)
+        _list_sessions(session, profile_id, start, end, limit, analyzed_only, sort_by)
 
 
-@analyze.command("show")
+@analysis.command("show")
 @click.option(
     "--profile", required=False, help="Profile username (optional if default set)"
 )
@@ -2047,31 +2144,51 @@ def _analyze_batch(
 
 def _list_sessions(
     session: Any,
-    prof: Any,
+    profile_id: int | None,
     start: datetime | None,
     end: datetime | None,
     limit: int,
     analyzed_only: bool,
+    sort_by: str = "date-desc",
 ) -> None:
     """List sessions and their analysis status.
 
     Args:
+        profile_id: Profile ID to filter by, or None to show all profiles
         limit: Maximum sessions to show (0 for unlimited)
+        sort_by: Sort order (date-asc, date-desc, profile, session-id, ahi)
     """
+    from sqlalchemy.orm import joinedload
+
     from snore.database import models
 
-    query = (
-        session.query(models.Session)
-        .join(models.Day)
-        .filter(models.Day.profile_id == prof.id)
-    )
+    query = session.query(models.Session).join(models.Day)
+
+    query = query.options(joinedload(models.Session.day).joinedload(models.Day.profile))
+
+    if profile_id is None or sort_by == "profile":
+        query = query.join(models.Profile, models.Day.profile_id == models.Profile.id)
+
+    if profile_id is not None:
+        query = query.filter(models.Day.profile_id == profile_id)
 
     if start:
         query = query.filter(models.Day.date >= start.date())
     if end:
         query = query.filter(models.Day.date <= end.date())
 
-    query = query.order_by(models.Day.date.desc())
+    sort_clauses = {
+        "date-asc": models.Day.date.asc(),
+        "date-desc": models.Day.date.desc(),
+        "profile": (models.Profile.username.asc(), models.Day.date.desc()),
+        "session-id": models.Session.id.asc(),
+    }
+
+    sort_clause = sort_clauses.get(sort_by, models.Day.date.desc())
+    if isinstance(sort_clause, tuple):
+        query = query.order_by(*sort_clause)
+    else:
+        query = query.order_by(sort_clause)
 
     total_sessions = query.count()
 
@@ -2084,10 +2201,16 @@ def _list_sessions(
         click.echo("No sessions found")
         return
 
-    click.echo(
-        f"{'Date':<12} {'ID':<6} {'Duration':<10} {'Analyzed':<10} {'Analysis ID':<12}"
-    )
-    click.echo("-" * 60)
+    if profile_id is None:
+        click.echo(
+            f"{'Date':<12} {'Profile':<12} {'ID':<6} {'Duration':<10} {'Analyzed':<10} {'Analysis ID':<12}"
+        )
+        click.echo("-" * 72)
+    else:
+        click.echo(
+            f"{'Date':<12} {'ID':<6} {'Duration':<10} {'Analyzed':<10} {'Analysis ID':<12}"
+        )
+        click.echo("-" * 60)
 
     displayed_count = 0
 
@@ -2117,10 +2240,17 @@ def _list_sessions(
         day_date = (
             db_session.day.date if db_session.day else db_session.start_time.date()
         )
-        click.echo(
-            f"{day_date!s:<12} {db_session.id:<6} {duration:<10} "
-            f"{analyzed_str:<10} {analysis_id_str:<12}"
-        )
+        if profile_id is None:
+            profile_name = db_session.day.profile.username if db_session.day else "N/A"
+            click.echo(
+                f"{day_date!s:<12} {profile_name:<12} {db_session.id:<6} {duration:<10} "
+                f"{analyzed_str:<10} {analysis_id_str:<12}"
+            )
+        else:
+            click.echo(
+                f"{day_date!s:<12} {db_session.id:<6} {duration:<10} "
+                f"{analyzed_str:<10} {analysis_id_str:<12}"
+            )
 
     if analyzed_only and displayed_count > 0:
         click.echo(f"\nShowing {displayed_count} analyzed session(s)")
@@ -2133,6 +2263,260 @@ def _list_sessions(
         )
     elif limit == 0 and total_sessions > DEFAULT_LIST_SESSIONS_LIMIT:
         click.echo(f"\nShowing all {total_sessions} sessions")
+
+
+@analysis.command("delete")
+@click.option(
+    "--session-id",
+    "session_ids",
+    type=str,
+    help="Comma-separated session IDs to delete analysis for (e.g., '1,2,3')",
+)
+@click.option(
+    "--from",
+    "from_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Delete analysis for sessions from this date (YYYY-MM-DD)",
+)
+@click.option(
+    "--to",
+    "to_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Delete analysis for sessions up to this date (YYYY-MM-DD)",
+)
+@click.option("--all", "delete_all", is_flag=True, help="Delete all analysis results")
+@click.option(
+    "--all-versions",
+    is_flag=True,
+    help="Delete all analysis versions (default: only latest)",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Preview what would be deleted without deleting"
+)
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
+@click.option("--db", type=click.Path(), help="Database path")
+def analysis_delete(
+    session_ids: str | None,
+    from_date: datetime | None,
+    to_date: datetime | None,
+    delete_all: bool,
+    all_versions: bool,
+    dry_run: bool,
+    force: bool,
+    db: str | None,
+) -> int | None:
+    """Delete analysis results without deleting the sessions themselves."""
+    from sqlalchemy import bindparam, text
+
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    if not any([session_ids, from_date, to_date, delete_all]):
+        raise click.ClickException(
+            "You must specify at least one filter:\n"
+            "  • --session-id <ids>\n"
+            "  • --from <date>\n"
+            "  • --to <date>\n"
+            "  • --all"
+        )
+
+    with session_scope() as session:
+        query = """
+            SELECT DISTINCT
+                sessions.id,
+                sessions.device_session_id,
+                sessions.start_time,
+                devices.manufacturer,
+                devices.model
+            FROM sessions
+            JOIN devices ON sessions.device_id = devices.id
+            JOIN analysis_results ON sessions.id = analysis_results.session_id
+            WHERE 1=1
+        """
+        params: dict[str, Any] = {}
+
+        if session_ids:
+            try:
+                id_list = [int(sid.strip()) for sid in session_ids.split(",")]
+                query += " AND sessions.id IN :session_ids"
+                params["session_ids"] = id_list
+            except ValueError:
+                click.echo(
+                    "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
+                    err=True,
+                )
+                return 1
+
+        if from_date:
+            query += " AND sessions.start_time >= :from_date"
+            params["from_date"] = from_date
+
+        if to_date:
+            query += " AND sessions.start_time <= :to_date"
+            params["to_date"] = to_date
+
+        query += " ORDER BY sessions.start_time DESC"
+
+        if "session_ids" in params:
+            result = session.execute(
+                text(query).bindparams(bindparam("session_ids", expanding=True)), params
+            )
+        else:
+            result = session.execute(text(query), params)
+        sessions_with_analysis = result.fetchall()
+
+        if not sessions_with_analysis:
+            click.echo(
+                "⚠️  No sessions with analysis results found matching the specified criteria"
+            )
+            return 0
+
+        session_ids_list = [s.id for s in sessions_with_analysis]
+
+        analysis_counts = session.execute(
+            text(
+                """
+                SELECT session_id, COUNT(*) as count
+                FROM analysis_results
+                WHERE session_id IN :session_ids
+                GROUP BY session_id
+            """
+            ).bindparams(bindparam("session_ids", expanding=True)),
+            {"session_ids": session_ids_list},
+        ).fetchall()
+
+        analysis_count_dict = {row[0]: int(row[1]) for row in analysis_counts}
+
+        total_analysis_records = sum(analysis_count_dict.values())
+        records_to_delete = (
+            total_analysis_records if all_versions else len(sessions_with_analysis)
+        )
+
+        patterns_count = session.execute(
+            text(
+                """
+                SELECT COUNT(*) as count
+                FROM detected_patterns
+                WHERE analysis_result_id IN (
+                    SELECT id FROM analysis_results WHERE session_id IN :session_ids
+                )
+            """
+            ).bindparams(bindparam("session_ids", expanding=True)),
+            {"session_ids": session_ids_list},
+        ).scalar()
+
+        click.echo(f"\n{'=' * 80}")
+        if dry_run:
+            click.echo("🔍 DRY RUN MODE - No data will be deleted")
+        else:
+            click.echo("⚠️  Analysis Results to be DELETED")
+        click.echo(f"{'=' * 80}\n")
+
+        click.echo(
+            f"{'Sess ID':<8} {'Date':<12} {'Time':<8} {'Versions':<10} {'Device':<25}"
+        )
+        click.echo("-" * 80)
+
+        for sess in sessions_with_analysis:
+            start = (
+                datetime.fromisoformat(sess.start_time)
+                if isinstance(sess.start_time, str)
+                else sess.start_time
+            )
+            device_name = f"{sess.manufacturer} {sess.model}"
+            version_count = analysis_count_dict.get(sess.id, 0)
+
+            click.echo(
+                f"{sess.id:<8} "
+                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
+                f"{version_count:<10} "
+                f"{device_name:<25}"
+            )
+
+        click.echo("\n" + "=" * 80)
+        click.echo("📊 Deletion Summary")
+        click.echo("=" * 80)
+        click.echo(f"Sessions with analysis:          {len(sessions_with_analysis)}")
+        click.echo(
+            f"Total analysis records:          {total_analysis_records}"
+            + (
+                " (all versions)"
+                if all_versions or total_analysis_records == len(sessions_with_analysis)
+                else ""
+            )
+        )
+        click.echo(
+            f"Analysis records to delete:      {records_to_delete}"
+            + (
+                " (latest only)"
+                if not all_versions
+                and total_analysis_records > len(sessions_with_analysis)
+                else ""
+            )
+        )
+        click.echo(
+            f"Detected patterns to delete:     {patterns_count} (cascade delete)"
+        )
+        click.echo("=" * 80 + "\n")
+
+        if dry_run:
+            click.echo("✓ Dry run complete. Use without --dry-run to delete.")
+            return 0
+
+        if not force:
+            click.echo(
+                "⚠️  WARNING: This will delete analysis results but keep the sessions!"
+            )
+            if not click.confirm(
+                "Are you sure you want to delete these analysis results?"
+            ):
+                click.echo("Deletion cancelled")
+                return 0
+
+        if all_versions:
+            session.execute(
+                text(
+                    "DELETE FROM analysis_results WHERE session_id IN :session_ids"
+                ).bindparams(bindparam("session_ids", expanding=True)),
+                {"session_ids": session_ids_list},
+            )
+            deleted_count = records_to_delete
+        else:
+            deleted_count = 0
+            for session_id in session_ids_list:
+                latest_result = session.execute(
+                    text(
+                        """
+                        SELECT id FROM analysis_results
+                        WHERE session_id = :session_id
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """
+                    ),
+                    {"session_id": session_id},
+                ).fetchone()
+
+                if latest_result:
+                    session.execute(
+                        text("DELETE FROM analysis_results WHERE id = :analysis_id"),
+                        {"analysis_id": latest_result.id},
+                    )
+                    deleted_count += 1
+
+        session.commit()
+
+        click.echo(
+            f"\n✓ Successfully deleted {deleted_count} analysis record(s) for {len(sessions_with_analysis)} session(s)"
+        )
+
+        if deleted_count > 10:
+            click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
+
+        return 0
 
 
 @cli.group()
@@ -2498,12 +2882,12 @@ def validate(
 
 
 @cli.group()
-def events() -> None:
+def event() -> None:
     """Event data export commands."""
     pass
 
 
-@events.command("export")
+@event.command("export")
 @click.option(
     "--session-id",
     type=int,

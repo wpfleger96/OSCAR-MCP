@@ -7,24 +7,22 @@ SNORE (Sleep eNvironment Observation & Respiratory Evaluation) is a CLI tool for
 ```bash
 # Development workflow
 just                # Quick check: sync, type-check, lint-check, format-check
-just test           # Run pytest
+just test           # Run all tests
 just check-all      # Full quality check + tests
-just pre-commit     # Pre-commit: sync, type-check, lint, format, test
+just pre-commit     # Pre-commit: sync, type-check, lint, format
 just ci             # CI workflow (same as pre-commit but checks only)
 just lint           # Ruff lint with auto-fix
 just format         # Ruff format
-uv sync             # Install dependencies
+just docs           # Generate CLI documentation
+just sync           # Install dependencies (uv sync)
 
-# Testing
-uv run pytest tests/unit/test_file.py  # Single test file
-
-# CLI (local development - use `uv run`)
-uv run snore import-data <path>                # Import device data
-uv run snore list-sessions                     # List sessions
-uv run snore analyze run --session-id <id>     # Analyze session
-uv run snore analyze list                      # List sessions with analysis status
-uv run snore analyze show --date YYYY-MM-DD    # Show analysis results
-uv run snore config set-default-profile <name> # Set default profile
+# CLI (local development - always use `uv run snore`)
+uv run snore import <path>                     # Import device data
+uv run snore session list                      # List sessions
+uv run snore analysis run --session-id <id>    # Analyze session
+uv run snore analysis list                     # List sessions with analysis status
+uv run snore analysis show --date YYYY-MM-DD   # Show analysis results
+uv run snore profile set-default <name>        # Set default profile
 uv run snore db drop                           # Drop database (with confirmation)
 uv run snore db init                           # Initialize database
 uv run snore setup --github                    # Install as uv tool from GitHub
@@ -149,12 +147,20 @@ with session_scope() as session:
 
 ## Testing
 
+**Standard workflow:**
 ```bash
-just test                                    # All tests
+just test                # All tests (standard pytest invocation)
+just check-all           # Quality checks + tests
+```
+
+**Advanced pytest options (when needed):**
+```bash
+# Specific test subsets
 uv run pytest tests/unit/                    # Unit only
 uv run pytest tests/integration/             # Integration only
 uv run pytest -m recorded                    # Tests using real device data
 uv run pytest tests/unit/test_file.py -v    # Single file verbose
+uv run pytest tests/ --cov=snore             # With coverage
 ```
 
 Markers: `unit`, `integration`, `parser`, `recorded`, `real_data`, `slow`

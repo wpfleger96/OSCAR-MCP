@@ -41,3 +41,7 @@ ci: sync type-check lint-check format-check test
 # Testing
 test:
     uv run pytest
+
+# Generate CLI documentation
+docs:
+    uv run python scripts/generate_cli_docs.py

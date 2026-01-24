@@ -77,17 +77,17 @@ For **ResMed AirSense/AirCurve users**, import directly from your SD card:
 uv sync
 
 # Import ResMed data from SD card
-uv run snore import-data /path/to/ResMed/Backup/
+uv run snore import /path/to/ResMed/Backup/
 
 # Or if you've already imported to OSCAR desktop app
-uv run snore import-data ~/Downloads/OSCAR/Profiles/<Profile>/ResMed_*/Backup/
+uv run snore import ~/Downloads/OSCAR/Profiles/<Profile>/ResMed_*/Backup/
 
 # Advanced import options
-uv run snore import-data /path/to/data/ \
+uv run snore import /path/to/data/ \
   --limit 10 \                    # Import only first 10 sessions
   --sort-by date-desc \           # Newest first
-  --date-from 2024-01-01 \        # Filter by date range
-  --date-to 2024-12-31 \
+  --from 2024-01-01 \        # Filter by date range
+  --to 2024-12-31 \
   --dry-run                       # Preview without importing
 ```
 
@@ -101,41 +101,65 @@ The import will:
 
 ```bash
 # List all imported sessions
-uv run snore list-sessions
+uv run snore session list
 
 # List sessions in date range
-uv run snore list-sessions --from-date 2024-01-01 --to-date 2024-12-31
+uv run snore session list --from 2024-01-01 --to 2024-12-31
 
 # Show database statistics
 uv run snore db stats
 ```
 
-### 3. Configure Default Profile (Optional)
+### 3. Manage Profiles
+
+SNORE supports multiple user profiles. You can list, create, delete, and manage profiles:
+
+```bash
+# List all profiles
+uv run snore profile list
+
+# Show detailed profile information
+uv run snore profile show <username>
+
+# Create a new profile
+uv run snore profile create <username>
+
+# Create with metadata
+uv run snore profile create <username> --first-name John --last-name Doe
+
+# Delete a profile and all its data
+uv run snore profile delete <username>
+
+# Preview deletion without deleting
+uv run snore profile delete <username> --dry-run
+```
+
+### 4. Configure Default Profile (Optional)
 
 To avoid passing `--profile` every time, set a default profile:
 
 ```bash
 # Set default profile
-uv run snore config set-default-profile <username>
+uv run snore profile set-default <username>
 
 # View current default
-uv run snore config get-default-profile
+uv run snore profile list
 
 # Remove default
-uv run snore config unset-default-profile
+uv run snore profile unset-default
 
 # Show all configuration
 uv run snore config show
 ```
 
-The default profile is stored in `~/.snore/config.toml`. Once set, the `analyze` command will use it automatically:
+The default profile is stored in `~/.snore/config.toml`. Once set, the `analysis` command will use it automatically:
 
 ```bash
 # Before: required --profile flag
-uv run snore analyze --profile john_doe --all
+uv run snore analysis run --profile john_doe --all
 
 # After: profile auto-detected
-uv run snore analyze --all
+uv run snore analysis run --all
 ```
 
 **Profile Resolution:**
@@ -144,28 +168,28 @@ uv run snore analyze --all
 3. Auto-detects if only one profile exists in database
 4. Shows helpful error if multiple profiles and no default set
 
-### 4. Analyze CPAP Sessions
+### 5. Analyze CPAP Sessions
 
 Run programmatic respiratory event detection on imported sessions:
 
 ```bash
 # Analyze specific date (uses default profile)
-uv run snore analyze --date 2024-12-05
+uv run snore analysis run --date 2024-12-05
 
 # Analyze specific session by ID
-uv run snore analyze --session-id 123
+uv run snore analysis run --session-id 123
 
 # Analyze date range
-uv run snore analyze --start 2024-12-01 --end 2024-12-31
+uv run snore analysis run --from 2024-12-01 --to 2024-12-31
 
 # Run specific detection mode
-uv run snore analyze --date 2024-12-05 --mode aasm_relaxed
+uv run snore analysis run --date 2024-12-05 --mode aasm_relaxed
 
 # Run all available modes
-uv run snore analyze --date 2024-12-05 --all-modes
+uv run snore analysis run --date 2024-12-05 --all-modes
 
 # List analyzed sessions
-uv run snore analyze --list
+uv run snore analysis list
 ```
 
 **Available Detection Modes:**
@@ -181,26 +205,26 @@ uv run snore analyze --list
 - Flow limitation analysis
 - Complex pattern detection (CSR, periodic breathing)
 
-### 5. Manage Sessions
+### 6. Manage Sessions
 
 ```bash
 # Delete sessions by date range (with preview)
-uv run snore delete-sessions --from-date 2024-01-01 --to-date 2024-01-31 --dry-run
+uv run snore session delete --from 2024-01-01 --to 2024-01-31 --dry-run
 
 # Delete specific sessions by ID
-uv run snore delete-sessions --session-id "1,2,3"
+uv run snore session delete --session-id "1,2,3"
 
 # Delete all sessions (with confirmation)
-uv run snore delete-sessions --all
+uv run snore session delete --all
 
 # Force delete without confirmation prompt
-uv run snore delete-sessions --session-id "5" --force
+uv run snore session delete --session-id "5" --force
 
 # Database maintenance after large deletions
 uv run snore db vacuum
 ```
 
-### 6. Direct Database Access
+### 7. Direct Database Access
 
 Query the SQLite database directly:
 
@@ -258,17 +282,23 @@ SNORE/
 └── pyproject.toml
 ```
 
-## Testing
+## Development
 
 ```bash
+# Quick quality check (no tests)
+just
+
 # Run all tests
-uv run pytest tests/ -v
+just test
 
-# Run with coverage
-uv run pytest tests/ --cov=snore
+# Full quality check + tests
+just check-all
 
-# Check linting
-uv run ruff check .
+# Pre-commit checks (type-check, lint, format)
+just pre-commit
+
+# Generate CLI documentation
+just docs
 ```
 
 ## Clinical Disclaimer

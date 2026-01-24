@@ -2,10 +2,10 @@
 Tests for CLI commands.
 
 These tests verify the command-line interface functionality including:
-- delete-sessions command with various input modes
-- list-profiles command output
+- session delete command with various input modes
+- profile list command output
 - db stats command
-- list-sessions command with limits and truncation
+- session list command with limits and truncation
 """
 
 from datetime import datetime, timedelta
@@ -96,14 +96,14 @@ def populated_test_db(temp_db):
     return temp_db
 
 
-class TestDeleteSessionsCommand:
-    """Test delete-sessions command with various scenarios."""
+class TestSessionDeleteCommand:
+    """Test session delete command with various scenarios."""
 
     def test_delete_single_session_by_id(self, cli_runner, populated_test_db):
         """Test deleting a single session by ID."""
         result = cli_runner.invoke(
             cli,
-            ["delete-sessions", "--db", str(populated_test_db), "--session-id", "1"],
+            ["session", "delete", "--db", str(populated_test_db), "--session-id", "1"],
             input="y\n",
         )
 
@@ -119,7 +119,8 @@ class TestDeleteSessionsCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-sessions",
+                "session",
+                "delete",
                 "--db",
                 str(populated_test_db),
                 "--session-id",
@@ -144,12 +145,13 @@ class TestDeleteSessionsCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-sessions",
+                "session",
+                "delete",
                 "--db",
                 str(populated_test_db),
-                "--from-date",
+                "--from",
                 "2025-10-01",
-                "--to-date",
+                "--to",
                 "2025-10-03",
             ],
             input="y\n",
@@ -177,7 +179,7 @@ class TestDeleteSessionsCommand:
 
         result = cli_runner.invoke(
             cli,
-            ["delete-sessions", "--db", str(populated_test_db), "--session-id", "1"],
+            ["session", "delete", "--db", str(populated_test_db), "--session-id", "1"],
             input="y\n",
         )
 
@@ -198,7 +200,7 @@ class TestDeleteSessionsCommand:
         """Test that datetime formatting works correctly in delete preview."""
         result = cli_runner.invoke(
             cli,
-            ["delete-sessions", "--db", str(populated_test_db), "--session-id", "1"],
+            ["session", "delete", "--db", str(populated_test_db), "--session-id", "1"],
             input="n\n",
         )
 
@@ -207,15 +209,15 @@ class TestDeleteSessionsCommand:
         assert "Deletion cancelled" in result.output
 
 
-class TestListProfilesCommand:
-    """Test list-profiles command."""
+class TestProfileListCommand:
+    """Test profile list command."""
 
     def test_list_profiles_shows_correct_session_count(
         self, cli_runner, populated_test_db
     ):
-        """Test that list-profiles shows correct session count (tests day linking fix)."""
+        """Test that profile list shows correct session count (tests day linking fix)."""
         result = cli_runner.invoke(
-            cli, ["list-profiles", "--db", str(populated_test_db)]
+            cli, ["profile", "list", "--db", str(populated_test_db)]
         )
 
         assert result.exit_code == 0
@@ -224,10 +226,10 @@ class TestListProfilesCommand:
         assert "Days with data: 10" in result.output
 
     def test_list_profiles_empty_database(self, cli_runner, temp_db):
-        """Test list-profiles with empty database."""
+        """Test profile list with empty database."""
         init_database(str(temp_db))
 
-        result = cli_runner.invoke(cli, ["list-profiles", "--db", str(temp_db)])
+        result = cli_runner.invoke(cli, ["profile", "list", "--db", str(temp_db)])
 
         assert result.exit_code == 0
         assert "No profiles found" in result.output
@@ -259,13 +261,13 @@ class TestDbStatsCommand:
         assert "Sessions: 0" in result.output
 
 
-class TestListSessionsCommand:
-    """Test list-sessions command."""
+class TestSessionListCommand:
+    """Test session list command."""
 
     def test_list_sessions_default_limit(self, cli_runner, populated_test_db):
-        """Test list-sessions uses default limit of 20."""
+        """Test session list uses default limit of 20."""
         result = cli_runner.invoke(
-            cli, ["list-sessions", "--db", str(populated_test_db)]
+            cli, ["session", "list", "--db", str(populated_test_db)]
         )
 
         assert result.exit_code == 0
@@ -279,9 +281,9 @@ class TestListSessionsCommand:
         assert len(session_rows) == 10
 
     def test_list_sessions_custom_limit(self, cli_runner, populated_test_db):
-        """Test list-sessions with custom limit."""
+        """Test session list with custom limit."""
         result = cli_runner.invoke(
-            cli, ["list-sessions", "--db", str(populated_test_db), "--limit", "5"]
+            cli, ["session", "list", "--db", str(populated_test_db), "--limit", "5"]
         )
 
         assert result.exit_code == 0
@@ -296,9 +298,9 @@ class TestListSessionsCommand:
         assert "Tip:" in result.output
 
     def test_list_sessions_unlimited(self, cli_runner, populated_test_db):
-        """Test list-sessions with --limit 0 shows all sessions."""
+        """Test session list with --limit 0 shows all sessions."""
         result = cli_runner.invoke(
-            cli, ["list-sessions", "--db", str(populated_test_db), "--limit", "0"]
+            cli, ["session", "list", "--db", str(populated_test_db), "--limit", "0"]
         )
 
         assert result.exit_code == 0
@@ -310,7 +312,7 @@ class TestListSessionsCommand:
         assert len(session_rows) == 10
 
     def test_list_sessions_no_truncation_message(self, cli_runner, temp_db):
-        """Test list-sessions doesn't show truncation when all results fit."""
+        """Test session list doesn't show truncation when all results fit."""
         init_database(str(temp_db))
 
         with session_scope() as session:
@@ -340,7 +342,7 @@ class TestListSessionsCommand:
             session.add(sess)
             session.commit()
 
-        result = cli_runner.invoke(cli, ["list-sessions", "--db", str(temp_db)])
+        result = cli_runner.invoke(cli, ["session", "list", "--db", str(temp_db)])
 
         assert result.exit_code == 0
         assert "Showing" not in result.output or "Showing all" in result.output
@@ -451,8 +453,8 @@ def db_with_analysis(temp_db):
     return temp_db
 
 
-class TestDeleteAnalysisCommand:
-    """Test delete-analysis command with various scenarios."""
+class TestAnalysisDeleteCommand:
+    """Test analysis delete command with various scenarios."""
 
     def test_delete_analysis_single_session(self, cli_runner, db_with_analysis):
         """Test deleting analysis for a single session (latest only)."""
@@ -465,7 +467,8 @@ class TestDeleteAnalysisCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-analysis",
+                "analysis",
+                "delete",
                 "--db",
                 str(db_with_analysis),
                 "--session-id",
@@ -491,7 +494,8 @@ class TestDeleteAnalysisCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-analysis",
+                "analysis",
+                "delete",
                 "--db",
                 str(db_with_analysis),
                 "--session-id",
@@ -518,7 +522,8 @@ class TestDeleteAnalysisCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-analysis",
+                "analysis",
+                "delete",
                 "--db",
                 str(db_with_analysis),
                 "--session-id",
@@ -551,12 +556,13 @@ class TestDeleteAnalysisCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-analysis",
+                "analysis",
+                "delete",
                 "--db",
                 str(db_with_analysis),
-                "--from-date",
+                "--from",
                 "2025-10-01",
-                "--to-date",
+                "--to",
                 "2025-10-03",
                 "--force",
             ],
@@ -577,7 +583,8 @@ class TestDeleteAnalysisCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-analysis",
+                "analysis",
+                "delete",
                 "--db",
                 str(db_with_analysis),
                 "--session-id",
@@ -598,7 +605,7 @@ class TestDeleteAnalysisCommand:
         """Test that user can cancel deletion."""
         result = cli_runner.invoke(
             cli,
-            ["delete-analysis", "--db", str(db_with_analysis), "--session-id", "1"],
+            ["analysis", "delete", "--db", str(db_with_analysis), "--session-id", "1"],
             input="n\n",
         )
 
@@ -614,7 +621,7 @@ class TestDeleteAnalysisCommand:
     def test_delete_analysis_no_filter_error(self, cli_runner, db_with_analysis):
         """Test that command errors when no filter is provided."""
         result = cli_runner.invoke(
-            cli, ["delete-analysis", "--db", str(db_with_analysis)]
+            cli, ["analysis", "delete", "--db", str(db_with_analysis)]
         )
 
         assert result.exit_code == 1
@@ -652,7 +659,7 @@ class TestDeleteAnalysisCommand:
 
         result = cli_runner.invoke(
             cli,
-            ["delete-analysis", "--db", str(temp_db), "--session-id", "1"],
+            ["analysis", "delete", "--db", str(temp_db), "--session-id", "1"],
         )
 
         assert result.exit_code == 0
@@ -679,7 +686,8 @@ class TestDeleteAnalysisCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "delete-analysis",
+                "analysis",
+                "delete",
                 "--db",
                 str(db_with_analysis),
                 "--session-id",
@@ -702,7 +710,7 @@ class TestDeleteAnalysisCommand:
         """Test deleting all analysis results."""
         result = cli_runner.invoke(
             cli,
-            ["delete-analysis", "--db", str(db_with_analysis), "--all", "--force"],
+            ["analysis", "delete", "--db", str(db_with_analysis), "--all", "--force"],
         )
 
         assert result.exit_code == 0
@@ -714,16 +722,16 @@ class TestDeleteAnalysisCommand:
             assert total_analysis == 4
 
 
-class TestAnalyzeCommand:
-    """Test consolidated analyze command."""
+class TestAnalysisCommand:
+    """Test consolidated analysis command."""
 
     def test_analyze_missing_selection_flag(self, cli_runner, temp_db):
-        """Test that analyze run requires at least one selection flag."""
+        """Test that analysis run requires at least one selection flag."""
         init_database(str(temp_db))
 
         result = cli_runner.invoke(
             cli,
-            ["analyze", "run", "--db", str(temp_db), "--profile", "testuser"],
+            ["analysis", "run", "--db", str(temp_db), "--profile", "testuser"],
         )
 
         assert result.exit_code == 1
@@ -736,7 +744,7 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "run",
                 "--db",
                 str(temp_db),
@@ -759,7 +767,7 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "run",
                 "--db",
                 str(temp_db),
@@ -767,7 +775,7 @@ class TestAnalyzeCommand:
                 "testuser",
                 "--session-id",
                 "1",
-                "--start",
+                "--from",
                 "2025-01-01",
             ],
         )
@@ -782,7 +790,7 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "list",
                 "--db",
                 str(temp_db),
@@ -799,7 +807,7 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "list",
                 "--db",
                 str(db_with_analysis),
@@ -817,15 +825,15 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "list",
                 "--db",
                 str(db_with_analysis),
                 "--profile",
                 "testuser",
-                "--start",
+                "--from",
                 "2025-10-01",
-                "--end",
+                "--to",
                 "2025-10-03",
             ],
         )
@@ -836,7 +844,7 @@ class TestAnalyzeCommand:
         """Test that running 'analyze' without subcommand shows help."""
         init_database(str(temp_db))
 
-        result = cli_runner.invoke(cli, ["analyze"])
+        result = cli_runner.invoke(cli, ["analysis"])
 
         assert result.exit_code in [0, 2]
         assert "Commands:" in result.output or "show" in result.output
@@ -846,7 +854,7 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "show",
                 "--db",
                 str(db_with_analysis),
@@ -864,7 +872,7 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "show",
                 "--db",
                 str(db_with_analysis),
@@ -912,7 +920,7 @@ class TestAnalyzeCommand:
         result = cli_runner.invoke(
             cli,
             [
-                "analyze",
+                "analysis",
                 "show",
                 "--db",
                 str(temp_db),
