@@ -370,10 +370,6 @@ SPO2_CRITICAL_MIN = 88  # Critical desaturation threshold
 LEAK_ACCEPTABLE_MAX = 24  # Maximum acceptable leak rate
 LEAK_LARGE_THRESHOLD = 30  # Large leak threshold
 
-# Compliance thresholds
-COMPLIANCE_MIN_HOURS = 4  # Minimum hours per night for compliance
-COMPLIANCE_MIN_DAYS = 21  # Minimum days per month (70% of 30)
-
 
 # ============================================================================
 # Analysis Algorithm Constants

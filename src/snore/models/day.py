@@ -14,9 +14,6 @@ class DaySummary(BaseModel):
         default=None, description="Total hours of therapy"
     )
     ahi: float | None = Field(default=None, description="Apnea-Hypopnea Index")
-    compliance: bool = Field(
-        default=False, description="Met minimum 4-hour usage requirement"
-    )
 
     class Config:
         json_schema_extra = {
@@ -25,7 +22,6 @@ class DaySummary(BaseModel):
                 "date": "2024-01-15",
                 "total_therapy_hours": 7.67,
                 "ahi": 2.3,
-                "compliance": True,
             }
         }
 
@@ -74,10 +70,6 @@ class DayReport(BaseModel):
         default=None, description="Average pulse rate (bpm)"
     )
 
-    compliant: bool = Field(
-        default=False, description="Met minimum 4-hour usage requirement"
-    )
-
     class Config:
         json_schema_extra = {
             "example": {
@@ -102,7 +94,6 @@ class DayReport(BaseModel):
                 "spo2_min": 91,
                 "spo2_median": 97,
                 "pulse_avg": 68,
-                "compliant": True,
             }
         }
 
@@ -117,7 +108,7 @@ class DayTextReport(BaseModel):
         json_schema_extra = {
             "example": {
                 "date": "2024-01-15",
-                "summary": "On January 15, 2024, therapy was used for 7.7 hours with good compliance. "
+                "summary": "On January 15, 2024, therapy was used for 7.7 hours. "
                 "The AHI was 2.3 events per hour (normal range, <5). "
                 "There were 12 obstructive apneas and 6 hypopneas. "
                 "Median pressure was 10.2 cmH₂O with a 95th percentile of 12.8 cmH₂O. "

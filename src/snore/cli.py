@@ -520,6 +520,156 @@ def import_data(
     return 0
 
 
+@cli.command()
+@click.option("--db", type=click.Path(), help="Database path")
+@click.option("--profile", type=str, help="Filter to specific profile")
+@click.option("--days", type=int, help="Limit to last N days")
+def stats(db: str | None, profile: str | None, days: int | None) -> None:
+    """Show therapy usage and clinical statistics."""
+    from datetime import date, timedelta
+
+    from sqlalchemy import func, text
+
+    from snore.analysis.calculations import (
+        assess_therapy_effectiveness,
+        calculate_average_ahi,
+        calculate_average_hours_per_day,
+        calculate_total_hours,
+    )
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
+    init_database(str(Path(db)) if db else None)
+
+    with session_scope() as session:
+        query = session.query(models.Day)
+
+        if profile:
+            query = query.join(models.Profile).filter(
+                models.Profile.username == profile
+            )
+
+        if days:
+            cutoff_date = date.today() - timedelta(days=days)
+            query = query.filter(models.Day.date >= cutoff_date)
+
+        day_records = query.all()
+
+        if not day_records:
+            click.echo("\n📈 Therapy Statistics")
+            click.echo(f"{'=' * 50}")
+            click.echo("\nNo therapy data found.")
+            click.echo(f"{'=' * 50}\n")
+            return
+
+        sessions_by_profile = session.execute(
+            text("""
+            SELECT p.username, COUNT(s.id) as session_count
+            FROM profiles p
+            LEFT JOIN devices d ON d.profile_id = p.id
+            LEFT JOIN sessions s ON s.device_id = d.id
+            GROUP BY p.id, p.username
+            ORDER BY session_count DESC
+        """)
+        ).fetchall()
+
+        dates = [d.date for d in day_records]
+        first_date = min(dates)
+        last_date = max(dates)
+        days_since_last = (date.today() - last_date).days
+
+        total_hours = calculate_total_hours(day_records)
+        avg_hours = calculate_average_hours_per_day(day_records)
+        days_with_data = len(day_records)
+
+        avg_ahi = calculate_average_ahi(day_records)
+        effectiveness = assess_therapy_effectiveness(avg_ahi) if avg_ahi else "unknown"
+
+        pressure_values = [
+            d.pressure_median for d in day_records if d.pressure_median is not None
+        ]
+        avg_pressure = (
+            sum(pressure_values) / len(pressure_values) if pressure_values else None
+        )
+        min_pressure = min(pressure_values) if pressure_values else None
+        max_pressure = max(pressure_values) if pressure_values else None
+
+        leak_values = [d.leak_median for d in day_records if d.leak_median is not None]
+        avg_leak = sum(leak_values) / len(leak_values) if leak_values else None
+
+        spo2_values = [d.spo2_mean for d in day_records if d.spo2_mean is not None]
+        avg_spo2 = sum(spo2_values) / len(spo2_values) if spo2_values else None
+        spo2_mins = [d.spo2_min for d in day_records if d.spo2_min is not None]
+        min_spo2 = min(spo2_mins) if spo2_mins else None
+
+        day_ids = [d.id for d in day_records]
+
+        event_counts = (
+            session.query(
+                models.Event.event_type, func.count(models.Event.id).label("count")
+            )
+            .join(models.Session)
+            .join(models.Day)
+            .filter(models.Day.id.in_(day_ids))
+            .group_by(models.Event.event_type)
+            .order_by(text("count DESC"))
+            .all()
+        )
+
+        total_events = sum(count for _, count in event_counts)
+
+        click.echo("\n📈 Therapy Statistics")
+        click.echo(f"{'=' * 50}")
+
+        if not profile:
+            click.echo("\nProfiles")
+            for username, count in sessions_by_profile:
+                click.echo(f"  {username}: {count} sessions")
+
+        click.echo("\nDate Range")
+        click.echo(f"  First session: {first_date}")
+        click.echo(f"  Last session: {last_date}")
+        click.echo(f"  Days since last use: {days_since_last}")
+
+        click.echo("\nUsage")
+        click.echo(f"  Total therapy hours: {total_hours:,.1f} hrs")
+        click.echo(f"  Average per night: {avg_hours:.1f} hrs")
+        click.echo(f"  Days with data: {days_with_data}")
+
+        click.echo("\nClinical")
+        if avg_ahi is not None:
+            click.echo(f"  Average AHI: {avg_ahi:.1f}")
+        else:
+            click.echo("  Average AHI: N/A")
+        click.echo(f"  Effectiveness: {effectiveness}")
+
+        if avg_pressure is not None:
+            click.echo("\nPressure")
+            click.echo(f"  Average: {avg_pressure:.1f} cmH₂O")
+            if min_pressure is not None and max_pressure is not None:
+                click.echo(f"  Range: {min_pressure:.1f} - {max_pressure:.1f} cmH₂O")
+
+        if avg_leak is not None:
+            click.echo("\nLeak")
+            click.echo(f"  Average: {avg_leak:.1f} L/min")
+            leak_assessment = "well controlled" if avg_leak < 24 else "elevated"
+            click.echo(f"  Assessment: {leak_assessment}")
+
+        if avg_spo2 is not None:
+            click.echo("\nSpO₂")
+            click.echo(f"  Average: {avg_spo2:.1f}%")
+            if min_spo2 is not None:
+                click.echo(f"  Minimum recorded: {min_spo2:.0f}%")
+
+        if event_counts:
+            click.echo("\nEvents")
+            for event_type, count in event_counts:
+                pct = (count / total_events * 100) if total_events > 0 else 0
+                click.echo(f"  {event_type}: {count:,} ({pct:.1f}%)")
+
+        click.echo(f"\n{'=' * 50}\n")
+
+
 @cli.group()
 def db() -> None:
     """Database management commands."""
@@ -563,9 +713,9 @@ def init(db: str | None) -> int | None:
     return None
 
 
-@db.command()
+@db.command("stats")
 @click.option("--db", type=click.Path(), help="Database path")
-def stats(db: str | None) -> None:
+def db_stats(db: str | None) -> None:
     """Show database statistics."""
     import os
 
@@ -583,9 +733,25 @@ def stats(db: str | None) -> None:
         db_path = Path(DEFAULT_DATABASE_PATH)
 
     with session_scope() as session:
+        profile_count = session.query(models.Profile).count()
         device_count = session.query(models.Device).count()
         session_count = session.query(models.Session).count()
+        day_count = session.query(models.Day).count()
         event_count = session.execute(text("SELECT COUNT(*) FROM events")).scalar()
+        waveform_count = session.query(models.Waveform).count()
+        analysis_count = session.query(models.AnalysisResult).count()
+        pattern_count = session.query(models.DetectedPattern).count()
+
+        sessions_with_waveforms = (
+            session.query(models.Session)
+            .filter(models.Session.has_waveform_data == True)
+            .count()
+        )
+        sessions_with_events = (
+            session.query(models.Session)
+            .filter(models.Session.has_event_data == True)
+            .count()
+        )
 
         first_session = session.execute(
             text("SELECT MIN(start_time) as first FROM sessions")
@@ -602,9 +768,34 @@ def stats(db: str | None) -> None:
         click.echo(f"{'=' * 50}")
         click.echo(f"Database: {db_path}")
         click.echo(f"Size: {size_mb:.1f} MB")
-        click.echo(f"\nDevices: {device_count}")
-        click.echo(f"Sessions: {session_count}")
-        click.echo(f"Events: {event_count}")
+
+        click.echo("\nRow Counts")
+        click.echo(f"  Profiles: {profile_count}")
+        click.echo(f"  Devices: {device_count}")
+        click.echo(f"  Sessions: {session_count}")
+        click.echo(f"  Days: {day_count}")
+        click.echo(f"  Events: {event_count}")
+        click.echo(f"  Waveforms: {waveform_count}")
+        click.echo(f"  Analysis Results: {analysis_count}")
+        click.echo(f"  Detected Patterns: {pattern_count}")
+
+        click.echo("\nData Coverage")
+        wf_pct = (
+            (sessions_with_waveforms / session_count * 100) if session_count > 0 else 0
+        )
+        ev_pct = (
+            (sessions_with_events / session_count * 100) if session_count > 0 else 0
+        )
+        an_pct = (analysis_count / session_count * 100) if session_count > 0 else 0
+        click.echo(
+            f"  Sessions with waveforms: {sessions_with_waveforms}/{session_count} ({wf_pct:.1f}%)"
+        )
+        click.echo(
+            f"  Sessions with events: {sessions_with_events}/{session_count} ({ev_pct:.1f}%)"
+        )
+        click.echo(
+            f"  Sessions analyzed: {analysis_count}/{session_count} ({an_pct:.1f}%)"
+        )
 
         if first_session and last_session:
             first_dt = (
@@ -1010,7 +1201,7 @@ def profile_delete(username: str, force: bool, dry_run: bool, db: str | None) ->
 @click.argument("username")
 @click.option("--db", type=click.Path(), help="Database path")
 def profile_set_default(username: str, db: str | None) -> None:
-    """Set default profile for CLI commands (must exist in database)."""
+    """Set the default profile for CLI commands."""
     from snore.database import models
     from snore.database.session import init_database, session_scope
 
@@ -1045,6 +1236,18 @@ def profile_unset_default() -> None:
     unset_default_profile()
     click.echo("✓ Default profile unset")
     click.echo(f"  Config: {get_config_path()}")
+
+
+@profile.command("show-default")
+def profile_show_default() -> None:
+    """Show current default profile."""
+    default = get_default_profile()
+    if default:
+        click.echo(f"Default profile: {default}")
+        click.echo(f"  Config: {get_config_path()}")
+    else:
+        click.echo("No default profile set")
+        click.echo("  Set with: snore profile set-default <name>")
 
 
 @cli.group()
@@ -1102,13 +1305,25 @@ def session_list(
     else:
         init_database()
 
+    effective_profile = None
+    using_default = False
+
+    if not all_profiles:
+        if profile:
+            effective_profile = profile
+        else:
+            default = get_default_profile()
+            if default:
+                effective_profile = default
+                using_default = True
+
     with session_scope() as db_session:
         where_clause = "WHERE 1=1"
         params: dict[str, Any] = {}
 
-        if not all_profiles and profile:
+        if effective_profile:
             where_clause += " AND profiles.username = :profile"
-            params["profile"] = profile
+            params["profile"] = effective_profile
 
         if from_date:
             where_clause += " AND sessions.start_time >= :from_date"
@@ -1166,8 +1381,11 @@ def session_list(
             click.echo("No sessions found")
             return
 
+        if using_default:
+            click.echo(f"(Using default profile: {effective_profile})\n")
+
         click.echo(
-            f"\n{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Profile':<15} {'Device':<25} {'AHI':<8}"
+            f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Profile':<15} {'Device':<25} {'AHI':<8}"
         )
         click.echo("-" * 95)
 

@@ -2,43 +2,7 @@
 
 from datetime import date
 
-from snore.constants import COMPLIANCE_MIN_HOURS
 from snore.database import models
-
-
-def is_compliant(hours: float | None) -> bool:
-    """
-    Check if usage meets compliance requirements.
-
-    Args:
-        hours: Hours of therapy usage
-
-    Returns:
-        True if compliant (>= 4 hours)
-    """
-    if hours is None:
-        return False
-    return hours >= COMPLIANCE_MIN_HOURS
-
-
-def calculate_compliance_rate(days: list[models.Day]) -> tuple[float, int, int]:
-    """
-    Calculate compliance rate for a set of days.
-
-    Args:
-        days: List of Day records
-
-    Returns:
-        Tuple of (compliance_percentage, compliant_days, total_days)
-    """
-    if not days:
-        return 0.0, 0, 0
-
-    total_days = len(days)
-    compliant_days = sum(1 for day in days if is_compliant(day.total_therapy_hours))
-
-    compliance_percentage = (compliant_days / total_days) * 100
-    return compliance_percentage, compliant_days, total_days
 
 
 def calculate_average_ahi(days: list[models.Day]) -> float | None:

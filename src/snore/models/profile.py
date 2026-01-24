@@ -58,9 +58,6 @@ class ProfileDetail(BaseModel):
     avg_ahi: float | None = Field(
         default=None, description="Average AHI across all days"
     )
-    compliance_rate: float | None = Field(
-        default=None, description="Percentage of days with >4 hours usage"
-    )
     days_with_data: int = Field(
         default=0, description="Number of days with therapy data"
     )
@@ -79,7 +76,6 @@ class ProfileDetail(BaseModel):
                 "updated_at": "2024-01-15T12:30:00",
                 "total_therapy_hours": 2920.5,
                 "avg_ahi": 3.2,
-                "compliance_rate": 95.0,
                 "days_with_data": 365,
             }
         }
