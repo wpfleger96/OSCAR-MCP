@@ -15,9 +15,11 @@ File Types:
 
 import json
 import logging
+import os
 import re
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -331,11 +333,20 @@ class ResmedEDFParser(DeviceParser):
         date_to: str | None = None,
         limit: int | None = None,
         sort_by: str | None = None,
+        parallel: bool = True,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all ResMed sessions from the given path.
 
         Yields one UnifiedSession per therapy session.
+
+        Args:
+            path: Path to data directory
+            date_from: Filter sessions from this date
+            date_to: Filter sessions to this date
+            limit: Limit number of sessions
+            sort_by: Sort order (date-asc, date-desc, or None)
+            parallel: Enable parallel parsing (default: True)
         """
         path = Path(self._data_root if self._data_root else path)
         datalog_dir = path / "DATALOG"
@@ -360,6 +371,25 @@ class ResmedEDFParser(DeviceParser):
         else:
             night_items = list(night_groups.items())
 
+        if parallel and len(night_items) > 1:
+            yield from self._parse_sessions_parallel(
+                night_items, device_info, path, date_from, date_to, limit
+            )
+        else:
+            yield from self._parse_sessions_sequential(
+                night_items, device_info, path, date_from, date_to, limit
+            )
+
+    def _parse_sessions_sequential(
+        self,
+        night_items: list[tuple[str, dict[str, dict[str, Path]]]],
+        device_info: Any,
+        path: Path,
+        date_from: str | None,
+        date_to: str | None,
+        limit: int | None,
+    ) -> Iterator[UnifiedSession]:
+        """Parse sessions sequentially (original behavior)."""
         sessions_yielded = 0
 
         for night_date, segments in night_items:
@@ -424,6 +454,98 @@ class ResmedEDFParser(DeviceParser):
                 logger.error(f"Failed to parse night {night_date}: {e}")
                 continue
 
+    def _parse_sessions_parallel(
+        self,
+        night_items: list[tuple[str, dict[str, dict[str, Path]]]],
+        device_info: Any,
+        path: Path,
+        date_from: str | None,
+        date_to: str | None,
+        limit: int | None,
+    ) -> Iterator[UnifiedSession]:
+        """Parse sessions in parallel using ThreadPoolExecutor for I/O-bound EDF reading."""
+        filtered_items = []
+        for night_date, segments in night_items:
+            if date_from or date_to:
+                try:
+                    night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
+
+                    if date_from:
+                        filter_date_from = datetime.fromisoformat(date_from).date()
+                        if night_date_obj < filter_date_from:
+                            logger.debug(
+                                f"Skipping night {night_date}: before {filter_date_from}"
+                            )
+                            continue
+
+                    if date_to:
+                        filter_date_to = datetime.fromisoformat(date_to).date()
+                        if night_date_obj > filter_date_to:
+                            logger.debug(
+                                f"Skipping night {night_date}: after {filter_date_to}"
+                            )
+                            continue
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Could not parse night date {night_date}: {e}")
+
+            filtered_items.append((night_date, segments))
+
+        if limit is not None and len(filtered_items) > limit:
+            filtered_items = filtered_items[:limit]
+
+        logger.info(
+            f"Parsing {len(filtered_items)} nights in parallel with {os.cpu_count()} workers"
+        )
+
+        sessions_yielded = 0
+
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            futures = {
+                executor.submit(
+                    self._parse_night_session, night_date, segments, device_info, path
+                ): night_date
+                for night_date, segments in filtered_items
+            }
+
+            for future in as_completed(futures):
+                night_date = futures[future]
+
+                if limit is not None and sessions_yielded >= limit:
+                    logger.info(
+                        f"Reached session limit of {limit}, cancelling remaining"
+                    )
+                    for remaining_future in futures:
+                        if not remaining_future.done():
+                            remaining_future.cancel()
+                    break
+
+                try:
+                    session = future.result()
+
+                    if session is None:
+                        continue
+
+                    if date_from:
+                        if (
+                            session.start_time.date()
+                            < datetime.fromisoformat(date_from).date()
+                        ):
+                            continue
+                    if date_to:
+                        if (
+                            session.start_time.date()
+                            > datetime.fromisoformat(date_to).date()
+                        ):
+                            continue
+
+                    session.finalize_statistics()
+                    yield session
+                    sessions_yielded += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to parse night {night_date}: {e}")
+                    continue
+
     def _get_night_date(self, timestamp: datetime) -> str:
         """
         Get the "night date" for a session using OSCAR's noon cutoff rule.
@@ -446,6 +568,37 @@ class ResmedEDFParser(DeviceParser):
 
         return night_date.strftime("%Y%m%d")
 
+    def _scan_edf_files(self, datalog_dir: Path) -> list[Path]:
+        """
+        Scan for EDF files using os.scandir (faster than rglob).
+
+        Pre-filters by filename pattern during scan.
+
+        Args:
+            datalog_dir: Directory to scan
+
+        Returns:
+            List of EDF file paths
+        """
+        edf_files = []
+
+        def scan_dir(path: Path) -> None:
+            """Recursively scan directory for EDF files."""
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        if entry.is_file() and entry.name.endswith(".edf"):
+                            match = re.match(r"\d{8}_\d{6}_[A-Z0-9]+\.edf", entry.name)
+                            if match:
+                                edf_files.append(Path(entry.path))
+                        elif entry.is_dir():
+                            scan_dir(Path(entry.path))
+            except PermissionError:
+                logger.warning(f"Permission denied accessing directory: {path}")
+
+        scan_dir(datalog_dir)
+        return edf_files
+
     def _group_session_files(
         self, datalog_dir: Path
     ) -> dict[str, dict[str, dict[str, Path]]]:
@@ -454,6 +607,9 @@ class ResmedEDFParser(DeviceParser):
 
         Multiple sessions within the same night (mask removals/bathroom breaks)
         are grouped together to match OSCAR's behavior.
+
+        Args:
+            datalog_dir: Directory containing DATALOG files
 
         Returns:
             Dict mapping night_date to dict of session_ids to file types
@@ -473,7 +629,7 @@ class ResmedEDFParser(DeviceParser):
         """
         groups: dict[str, dict[str, dict[str, Path]]] = {}
 
-        for edf_file in datalog_dir.rglob("*.edf"):
+        for edf_file in self._scan_edf_files(datalog_dir):
             filename = edf_file.name
 
             match = re.match(r"(\d{8}_\d{6})_([A-Z0-9]+)\.edf", filename)

@@ -132,6 +132,7 @@ class DeviceParser(ABC):
         date_to: str | None = None,
         limit: int | None = None,
         sort_by: str | None = None,
+        parallel: bool = True,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all sessions from the given path and yield unified sessions.

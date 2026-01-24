@@ -265,6 +265,15 @@ def upgrade(check: bool, force: bool) -> None:
 @click.option(
     "--dry-run", is_flag=True, help="Show what would be imported without importing"
 )
+@click.option(
+    "--no-parallel", is_flag=True, help="Disable parallel parsing (for debugging)"
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=50,
+    help="Number of sessions per database transaction (default: 50)",
+)
 def import_data(
     path: str,
     force: bool,
@@ -274,6 +283,8 @@ def import_data(
     date_from: datetime | None,
     date_to: datetime | None,
     dry_run: bool,
+    no_parallel: bool,
+    batch_size: int,
 ) -> int:
     """Import CPAP data from device SD card or directory."""
     from snore.database.importers import SessionImporter
@@ -381,6 +392,7 @@ def import_data(
                     date_to=date_to_str,
                     limit=limit,
                     sort_by=sort_by if sort_by != "filesystem" else None,
+                    parallel=not no_parallel,
                 )
             )
         except Exception as e:
@@ -456,27 +468,14 @@ def import_data(
 
         importer = SessionImporter(profile_id=profile_id)
 
-        imported = 0
-        skipped = 0
-        failed = 0
+        total_batches = (len(sessions) + batch_size - 1) // batch_size
+        click.echo(
+            f"📥 Importing {len(sessions)} sessions in {total_batches} batch(es)..."
+        )
 
-        with click.progressbar(
-            sessions,
-            label="Importing sessions",
-            show_pos=True,
-            item_show_func=lambda s: f"{s.start_time:%Y-%m-%d}" if s else "",
-        ) as bar:
-            for unified_session in bar:
-                try:
-                    if importer.import_session(unified_session, force=force):
-                        imported += 1
-                    else:
-                        skipped += 1
-                except Exception as e:
-                    failed += 1
-                    logger.error(
-                        f"Failed to import session {unified_session.device_session_id}: {e}"
-                    )
+        imported, skipped, failed = importer.import_sessions_batch(
+            sessions, force=force, batch_size=batch_size
+        )
 
         total_imported += imported
         total_skipped += skipped

@@ -115,6 +115,126 @@ class SessionImporter:
 
         return total_cleaned
 
+    def _import_single_session(
+        self, db: Session, session_data: UnifiedSession, force: bool = False
+    ) -> tuple[bool, int | None]:
+        """
+        Import a single session. Returns (imported, day_id).
+
+        This method NEVER aggregates - aggregation is handled by the caller.
+
+        Args:
+            db: SQLAlchemy database session
+            session_data: UnifiedSession to import
+            force: If True, re-import existing sessions
+
+        Returns:
+            Tuple of (was_imported, day_id)
+        """
+        if self.profile_id is None:
+            self.profile_id = self.get_or_create_default_profile(db)
+
+        device = (
+            db.query(models.Device)
+            .filter_by(serial_number=session_data.device_info.serial_number)
+            .first()
+        )
+
+        if device:
+            device.manufacturer = session_data.device_info.manufacturer
+            device.model = session_data.device_info.model
+            device.firmware_version = session_data.device_info.firmware_version
+            device.hardware_version = session_data.device_info.hardware_version
+            device.product_code = session_data.device_info.product_code
+            if self.profile_id:
+                device.profile_id = self.profile_id
+            device.last_import = datetime.now(UTC).replace(tzinfo=None)
+        else:
+            device = models.Device(
+                manufacturer=session_data.device_info.manufacturer,
+                model=session_data.device_info.model,
+                serial_number=session_data.device_info.serial_number,
+                firmware_version=session_data.device_info.firmware_version,
+                hardware_version=session_data.device_info.hardware_version,
+                product_code=session_data.device_info.product_code,
+                profile_id=self.profile_id,
+            )
+            db.add(device)
+            db.flush()
+
+        existing = (
+            db.query(models.Session)
+            .filter_by(
+                device_id=device.id,
+                device_session_id=session_data.device_session_id,
+            )
+            .first()
+        )
+
+        if existing and not force:
+            logger.debug(
+                f"Session {session_data.device_session_id} already exists, skipping"
+            )
+            return False, None
+
+        if existing and force:
+            logger.info(f"Force re-importing session {session_data.device_session_id}")
+            db.delete(existing)
+            db.flush()
+
+        notes_json = (
+            json.dumps(session_data.data_quality_notes)
+            if session_data.data_quality_notes
+            else None
+        )
+
+        new_session = models.Session(
+            device_id=device.id,
+            device_session_id=session_data.device_session_id,
+            start_time=session_data.start_time,
+            end_time=session_data.end_time,
+            duration_seconds=session_data.duration_seconds,
+            therapy_mode=session_data.settings.mode.value
+            if session_data.settings
+            else None,
+            import_source=session_data.import_source,
+            parser_version=session_data.parser_version,
+            data_quality_notes=notes_json,
+            has_waveform_data=session_data.has_waveform_data,
+            has_event_data=session_data.has_event_data,
+            has_statistics=session_data.has_statistics,
+        )
+        db.add(new_session)
+        db.flush()
+
+        day_id = None
+        if device.profile_id:
+            profile = db.get(models.Profile, device.profile_id)
+            if profile:
+                day_date = DayManager.get_day_for_session(
+                    session_data.start_time, profile
+                )
+                day = DayManager.get_or_create_day(device.profile_id, day_date, db)
+                new_session.day_id = day.id
+                day_id = day.id
+
+        if session_data.has_waveform_data:
+            self._import_waveforms(db, new_session.id, session_data)
+
+        if session_data.has_event_data:
+            self._import_events(db, new_session.id, session_data)
+
+        if session_data.has_statistics:
+            self._import_statistics(db, new_session.id, session_data)
+
+        if session_data.settings:
+            self._import_settings(db, new_session.id, session_data)
+
+        logger.info(
+            f"Imported session {session_data.device_session_id} from {session_data.start_time}"
+        )
+        return True, day_id
+
     def import_session(self, session_data: UnifiedSession, force: bool = False) -> bool:
         """
         Import a complete session to database.
@@ -127,116 +247,73 @@ class SessionImporter:
             True if imported, False if skipped (already exists)
         """
         with session_scope() as db:
-            if self.profile_id is None:
-                self.profile_id = self.get_or_create_default_profile(db)
+            imported, day_id = self._import_single_session(db, session_data, force)
 
-            device = (
-                db.query(models.Device)
-                .filter_by(serial_number=session_data.device_info.serial_number)
-                .first()
-            )
-
-            if device:
-                device.manufacturer = session_data.device_info.manufacturer
-                device.model = session_data.device_info.model
-                device.firmware_version = session_data.device_info.firmware_version
-                device.hardware_version = session_data.device_info.hardware_version
-                device.product_code = session_data.device_info.product_code
-                if self.profile_id:
-                    device.profile_id = self.profile_id
-                device.last_import = datetime.now(UTC).replace(tzinfo=None)
-            else:
-                device = models.Device(
-                    manufacturer=session_data.device_info.manufacturer,
-                    model=session_data.device_info.model,
-                    serial_number=session_data.device_info.serial_number,
-                    firmware_version=session_data.device_info.firmware_version,
-                    hardware_version=session_data.device_info.hardware_version,
-                    product_code=session_data.device_info.product_code,
-                    profile_id=self.profile_id,
-                )
-                db.add(device)
-                db.flush()
-
-            existing = (
-                db.query(models.Session)
-                .filter_by(
-                    device_id=device.id,
-                    device_session_id=session_data.device_session_id,
-                )
-                .first()
-            )
-
-            if existing and not force:
-                logger.debug(
-                    f"Session {session_data.device_session_id} already exists, skipping"
-                )
-                return False
-
-            if existing and force:
-                logger.info(
-                    f"Force re-importing session {session_data.device_session_id}"
-                )
-                db.delete(existing)
-                db.flush()
-
-            notes_json = (
-                json.dumps(session_data.data_quality_notes)
-                if session_data.data_quality_notes
-                else None
-            )
-
-            new_session = models.Session(
-                device_id=device.id,
-                device_session_id=session_data.device_session_id,
-                start_time=session_data.start_time,
-                end_time=session_data.end_time,
-                duration_seconds=session_data.duration_seconds,
-                therapy_mode=session_data.settings.mode.value
-                if session_data.settings
-                else None,
-                import_source=session_data.import_source,
-                parser_version=session_data.parser_version,
-                data_quality_notes=notes_json,
-                has_waveform_data=session_data.has_waveform_data,
-                has_event_data=session_data.has_event_data,
-                has_statistics=session_data.has_statistics,
-            )
-            db.add(new_session)
-            db.flush()
-
-            if device.profile_id:
-                profile = db.get(models.Profile, device.profile_id)
-                if profile:
-                    day_date = DayManager.get_day_for_session(
-                        session_data.start_time, profile
-                    )
-                    day = DayManager.create_or_update_day(
-                        device.profile_id, day_date, db
-                    )
-                    new_session.day_id = day.id
-
-            if session_data.has_waveform_data:
-                self._import_waveforms(db, new_session.id, session_data)
-
-            if session_data.has_event_data:
-                self._import_events(db, new_session.id, session_data)
-
-            if session_data.has_statistics:
-                self._import_statistics(db, new_session.id, session_data)
-
-            if session_data.settings:
-                self._import_settings(db, new_session.id, session_data)
-
-            if new_session.day_id:
-                day_record = db.get(models.Day, new_session.day_id)
-                if day_record is not None:
+            if imported and day_id:
+                day_record = db.get(models.Day, day_id)
+                if day_record:
                     DayManager._aggregate_day_statistics(day_record, db)
 
-        logger.info(
-            f"Imported session {session_data.device_session_id} from {session_data.start_time}"
-        )
-        return True
+        return imported
+
+    def import_sessions_batch(
+        self,
+        sessions: list[UnifiedSession],
+        force: bool = False,
+        batch_size: int = 50,
+    ) -> tuple[int, int, int]:
+        """
+        Import multiple sessions in batched transactions.
+
+        Processes sessions in configurable batch sizes with single transaction per batch.
+        Aggregates day statistics at end of EACH batch for crash safety.
+
+        Args:
+            sessions: List of UnifiedSession objects to import
+            force: If True, re-import existing sessions
+            batch_size: Number of sessions per transaction (default: 50)
+
+        Returns:
+            Tuple of (imported_count, skipped_count, failed_count)
+        """
+        imported = 0
+        skipped = 0
+        failed = 0
+        total_batches = (len(sessions) + batch_size - 1) // batch_size
+
+        for batch_num, i in enumerate(range(0, len(sessions), batch_size), 1):
+            batch = sessions[i : i + batch_size]
+            batch_day_ids = set()
+
+            logger.info(
+                f"Importing batch {batch_num}/{total_batches} ({len(batch)} sessions)"
+            )
+
+            with session_scope() as db:
+                for session_data in batch:
+                    try:
+                        was_imported, day_id = self._import_single_session(
+                            db, session_data, force
+                        )
+                        if was_imported:
+                            imported += 1
+                            if day_id:
+                                batch_day_ids.add(day_id)
+                        else:
+                            skipped += 1
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to import session {session_data.device_session_id}: {e}"
+                        )
+                        failed += 1
+
+                if batch_day_ids:
+                    for day_id in batch_day_ids:
+                        day_record = db.get(models.Day, day_id)
+                        if day_record:
+                            DayManager._aggregate_day_statistics(day_record, db)
+
+        return imported, skipped, failed
 
     def _import_waveforms(
         self, db: Session, session_id: int, session_data: UnifiedSession
@@ -372,14 +449,16 @@ class SessionImporter:
         if settings.other_settings:
             settings_dict.update(settings.other_settings)
 
-        for key, value in settings_dict.items():
-            if value is not None:
-                setting_record = models.Setting(
-                    session_id=session_id, key=key, value=str(value)
-                )
-                db.add(setting_record)
+        setting_records = [
+            models.Setting(session_id=session_id, key=key, value=str(value))
+            for key, value in settings_dict.items()
+            if value is not None
+        ]
 
-        logger.debug(f"Imported {len(settings_dict)} settings")
+        if setting_records:
+            db.bulk_save_objects(setting_records)
+
+        logger.debug(f"Imported {len(setting_records)} settings")
 
 
 def import_session(

@@ -47,6 +47,40 @@ class DayManager:
         return session_start.date()
 
     @classmethod
+    def get_or_create_day(
+        cls,
+        profile_id: int,
+        day_date: date,
+        db_session: Session,
+    ) -> Day:
+        """
+        Get or create day WITHOUT triggering aggregation.
+
+        Use this when you want to defer aggregation (e.g., batch imports)
+        or when aggregation will be handled separately.
+
+        Args:
+            profile_id: Profile ID
+            day_date: Date for the day record
+            db_session: SQLAlchemy database session
+
+        Returns:
+            Day object (without aggregated statistics)
+        """
+        day = (
+            db_session.query(Day)
+            .filter_by(profile_id=profile_id, date=day_date)
+            .first()
+        )
+
+        if not day:
+            day = Day(profile_id=profile_id, date=day_date)
+            db_session.add(day)
+            db_session.flush()
+
+        return day
+
+    @classmethod
     def create_or_update_day(
         cls,
         profile_id: int,
@@ -64,19 +98,8 @@ class DayManager:
         Returns:
             Updated Day object
         """
-        day = (
-            db_session.query(Day)
-            .filter_by(profile_id=profile_id, date=day_date)
-            .first()
-        )
-
-        if not day:
-            day = Day(profile_id=profile_id, date=day_date)
-            db_session.add(day)
-            db_session.flush()
-
+        day = cls.get_or_create_day(profile_id, day_date, db_session)
         cls._aggregate_day_statistics(day, db_session)
-
         return day
 
     @classmethod
@@ -220,7 +243,7 @@ class DayManager:
         """
         day_date = cls.get_day_for_session(session.start_time, profile)
 
-        day = cls.create_or_update_day(profile.id, day_date, db_session)
+        day = cls.get_or_create_day(profile.id, day_date, db_session)
 
         session.day_id = day.id
 
