@@ -4,8 +4,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
-
-from uniplot import plot as uniplot_plot
+import plotext as plt
 
 if TYPE_CHECKING:
     from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
@@ -263,15 +262,14 @@ class AsciiWaveformRenderer:
         return "\n".join(lines)
 
 
-class UniplotWaveformRenderer:
-    """Render flow waveform using uniplot for high-resolution terminal display."""
+class WaveformRenderer:
+    """Render flow waveform using plotext for high-resolution terminal display."""
 
     def __init__(
         self,
         width: int = 80,
         height: int = 20,
         show_events: bool = True,
-        interactive: bool = False,
     ):
         """
         Initialize renderer.
@@ -280,12 +278,10 @@ class UniplotWaveformRenderer:
             width: Chart width in characters (default: 80)
             height: Chart height in lines (default: 20)
             show_events: Whether to show event annotations (default: True)
-            interactive: Enable interactive zoom/pan mode (default: False)
         """
         self.width = width
         self.height = height
         self.show_events = show_events
-        self.interactive = interactive
 
     def render(
         self,
@@ -297,7 +293,7 @@ class UniplotWaveformRenderer:
         center_time: str | None = None,
     ) -> None:
         """
-        Generate high-resolution waveform visualization using uniplot.
+        Generate high-resolution waveform visualization using plotext.
 
         Args:
             timestamps: Timestamp array in seconds
@@ -329,24 +325,26 @@ class UniplotWaveformRenderer:
         print(f"Sample rate: {sample_rate:.0f}Hz | Samples: {len(timestamps)}")
         print()
 
-        def x_formatter(val: float) -> str:
-            """Format x-axis values as HH:MM:SS."""
-            return _format_time_offset(val)
+        plt.clear_figure()
+        plt.theme("clear")
 
-        uniplot_plot(
-            xs=timestamps,
-            ys=flow_values,
-            title=title,
-            x_unit="",
-            y_unit="L/min",
-            width=self.width,
-            height=self.height,
-            lines=True,
-            character_set="braille",
-            interactive=self.interactive,
-            x_gridlines=[0],
-            y_gridlines=[0],
+        start_time = timestamps[0]
+        relative_timestamps = timestamps - start_time
+        window_duration = timestamps[-1] - start_time
+
+        plt.plot(relative_timestamps, flow_values, marker="braille")
+        plt.title(title)
+        plt.ylabel("L/min")
+
+        tick_interval = (
+            10 if window_duration <= 60 else (15 if window_duration <= 120 else 30)
         )
+        tick_positions = list(range(0, int(window_duration) + 1, tick_interval))
+        tick_labels = [_format_time_offset(start_time + t) for t in tick_positions]
+        plt.xticks(tick_positions, tick_labels)
+
+        plt.plotsize(self.width, self.height)
+        plt.show()
 
         if self.show_events:
             print()

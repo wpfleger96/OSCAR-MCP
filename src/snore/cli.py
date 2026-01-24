@@ -2830,7 +2830,7 @@ def show_waveform(
     from snore.analysis.service import AnalysisService
     from snore.database import models
     from snore.database.session import init_database, session_scope
-    from snore.waveform import UniplotWaveformRenderer, WaveformInspector
+    from snore.waveform import WaveformRenderer, WaveformInspector
     from snore.waveform.inspector import parse_time_offset
 
     if session_id is None and date is None:
@@ -2925,8 +2925,8 @@ def show_waveform(
                 )
 
         if output_format == "plot":
-            renderer = UniplotWaveformRenderer(
-                width=80, height=20, show_events=True, interactive=interactive
+            renderer = WaveformRenderer(
+                width=80, height=20, show_events=True
             )
             renderer.render(
                 timestamps=timestamps,
