@@ -416,6 +416,7 @@ class ResmedEDFParser(DeviceParser):
                         )
                         continue
 
+                session.finalize_statistics()
                 yield session
                 sessions_yielded += 1
 

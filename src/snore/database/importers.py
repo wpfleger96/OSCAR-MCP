@@ -228,6 +228,11 @@ class SessionImporter:
             if session_data.settings:
                 self._import_settings(db, new_session.id, session_data)
 
+            if new_session.day_id:
+                day_record = db.get(models.Day, new_session.day_id)
+                if day_record is not None:
+                    DayManager._aggregate_day_statistics(day_record, db)
+
         logger.info(
             f"Imported session {session_data.device_session_id} from {session_data.start_time}"
         )

@@ -207,7 +207,6 @@ class WaveformData(BaseModel):
     sample_rate: float = Field(ge=0, description="Sample rate (Hz)")
     unit: str = Field(description="Units (e.g., 'L/min', 'cmH2O')")
 
-    # Time-series data - MUST be seconds offset from session start (not datetime!)
     timestamps: list[float] | np.ndarray = Field(
         description="Seconds from session start"
     )
@@ -383,3 +382,53 @@ class UnifiedSession(BaseModel):
     def has_waveform(self, waveform_type: WaveformType) -> bool:
         """Check if session has data for a specific waveform type."""
         return waveform_type in self.waveforms
+
+    def finalize_statistics(self) -> None:
+        """Calculate all statistics from parsed events and waveforms."""
+        event_counts = {"OA": 0, "CA": 0, "H": 0, "RE": 0, "UA": 0}
+        for event in self.events:
+            event_type_str = (
+                event.event_type.value
+                if isinstance(event.event_type, RespiratoryEventType)
+                else event.event_type
+            )
+            if event_type_str in event_counts:
+                event_counts[event_type_str] += 1
+
+        self.statistics.obstructive_apneas = event_counts["OA"]
+        self.statistics.central_apneas = event_counts["CA"]
+        self.statistics.hypopneas = event_counts["H"]
+        self.statistics.reras = event_counts["RE"]
+
+        if self.duration_seconds and self.duration_seconds > 0:
+            hours = self.duration_seconds / 3600
+            total_events = event_counts["OA"] + event_counts["CA"] + event_counts["H"]
+            self.statistics.ahi = total_events / hours if hours > 0 else None
+            self.statistics.oai = event_counts["OA"] / hours if hours > 0 else None
+            self.statistics.cai = event_counts["CA"] / hours if hours > 0 else None
+            self.statistics.hi = event_counts["H"] / hours if hours > 0 else None
+            self.statistics.usage_hours = hours
+
+        pressure_wf = self.waveforms.get(WaveformType.MASK_PRESSURE)
+        if (
+            pressure_wf
+            and pressure_wf.values is not None
+            and len(pressure_wf.values) > 0
+        ):
+            data = pressure_wf.values
+            self.statistics.pressure_min = pressure_wf.min_value
+            self.statistics.pressure_max = pressure_wf.max_value
+            self.statistics.pressure_mean = pressure_wf.mean_value
+            self.statistics.pressure_median = float(np.median(data))
+            self.statistics.pressure_95th = float(np.percentile(data, 95))
+
+        leak_wf = self.waveforms.get(WaveformType.LEAK_RATE)
+        if leak_wf and leak_wf.values is not None and len(leak_wf.values) > 0:
+            data = leak_wf.values
+            self.statistics.leak_min = leak_wf.min_value
+            self.statistics.leak_max = leak_wf.max_value
+            self.statistics.leak_mean = leak_wf.mean_value
+            self.statistics.leak_median = float(np.median(data))
+            self.statistics.leak_95th = float(np.percentile(data, 95))
+
+        self.has_statistics = True
