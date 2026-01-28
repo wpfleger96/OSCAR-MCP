@@ -704,7 +704,6 @@ RDI_EVENT_TYPES = AHI_EVENT_TYPES
 
 # Database stored in user's home directory
 DEFAULT_DATABASE_PATH = str(Path.home() / ".snore" / "snore.db")
-DEFAULT_PROFILE_NAME = "Default"
 
 # Logging configuration
 DEFAULT_LOG_DIR = Path.home() / ".snore" / "logs"

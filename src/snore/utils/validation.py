@@ -2,34 +2,6 @@
 
 from datetime import date, datetime
 
-from snore.database import models
-from snore.database.session import session_scope
-
-
-def validate_profile_exists(profile_name: str) -> models.Profile:
-    """
-    Validate that a profile exists in the database and return it.
-
-    Args:
-        profile_name: Profile username
-
-    Returns:
-        Profile object if found
-
-    Raises:
-        ValueError: If profile does not exist
-    """
-    with session_scope() as session:
-        profile = session.query(models.Profile).filter_by(username=profile_name).first()
-        if not profile:
-            raise ValueError(
-                f"Profile '{profile_name}' not found. "
-                f"Use 'oscar-import status' to list available profiles."
-            )
-        # Detach from session so it can be returned
-        session.expunge(profile)
-    return profile
-
 
 def validate_date_format(date_str: str) -> date:
     """

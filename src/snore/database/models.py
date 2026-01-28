@@ -59,9 +59,6 @@ class Profile(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
 
-    devices = relationship("Device", back_populates="profile")
-    days = relationship("Day", back_populates="profile", cascade="all, delete-orphan")
-
     __table_args__ = (CheckConstraint("length(username) > 0", name="chk_username"),)
 
     def __repr__(self) -> str:
@@ -74,9 +71,6 @@ class Device(Base):
     __tablename__ = "devices"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    profile_id: Mapped[int | None] = mapped_column(
-        ForeignKey("profiles.id", ondelete="CASCADE")
-    )
     manufacturer: Mapped[str] = mapped_column(String)
     model: Mapped[str] = mapped_column(String)
     serial_number: Mapped[str] = mapped_column(String, unique=True)
@@ -86,10 +80,10 @@ class Device(Base):
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     last_import: Mapped[datetime | None] = mapped_column(DateTime)
 
-    profile = relationship("Profile", back_populates="devices")
     sessions = relationship(
         "Session", back_populates="device", cascade="all, delete-orphan"
     )
+    days = relationship("Day", back_populates="device", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint("length(manufacturer) > 0", name="chk_manufacturer"),
@@ -106,9 +100,7 @@ class Day(Base):
     __tablename__ = "days"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    profile_id: Mapped[int] = mapped_column(
-        ForeignKey("profiles.id", ondelete="CASCADE")
-    )
+    device_id: Mapped[int] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
     date: Mapped[date] = mapped_column(Date)
 
     # Pre-calculated statistics (cached for performance)
@@ -148,13 +140,13 @@ class Day(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
 
-    profile = relationship("Profile", back_populates="days")
+    device = relationship("Device", back_populates="days")
     sessions = relationship("Session", back_populates="day")
 
-    __table_args__ = (UniqueConstraint("profile_id", "date", name="uq_profile_date"),)
+    __table_args__ = (UniqueConstraint("device_id", "date", name="uq_device_date"),)
 
     def __repr__(self) -> str:
-        return f"<Day(id={self.id}, profile_id={self.profile_id}, date={self.date}, ahi={self.ahi})>"
+        return f"<Day(id={self.id}, device_id={self.device_id}, date={self.date}, ahi={self.ahi})>"
 
 
 class Session(Base):

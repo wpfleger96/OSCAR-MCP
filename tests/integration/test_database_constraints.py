@@ -43,14 +43,7 @@ class TestForeignKeyConstraints:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -103,14 +96,7 @@ class TestForeignKeyConstraints:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -159,14 +145,7 @@ class TestForeignKeyConstraints:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -216,14 +195,7 @@ class TestForeignKeyConstraints:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -438,14 +410,7 @@ class TestDataIntegrity:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -486,14 +451,7 @@ class TestDataIntegrity:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",

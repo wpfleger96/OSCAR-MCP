@@ -13,7 +13,6 @@ import numpy as np
 
 from sqlalchemy.orm import Session
 
-from snore.constants import DEFAULT_PROFILE_NAME
 from snore.database import models
 from snore.database.day_manager import DayManager
 from snore.database.session import session_scope
@@ -52,34 +51,9 @@ def serialize_waveform(waveform: WaveformData) -> bytes:
 class SessionImporter:
     """Handles importing UnifiedSession objects to database using SQLAlchemy."""
 
-    def __init__(self, profile_id: int | None = None):
-        """
-        Initialize importer.
-
-        Args:
-            profile_id: Optional profile_id to link devices to
-        """
-        self.profile_id = profile_id
-
-    @staticmethod
-    def get_or_create_default_profile(db: Session) -> int:
-        """
-        Get or create the Default profile for SD card imports.
-
-        Returns:
-            Profile ID of the Default profile
-        """
-        profile = (
-            db.query(models.Profile).filter_by(username=DEFAULT_PROFILE_NAME).first()
-        )
-        if not profile:
-            profile = models.Profile(
-                username=DEFAULT_PROFILE_NAME, settings={"day_split_time": "12:00:00"}
-            )
-            db.add(profile)
-            db.flush()
-            logger.info(f"Created default profile '{DEFAULT_PROFILE_NAME}'")
-        return profile.id
+    def __init__(self) -> None:
+        """Initialize importer."""
+        pass
 
     @staticmethod
     def cleanup_orphaned_records(db: Session) -> int:
@@ -131,9 +105,6 @@ class SessionImporter:
         Returns:
             Tuple of (was_imported, day_id)
         """
-        if self.profile_id is None:
-            self.profile_id = self.get_or_create_default_profile(db)
-
         device = (
             db.query(models.Device)
             .filter_by(serial_number=session_data.device_info.serial_number)
@@ -146,8 +117,6 @@ class SessionImporter:
             device.firmware_version = session_data.device_info.firmware_version
             device.hardware_version = session_data.device_info.hardware_version
             device.product_code = session_data.device_info.product_code
-            if self.profile_id:
-                device.profile_id = self.profile_id
             device.last_import = datetime.now(UTC).replace(tzinfo=None)
         else:
             device = models.Device(
@@ -157,7 +126,6 @@ class SessionImporter:
                 firmware_version=session_data.device_info.firmware_version,
                 hardware_version=session_data.device_info.hardware_version,
                 product_code=session_data.device_info.product_code,
-                profile_id=self.profile_id,
             )
             db.add(device)
             db.flush()
@@ -207,16 +175,10 @@ class SessionImporter:
         db.add(new_session)
         db.flush()
 
-        day_id = None
-        if device.profile_id:
-            profile = db.get(models.Profile, device.profile_id)
-            if profile:
-                day_date = DayManager.get_day_for_session(
-                    session_data.start_time, profile
-                )
-                day = DayManager.get_or_create_day(device.profile_id, day_date, db)
-                new_session.day_id = day.id
-                day_id = day.id
+        day_date = DayManager.get_day_for_session(session_data.start_time)
+        day = DayManager.get_or_create_day(device.id, day_date, db)
+        new_session.day_id = day.id
+        day_id = day.id
 
         if session_data.has_waveform_data:
             self._import_waveforms(db, new_session.id, session_data)
@@ -461,19 +423,16 @@ class SessionImporter:
         logger.debug(f"Imported {len(setting_records)} settings")
 
 
-def import_session(
-    session_data: UnifiedSession, profile_id: int | None = None, force: bool = False
-) -> bool:
+def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
     """
     Convenience function to import a session.
 
     Args:
         session_data: UnifiedSession to import
-        profile_id: Optional profile_id to link device to
         force: Force re-import if exists
 
     Returns:
         True if imported, False if skipped
     """
-    importer = SessionImporter(profile_id=profile_id)
+    importer = SessionImporter()
     return importer.import_session(session_data, force=force)

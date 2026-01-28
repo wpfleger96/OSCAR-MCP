@@ -26,19 +26,12 @@ def reset_database_state():
 
 
 @pytest.fixture
-def profile_with_device(temp_db):
-    """Create a profile and device for testing."""
+def test_device_fixture(temp_db):
+    """Create a device for testing."""
     init_database(str(temp_db))
 
     with session_scope() as session:
-        profile = models.Profile(
-            username="testuser", settings={"day_split_time": "12:00:00"}
-        )
-        session.add(profile)
-        session.flush()
-
         device = models.Device(
-            profile_id=profile.id,
             manufacturer="Test",
             model="Test Model",
             serial_number="TEST123",
@@ -46,23 +39,21 @@ def profile_with_device(temp_db):
         session.add(device)
         session.commit()
 
-        return profile.id, device.id
+        return device.id
 
 
 class TestDayRecordCreation:
     """Test that Day records are created and linked properly."""
 
-    def test_create_session_with_day_record(self, temp_db, profile_with_device):
+    def test_create_session_with_day_record(self, temp_db, test_device_fixture):
         """Test that creating a session with day linking works."""
-        profile_id, device_id = profile_with_device
+        device_id = test_device_fixture
 
         start_time = datetime(2025, 10, 15, 22, 0, 0)
 
         with session_scope() as session:
-            profile = session.get(models.Profile, profile_id)
-
-            day_date = DayManager.get_day_for_session(start_time, profile)
-            day = DayManager.create_or_update_day(profile_id, day_date, session)
+            day_date = DayManager.get_day_for_session(start_time)
+            day = DayManager.create_or_update_day(device_id, day_date, session)
 
             new_session = models.Session(
                 device_id=device_id,
@@ -79,25 +70,23 @@ class TestDayRecordCreation:
 
             day = session.query(models.Day).filter_by(id=new_session.day_id).first()
             assert day is not None, "Day record should exist"
-            assert day.profile_id == profile_id
+            assert day.device_id == device_id
             assert day.date == datetime(2025, 10, 15).date()
 
-    def test_link_sessions_to_same_day(self, temp_db, profile_with_device):
+    def test_link_sessions_to_same_day(self, temp_db, test_device_fixture):
         """Test that multiple sessions on same day link to same Day record."""
-        profile_id, device_id = profile_with_device
+        device_id = test_device_fixture
 
         start_time_1 = datetime(2025, 10, 15, 22, 0, 0)
         start_time_2 = datetime(2025, 10, 16, 0, 30, 0)
 
         with session_scope() as session:
-            profile = session.get(models.Profile, profile_id)
-
-            day_date_1 = DayManager.get_day_for_session(start_time_1, profile)
-            day_date_2 = DayManager.get_day_for_session(start_time_2, profile)
+            day_date_1 = DayManager.get_day_for_session(start_time_1)
+            day_date_2 = DayManager.get_day_for_session(start_time_2)
 
             assert day_date_1 == day_date_2, "Both sessions should map to same day"
 
-            day = DayManager.create_or_update_day(profile_id, day_date_1, session)
+            day = DayManager.create_or_update_day(device_id, day_date_1, session)
 
             sess1 = models.Session(
                 device_id=device_id,
@@ -130,72 +119,40 @@ class TestDayRecordCreation:
 class TestDaySplittingLogic:
     """Test day-splitting logic (sessions before noon belong to previous day)."""
 
-    def test_session_after_noon_belongs_to_same_day(self, temp_db, profile_with_device):
+    def test_session_after_noon_belongs_to_same_day(self, temp_db, test_device_fixture):
         """Test that session starting after noon belongs to same day."""
-        profile_id, device_id = profile_with_device
-
         start_time = datetime(2025, 10, 15, 22, 0, 0)
 
-        with session_scope() as session:
-            profile = session.get(models.Profile, profile_id)
+        day_date = DayManager.get_day_for_session(start_time)
 
-            day_date = DayManager.get_day_for_session(start_time, profile)
-
-            expected_date = datetime(2025, 10, 15).date()
-            assert day_date == expected_date
+        expected_date = datetime(2025, 10, 15).date()
+        assert day_date == expected_date
 
     def test_session_before_noon_belongs_to_previous_day(
-        self, temp_db, profile_with_device
+        self, temp_db, test_device_fixture
     ):
         """Test that session starting before noon belongs to previous day."""
-        profile_id, device_id = profile_with_device
-
         start_time = datetime(2025, 10, 16, 9, 0, 0)
 
-        with session_scope() as session:
-            profile = session.get(models.Profile, profile_id)
+        day_date = DayManager.get_day_for_session(start_time)
 
-            day_date = DayManager.get_day_for_session(start_time, profile)
-
-            expected_date = datetime(2025, 10, 15).date()
-            assert day_date == expected_date
-
-    def test_custom_day_split_time(self, temp_db):
-        """Test that custom day_split_time setting is respected."""
-        init_database(str(temp_db))
-
-        with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "14:00:00"}
-            )
-            session.add(profile)
-            session.commit()
-
-            start_time = datetime(2025, 10, 16, 13, 0, 0)
-
-            day_date = DayManager.get_day_for_session(start_time, profile)
-
-            expected_date = datetime(2025, 10, 15).date()
-            assert day_date == expected_date
+        expected_date = datetime(2025, 10, 15).date()
+        assert day_date == expected_date
 
 
-class TestListProfilesIntegration:
-    """Test that list-profiles shows correct counts after import."""
+class TestDeviceDayIntegration:
+    """Test that device-day relationships work correctly."""
 
-    def test_list_profiles_shows_correct_session_count(
-        self, temp_db, profile_with_device
-    ):
-        """Test that list-profiles queries work correctly with day-linked sessions."""
-        profile_id, device_id = profile_with_device
+    def test_device_shows_correct_session_count(self, temp_db, test_device_fixture):
+        """Test that queries work correctly with day-linked sessions."""
+        device_id = test_device_fixture
 
         with session_scope() as session:
-            profile = session.get(models.Profile, profile_id)
-
             for i in range(3):
                 start_time = datetime(2025, 10, 15 + i, 22, 0, 0)
 
-                day_date = DayManager.get_day_for_session(start_time, profile)
-                day = DayManager.create_or_update_day(profile_id, day_date, session)
+                day_date = DayManager.get_day_for_session(start_time)
+                day = DayManager.create_or_update_day(device_id, day_date, session)
 
                 sess = models.Session(
                     device_id=device_id,
@@ -212,7 +169,7 @@ class TestListProfilesIntegration:
             total_sessions = (
                 session.query(models.Session)
                 .join(models.Day)
-                .filter(models.Day.profile_id == profile_id)
+                .filter(models.Day.device_id == device_id)
                 .count()
             )
 
@@ -221,13 +178,13 @@ class TestListProfilesIntegration:
             )
 
             days_count = (
-                session.query(models.Day).filter_by(profile_id=profile_id).count()
+                session.query(models.Day).filter_by(device_id=device_id).count()
             )
             assert days_count == 3, "Should have 3 separate days"
 
-    def test_sessions_without_day_id_not_counted(self, temp_db, profile_with_device):
+    def test_sessions_without_day_id_not_counted(self, temp_db, test_device_fixture):
         """Test that sessions without day_id are not counted (tests the bug we fixed)."""
-        profile_id, device_id = profile_with_device
+        device_id = test_device_fixture
 
         with session_scope() as session:
             orphan_session = models.Session(
@@ -244,7 +201,7 @@ class TestListProfilesIntegration:
             sessions_through_day = (
                 session.query(models.Session)
                 .join(models.Day)
-                .filter(models.Day.profile_id == profile_id)
+                .filter(models.Day.device_id == device_id)
                 .count()
             )
 
@@ -265,73 +222,59 @@ class TestDayManagerFunctions:
         """Test get_day_for_session with time after split."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.commit()
+        session_time = datetime(2025, 10, 15, 22, 0, 0)
+        day_date = DayManager.get_day_for_session(session_time)
 
-            session_time = datetime(2025, 10, 15, 22, 0, 0)
-            day_date = DayManager.get_day_for_session(session_time, profile)
-
-            assert day_date == datetime(2025, 10, 15).date()
+        assert day_date == datetime(2025, 10, 15).date()
 
     def test_get_day_for_session_before_split(self, temp_db):
         """Test get_day_for_session with time before split."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.commit()
+        session_time = datetime(2025, 10, 16, 9, 0, 0)
+        day_date = DayManager.get_day_for_session(session_time)
 
-            session_time = datetime(2025, 10, 16, 9, 0, 0)
-            day_date = DayManager.get_day_for_session(session_time, profile)
+        assert day_date == datetime(2025, 10, 15).date()
 
-            assert day_date == datetime(2025, 10, 15).date()
-
-    def test_create_or_update_day_creates_new(self, temp_db, profile_with_device):
+    def test_create_or_update_day_creates_new(self, temp_db, test_device_fixture):
         """Test that create_or_update_day creates new Day when none exists."""
-        profile_id, device_id = profile_with_device
+        device_id = test_device_fixture
 
         with session_scope() as session:
             day_date = datetime(2025, 10, 16).date()
 
             existing = (
                 session.query(models.Day)
-                .filter_by(profile_id=profile_id, date=day_date)
+                .filter_by(device_id=device_id, date=day_date)
                 .first()
             )
             assert existing is None
 
-            day = DayManager.create_or_update_day(profile_id, day_date, session)
+            day = DayManager.create_or_update_day(device_id, day_date, session)
             session.commit()
 
             assert day.id is not None
-            assert day.profile_id == profile_id
+            assert day.device_id == device_id
             assert day.date == day_date
 
-    def test_create_or_update_day_updates_existing(self, temp_db, profile_with_device):
+    def test_create_or_update_day_updates_existing(self, temp_db, test_device_fixture):
         """Test that create_or_update_day returns existing Day."""
-        profile_id, device_id = profile_with_device
+        device_id = test_device_fixture
 
         with session_scope() as session:
             day_date = datetime(2025, 10, 16).date()
 
-            day1 = DayManager.create_or_update_day(profile_id, day_date, session)
+            day1 = DayManager.create_or_update_day(device_id, day_date, session)
             session.commit()
             day1_id = day1.id
 
-            day2 = DayManager.create_or_update_day(profile_id, day_date, session)
+            day2 = DayManager.create_or_update_day(device_id, day_date, session)
 
             assert day2.id == day1_id
 
             count = (
                 session.query(models.Day)
-                .filter_by(profile_id=profile_id, date=day_date)
+                .filter_by(device_id=device_id, date=day_date)
                 .count()
             )
             assert count == 1

@@ -19,8 +19,6 @@ SNORE analyzes CPAP therapy data, generates reports, and provides insights about
 - **Auto-Detection**: Automatically detects ResMed device type
 - **CLI Tool**: Import, query, delete, and manage CPAP data from command line
 - **Comprehensive Parsing**: Waveforms, events, statistics, and device metadata
-- **Default Profile Configuration**: Save default profile to avoid repeated `--profile` flags
-
 **Supported Devices:** ResMed AirSense 10/11, AirCurve 10/11, S9 series
 
 ### Architecture
@@ -103,6 +101,9 @@ The import will:
 # List all imported sessions
 uv run snore session list
 
+# List sessions for specific device
+uv run snore session list --device 22231974465
+
 # List sessions in date range
 uv run snore session list --from 2024-01-01 --to 2024-12-31
 
@@ -110,74 +111,16 @@ uv run snore session list --from 2024-01-01 --to 2024-12-31
 uv run snore db stats
 ```
 
-### 3. Manage Profiles
-
-SNORE supports multiple user profiles. You can list, create, delete, and manage profiles:
-
-```bash
-# List all profiles
-uv run snore profile list
-
-# Show detailed profile information
-uv run snore profile show <username>
-
-# Create a new profile
-uv run snore profile create <username>
-
-# Create with metadata
-uv run snore profile create <username> --first-name John --last-name Doe
-
-# Delete a profile and all its data
-uv run snore profile delete <username>
-
-# Preview deletion without deleting
-uv run snore profile delete <username> --dry-run
-```
-
-### 4. Configure Default Profile (Optional)
-
-To avoid passing `--profile` every time, set a default profile:
-
-```bash
-# Set default profile
-uv run snore profile set-default <username>
-
-# View current default
-uv run snore profile list
-
-# Remove default
-uv run snore profile unset-default
-
-# Show all configuration
-uv run snore config show
-```
-
-The default profile is stored in `~/.snore/config.toml`. Once set, the `analysis` command will use it automatically:
-
-```bash
-# Before: required --profile flag
-uv run snore analysis run --profile john_doe --all
-
-# After: profile auto-detected
-uv run snore analysis run --all
-```
-
-**Profile Resolution:**
-1. Explicit `--profile` flag takes precedence
-2. Falls back to configured default
-3. Auto-detects if only one profile exists in database
-4. Shows helpful error if multiple profiles and no default set
-
-### 5. Analyze CPAP Sessions
+### 3. Analyze CPAP Sessions
 
 Run programmatic respiratory event detection on imported sessions:
 
 ```bash
-# Analyze specific date (uses default profile)
-uv run snore analysis run --date 2024-12-05
-
 # Analyze specific session by ID
 uv run snore analysis run --session-id 123
+
+# Analyze specific date
+uv run snore analysis run --date 2024-12-05
 
 # Analyze date range
 uv run snore analysis run --from 2024-12-01 --to 2024-12-31
@@ -205,11 +148,14 @@ uv run snore analysis list
 - Flow limitation analysis
 - Complex pattern detection (CSR, periodic breathing)
 
-### 6. Manage Sessions
+### 4. Manage Sessions
 
 ```bash
 # Delete sessions by date range (with preview)
 uv run snore session delete --from 2024-01-01 --to 2024-01-31 --dry-run
+
+# Delete sessions for specific device
+uv run snore session delete --device 22231974465 --dry-run
 
 # Delete specific sessions by ID
 uv run snore session delete --session-id "1,2,3"
@@ -224,7 +170,7 @@ uv run snore session delete --session-id "5" --force
 uv run snore db vacuum
 ```
 
-### 7. Direct Database Access
+### 5. Direct Database Access
 
 Query the SQLite database directly:
 

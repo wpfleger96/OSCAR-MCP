@@ -46,17 +46,7 @@ def _get_user_logging_config() -> dict[str, Any]:
     Returns:
         Dictionary with logging settings, or empty dict if not configured
     """
-    try:
-        from snore.config import load_config
-
-        config = load_config()
-        logging_config = config.get("logging", {})
-
-        if isinstance(logging_config, dict):
-            return logging_config
-        return {}
-    except Exception:
-        return {}
+    return {}
 
 
 def _build_logging_config(

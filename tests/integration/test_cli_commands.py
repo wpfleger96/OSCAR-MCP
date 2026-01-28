@@ -42,14 +42,7 @@ def populated_test_db(temp_db):
     init_database(str(temp_db))
 
     with session_scope() as session:
-        profile = models.Profile(
-            username="testuser", settings={"day_split_time": "12:00:00"}
-        )
-        session.add(profile)
-        session.flush()
-
         device = models.Device(
-            profile_id=profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="TEST12345",
@@ -74,8 +67,8 @@ def populated_test_db(temp_db):
             session.add(sess)
             session.flush()
 
-            day_date = DayManager.get_day_for_session(start_time, profile)
-            day = DayManager.create_or_update_day(profile.id, day_date, session)
+            day_date = DayManager.get_day_for_session(start_time)
+            day = DayManager.create_or_update_day(device.id, day_date, session)
             sess.day_id = day.id
 
             session.add(models.Setting(session_id=sess.id, key="mode", value="CPAP"))
@@ -209,32 +202,6 @@ class TestSessionDeleteCommand:
         assert "Deletion cancelled" in result.output
 
 
-class TestProfileListCommand:
-    """Test profile list command."""
-
-    def test_list_profiles_shows_correct_session_count(
-        self, cli_runner, populated_test_db
-    ):
-        """Test that profile list shows correct session count (tests day linking fix)."""
-        result = cli_runner.invoke(
-            cli, ["profile", "list", "--db", str(populated_test_db)]
-        )
-
-        assert result.exit_code == 0
-        assert "testuser" in result.output
-        assert "Sessions: 10" in result.output
-        assert "Days with data: 10" in result.output
-
-    def test_list_profiles_empty_database(self, cli_runner, temp_db):
-        """Test profile list with empty database."""
-        init_database(str(temp_db))
-
-        result = cli_runner.invoke(cli, ["profile", "list", "--db", str(temp_db)])
-
-        assert result.exit_code == 0
-        assert "No profiles found" in result.output
-
-
 class TestDbStatsCommand:
     """Test db stats command."""
 
@@ -271,12 +238,11 @@ class TestSessionListCommand:
         )
 
         assert result.exit_code == 0
-        assert "testuser" in result.output
 
         session_rows = [
             line
             for line in result.output.split("\n")
-            if "2025-10-" in line and "testuser" in line
+            if "2025-10-" in line and "TEST12345" in line
         ]
         assert len(session_rows) == 10
 
@@ -291,7 +257,7 @@ class TestSessionListCommand:
         session_rows = [
             line
             for line in result.output.split("\n")
-            if "2025-10-" in line and "testuser" in line
+            if "2025-10-" in line and "TEST12345" in line
         ]
         assert len(session_rows) == 5
         assert "Showing 5 of 10 sessions" in result.output
@@ -307,7 +273,7 @@ class TestSessionListCommand:
         session_rows = [
             line
             for line in result.output.split("\n")
-            if "2025-10-" in line and "testuser" in line
+            if "2025-10-" in line and "TEST12345" in line
         ]
         assert len(session_rows) == 10
 
@@ -316,14 +282,7 @@ class TestSessionListCommand:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST",
@@ -354,14 +313,7 @@ def db_with_analysis(temp_db):
     init_database(str(temp_db))
 
     with session_scope() as session:
-        profile = models.Profile(
-            username="testuser", settings={"day_split_time": "12:00:00"}
-        )
-        session.add(profile)
-        session.flush()
-
         device = models.Device(
-            profile_id=profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="TEST12345",
@@ -384,8 +336,8 @@ def db_with_analysis(temp_db):
             session.add(sess)
             session.flush()
 
-            day_date = DayManager.get_day_for_session(start_time, profile)
-            day = DayManager.create_or_update_day(profile.id, day_date, session)
+            day_date = DayManager.get_day_for_session(start_time)
+            day = DayManager.create_or_update_day(device.id, day_date, session)
             sess.day_id = day.id
 
             num_analyses = 3 if i < 2 else 1
@@ -632,14 +584,7 @@ class TestAnalysisDeleteCommand:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST",
@@ -731,7 +676,7 @@ class TestAnalysisCommand:
 
         result = cli_runner.invoke(
             cli,
-            ["analysis", "run", "--db", str(temp_db), "--profile", "testuser"],
+            ["analysis", "run", "--db", str(temp_db)],
         )
 
         assert result.exit_code == 1
@@ -748,8 +693,6 @@ class TestAnalysisCommand:
                 "run",
                 "--db",
                 str(temp_db),
-                "--profile",
-                "testuser",
                 "--session-id",
                 "1",
                 "--date",
@@ -771,8 +714,6 @@ class TestAnalysisCommand:
                 "run",
                 "--db",
                 str(temp_db),
-                "--profile",
-                "testuser",
                 "--session-id",
                 "1",
                 "--from",
@@ -783,25 +724,6 @@ class TestAnalysisCommand:
         assert result.exit_code == 1
         assert "cannot be used with batch flags" in result.output
 
-    def test_analyze_profile_not_found(self, cli_runner, temp_db):
-        """Test error when profile doesn't exist."""
-        init_database(str(temp_db))
-
-        result = cli_runner.invoke(
-            cli,
-            [
-                "analysis",
-                "list",
-                "--db",
-                str(temp_db),
-                "--profile",
-                "nonexistent",
-            ],
-        )
-
-        assert result.exit_code == 1
-        assert "Profile 'nonexistent' not found" in result.output
-
     def test_analyze_list_mode(self, cli_runner, db_with_analysis):
         """Test list subcommand shows analysis status."""
         result = cli_runner.invoke(
@@ -811,8 +733,6 @@ class TestAnalysisCommand:
                 "list",
                 "--db",
                 str(db_with_analysis),
-                "--profile",
-                "testuser",
             ],
         )
 
@@ -829,8 +749,6 @@ class TestAnalysisCommand:
                 "list",
                 "--db",
                 str(db_with_analysis),
-                "--profile",
-                "testuser",
                 "--from",
                 "2025-10-01",
                 "--to",
@@ -876,8 +794,6 @@ class TestAnalysisCommand:
                 "show",
                 "--db",
                 str(db_with_analysis),
-                "--profile",
-                "testuser",
                 "--date",
                 "2025-10-01",
             ],
@@ -892,14 +808,7 @@ class TestAnalysisCommand:
         init_database(str(temp_db))
 
         with session_scope() as session:
-            profile = models.Profile(
-                username="testuser", settings={"day_split_time": "12:00:00"}
-            )
-            session.add(profile)
-            session.flush()
-
             device = models.Device(
-                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST",

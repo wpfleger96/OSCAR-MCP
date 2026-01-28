@@ -14,94 +14,47 @@ from snore.database.day_manager import DayManager
 
 
 class TestDaySplitLogic:
-    """Test day-splitting algorithm (OSCAR-compatible noon boundary logic)."""
+    """Test day-splitting algorithm (hardcoded noon boundary logic)."""
 
-    def test_default_noon_split_before(self, db_session, test_profile_factory):
+    def test_default_noon_split_before(self, db_session):
         """Session before noon belongs to previous calendar day."""
-        profile = test_profile_factory(username="test_user", day_split_time="12:00:00")
-
         session_start = datetime(2024, 11, 5, 11, 59, 0)
 
-        result = DayManager.get_day_for_session(session_start, profile)
+        result = DayManager.get_day_for_session(session_start)
 
         assert result == date(2024, 11, 4)
 
-    def test_default_noon_split_at_boundary(self, db_session, test_profile_factory):
+    def test_default_noon_split_at_boundary(self, db_session):
         """Session exactly at noon belongs to same calendar day."""
-        profile = test_profile_factory(username="test_user", day_split_time="12:00:00")
-
         session_start = datetime(2024, 11, 5, 12, 0, 0)
 
-        result = DayManager.get_day_for_session(session_start, profile)
+        result = DayManager.get_day_for_session(session_start)
 
         assert result == date(2024, 11, 5)
 
-    def test_default_noon_split_after(self, db_session, test_profile_factory):
+    def test_default_noon_split_after(self, db_session):
         """Session after noon belongs to same calendar day."""
-        profile = test_profile_factory(username="test_user", day_split_time="12:00:00")
-
         session_start = datetime(2024, 11, 5, 12, 1, 0)
 
-        result = DayManager.get_day_for_session(session_start, profile)
+        result = DayManager.get_day_for_session(session_start)
 
         assert result == date(2024, 11, 5)
 
-    def test_custom_split_time_6am(self, db_session, test_profile_factory):
-        """Custom 6 AM split time."""
-        profile = test_profile_factory(username="test_user", day_split_time="06:00:00")
-
-        session_before = datetime(2024, 11, 5, 5, 59, 0)
-        assert DayManager.get_day_for_session(session_before, profile) == date(
-            2024, 11, 4
-        )
-
-        session_at = datetime(2024, 11, 5, 6, 0, 0)
-        assert DayManager.get_day_for_session(session_at, profile) == date(2024, 11, 5)
-
-    def test_custom_split_time_2pm(self, db_session, test_profile_factory):
-        """Custom 2 PM split time."""
-        profile = test_profile_factory(username="test_user", day_split_time="14:00:00")
-
-        session_before = datetime(2024, 11, 5, 13, 59, 0)
-        assert DayManager.get_day_for_session(session_before, profile) == date(
-            2024, 11, 4
-        )
-
-        session_at = datetime(2024, 11, 5, 14, 0, 0)
-        assert DayManager.get_day_for_session(session_at, profile) == date(2024, 11, 5)
-
-    def test_midnight_session_with_noon_split(self, db_session, test_profile_factory):
+    def test_midnight_session_with_noon_split(self, db_session):
         """Midnight session (00:00) with noon split belongs to previous day."""
-        profile = test_profile_factory(username="test_user", day_split_time="12:00:00")
-
         session_start = datetime(2024, 11, 5, 0, 0, 0)
 
-        result = DayManager.get_day_for_session(session_start, profile)
+        result = DayManager.get_day_for_session(session_start)
 
         assert result == date(2024, 11, 4)
 
-    def test_late_night_session_23_59(self, db_session, test_profile_factory):
+    def test_late_night_session_23_59(self, db_session):
         """Late night session (23:59) with noon split belongs to same day."""
-        profile = test_profile_factory(username="test_user", day_split_time="12:00:00")
-
         session_start = datetime(2024, 11, 5, 23, 59, 0)
 
-        result = DayManager.get_day_for_session(session_start, profile)
+        result = DayManager.get_day_for_session(session_start)
 
         assert result == date(2024, 11, 5)
-
-    def test_missing_settings_uses_default(self, db_session, test_profile_factory):
-        """Profile without day_split_time setting uses default noon."""
-        profile = test_profile_factory(username="test_user")
-        profile.settings = {}
-
-        session_before = datetime(2024, 11, 5, 11, 59, 0)
-        assert DayManager.get_day_for_session(session_before, profile) == date(
-            2024, 11, 4
-        )
-
-        session_at = datetime(2024, 11, 5, 12, 0, 0)
-        assert DayManager.get_day_for_session(session_at, profile) == date(2024, 11, 5)
 
 
 class TestStatisticalAggregation:
@@ -111,7 +64,7 @@ class TestStatisticalAggregation:
         self, db_session, test_device, test_session_factory
     ):
         """Single session aggregation should copy statistics directly."""
-        device, profile = test_device
+        device = test_device
 
         session_start = datetime(2024, 11, 5, 12, 0, 0)
         session = test_session_factory(
@@ -135,7 +88,7 @@ class TestStatisticalAggregation:
             leak_median=5.0,
         )
 
-        day = DayManager.link_session_to_day(session, profile, db_session)
+        day = DayManager.link_session_to_day(session, device.id, db_session)
 
         assert day.session_count == 1
         assert day.total_therapy_hours == pytest.approx(8.0, abs=0.01)
@@ -151,7 +104,7 @@ class TestStatisticalAggregation:
         self, db_session, test_device, test_session_factory
     ):
         """Event counts should sum across sessions."""
-        device, profile = test_device
+        device = test_device
 
         session1 = test_session_factory(
             device_id=device.id,
@@ -173,8 +126,8 @@ class TestStatisticalAggregation:
             reras=5,
         )
 
-        day = DayManager.link_session_to_day(session1, profile, db_session)
-        day = DayManager.link_session_to_day(session2, profile, db_session)
+        day = DayManager.link_session_to_day(session1, device.id, db_session)
+        day = DayManager.link_session_to_day(session2, device.id, db_session)
 
         assert day.session_count == 2
         assert day.obstructive_apneas == 25
@@ -184,7 +137,7 @@ class TestStatisticalAggregation:
 
     def test_weighted_average_ahi(self, db_session, test_device, test_session_factory):
         """AHI should be weighted by session duration."""
-        device, profile = test_device
+        device = test_device
 
         session1 = test_session_factory(
             device_id=device.id,
@@ -200,8 +153,8 @@ class TestStatisticalAggregation:
             ahi=4.0,
         )
 
-        day = DayManager.link_session_to_day(session1, profile, db_session)
-        day = DayManager.link_session_to_day(session2, profile, db_session)
+        day = DayManager.link_session_to_day(session1, device.id, db_session)
+        day = DayManager.link_session_to_day(session2, device.id, db_session)
 
         assert day.ahi == pytest.approx(8.0, abs=0.01)
 
@@ -209,7 +162,7 @@ class TestStatisticalAggregation:
         self, db_session, test_device, test_session_factory
     ):
         """Pressure min/max should be extremes across all sessions."""
-        device, profile = test_device
+        device = test_device
 
         session1 = test_session_factory(
             device_id=device.id,
@@ -229,8 +182,8 @@ class TestStatisticalAggregation:
             pressure_median=9.0,
         )
 
-        day = DayManager.link_session_to_day(session1, profile, db_session)
-        day = DayManager.link_session_to_day(session2, profile, db_session)
+        day = DayManager.link_session_to_day(session1, device.id, db_session)
+        day = DayManager.link_session_to_day(session2, device.id, db_session)
 
         assert day.pressure_min == pytest.approx(6.0, abs=0.01)
         assert day.pressure_max == pytest.approx(15.0, abs=0.01)
@@ -239,7 +192,7 @@ class TestStatisticalAggregation:
         self, db_session, test_device, test_session_factory
     ):
         """Day with no sessions should have reset statistics."""
-        device, profile = test_device
+        device = test_device
 
         session = test_session_factory(
             device_id=device.id,
@@ -249,7 +202,7 @@ class TestStatisticalAggregation:
             ahi=5.0,
         )
 
-        day = DayManager.link_session_to_day(session, profile, db_session)
+        day = DayManager.link_session_to_day(session, device.id, db_session)
         assert day.session_count == 1
         assert day.obstructive_apneas == 10
 
@@ -266,7 +219,7 @@ class TestStatisticalAggregation:
         self, db_session, test_device, test_session_factory
     ):
         """Sessions with missing statistics should be handled gracefully."""
-        device, profile = test_device
+        device = test_device
 
         session1 = test_session_factory(
             device_id=device.id,
@@ -281,8 +234,8 @@ class TestStatisticalAggregation:
             duration_hours=4.0,
         )
 
-        day = DayManager.link_session_to_day(session1, profile, db_session)
-        day = DayManager.link_session_to_day(session2, profile, db_session)
+        day = DayManager.link_session_to_day(session1, device.id, db_session)
+        day = DayManager.link_session_to_day(session2, device.id, db_session)
 
         assert day.ahi == pytest.approx(8.0, abs=0.01)
 
@@ -290,7 +243,7 @@ class TestStatisticalAggregation:
         self, db_session, test_device, test_session_factory
     ):
         """Sessions with zero duration should not cause division by zero."""
-        device, profile = test_device
+        device = test_device
 
         session = test_session_factory(
             device_id=device.id,
@@ -299,7 +252,7 @@ class TestStatisticalAggregation:
             ahi=5.0,
         )
 
-        day = DayManager.link_session_to_day(session, profile, db_session)
+        day = DayManager.link_session_to_day(session, device.id, db_session)
 
         assert day.total_therapy_hours == pytest.approx(0.0, abs=0.01)
 
@@ -307,7 +260,7 @@ class TestStatisticalAggregation:
         self, db_session, test_device, test_session_factory
     ):
         """Total therapy hours should sum all session durations."""
-        device, profile = test_device
+        device = test_device
 
         session1 = test_session_factory(
             device_id=device.id,
@@ -327,9 +280,9 @@ class TestStatisticalAggregation:
             duration_hours=1.5,
         )
 
-        day = DayManager.link_session_to_day(session1, profile, db_session)
-        day = DayManager.link_session_to_day(session2, profile, db_session)
-        day = DayManager.link_session_to_day(session3, profile, db_session)
+        day = DayManager.link_session_to_day(session1, device.id, db_session)
+        day = DayManager.link_session_to_day(session2, device.id, db_session)
+        day = DayManager.link_session_to_day(session3, device.id, db_session)
 
         assert day.total_therapy_hours == pytest.approx(8.0, abs=0.01)
         assert day.session_count == 3

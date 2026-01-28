@@ -893,9 +893,9 @@ class TestClassifyApneaType:
 
     def test_classify_mixed(self, aasm_detector):
         """Medium effort should be classified as MA."""
-        flow_signal = np.array(
-            [0.06, -0.06, 0.07, -0.05, 0.06, -0.06, 0.07, -0.05, 0.06, -0.06]
-        )
+        # Signal with moderate variation to produce effort score in MA range (0.05-0.15)
+        # std ≈ 3.5, range ≈ 7, normalizes to effort ≈ 0.08-0.10
+        flow_signal = np.array([3.0, -3.0, 3.5, -2.5, 3.0, -3.0, 3.5, -2.5, 3.0, -3.0])
 
         apnea_type, confidence = aasm_detector._classify_apnea_type(
             flow_signal=flow_signal, sample_rate=25.0

@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timedelta
 
 from sqlalchemy.orm import Session
 
-from snore.database.models import Day, Profile, Statistics
+from snore.database.models import Day, Statistics
 from snore.database.models import Session as SessionModel
 
 
@@ -18,38 +18,27 @@ class DayManager:
     DEFAULT_SPLIT_TIME = time(12, 0)
 
     @classmethod
-    def get_day_for_session(cls, session_start: datetime, profile: Profile) -> date:
+    def get_day_for_session(cls, session_start: datetime) -> date:
         """
         Determine which calendar day a session belongs to based on split time.
 
         OSCAR logic: Sessions before the split time belong to the previous day.
-        Default split time is 12:00 noon.
+        Split time is hardcoded to 12:00 noon.
 
         Args:
             session_start: Session start datetime
-            profile: Profile with settings containing optional day_split_time
 
         Returns:
             Date the session belongs to
         """
-        split_time = cls.DEFAULT_SPLIT_TIME
-        if profile.settings and isinstance(profile.settings, dict):
-            settings_split = profile.settings.get("day_split_time")
-            if settings_split:
-                if isinstance(settings_split, str):
-                    hour, minute, *_ = map(int, settings_split.split(":") + [0])
-                    split_time = time(hour, minute)
-                elif isinstance(settings_split, time):
-                    split_time = settings_split
-
-        if session_start.time() < split_time:
+        if session_start.time() < cls.DEFAULT_SPLIT_TIME:
             return session_start.date() - timedelta(days=1)
         return session_start.date()
 
     @classmethod
     def get_or_create_day(
         cls,
-        profile_id: int,
+        device_id: int,
         day_date: date,
         db_session: Session,
     ) -> Day:
@@ -60,7 +49,7 @@ class DayManager:
         or when aggregation will be handled separately.
 
         Args:
-            profile_id: Profile ID
+            device_id: Device ID
             day_date: Date for the day record
             db_session: SQLAlchemy database session
 
@@ -68,13 +57,11 @@ class DayManager:
             Day object (without aggregated statistics)
         """
         day = (
-            db_session.query(Day)
-            .filter_by(profile_id=profile_id, date=day_date)
-            .first()
+            db_session.query(Day).filter_by(device_id=device_id, date=day_date).first()
         )
 
         if not day:
-            day = Day(profile_id=profile_id, date=day_date)
+            day = Day(device_id=device_id, date=day_date)
             db_session.add(day)
             db_session.flush()
 
@@ -83,7 +70,7 @@ class DayManager:
     @classmethod
     def create_or_update_day(
         cls,
-        profile_id: int,
+        device_id: int,
         day_date: date,
         db_session: Session,
     ) -> Day:
@@ -91,14 +78,14 @@ class DayManager:
         Create or update a day record with aggregated statistics from all sessions.
 
         Args:
-            profile_id: Profile ID
+            device_id: Device ID
             day_date: Date for the day record
             db_session: SQLAlchemy database session
 
         Returns:
             Updated Day object
         """
-        day = cls.get_or_create_day(profile_id, day_date, db_session)
+        day = cls.get_or_create_day(device_id, day_date, db_session)
         cls._aggregate_day_statistics(day, db_session)
         return day
 
@@ -225,7 +212,7 @@ class DayManager:
     def link_session_to_day(
         cls,
         session: SessionModel,
-        profile: Profile,
+        device_id: int,
         db_session: Session,
     ) -> Day:
         """
@@ -235,15 +222,15 @@ class DayManager:
 
         Args:
             session: Session to link
-            profile: Profile the session belongs to
+            device_id: Device ID the session belongs to
             db_session: SQLAlchemy database session
 
         Returns:
             Day object the session was linked to
         """
-        day_date = cls.get_day_for_session(session.start_time, profile)
+        day_date = cls.get_day_for_session(session.start_time)
 
-        day = cls.get_or_create_day(profile.id, day_date, db_session)
+        day = cls.get_or_create_day(device_id, day_date, db_session)
 
         session.day_id = day.id
 
@@ -252,22 +239,22 @@ class DayManager:
         return day
 
     @classmethod
-    def recalculate_all_days_for_profile(
-        cls, profile_id: int, db_session: Session
+    def recalculate_all_days_for_device(
+        cls, device_id: int, db_session: Session
     ) -> int:
         """
-        Recalculate all day records for a profile.
+        Recalculate all day records for a device.
 
         Useful after bulk session imports or data corrections.
 
         Args:
-            profile_id: Profile ID to recalculate
+            device_id: Device ID to recalculate
             db_session: SQLAlchemy database session
 
         Returns:
             Number of day records updated
         """
-        days = db_session.query(Day).filter_by(profile_id=profile_id).all()
+        days = db_session.query(Day).filter_by(device_id=device_id).all()
 
         for day in days:
             cls._aggregate_day_statistics(day, db_session)

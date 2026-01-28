@@ -12,53 +12,7 @@ import pytest
 from snore.utils.validation import (
     validate_date_format,
     validate_date_range,
-    validate_profile_exists,
 )
-
-
-class TestProfileValidation:
-    """Test profile existence validation."""
-
-    def test_validate_existing_profile(self, initialized_db):
-        """Valid profile should be returned."""
-        from snore.database.models import Profile
-
-        profile = Profile(
-            username="test_user_validation", first_name="Test", last_name="User"
-        )
-        initialized_db.add(profile)
-        initialized_db.commit()
-
-        result = validate_profile_exists("test_user_validation")
-
-        assert result is not None
-        assert result.username == "test_user_validation"
-        assert result.first_name == "Test"
-        assert result.last_name == "User"
-
-    def test_validate_nonexistent_profile_raises_error(self, initialized_db):
-        """Non-existent profile should raise ValueError."""
-        with pytest.raises(ValueError) as exc_info:
-            validate_profile_exists("nonexistent_user")
-
-        error_msg = str(exc_info.value)
-        assert "not found" in error_msg.lower()
-        assert "nonexistent_user" in error_msg
-        assert "oscar-import status" in error_msg.lower()
-
-    def test_validate_profile_case_sensitive(self, initialized_db):
-        """Profile validation should be case-sensitive."""
-        from snore.database.models import Profile
-
-        profile = Profile(username="TestUser")
-        initialized_db.add(profile)
-        initialized_db.commit()
-
-        result = validate_profile_exists("TestUser")
-        assert result.username == "TestUser"
-
-        with pytest.raises(ValueError):
-            validate_profile_exists("testuser")
 
 
 class TestDateValidation:

@@ -160,22 +160,20 @@ def test_profile_factory(db_session):
 
 
 @pytest.fixture
-def test_device(db_session, test_profile_factory):
-    """Create a test device linked to a test profile."""
+def test_device(db_session):
+    """Create a test device."""
     import uuid
 
     from snore.database.models import Device
 
-    profile = test_profile_factory()
     device = Device(
-        profile_id=profile.id,
         manufacturer="Test Manufacturer",
         model="Test Model",
         serial_number=f"TEST_{uuid.uuid4().hex[:8]}",
     )
     db_session.add(device)
     db_session.flush()
-    return device, profile
+    return device
 
 
 @pytest.fixture
