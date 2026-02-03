@@ -22,7 +22,8 @@ uv run snore session list                      # List sessions
 uv run snore analysis run --session-id <id>    # Analyze session
 uv run snore analysis list                     # List sessions with analysis status
 uv run snore analysis show --date YYYY-MM-DD   # Show analysis results
-uv run snore profile set-default <name>        # Set default profile
+uv run snore waveform show --date YYYY-MM-DD --time HH:MM:SS  # Visualize waveform
+uv run snore waveform compare --session-id <id> --mode aasm   # Compare detection
 uv run snore db drop                           # Drop database (with confirmation)
 uv run snore db init                           # Initialize database
 uv run snore setup --github                    # Install as uv tool from GitHub
@@ -165,7 +166,7 @@ uv run pytest tests/ --cov=snore             # With coverage
 
 Markers: `unit`, `integration`, `parser`, `recorded`, `real_data`, `slow`
 
-Key fixtures: `db_session`, `test_profile_factory`, `test_session_factory`, `recorded_session("YYYYMMDD")`
+Key fixtures: `db_session`, `test_device`, `test_session_factory`, `recorded_session("YYYYMMDD")`
 
 ## Common Gotchas
 
@@ -173,7 +174,7 @@ Key fixtures: `db_session`, `test_profile_factory`, `test_session_factory`, `rec
 2. **Refresh after relationship changes:** `db_session.refresh(session)` after adding statistics
 3. **Integration test isolation:** Use `reset_database_state()` autouse fixture pattern
 4. **WAL cleanup:** Temp databases need `-wal` and `-shm` file cleanup
-5. **Profile resolution:** CLI flag > config > auto-detect fallback chain
+5. **Profile management removed:** Profiles are now optional (device-centric model). Days link directly to devices via `device_id`, not `profile_id`
 6. **Type safety:** Use proper types (`list[BreathMetrics]` not `list[Any]`) - mypy strict mode enabled
 7. **Pydantic validation:** Use `model_construct()` to bypass validation when testing invalid data
 8. **Local development vs installed tool** - **CRITICAL**: Always use `uv run snore` when developing locally:
@@ -199,7 +200,7 @@ Key fixtures: `db_session`, `test_profile_factory`, `test_session_factory`, `rec
 | Add event type | `src/snore/analysis/shared/types.py` (event models), update `detector.py`, add to `EventTimeline` |
 | Tune detection thresholds | `src/snore/analysis/modes/config.py` (DetectionModeConfig fields), validate with `validate_against_machine_events()` |
 | Modify data models | `src/snore/models/unified.py` (data), `database/models.py` (ORM), use Pydantic |
-| Add configuration setting | `src/snore/config.py` (stored in ~/.snore/config.toml) |
+| Add waveform visualization | `src/snore/waveform/renderer.py` (ASCII/plotext), `inspector.py` (data loading) |
 | Add test fixture | `tests/conftest.py`, `tests/helpers/` |
 | Modify channel IDs | `src/snore/constants.py` (must align with OSCAR's schema.h) |
 | Update algorithm documentation | `docs/apnea_detection_reference.md` (add inline citations [#]) |
