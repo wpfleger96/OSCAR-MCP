@@ -146,6 +146,7 @@ class ResmedEDFParser(DeviceParser):
         super().__init__()
         self._data_root: Path | None = None
         self._root_metadata: DataRoot | None = None
+        self._all_roots: list[DataRoot] = []
         self._finder = DataRootFinder()
 
     def get_metadata(self) -> ParserMetadata:
@@ -205,12 +206,22 @@ class ResmedEDFParser(DeviceParser):
 
         self._data_root = roots[0].path
         self._root_metadata = roots[0]
+        self._all_roots = roots
 
         metadata_dict = {
             "data_root": str(self._data_root),
             "structure_type": self._root_metadata.structure_type,
             "profile_name": self._root_metadata.profile_name,
             "device_serial": self._root_metadata.device_serial,
+            "all_roots": [str(r.path) for r in roots],
+            "root_metadata": {
+                str(r.path): {
+                    "profile_name": r.profile_name,
+                    "structure_type": r.structure_type,
+                    "device_serial": r.device_serial,
+                }
+                for r in roots
+            },
         }
 
         if self._data_root != path:
@@ -380,7 +391,17 @@ class ResmedEDFParser(DeviceParser):
             sort_by: Sort order (date-asc, date-desc, or None)
             parallel: Enable parallel parsing (default: True)
         """
-        path = Path(self._data_root if self._data_root else path)
+        path = Path(path)
+
+        if self._all_roots:
+            matching_roots = [r for r in self._all_roots if r.path == path]
+            if matching_roots:
+                path = matching_roots[0].path
+            elif self._data_root:
+                path = self._data_root
+        elif self._data_root:
+            path = self._data_root
+
         datalog_dir = path / "DATALOG"
 
         if not datalog_dir.exists():

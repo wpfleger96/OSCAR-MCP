@@ -33,5 +33,15 @@ def register_all_parsers() -> None:
     except Exception as e:
         logger.error(f"Failed to register ResMed EDF+ parser: {e}", exc_info=True)
 
+    try:
+        from snore.parsers.oscar_device import OscarDeviceParser
+
+        parser_registry.register(OscarDeviceParser())
+        logger.info("Registered OSCAR binary parser")
+    except ImportError as e:
+        logger.warning(f"OSCAR binary parser not available: {e}")
+    except Exception as e:
+        logger.error(f"Failed to register OSCAR binary parser: {e}", exc_info=True)
+
     registered_count = len(parser_registry.list_parsers())
     logger.info(f"Parser registration complete: {registered_count} parser(s) available")

@@ -73,9 +73,9 @@ class OscarSummaryParser:
             last_timestamp=header["last_timestamp"],
         )
 
-        self._skip_to_statistics(stream)
-
         reader = QDataStreamReader(stream)
+
+        summary.settings = self._parse_settings(reader)
 
         try:
             if summary.version >= 18:
@@ -116,66 +116,22 @@ class OscarSummaryParser:
 
         return summary
 
-    def _skip_to_statistics(self, stream: Any) -> None:
+    def _parse_settings(self, reader: QDataStreamReader) -> dict[int, Any]:
         """
-        Skip past settings section to find where statistics begin.
+        Parse settings QHash<ChannelID, QVariant> from summary file.
 
-        Settings contain custom Qt types that we can't reliably parse.
-        Statistics start with m_cnt which is QHash<uint32, float>.
-
-        We search for a pattern:
-        - A small count (5-50 channels is reasonable)
-        - Followed by channel IDs in range 0x1000-0x3000
-        - Followed by reasonable float values
+        Returns:
+            Dictionary mapping channel IDs to setting values
         """
-        start_pos = stream.tell()
+        count = reader.read_uint32()
+        settings = {}
 
-        data = stream.read()
+        for _ in range(count):
+            key = reader.read_uint32()
+            value = reader.read_qvariant()
+            settings[key] = value
 
-        for offset in range(0, len(data) - 100, 4):
-            count_bytes = data[offset : offset + 4]
-            if len(count_bytes) < 4:
-                continue
-
-            count = struct.unpack("<I", count_bytes)[0]
-
-            if not (5 <= count <= 50):
-                continue
-
-            valid = True
-            pos = offset + 4
-            for _ in range(min(3, count)):
-                if pos + 8 > len(data):
-                    valid = False
-                    break
-
-                channel_id = struct.unpack("<I", data[pos : pos + 4])[0]
-                value_bytes = data[pos + 4 : pos + 8]
-                try:
-                    value = struct.unpack("<f", value_bytes)[0]
-                except struct.error:
-                    valid = False
-                    break
-
-                if not (
-                    (0x0001 <= channel_id <= 0x0100) or (0x1000 <= channel_id <= 0x3000)
-                ):
-                    valid = False
-                    break
-
-                import math
-
-                if value < 0 or not math.isfinite(value) or value > 1000000:
-                    valid = False
-                    break
-
-                pos += 8
-
-            if valid:
-                stream.seek(start_pos + offset)
-                return
-
-        raise OscarSummaryParseError("Could not locate statistics section in file")
+        return settings
 
     def _parse_header(self, stream: Any) -> dict[str, Any]:
         """

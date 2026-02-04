@@ -198,6 +198,12 @@ def upgrade(check: bool, force: bool) -> None:
     default=50,
     help="Number of sessions per database transaction (default: 50)",
 )
+@click.option(
+    "--all",
+    "select_all",
+    is_flag=True,
+    help="Import all detected data sources without prompting",
+)
 def import_data(
     path: str,
     force: bool,
@@ -209,6 +215,7 @@ def import_data(
     dry_run: bool,
     no_parallel: bool,
     batch_size: int,
+    select_all: bool,
 ) -> int:
     """Import CPAP data from device SD card or directory."""
     from snore.database.importers import SessionImporter
@@ -228,35 +235,84 @@ def import_data(
             click.echo(f"  - {p.manufacturer}: {p.parser_id}")
         return 1
 
-    selected_results = []
-    if len(results) > 1:
-        click.echo(f"\nFound {len(results)} data sources:\n")
-        for i, (parser, detection) in enumerate(results, 1):
-            meta = detection.metadata or {}
-            if meta.get("profile_name"):
-                desc = f"{meta['profile_name']} ({meta.get('structure_type', 'unknown').replace('_', ' ')})"
-            else:
-                structure = meta.get("structure_type", "raw SD card").replace("_", " ")
-                serial = meta.get("device_serial", "unknown")
-                desc = f"{structure} - S/N: {serial}"
+    expanded_sources = []
+    for parser, detection in results:
+        meta = detection.metadata or {}
+        all_roots = meta.get("all_roots", [])
 
-            click.echo(f"  {i}. {parser.manufacturer} - {desc}")
-            if meta.get("data_root"):
-                click.echo(f"     Path: {meta['data_root']}")
-
-        click.echo(f"  {len(results) + 1}. Import all")
-
-        choice = click.prompt("\nSelect which to import", type=int, default=1)
-
-        if choice == len(results) + 1:
-            selected_results = results
-        elif 1 <= choice <= len(results):
-            selected_results = [results[choice - 1]]
+        if not all_roots:
+            expanded_sources.append(
+                {
+                    "parser": parser,
+                    "detection": detection,
+                    "root_path": meta.get("data_root"),
+                    "profile_name": meta.get("profile_name"),
+                    "structure_type": meta.get("structure_type"),
+                    "device_serial": meta.get("device_serial"),
+                }
+            )
         else:
-            click.echo(f"❌ Invalid choice: {choice}", err=True)
-            return 1
+            root_metadata = meta.get("root_metadata", {})
+            for root_path in all_roots:
+                root_info = root_metadata.get(root_path, {})
+                expanded_sources.append(
+                    {
+                        "parser": parser,
+                        "detection": detection,
+                        "root_path": root_path,
+                        "profile_name": root_info.get(
+                            "profile_name", meta.get("profile_name")
+                        ),
+                        "structure_type": root_info.get(
+                            "structure_type", meta.get("structure_type")
+                        ),
+                        "device_serial": root_info.get(
+                            "device_serial", meta.get("device_serial")
+                        ),
+                    }
+                )
+
+    selected_sources = []
+    if len(expanded_sources) > 1:
+        click.echo(f"\nFound {len(expanded_sources)} data sources:\n")
+        for i, source in enumerate(expanded_sources, 1):
+            profile = source.get("profile_name") or "unknown"
+            structure_type = source.get("structure_type")
+            structure = str(structure_type or "unknown").replace("_", " ")
+            parser_obj = source.get("parser")
+            parser_name = parser_obj.manufacturer if parser_obj else "unknown"  # type: ignore[union-attr]
+
+            click.echo(f"  {i}. {parser_name} - {profile} ({structure})")
+            root = source.get("root_path")
+            if root:
+                click.echo(f"     Path: {root}")
+
+        if select_all:
+            selected_sources = expanded_sources
+        else:
+            selection = click.prompt(
+                "\nSelect sources to import (comma-separated numbers, or 'all')",
+                default="all",
+            )
+
+            if selection.lower() == "all":
+                selected_sources = expanded_sources
+            else:
+                try:
+                    indices = [int(x.strip()) - 1 for x in selection.split(",")]
+                    selected_sources = [
+                        expanded_sources[i]
+                        for i in indices
+                        if 0 <= i < len(expanded_sources)
+                    ]
+                    if not selected_sources:
+                        click.echo("❌ Invalid selection: no valid indices", err=True)
+                        return 1
+                except (ValueError, IndexError):
+                    click.echo(f"❌ Invalid selection: {selection}", err=True)
+                    return 1
     else:
-        selected_results = results
+        selected_sources = expanded_sources
 
     init_database(str(Path(db)) if db else None)
 
@@ -269,23 +325,26 @@ def import_data(
     total_skipped = 0
     total_failed = 0
 
-    for parser, detection in selected_results:
-        meta = detection.metadata or {}
+    for source in selected_sources:
+        parser = source.get("parser")  # type: ignore[assignment]
+        if not parser:
+            continue
         source_desc = (
-            meta.get("profile_name") or f"S/N {meta.get('device_serial', 'unknown')}"
+            source.get("profile_name")
+            or f"S/N {source.get('device_serial', 'unknown')}"
         )
 
-        if len(selected_results) > 1:
+        if len(selected_sources) > 1:
             click.echo(f"\n{'=' * 60}")
             click.echo(f"Processing: {source_desc}")
             click.echo(f"{'=' * 60}")
 
         click.echo(f"✓ Detected: {parser.manufacturer} ({parser.parser_id})")
-        click.echo(
-            f"  Structure: {meta.get('structure_type', 'unknown').replace('_', ' ')}"
-        )
-        if meta.get("data_root"):
-            click.echo(f"  Data root: {meta['data_root']}")
+        structure_val = source.get("structure_type")
+        click.echo(f"  Structure: {str(structure_val or 'unknown').replace('_', ' ')}")
+        root_val = source.get("root_path")
+        if root_val:
+            click.echo(f"  Data root: {root_val}")
 
         date_from_str = date_from.strftime("%Y-%m-%d") if date_from else None
         date_to_str = date_to.strftime("%Y-%m-%d") if date_to else None
@@ -304,9 +363,10 @@ def import_data(
 
         click.echo("\n📋 Parsing sessions...")
         try:
+            root_path = source.get("root_path")
             sessions = list(
                 parser.parse_sessions(
-                    data_path,
+                    Path(str(root_path)) if root_path else data_path,
                     date_from=date_from_str,
                     date_to=date_to_str,
                     limit=limit,
@@ -318,13 +378,13 @@ def import_data(
             click.echo(f"❌ Error parsing sessions: {e}", err=True)
             if logging.getLogger().level == logging.DEBUG:
                 raise
-            if len(selected_results) > 1:
+            if len(selected_sources) > 1:
                 continue
             return 1
 
         if not sessions:
             click.echo("⚠️  No sessions found")
-            if len(selected_results) > 1:
+            if len(selected_sources) > 1:
                 continue
             return 0
 
@@ -381,7 +441,7 @@ def import_data(
                 click.echo(
                     f"  • Date range: {first_date:%Y-%m-%d} to {last_date:%Y-%m-%d}"
                 )
-            if len(selected_results) == 1:
+            if len(selected_sources) == 1:
                 click.echo("\n✓ Dry run complete. Use without --dry-run to import.")
             continue
 
@@ -400,7 +460,7 @@ def import_data(
         total_skipped += skipped
         total_failed += failed
 
-        if len(selected_results) > 1:
+        if len(selected_sources) > 1:
             click.echo(f"\n{'=' * 50}")
             click.echo(f"📊 Summary for {source_desc}")
             click.echo(f"{'=' * 50}")
@@ -410,11 +470,11 @@ def import_data(
             if failed > 0:
                 click.echo(f"❌ Failed:   {failed} sessions")
 
-    if dry_run and len(selected_results) > 1:
+    if dry_run and len(selected_sources) > 1:
         click.echo(f"\n{'=' * 50}")
         click.echo("📊 Overall Dry Run Summary")
         click.echo(f"{'=' * 50}")
-        click.echo(f"✓ Total data sources: {len(selected_results)}")
+        click.echo(f"✓ Total data sources: {len(selected_sources)}")
         click.echo("\n✓ Dry run complete. Use without --dry-run to import.")
         return 0
     elif dry_run:

@@ -1,0 +1,622 @@
+"""
+OSCAR Device Parser
+
+Parser for OSCAR binary cache files (.000 summary, .001 events).
+Supports importing data from OSCAR Profiles directory structure.
+"""
+
+import logging
+import os
+import xml.etree.ElementTree as ET
+
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
+from pathlib import Path
+
+import numpy as np
+
+from snore.constants import (
+    CPAP_CLEAR_AIRWAY,
+    CPAP_FLOW_LIMIT,
+    CPAP_HYPOPNEA,
+    CPAP_LEAK,
+    CPAP_MASK_PRESSURE,
+    CPAP_MINUTE_VENT,
+    CPAP_OBSTRUCTIVE,
+    CPAP_PERIODIC_BREATHING,
+    CPAP_RERA,
+    CPAP_RESPRATE,
+    CPAP_TIDAL_VOLUME,
+    OXI_PULSE,
+    OXI_SPO2,
+    PARSER_MAX_SEARCH_DEPTH,
+)
+from snore.models.unified import (
+    DeviceInfo,
+    RespiratoryEvent,
+    UnifiedSession,
+    WaveformData,
+)
+from snore.parsers.base import (
+    DeviceParser,
+    ParserDetectionResult,
+    ParserError,
+    ParserMetadata,
+)
+from snore.parsers.discovery import DataRoot, DataRootFinder
+from snore.parsers.oscar_events import parse_events_file
+from snore.parsers.oscar_mappings import (
+    OSCAR_EVENT_CHANNEL_IDS,
+    OSCAR_EVENT_TYPE_MAP,
+    OSCAR_WAVEFORM_CHANNEL_IDS,
+    OSCAR_WAVEFORM_TYPE_MAP,
+    OSCAR_WAVEFORM_UNITS,
+)
+from snore.parsers.oscar_summary import parse_summary_file
+from snore.parsers.types import EventListType, SessionEvents, SessionSummary
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_EVENT_DURATION_SECONDS = 10.0  # OSCAR's default apnea duration
+
+
+class OscarDeviceParser(DeviceParser):
+    """
+    Parser for OSCAR binary cache files.
+
+    Supports the standard OSCAR profile structure:
+    - Profiles/{profile_name}/
+      - {manufacturer}_{serial}/
+        - machine.xml
+        - Summaries/{session_id}.000
+        - Events/{session_id}.001
+    """
+
+    def __init__(self) -> None:
+        """Initialize OSCAR parser."""
+        super().__init__()
+        self._data_roots: list[DataRoot] = []
+        self._finder = DataRootFinder()
+
+    def get_metadata(self) -> ParserMetadata:
+        """Return OSCAR parser metadata."""
+        return ParserMetadata(
+            parser_id="oscar_binary",
+            parser_version="1.0.0",
+            manufacturer="OSCAR",
+            supported_formats=["OSCAR Binary Cache"],
+            supported_models=[
+                "ResMed AirSense 10/11",
+                "ResMed AirCurve 10/11",
+                "Philips DreamStation",
+                "F&P SleepStyle",
+                "Any OSCAR-supported device",
+            ],
+            description="Parser for OSCAR binary cache files (.000/.001)",
+            requires_libraries=["numpy"],
+        )
+
+    def detect(self, path: Path) -> ParserDetectionResult:
+        """
+        Detect OSCAR binary cache data structure.
+
+        Searches for Profiles/{profile}/{device}/ structure with:
+        - machine.xml (optional but preferred)
+        - Summaries/*.000 files
+        - Events/*.001 files
+        """
+        path = Path(path)
+
+        if not path.exists():
+            return ParserDetectionResult(
+                detected=False, message=f"Path does not exist: {path}"
+            )
+
+        roots = self._finder.find_data_roots(
+            path,
+            validator_func=self._is_oscar_device_root,
+            metadata_extractor_func=self._create_data_root,
+            max_levels_down=PARSER_MAX_SEARCH_DEPTH,
+        )
+
+        if not roots:
+            return ParserDetectionResult(
+                detected=False,
+                message="No OSCAR profile data found",
+            )
+
+        self._data_roots = roots
+
+        profile_count = len(set(r.profile_name for r in roots if r.profile_name))
+        device_count = len(roots)
+
+        first_root = roots[0]
+        return ParserDetectionResult(
+            detected=True,
+            confidence=first_root.confidence,
+            message=f"Found {device_count} OSCAR device(s) across {profile_count} profile(s)",
+            metadata={
+                "data_root": str(first_root.path),
+                "structure_type": first_root.structure_type,
+                "profile_name": first_root.profile_name,
+                "device_serial": first_root.device_serial,
+                "all_roots": [str(r.path) for r in roots],
+                "root_metadata": {
+                    str(r.path): {
+                        "profile_name": r.profile_name,
+                        "structure_type": r.structure_type,
+                        "device_serial": r.device_serial,
+                    }
+                    for r in roots
+                },
+            },
+        )
+
+    def _is_oscar_device_root(self, path: Path) -> bool:
+        """Check if path is an OSCAR device data root."""
+        summaries = path / "Summaries"
+        events = path / "Events"
+
+        if not (summaries.is_dir() and events.is_dir()):
+            return False
+
+        has_summary = any(summaries.glob("*.000"))
+        has_events = any(events.glob("*.001"))
+
+        return has_summary or has_events
+
+    def _create_data_root(self, path: Path) -> DataRoot:
+        """Create DataRoot with metadata from OSCAR directory structure."""
+        parts = path.parts
+
+        profile_name = None
+        device_serial = None
+
+        if "Profiles" in parts:
+            profiles_idx = parts.index("Profiles")
+            if profiles_idx + 1 < len(parts):
+                profile_name = parts[profiles_idx + 1]
+            if profiles_idx + 2 < len(parts):
+                device_str = parts[profiles_idx + 2]
+                if "_" in device_str:
+                    device_serial = device_str.split("_", 1)[1]
+
+        return DataRoot(
+            path=path,
+            structure_type="oscar_profile",
+            profile_name=profile_name,
+            device_serial=device_serial,
+            confidence=0.95,
+        )
+
+    def get_device_info(self, path: Path) -> DeviceInfo:
+        """
+        Extract device information from machine.xml or directory name.
+
+        machine.xml contains:
+        <machine id="..." type="..." class="...">
+            <brand>ResMed</brand>
+            <model>AirSense 10 AutoSet</model>
+            <serial>12345678</serial>
+            ...
+        </machine>
+        """
+        machine_xml = path / "machine.xml"
+
+        if machine_xml.exists():
+            try:
+                return self._parse_machine_xml(machine_xml)
+            except Exception as e:
+                logger.warning(f"Failed to parse machine.xml: {e}")
+
+        device_dir_name = path.name
+        if "_" in device_dir_name:
+            manufacturer, serial = device_dir_name.split("_", 1)
+            return DeviceInfo(
+                manufacturer=manufacturer,
+                model="Unknown",
+                serial_number=serial,
+            )
+
+        return DeviceInfo(
+            manufacturer="Unknown",
+            model="Unknown",
+            serial_number="Unknown",
+        )
+
+    def _parse_machine_xml(self, xml_path: Path) -> DeviceInfo:
+        """Parse machine.xml for device information."""
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+
+        return DeviceInfo(
+            manufacturer=root.findtext("brand", "Unknown"),
+            model=root.findtext("model", "Unknown"),
+            serial_number=root.findtext("serial", "Unknown"),
+            firmware_version=root.findtext("version", None),
+        )
+
+    def parse_sessions(
+        self,
+        path: Path,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int | None = None,
+        sort_by: str | None = None,
+        parallel: bool = True,
+    ) -> Iterator[UnifiedSession]:
+        """
+        Parse all sessions from OSCAR binary cache.
+
+        Each .000/.001 pair is one session (OSCAR already groups sessions).
+        """
+        path = Path(path)
+
+        if self._data_roots:
+            matching_roots = [r for r in self._data_roots if r.path == path]
+            if matching_roots:
+                roots_to_parse = matching_roots
+            else:
+                detection = self.detect(path)
+                if not detection.detected:
+                    raise ParserError("No OSCAR data found at path", self)
+                roots_to_parse = self._data_roots
+        else:
+            detection = self.detect(path)
+            if not detection.detected:
+                raise ParserError("No OSCAR data found at path", self)
+            roots_to_parse = self._data_roots
+
+        sessions_yielded = 0
+
+        for data_root in roots_to_parse:
+            device_info = self.get_device_info(data_root.path)
+
+            session_files = self._find_session_files(data_root.path)
+
+            if sort_by == "date-asc":
+                session_files = sorted(session_files, key=lambda x: x[0])
+            elif sort_by == "date-desc":
+                session_files = sorted(session_files, key=lambda x: x[0], reverse=True)
+
+            if parallel and len(session_files) > 1:
+                yield from self._parse_sessions_parallel(
+                    session_files,
+                    device_info,
+                    data_root.path,
+                    date_from,
+                    date_to,
+                    limit,
+                )
+                return
+
+            for session_id, summary_path, events_path in session_files:
+                if limit is not None and sessions_yielded >= limit:
+                    return
+
+                if date_from or date_to:
+                    session_date = datetime.fromtimestamp(session_id, tz=UTC).date()
+                    if (
+                        date_from
+                        and session_date < datetime.fromisoformat(date_from).date()
+                    ):
+                        continue
+                    if (
+                        date_to
+                        and session_date > datetime.fromisoformat(date_to).date()
+                    ):
+                        continue
+
+                try:
+                    session = self._parse_single_session(
+                        session_id,
+                        summary_path,
+                        events_path,
+                        device_info,
+                        data_root.path,
+                    )
+
+                    yield session
+                    sessions_yielded += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to parse session {session_id}: {e}")
+                    continue
+
+    def _find_session_files(
+        self, device_path: Path
+    ) -> list[tuple[int, Path | None, Path | None]]:
+        """
+        Find all session files in Summaries/ and Events/ directories.
+
+        Returns list of (session_id, summary_path, events_path) tuples.
+        """
+        summaries_dir = device_path / "Summaries"
+        events_dir = device_path / "Events"
+
+        session_map: dict[int, dict[str, Path]] = {}
+
+        if summaries_dir.exists():
+            for summary_file in summaries_dir.glob("*.000"):
+                try:
+                    session_id = int(summary_file.stem, 16)
+                    if session_id not in session_map:
+                        session_map[session_id] = {}
+                    session_map[session_id]["summary"] = summary_file
+                except ValueError:
+                    logger.warning(f"Invalid summary filename: {summary_file.name}")
+
+        if events_dir.exists():
+            for events_file in events_dir.glob("*.001"):
+                try:
+                    session_id = int(events_file.stem, 16)
+                    if session_id not in session_map:
+                        session_map[session_id] = {}
+                    session_map[session_id]["events"] = events_file
+                except ValueError:
+                    logger.warning(f"Invalid events filename: {events_file.name}")
+
+        result = []
+        for session_id in sorted(session_map.keys()):
+            files = session_map[session_id]
+            result.append(
+                (
+                    session_id,
+                    files.get("summary"),
+                    files.get("events"),
+                )
+            )
+
+        return result
+
+    def _parse_sessions_parallel(
+        self,
+        session_files: list[tuple[int, Path | None, Path | None]],
+        device_info: DeviceInfo,
+        base_path: Path,
+        date_from: str | None,
+        date_to: str | None,
+        limit: int | None,
+    ) -> Iterator[UnifiedSession]:
+        """Parse sessions in parallel using ThreadPoolExecutor."""
+        filtered_files = []
+        for session_id, summary_path, events_path in session_files:
+            if date_from or date_to:
+                session_date = datetime.fromtimestamp(session_id, tz=UTC).date()
+                if (
+                    date_from
+                    and session_date < datetime.fromisoformat(date_from).date()
+                ):
+                    continue
+                if date_to and session_date > datetime.fromisoformat(date_to).date():
+                    continue
+            filtered_files.append((session_id, summary_path, events_path))
+
+        if limit and len(filtered_files) > limit:
+            filtered_files = filtered_files[:limit]
+
+        logger.info(
+            f"Parsing {len(filtered_files)} sessions in parallel with {os.cpu_count()} workers"
+        )
+
+        sessions_yielded = 0
+
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            futures = {
+                executor.submit(
+                    self._parse_single_session,
+                    session_id,
+                    summary_path,
+                    events_path,
+                    device_info,
+                    base_path,
+                ): session_id
+                for session_id, summary_path, events_path in filtered_files
+            }
+
+            for future in as_completed(futures):
+                session_id = futures[future]
+
+                if limit is not None and sessions_yielded >= limit:
+                    for remaining_future in futures:
+                        if not remaining_future.done():
+                            remaining_future.cancel()
+                    break
+
+                try:
+                    session = future.result()
+                    yield session
+                    sessions_yielded += 1
+                except Exception as e:
+                    logger.error(f"Failed to parse session {session_id}: {e}")
+                    continue
+
+    def _parse_single_session(
+        self,
+        session_id: int,
+        summary_path: Path | None,
+        events_path: Path | None,
+        device_info: DeviceInfo,
+        base_path: Path,
+    ) -> UnifiedSession:
+        """Parse a single session from .000 and .001 files."""
+        summary: SessionSummary | None = None
+        events: SessionEvents | None = None
+
+        if summary_path and summary_path.exists():
+            try:
+                summary = parse_summary_file(summary_path)
+            except Exception as e:
+                logger.warning(
+                    f"Summary parsing failed for {summary_path.name}: {e}. "
+                    "Continuing with events file only."
+                )
+
+        if events_path and events_path.exists():
+            events = parse_events_file(events_path)
+
+        if summary:
+            first_ts = summary.first_timestamp
+            last_ts = summary.last_timestamp
+        elif events:
+            first_ts = events.first_timestamp
+            last_ts = events.last_timestamp
+        else:
+            raise ValueError(f"No data for session {session_id}")
+
+        start_time = datetime.fromtimestamp(first_ts / 1000, tz=UTC)
+        end_time = datetime.fromtimestamp(last_ts / 1000, tz=UTC)
+
+        session = UnifiedSession(
+            device_session_id=str(session_id),
+            device_info=device_info,
+            start_time=start_time,
+            end_time=end_time,
+            import_source="oscar_binary",
+            parser_version=self.metadata.parser_version,
+            raw_data_path=str(base_path),
+        )
+
+        if summary:
+            self._populate_statistics_from_summary(summary, session)
+
+        if events:
+            self._populate_waveforms_from_events(events, session)
+            self._populate_events_from_events(events, session)
+
+        session.finalize_statistics()
+        return session
+
+    def _populate_statistics_from_summary(
+        self, summary: SessionSummary, session: UnifiedSession
+    ) -> None:
+        """Populate session statistics from OSCAR summary data."""
+        stats = session.statistics
+
+        stats.obstructive_apneas = int(summary.counts.get(CPAP_OBSTRUCTIVE, 0))
+        stats.hypopneas = int(summary.counts.get(CPAP_HYPOPNEA, 0))
+        stats.central_apneas = int(summary.counts.get(CPAP_CLEAR_AIRWAY, 0))
+        stats.reras = int(summary.counts.get(CPAP_RERA, 0))
+        stats.flow_limitations = int(summary.counts.get(CPAP_FLOW_LIMIT, 0))
+
+        if CPAP_PERIODIC_BREATHING in summary.counts:
+            session.data_quality_notes.append(
+                f"Periodic breathing events: {int(summary.counts[CPAP_PERIODIC_BREATHING])}"
+            )
+
+        stats.pressure_min = summary.minimums.get(CPAP_MASK_PRESSURE)
+        stats.pressure_max = summary.maximums.get(CPAP_MASK_PRESSURE)
+        stats.pressure_mean = summary.averages.get(CPAP_MASK_PRESSURE)
+
+        stats.leak_min = summary.minimums.get(CPAP_LEAK)
+        stats.leak_max = summary.maximums.get(CPAP_LEAK)
+        stats.leak_mean = summary.averages.get(CPAP_LEAK)
+
+        stats.respiratory_rate_min = summary.minimums.get(CPAP_RESPRATE)
+        stats.respiratory_rate_max = summary.maximums.get(CPAP_RESPRATE)
+        stats.respiratory_rate_mean = summary.averages.get(CPAP_RESPRATE)
+
+        stats.tidal_volume_min = summary.minimums.get(CPAP_TIDAL_VOLUME)
+        stats.tidal_volume_max = summary.maximums.get(CPAP_TIDAL_VOLUME)
+        stats.tidal_volume_mean = summary.averages.get(CPAP_TIDAL_VOLUME)
+
+        stats.minute_ventilation_min = summary.minimums.get(CPAP_MINUTE_VENT)
+        stats.minute_ventilation_max = summary.maximums.get(CPAP_MINUTE_VENT)
+        stats.minute_ventilation_mean = summary.averages.get(CPAP_MINUTE_VENT)
+
+        stats.spo2_min = summary.minimums.get(OXI_SPO2)
+        stats.spo2_max = summary.maximums.get(OXI_SPO2)
+        stats.spo2_mean = summary.averages.get(OXI_SPO2)
+        if OXI_SPO2 in summary.time_below_threshold:
+            stats.spo2_time_below_90 = int(
+                summary.time_below_threshold[OXI_SPO2] / 1000
+            )
+
+        stats.pulse_min = summary.minimums.get(OXI_PULSE)
+        stats.pulse_max = summary.maximums.get(OXI_PULSE)
+        stats.pulse_mean = summary.averages.get(OXI_PULSE)
+
+        duration_ms = summary.last_timestamp - summary.first_timestamp
+        stats.usage_hours = duration_ms / (1000 * 3600)
+
+        session.has_statistics = True
+
+    def _populate_waveforms_from_events(
+        self, events: SessionEvents, session: UnifiedSession
+    ) -> None:
+        """Convert OSCAR EventLists to WaveformData."""
+        session_start_ms = events.first_timestamp
+
+        for channel_id, event_lists in events.event_lists.items():
+            if channel_id not in OSCAR_WAVEFORM_CHANNEL_IDS:
+                continue
+
+            waveform_type = OSCAR_WAVEFORM_TYPE_MAP[channel_id]
+            unit = OSCAR_WAVEFORM_UNITS.get(channel_id, "")
+
+            for event_list in event_lists:
+                if event_list.event_type != EventListType.WAVEFORM:
+                    continue
+
+                values = np.array(event_list.get_actual_values(), dtype=np.float32)
+
+                if len(values) == 0:
+                    continue
+
+                timestamps_ms = event_list.get_timestamps()
+                timestamps_seconds = np.array(
+                    [(ts - session_start_ms) / 1000.0 for ts in timestamps_ms],
+                    dtype=np.float32,
+                )
+
+                waveform = WaveformData(
+                    waveform_type=waveform_type,
+                    sample_rate=event_list.sample_rate,
+                    unit=event_list.dimension or unit,
+                    timestamps=timestamps_seconds,
+                    values=values,
+                    min_value=float(np.min(values)),
+                    max_value=float(np.max(values)),
+                    mean_value=float(np.mean(values)),
+                )
+
+                session.add_waveform(waveform)
+                logger.debug(
+                    f"Added {waveform_type.value} waveform: {len(values)} samples "
+                    f"at {event_list.sample_rate} Hz"
+                )
+
+    def _populate_events_from_events(
+        self, events: SessionEvents, session: UnifiedSession
+    ) -> None:
+        """Convert OSCAR EventLists to RespiratoryEvent objects."""
+        for channel_id, event_lists in events.event_lists.items():
+            if channel_id not in OSCAR_EVENT_CHANNEL_IDS:
+                continue
+
+            event_type = OSCAR_EVENT_TYPE_MAP[channel_id]
+
+            for event_list in event_lists:
+                if event_list.event_type != EventListType.EVENT:
+                    continue
+
+                timestamps = event_list.get_timestamps()
+                durations = event_list.get_actual_values()
+
+                for i, timestamp_ms in enumerate(timestamps):
+                    event_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+
+                    duration = (
+                        durations[i]
+                        if i < len(durations)
+                        else DEFAULT_EVENT_DURATION_SECONDS
+                    )
+
+                    event = RespiratoryEvent(
+                        event_type=event_type,
+                        start_time=event_time,
+                        duration_seconds=max(duration, 0),
+                    )
+
+                    session.add_event(event)

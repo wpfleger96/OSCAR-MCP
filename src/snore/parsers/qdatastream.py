@@ -21,11 +21,14 @@ class QVariantType(IntEnum):
     LongLong = 4
     ULongLong = 5
     Double = 6
+    QVariantList = 9
     String = 10
+    QStringList = 11
     ByteArray = 12
     Date = 14
     Time = 15
     DateTime = 16
+    Float = 38
     UserType = 127  # User-defined types start at 127
 
 
@@ -150,13 +153,32 @@ class QDataStreamReader:
             return self.read_uint64()
         elif type_code == QVariantType.Double:
             return self.read_double()
+        elif type_code == QVariantType.Float:
+            return self.read_float()
+        elif type_code == QVariantType.QVariantList:
+            count = self.read_uint32()
+            return [self.read_qvariant() for _ in range(count)]
         elif type_code == QVariantType.String:
             return self.read_qstring()
+        elif type_code == QVariantType.QStringList:
+            count = self.read_uint32()
+            return [self.read_qstring() for _ in range(count)]
         elif type_code == QVariantType.ByteArray:
             length = self.read_uint32()
             if length == 0xFFFFFFFF:
                 return None
             return self.read_bytes(length)
+        elif type_code == QVariantType.DateTime:
+            julian_day = self.read_uint32()
+            msecs = self.read_uint32()
+            _ = self.read_uint8()  # timezone spec (ignored)
+            if julian_day == 0:
+                return None
+            from datetime import datetime, timedelta
+
+            base = datetime(1970, 1, 1)
+            days_offset = julian_day - 2440588
+            return base + timedelta(days=days_offset, milliseconds=msecs)
         else:
             import warnings
 

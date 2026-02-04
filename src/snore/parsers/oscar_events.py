@@ -99,16 +99,18 @@ class OscarEventsParser:
 
     def _parse_header(self, stream: BinaryIO) -> dict[str, Any]:
         """
-        Parse 42-byte header from events file.
+        Parse header from events file.
 
-        Header format:
+        Base header format (32 bytes, all versions):
         - 4 bytes: magic number (0xC73216AB)
-        - 2 bytes: version (10)
+        - 2 bytes: version
         - 2 bytes: file type (1 for events)
         - 4 bytes: machine ID
         - 4 bytes: session ID
         - 8 bytes: first timestamp (ms since epoch)
         - 8 bytes: last timestamp (ms since epoch)
+
+        Extended header (10 bytes, version >= 10 only):
         - 2 bytes: compression method (0=none, 1=qCompress)
         - 2 bytes: machine type
         - 4 bytes: uncompressed data size
@@ -120,11 +122,10 @@ class OscarEventsParser:
         Raises:
             OscarEventsParseError: If header is invalid
         """
-        header_data = stream.read(42)
-        if len(header_data) != 42:
+        base_header = stream.read(32)
+        if len(base_header) != 32:
             raise OscarEventsParseError("File too short to contain header")
 
-        # Unpack header (little-endian)
         (
             magic,
             version,
@@ -133,11 +134,7 @@ class OscarEventsParser:
             session_id,
             first_timestamp,
             last_timestamp,
-            compression,
-            machine_type,
-            data_size,
-            crc16,
-        ) = struct.unpack("<IHH II qq HH iH", header_data)
+        ) = struct.unpack("<IHH II qq", base_header)
 
         if magic != OSCAR_MAGIC_NUMBER:
             raise OscarEventsParseError(
@@ -147,6 +144,21 @@ class OscarEventsParser:
         if file_type != 1:
             raise OscarEventsParseError(
                 f"Invalid file type: {file_type} (expected 1 for events)"
+            )
+
+        compression = 0
+        machine_type = 0
+        data_size = 0
+        crc16 = 0
+
+        if version >= 10:
+            ext_header = stream.read(10)
+            if len(ext_header) != 10:
+                raise OscarEventsParseError(
+                    f"File too short for version {version} extended header"
+                )
+            (compression, machine_type, data_size, crc16) = struct.unpack(
+                "<HH iH", ext_header
             )
 
         return {
