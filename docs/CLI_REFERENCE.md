@@ -19,12 +19,10 @@ Options:
 Commands:
   analysis     Analyze CPAP sessions and view results.
   completions  Manage shell tab completion.
-  config       Configuration management commands.
   db           Database management commands.
   event        Event data export commands.
   import       Import CPAP data from device SD card or directory.
   logs         Log file management commands.
-  profile      Profile management commands.
   session      Session management commands.
   setup        Install SNORE globally as a uv tool.
   stats        Show therapy usage and clinical statistics.
@@ -78,13 +76,11 @@ Usage: snore analysis list [OPTIONS]
   List sessions with analysis status.
 
 Options:
-  --profile TEXT                  Profile username (optional if default set)
-  --all-profiles                  Include all profiles (ignores --profile)
   --from [%Y-%m-%d]               Start date for filtering (YYYY-MM-DD)
   --to [%Y-%m-%d]                 End date for filtering (YYYY-MM-DD)
   --limit INTEGER                 Max sessions to show (use 0 for all)
   --analyzed-only                 Show only analyzed sessions
-  --sort-by [date-asc|date-desc|profile|session-id]
+  --sort-by [date-asc|date-desc|session-id]
                                   Sort order for results (default: date-desc)
   --db PATH                       Database path
   --help                          Show this message and exit.
@@ -98,7 +94,6 @@ Usage: snore analysis run [OPTIONS]
   Run analysis on CPAP sessions.
 
 Options:
-  --profile TEXT        Profile username (optional if default set)
   --session-id INTEGER  Analyze single session by ID
   --date [%Y-%m-%d]     Analyze single session by date (YYYY-MM-DD)
   --from [%Y-%m-%d]     Start date for batch analysis (YYYY-MM-DD)
@@ -122,7 +117,6 @@ Usage: snore analysis show [OPTIONS]
   Display stored analysis results.
 
 Options:
-  --profile TEXT        Profile username (optional if default set)
   --session-id INTEGER  Show analysis for session ID
   --date [%Y-%m-%d]     Show analysis for session on date (YYYY-MM-DD)
   --db PATH             Database path
@@ -188,31 +182,6 @@ Options:
 Usage: snore completions zsh [OPTIONS]
 
   Output zsh completion script for manual installation.
-
-Options:
-  --help  Show this message and exit.
-```
-
-## `snore config`
-
-```
-Usage: snore config [OPTIONS] COMMAND [ARGS]...
-
-  Configuration management commands.
-
-Options:
-  --help  Show this message and exit.
-
-Commands:
-  show  Show all configuration settings.
-```
-
-## `snore config show`
-
-```
-Usage: snore config show [OPTIONS]
-
-  Show all configuration settings.
 
 Options:
   --help  Show this message and exit.
@@ -312,7 +281,6 @@ Usage: snore event export [OPTIONS]
 Options:
   --session-id INTEGER  Session ID to export events from
   --date [%Y-%m-%d]     Export events from session on this date (YYYY-MM-DD)
-  --profile TEXT        Profile username (optional if default set)
   -o, --output PATH     Output CSV file path  [required]
   --db PATH             Database path
   -m, --mode TEXT       Detection mode to export (default: aasm)
@@ -336,6 +304,11 @@ Options:
   --to [%Y-%m-%d]                 Import sessions up to this date (YYYY-MM-DD)
   --dry-run                       Show what would be imported without
                                   importing
+  --no-parallel                   Disable parallel parsing (for debugging)
+  --batch-size INTEGER            Number of sessions per database transaction
+                                  (default: 50)
+  --all                           Import all detected data sources without
+                                  prompting
   --help                          Show this message and exit.
 ```
 
@@ -391,112 +364,6 @@ Options:
   --help               Show this message and exit.
 ```
 
-## `snore profile`
-
-```
-Usage: snore profile [OPTIONS] COMMAND [ARGS]...
-
-  Profile management commands.
-
-Options:
-  --help  Show this message and exit.
-
-Commands:
-  create         Create a new profile.
-  delete         Delete a profile and all associated data (cascade delete).
-  list           List all profiles in the database.
-  set-default    Set the default profile for CLI commands.
-  show           Show details for a specific profile.
-  show-default   Show current default profile.
-  unset-default  Remove the default profile setting.
-```
-
-## `snore profile create`
-
-```
-Usage: snore profile create [OPTIONS] USERNAME
-
-  Create a new profile.
-
-Options:
-  --first-name TEXT  First name
-  --last-name TEXT   Last name
-  --db PATH          Database path
-  --help             Show this message and exit.
-```
-
-## `snore profile delete`
-
-```
-Usage: snore profile delete [OPTIONS] USERNAME
-
-  Delete a profile and all associated data (cascade delete).
-
-Options:
-  -f, --force  Skip confirmation prompt
-  --dry-run    Preview what would be deleted
-  --db PATH    Database path
-  --help       Show this message and exit.
-```
-
-## `snore profile list`
-
-```
-Usage: snore profile list [OPTIONS]
-
-  List all profiles in the database.
-
-Options:
-  --db PATH  Database path
-  --help     Show this message and exit.
-```
-
-## `snore profile set-default`
-
-```
-Usage: snore profile set-default [OPTIONS] USERNAME
-
-  Set the default profile for CLI commands.
-
-Options:
-  --db PATH  Database path
-  --help     Show this message and exit.
-```
-
-## `snore profile show`
-
-```
-Usage: snore profile show [OPTIONS] USERNAME
-
-  Show details for a specific profile.
-
-Options:
-  --db PATH  Database path
-  --help     Show this message and exit.
-```
-
-## `snore profile show-default`
-
-```
-Usage: snore profile show-default [OPTIONS]
-
-  Show current default profile.
-
-Options:
-  --help  Show this message and exit.
-```
-
-## `snore profile unset-default`
-
-```
-Usage: snore profile unset-default [OPTIONS]
-
-  Remove the default profile setting.
-
-Options:
-  --help  Show this message and exit.
-```
-
 ## `snore session`
 
 ```
@@ -521,16 +388,15 @@ Usage: snore session delete [OPTIONS]
   Delete sessions from the database.
 
 Options:
-  -p, --profile TEXT  Filter by profile username
-  --all-profiles      Include all profiles (ignores --profile)
-  --session-id TEXT   Comma-separated session IDs to delete (e.g., '1,2,3')
-  --from [%Y-%m-%d]   Delete sessions from this date (YYYY-MM-DD)
-  --to [%Y-%m-%d]     Delete sessions up to this date (YYYY-MM-DD)
-  --all               Delete all sessions
-  --dry-run           Preview what would be deleted without deleting
-  -f, --force         Skip confirmation prompt
-  --db PATH           Database path
-  --help              Show this message and exit.
+  -d, --device TEXT  Filter by device serial number
+  --session-id TEXT  Comma-separated session IDs to delete (e.g., '1,2,3')
+  --from [%Y-%m-%d]  Delete sessions from this date (YYYY-MM-DD)
+  --to [%Y-%m-%d]    Delete sessions up to this date (YYYY-MM-DD)
+  --all              Delete all sessions
+  --dry-run          Preview what would be deleted without deleting
+  -f, --force        Skip confirmation prompt
+  --db PATH          Database path
+  --help             Show this message and exit.
 ```
 
 ## `snore session list`
@@ -541,12 +407,11 @@ Usage: snore session list [OPTIONS]
   List imported sessions.
 
 Options:
-  -p, --profile TEXT              Filter by profile username
-  --all-profiles                  Include all profiles (ignores --profile)
+  -d, --device TEXT               Filter by device serial number
   --from [%Y-%m-%d]               Start date (YYYY-MM-DD)
   --to [%Y-%m-%d]                 End date (YYYY-MM-DD)
   --limit INTEGER                 Max sessions to show (use 0 for all)
-  --sort-by [date-asc|date-desc|profile|session-id|duration]
+  --sort-by [date-asc|date-desc|session-id|duration]
                                   Sort order for results (default: date-desc)
   --db PATH                       Database path
   --help                          Show this message and exit.
@@ -560,8 +425,9 @@ Usage: snore session show [OPTIONS] SESSION_ID
   Show details for a specific session.
 
 Options:
-  --db PATH  Database path
-  --help     Show this message and exit.
+  --settings  Show device settings
+  --db PATH   Database path
+  --help      Show this message and exit.
 ```
 
 ## `snore setup`
@@ -588,7 +454,6 @@ Usage: snore stats [OPTIONS]
 
 Options:
   --db PATH       Database path
-  --profile TEXT  Filter to specific profile
   --days INTEGER  Limit to last N days
   --help          Show this message and exit.
 ```
@@ -619,7 +484,6 @@ Usage: snore validate [OPTIONS]
 Options:
   --from [%Y-%m-%d]  Start date (YYYY-MM-DD)  [required]
   --to [%Y-%m-%d]    End date (YYYY-MM-DD)  [required]
-  --profile TEXT     Profile username (optional if default set)
   -m, --mode TEXT    Detection mode to validate (default: aasm)
   --export PATH      Export report to file (.json or .csv)
   --db PATH          Database path
@@ -659,7 +523,6 @@ Options:
   --date [%Y-%m-%d]     Session date (YYYY-MM-DD)
   -m, --mode TEXT       Detection mode to compare (default: aasm)
   --show-unmatched      Only show unmatched events
-  --profile TEXT        Profile username (optional if default set)
   --db PATH             Database path
   --help                Show this message and exit.
 ```
@@ -686,7 +549,6 @@ Options:
   --format [plot|csv]   Output format (plot=interactive graph, csv=data
                         export)
   -o, --output PATH     Output file path (required for csv format)
-  --profile TEXT        Profile username (optional if default set)
   --db PATH             Database path
   -m, --mode TEXT       Detection mode to compare (default: aasm)
   --help                Show this message and exit.

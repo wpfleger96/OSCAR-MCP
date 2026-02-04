@@ -81,6 +81,98 @@ ST_SPH    // Sum per hour (percentage of time)
 
 ---
 
+## Binary File Format
+
+### File Types and Magic Number
+
+All OSCAR binary files start with magic number `0xC73216AB`.
+
+| Extension | File Type | Content |
+|-----------|-----------|---------|
+| .000 | Summary (type=0) | Session statistics, settings, channel summaries |
+| .001 | Events (type=1) | Waveforms, respiratory events, time-series data |
+
+### Header Structure
+
+**Base header (32 bytes, all files):**
+```
+Offset  Size  Type      Field
+0       4     uint32    Magic number (0xC73216AB)
+4       2     uint16    Version
+6       2     uint16    File type (0=summary, 1=events)
+8       4     uint32    Machine ID
+12      4     uint32    Session ID
+16      8     int64     First timestamp (ms since epoch)
+24      8     int64     Last timestamp (ms since epoch)
+```
+
+**Events file extended header (10 bytes, version ≥10):**
+```
+Offset  Size  Type      Field
+32      2     uint16    Compression (0=none, 1=qCompress)
+34      2     uint16    Machine type
+36      4     int32     Uncompressed data size
+40      2     uint16    CRC16 checksum
+```
+
+### Qt QDataStream Format
+
+OSCAR uses Qt 4.6 QDataStream format with **little-endian** byte order.
+
+**QString:**
+- 4-byte length (in bytes), 0xFFFFFFFF = null
+- UTF-16-LE encoded data
+
+**QVariant:**
+- 4-byte type code + 1-byte null flag + type-specific data
+- Type codes: Bool=1, Int=2, UInt=3, LongLong=4, Double=6, String=10, ByteArray=12, DateTime=16
+
+**QHash<K,V>:**
+- 4-byte count, then count × (key, value) pairs
+
+**QVector<T>:**
+- 4-byte count, then packed array of T values
+
+### Compression
+
+**qCompress format:**
+- 4 bytes: Uncompressed size (big-endian uint32)
+- N bytes: zlib-compressed data
+
+**CRC16:** CRC-16-CCITT polynomial (0x1021)
+
+### EventList Storage
+
+**Waveforms (EVL_Waveform):**
+- Regularly sampled (sample_rate Hz)
+- Data stored as int16 with gain/offset: `actual = (stored × gain) + offset`
+
+**Events (EVL_Event):**
+- Delta-encoded timestamps (uint32 array)
+- Event type in low 4 bits (mask with 0x0F)
+
+### Summary File Statistics
+
+Version 18 summary files contain pre-calculated statistics per channel:
+- counts, sums, averages, weighted_averages
+- minimums, maximums, physical_minimums, physical_maximums
+- counts_per_hour, sums_per_hour
+- first_channel_time, last_channel_time
+- value_summaries, time_summaries (histogram data)
+- gains, available_channels
+
+### Key Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `parsers/qdatastream.py` | Qt QDataStream binary format reader |
+| `parsers/compression.py` | qCompress/qUncompress, CRC16, delta encoding |
+| `parsers/oscar_summary.py` | .000 summary file parser |
+| `parsers/oscar_events.py` | .001 events file parser |
+| `constants.py:616` | `OSCAR_MAGIC_NUMBER = 0xC73216AB` |
+
+---
+
 ## Analysis Implementation
 
 ### FlowParser - Breath Segmentation

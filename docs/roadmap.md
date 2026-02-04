@@ -35,7 +35,7 @@ Complete project overview showing implemented features and future development pl
 - [x] Parallel parsing with ThreadPoolExecutor
 - [x] Session segment merging (handles mask removal/replacement)
 - [x] Discontinuous EDF (EDF+D) support
-- [x] OSCAR binary parser (partial - summary and events files)
+- [x] OSCAR binary parser (full support - all OSCAR-cached devices)
 - [x] Date range filtering (--from/--to)
 - [x] Import sort modes (date-asc, date-desc, filesystem)
 
@@ -76,6 +76,7 @@ Complete project overview showing implemented features and future development pl
 - [x] `snore completions install/uninstall/bash/zsh` - Shell completion
 - [x] `snore setup` - Global installation via uv tool
 - [x] `snore upgrade` - Version upgrade
+- [x] `session show --settings` - View therapy settings (mode, pressure, EPR, ramp, humidity)
 
 ### Visualization
 - [x] **ASCII waveform renderer** - Pure terminal rendering, any terminal size
@@ -103,7 +104,6 @@ Complete project overview showing implemented features and future development pl
 - [ ] **Multi-waveform view** - Support `--type flow,leak,pressure` to view multiple waveforms simultaneously
 - [ ] **Waveform auto-discovery** - Show what waveform types are available for a session
 - [ ] **Enhanced session display** - Add full statistics to `session show` (pressure, leak, SpO2/pulse, RR/TV/MV, REI)
-- [ ] **Settings display** - Add `session show --settings` to view therapy settings (mode, pressure, EPR, ramp, humidity)
 - [ ] **Stats detail enhancement** - Add SpO2 time below 90%, respiratory metrics summary to `stats` command
 
 ---
@@ -255,7 +255,7 @@ Complete project overview showing implemented features and future development pl
 - Live device communication (SNORE imports from SD card only)
 - Proprietary binary format reverse-engineering (DreamStation 2 encrypted files, etc.)
 
-**Rationale:** Users can import non-ResMed devices via OSCAR, then export to OSCAR format for SNORE import (partial OSCAR parser already implemented).
+**Rationale:** Users can import non-ResMed devices via OSCAR, then export to OSCAR format for SNORE import (full OSCAR parser implemented).
 
 ---
 

@@ -34,7 +34,7 @@ Technical documentation for the SNORE system architecture, components, and desig
 │ ┌──────────┬──────────┬──────────┬────────┐│
 │ │ ResMed   │ OSCAR    │ Philips  │ Future ││
 │ │ EDF+     │ Binary   │ (TODO)   │        ││
-│ │   ✅     │  🔧      │          │        ││
+│ │   ✅     │  ✅      │          │        ││
 │ └──────────┴──────────┴──────────┴────────┘│
 └─────────────────────────────────────────────┘
 ```
@@ -363,7 +363,7 @@ Analysis Tools
 CLI/Reports
 ```
 
-### Other Devices Flow (Partial)
+### Other Devices Flow (Working)
 ```
 Any CPAP Device
     ↓
@@ -371,7 +371,7 @@ OSCAR Desktop App
     ↓
 .000/.001 binary files
     ↓
-OSCAR Binary Parser (🔧 partial)
+OSCAR Binary Parser ✅
     ↓
 UnifiedSession objects
     ↓
@@ -382,27 +382,9 @@ UnifiedSession objects
 
 ## File Locations
 
-### Production Data
-```
-~/Downloads/OSCAR/Profiles/<ProfileName>/
-├── <Manufacturer>_<Serial>/
-│   ├── Backup/              # ResMed EDF+ files (direct import ✅)
-│   │   ├── STR.edf
-│   │   ├── Identification.json
-│   │   └── DATALOG/YYYY/
-│   │       └── YYYYMMDD_HHMMSS_*.edf
-│   ├── Summaries/           # OSCAR binary (partial parser 🔧)
-│   │   └── *.000
-│   └── Events/              # OSCAR binary (partial parser 🔧)
-│       └── *.001
-```
-
-### Database Location
-```
-~/.snore/
-└── snore.db            # SQLite database
-    └── snore.db-wal    # Write-ahead log
-```
+- **Database:** `~/.snore/snore.db`
+- **ResMed data:** `DATALOG/YYYY/*.edf` on SD card or `~/Downloads/OSCAR/Profiles/<Profile>/<Device>/Backup/`
+- **OSCAR cache:** `~/Downloads/OSCAR/Profiles/<Profile>/<Device>/Summaries/*.000` and `Events/*.001`
 
 ---
 
@@ -424,93 +406,16 @@ UnifiedSession objects
 
 ---
 
-## Device Support & Coverage
+## Device Support
 
-### Supported CPAP/BiPAP Manufacturers
+**ResMed Devices (Direct Import)** ✅
+- AirSense 10/11, AirCurve 10/11, S9 series
+- Native EDF+ format → Direct import from SD card
+- ~40% of CPAP market
 
-OSCAR supports **18 different device manufacturers**, each with unique native formats:
+**All Other Manufacturers (via OSCAR)** ✅
+- Philips, Fisher & Paykel, Löwenstein, Weinmann, DeVilbiss, BMC, and 12+ others
+- Import via OSCAR desktop app → Binary cache files (.000/.001)
+- OSCAR binary parser fully implemented
+- 100% device coverage (all 18 OSCAR-supported manufacturers)
 
-#### 1. ResMed (Most Popular) - ✅ FULLY SUPPORTED
-- **Market Share:** ~40%
-- **Models**: S9, AirSense 10/11, AirCurve 10/11
-- **Native Format**: EDF+ (European Data Format Plus)
-- **Files**: STR.edf, BRP, PLD, EVE, CSL, SAD
-- **Status**: Direct import via ResMed EDF+ parser
-
-#### 2. Philips Respironics - 🔧 Via OSCAR Desktop
-- **Market Share:** ~30%
-- **Models**: DreamStation 1/2/Go, System One, BiPAP AutoSV
-- **Native Format**: Proprietary Binary (.000, .001, .002, .005, .006)
-- **Status**: Via OSCAR desktop app → .000/.001 export
-
-#### 3. Fisher & Paykel - 🔧 Via OSCAR Desktop
-- **Market Share:** ~10%
-- **Models**: ICON series, SleepStyle series
-- **Native Format**: Proprietary binary (ICON) or EDF+ with extensions
-- **Status**: Via OSCAR desktop app
-
-#### 4-18. Other Manufacturers - 🔧 Via OSCAR Desktop
-- Löwenstein (WMEDF format)
-- Weinmann (WMDATA files)
-- DeVilbiss (DV5/DV6)
-- BMC, Resvent / Hoffrichter, vREM, and others
-
-### Parser Strategy
-
-**Option 1: Direct Import (ResMed)** ✅
-```
-ResMed SD Card → SNORE → SQLite Database
-```
-- Currently working for ResMed devices
-- 40% market coverage
-
-**Option 2: OSCAR Desktop Export (All Others)** 🔧
-```
-Device SD Card → OSCAR Desktop → .000/.001 Files → SNORE → Database
-```
-- Requires completing OSCAR binary parser
-- 100% device coverage
-
-**Option 3: Additional Native Parsers** (Future)
-```
-Philips SD Card → SNORE → Database
-```
-- Add parsers for Philips, F&P, etc. as needed
-- Each parser ~200-300 lines
-
----
-
-## Architecture Benefits
-
-1. ✅ **Extensibility**
-   - New parsers require zero analysis code changes
-   - Add device support by creating one file
-   - Database schema supports all device types
-   - New analysis modes via simple config addition
-
-2. ✅ **Maintainability**
-   - Each parser completely independent
-   - Clear separation of concerns
-   - Easy to debug and test in isolation
-   - Simplified codebase (~2,400 lines removed in recent refactor)
-   - Single type system (Pydantic throughout)
-   - Config-based detection (no class hierarchy)
-
-3. ✅ **User Experience**
-   - Auto-detection "just works"
-   - Same tools for all device types
-   - Consistent data format
-   - Fast imports (no compression overhead)
-
-4. ✅ **Future-Proof**
-   - Can support any new CPAP device
-   - Can switch parser implementations
-   - Database schema is universal
-
-5. ✅ **Performance**
-   - Direct BLOB storage (no compression overhead)
-   - Efficient numpy serialization
-   - Strategic database indexes
-   - Fast queries on unified schema
-
----

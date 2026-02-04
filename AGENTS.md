@@ -67,37 +67,17 @@ tests/
 
 ## OSCAR Relationship
 
-**OSCAR (Open Source CPAP Analysis Reporter)** is the upstream OSS project that inspired SNORE's design. OSCAR is a mature Qt/C++ desktop GUI supporting 18+ CPAP manufacturers.
+**OSCAR** (Open Source CPAP Analysis Reporter) is the upstream OSS project (Qt/C++ desktop GUI, 18+ manufacturers).
 
-**Dual Import Strategy:**
-```
-Direct Import:    Device SD Card → SNORE → Database (ResMed only, faster)
-Via OSCAR:        Device SD Card → OSCAR Desktop → .000/.001 files → SNORE → Database (all manufacturers)
-```
+**Import paths:**
+- **Direct (ResMed):** SD Card → SNORE → Database
+- **Via OSCAR (all manufacturers):** SD Card → OSCAR → OSCAR Profiles dir → SNORE → Database
 
 **What SNORE borrows from OSCAR:**
+- Channel ID system (0x1000=Pressure, 0x1200=Flow, etc.) in `constants.py`
+- Binary format parsers for `.000/.001` session files
 
-1. **Channel ID System:** Uses OSCAR's exact channel IDs (0x1000=Pressure, 0x1100=ObstructiveApnea, 0x1200=Flow, 0x2000=SpO2) from `constants.py`
-2. **Binary Format Parsers:** Complete Qt binary format parsers in `parsers/oscar_summary.py`, `oscar_events.py`, `qdatastream.py`
-3. **Flow Limitation Classes:** OSCAR's 7-class system (Sinusoidal→Normal, DoublePeak→Mild, etc.)
-4. **Algorithm Validation:** Tests compare against OSCAR's breath segmentation and metrics
-
-**OSCAR File Format (.000 summary, .001 events):**
-- Magic number: 0xC73216AB
-- Qt QDataStream serialization with optional qCompress
-- Delta-encoded timestamps for events
-- Pre-calculated statistics (AHI, pressure stats, etc.)
-- Settings stored as Qt QVariant types
-
-**Key OSCAR parsers:**
-- `oscar_summary.py` - Parse .000 files (session metadata, statistics) - **has settings skip hack** due to custom Qt types
-- `oscar_events.py` - Parse .001 files (waveforms, respiratory events) - **uses bit masking** on event types
-- `qdatastream.py` - Qt binary serialization (little-endian, type markers)
-- `compression.py` - Qt qCompress/qUncompress, CRC16, delta-time decoding
-
-**SNORE vs OSCAR:**
-- SNORE: CLI-first, Python 3.13+, SQLite, direct device import (ResMed only)
-- OSCAR: Desktop GUI, Qt/C++, proprietary binary storage, broad device support
+**OSCAR parsers:** `parsers/oscar_device.py` (main), `oscar_summary.py`, `oscar_events.py`, `qdatastream.py`
 
 ## Tech Stack
 
@@ -182,18 +162,17 @@ Key fixtures: `db_session`, `test_device`, `test_session_factory`, `recorded_ses
    - **Installed tool (any directory)**: `snore <command>` → runs installed version from `~/.local/share/uv/tools/`
    - Running `snore` without `uv run` will NOT reflect your local changes
    - **NEVER use editable install** (`uv pip install -e .`) - risks conflicts with installed version, unnecessary complexity
-9. **Hypopnea detection modes:** `HypopneaMode` enum controls detection (AASM_3PCT, AASM_4PCT, FLOW_ONLY, DISABLED). AASM modes fall back to FLOW_ONLY (40% threshold) when no SpO2 data available unless `hypopnea_flow_only_fallback=False`. ResMed mode always uses FLOW_ONLY.
-10. **RERA confidence capped at 0.7:** Flow-based RERA detection without EEG cannot exceed 0.7 confidence (true RERAs require EEG arousal). Detection uses ≥2 flow-limited breaths + recovery breath ≥50% amplitude increase.
-11. **Apnea classification confidence:** OA vs CA vs MA classification from flow-only data is approximation (true classification needs thoracic/abdominal effort bands). All apneas include `classification_confidence` field (0-1) based on effort score distinctiveness.
-12. **SpO2/Flow timestamp alignment:** `_detect_hypopneas()` validates SpO2 and flow signal lengths match before indexing. Mismatch logs warning and skips desaturation check to prevent IndexError with external oximeters at different sample rates.
-13. **Documentation citations:** Use Vancouver-style numbered citations [1], [2] in `docs/apnea_detection_reference.md`. Add PDF to `docs/references/` and update both inline citation and References section. See existing format: author list, journal, year, volume, pages, DOI, PMCID, local path, URL.
+9. **RERA confidence capped at 0.7:** Flow-based RERA detection without EEG cannot exceed 0.7 confidence (true RERAs require EEG arousal). Detection uses ≥2 flow-limited breaths + recovery breath ≥50% amplitude increase.
+10. **Apnea classification confidence:** OA vs CA vs MA classification from flow-only data is approximation (true classification needs thoracic/abdominal effort bands). All apneas include `classification_confidence` field (0-1) based on effort score distinctiveness.
+11. **SpO2/Flow timestamp alignment:** `_detect_hypopneas()` validates SpO2 and flow signal lengths match before indexing. Mismatch logs warning and skips desaturation check to prevent IndexError with external oximeters at different sample rates.
+12. **Documentation citations:** Use Vancouver-style numbered citations [1], [2] in `docs/apnea_detection_reference.md`. Add PDF to `docs/references/` and update both inline citation and References section. See existing format: author list, journal, year, volume, pages, DOI, PMCID, local path, URL.
 
 ## Key Files by Task
 
 | Task | Files |
 |------|-------|
 | Add CLI command | `src/snore/cli.py` |
-| Add device parser | `src/snore/parsers/base.py`, `registry.py`, create new parser file |
+| Add device parser | `src/snore/parsers/base.py`, `register_all.py`, create new parser file |
 | Add analysis algorithm | `src/snore/analysis/shared/` (breath/feature algorithms) or `modes/` (event detection) |
 | Add detection mode | `src/snore/analysis/modes/config.py` (add `DetectionModeConfig`), update `detector.py` |
 | Modify event detection | `src/snore/analysis/modes/detector.py` (apnea/hypopnea/RERA detection logic) |

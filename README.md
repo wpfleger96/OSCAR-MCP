@@ -21,13 +21,6 @@ SNORE analyzes CPAP therapy data, generates reports, and provides insights about
 - **Comprehensive Parsing**: Waveforms, events, statistics, and device metadata
 **Supported Devices:** ResMed AirSense 10/11, AirCurve 10/11, S9 series
 
-### Architecture
-
-- **Modular Parser System**: Abstract base class + registry for device detection
-- **Universal Data Model**: All devices convert to unified format
-- **SQLite Database**: Universal schema supporting all device types
-- **UV Package Management**: Modern Python dependency management
-
 ## Installation
 
 ### Prerequisites
@@ -109,6 +102,9 @@ uv run snore session list --from 2024-01-01 --to 2024-12-31
 
 # Show database statistics
 uv run snore db stats
+
+# Show session details with therapy settings
+uv run snore session show 123 --settings
 ```
 
 ### 3. Analyze CPAP Sessions
@@ -170,63 +166,7 @@ uv run snore session delete --session-id "5" --force
 uv run snore db vacuum
 ```
 
-### 5. Direct Database Access
 
-Query the SQLite database directly:
-
-```bash
-sqlite3 ~/.snore/snore.db
-
-# Example queries
-SELECT COUNT(*) FROM sessions;
-SELECT * FROM devices;
-SELECT date(start_time), duration_seconds FROM sessions ORDER BY start_time DESC LIMIT 10;
-```
-
-## Database Schema
-
-The SQLite database stores all parsed CPAP data:
-
-**Tables:**
-- `devices` - Device metadata (manufacturer, model, serial, firmware)
-- `sessions` - Session records (start, end, duration, mode)
-- `waveforms` - Time-series data (Flow, Pressure, Leak, SpO2, Pulse)
-- `events` - Respiratory events (Apneas, Hypopneas, RERA, etc.)
-- `statistics` - Pre-calculated metrics (AHI, pressure stats, leak stats, SpO2)
-- `settings` - Therapy configuration (key-value pairs)
-- `analyses` - Programmatic analysis results (detection mode, events, metrics)
-
-Database location: `~/.snore/snore.db`
-
-## Project Structure
-
-```
-SNORE/
-├── src/snore/
-│   ├── cli.py                   # CLI commands (import, analyze, list, db)
-│   ├── constants.py             # Channel IDs and mappings
-│   ├── models/
-│   │   └── unified.py           # Universal data model (Pydantic)
-│   ├── database/
-│   │   ├── schema.sql           # SQLite schema
-│   │   ├── manager.py           # Database operations
-│   │   └── importers.py         # Session import pipeline
-│   ├── parsers/
-│   │   ├── base.py              # Abstract parser interface
-│   │   ├── registry.py          # Parser auto-detection
-│   │   ├── resmed_edf.py        # ResMed EDF+ parser
-│   │   └── formats/
-│   │       └── edf.py           # Generic EDF reader
-│   ├── analysis/
-│   │   ├── service.py           # Analysis orchestration
-│   │   ├── shared/              # Core algorithms (breath segmentation, features)
-│   │   └── modes/               # Detection modes (AASM, AASM Relaxed)
-│   └── utils/
-├── tests/
-│   ├── unit/                    # Unit tests
-│   └── integration/             # Integration tests
-└── pyproject.toml
-```
 
 ## Development
 
