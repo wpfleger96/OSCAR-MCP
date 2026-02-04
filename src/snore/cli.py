@@ -974,8 +974,9 @@ def session_list(
 
 @session.command("show")
 @click.argument("session_id", type=int)
+@click.option("--settings", "show_settings", is_flag=True, help="Show device settings")
 @click.option("--db", type=click.Path(), help="Database path")
-def session_show(session_id: int, db: str | None) -> None:
+def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
     """Show details for a specific session."""
     from snore.database import models
     from snore.database.session import init_database, session_scope
@@ -1047,6 +1048,31 @@ def session_show(session_id: int, db: str | None) -> None:
                 click.echo(f"    Usage: {stats.usage_hours:.1f}h")
             if stats.leak_percentile_70 is not None:
                 click.echo(f"    Leak (70th): {stats.leak_percentile_70:.1f} L/min")
+
+        if show_settings:
+            settings_records = (
+                db_session.query(models.Setting)
+                .filter(models.Setting.session_id == sess.id)
+                .order_by(models.Setting.key)
+                .all()
+            )
+            if settings_records:
+                click.echo("\n  Settings:")
+                import pint
+
+                ureg = pint.get_application_registry()  # type: ignore[no-untyped-call]
+                for s in settings_records:
+                    if s.key == "tube_temp" and s.value:
+                        try:
+                            temp_c = ureg.Quantity(float(s.value), ureg.degC)
+                            temp_f = temp_c.to(ureg.degF)
+                            click.echo(f"    {s.key}: {temp_f.magnitude:.1f}°F")
+                        except (ValueError, TypeError):
+                            click.echo(f"    {s.key}: {s.value}")
+                    else:
+                        click.echo(f"    {s.key}: {s.value}")
+            else:
+                click.echo("\n  Settings: None recorded")
 
         click.echo()
 

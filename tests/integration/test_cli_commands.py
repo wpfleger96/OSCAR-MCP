@@ -896,3 +896,29 @@ class TestDbInitCommand:
 
         assert result2.exit_code == 0
         assert temp_db.exists()
+
+
+class TestSessionShowCommand:
+    """Tests for session show command."""
+
+    @pytest.mark.integration
+    def test_session_show_settings_flag(
+        self, temp_db, resmed_parser, resmed_fixture_path
+    ):
+        """Test --settings flag displays settings."""
+        from snore.database.importers import SessionImporter
+
+        init_database(str(temp_db))
+
+        sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
+        importer = SessionImporter()
+        importer.import_session(sessions[0])
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["session", "show", "1", "--settings", "--db", str(temp_db)]
+        )
+
+        assert result.exit_code == 0
+        assert "Settings:" in result.output
+        assert "mode:" in result.output

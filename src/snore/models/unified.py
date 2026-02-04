@@ -100,9 +100,27 @@ class TherapySettings(BaseModel):
     )
 
     humidity_level: int | None = Field(default=None, description="Humidity level")
-    tube_temp: float | None = Field(default=None, description="Tube temperature (°C)")
+    tube_temp: float | None = Field(
+        default=None, description="Tube temperature (stored in °C)"
+    )
 
     mask_type: str | None = Field(default=None, description="Mask type")
+
+    epr_mode: str | None = Field(
+        default=None, description="EPR mode: Off, Ramp Only, or Full Time"
+    )
+    ramp_enabled: bool | None = Field(default=None, description="Ramp enabled")
+    humidity_enabled: bool | None = Field(default=None, description="Humidity enabled")
+    tube_temp_enabled: bool | None = Field(
+        default=None, description="Heated tube enabled"
+    )
+    climate_control: str | None = Field(
+        default=None, description="Climate control mode: Manual or Auto"
+    )
+    smart_start: bool | None = Field(default=None, description="Smart start enabled")
+    ab_filter: str | None = Field(
+        default=None, description="Filter type: Standard or Antibacterial"
+    )
 
     other_settings: dict[str, str] = Field(
         default_factory=dict, description="Other settings"

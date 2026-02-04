@@ -20,7 +20,7 @@ import re
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,8 @@ from snore.models.unified import (
     DeviceInfo,
     RespiratoryEvent,
     RespiratoryEventType,
+    TherapyMode,
+    TherapySettings,
     UnifiedSession,
     WaveformData,
     WaveformType,
@@ -69,8 +71,6 @@ class ResmedEDFParser(DeviceParser):
     FILE_TYPE_EVE = "_EVE.edf"  # Events
     FILE_TYPE_CSL = "_CSL.edf"  # Compliance
 
-    # Event type mapping from EDF annotations to unified types
-    # Based on OSCAR's ResMed annotation mappings
     EVENT_TYPE_MAP = {
         "Obstructive Apnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
         "ObstructiveApnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
@@ -103,11 +103,43 @@ class ResmedEDFParser(DeviceParser):
         "VS": RespiratoryEventType.VIBRATORY_SNORE,
     }
 
-    # Special annotations that should be filtered out (not actual events)
     FILTERED_ANNOTATIONS = {
         "Recording starts",
         "SpO2 Desaturation",  # handled separately if needed
     }
+
+    STR_SETTINGS_MAP = {
+        "Mode": "mode",
+        "S.C.Press": "pressure_fixed",
+        "S.A.MinPress": "pressure_min",
+        "S.A.MaxPress": "pressure_max",
+        "S.C.StartPress": "ramp_start_pressure",
+        "S.A.StartPress": "ramp_start_pressure",
+        "S.EPR.Level": "epr_level",
+        "S.EPR.EPRType": "epr_mode",
+        "S.RampEnable": "ramp_enabled",
+        "S.RampTime": "ramp_time",
+        "S.ClimateControl": "climate_control",
+        "S.HumEnable": "humidity_enabled",
+        "S.HumLevel": "humidity_level",
+        "S.TempEnable": "tube_temp_enabled",
+        "S.Temp": "tube_temp",
+        "S.SmartStart": "smart_start",
+        "S.ABFilter": "ab_filter",
+        "S.Mask": "mask_type",
+    }
+
+    EPR_TYPE_MAP = {0: "Off", 1: "Ramp Only", 2: "Full Time"}
+    MASK_TYPE_MAP = {
+        0: "Pillows",
+        1: "Full Face",
+        2: "Nasal",
+        3: "Nasal Pillows",
+        4: "Nasal",
+    }
+    CLIMATE_CONTROL_MAP = {1: "Manual", 2: "Auto"}
+    AB_FILTER_MAP = {0: "Standard", 1: "Antibacterial"}
+    MODE_MAP = {0: TherapyMode.CPAP, 1: TherapyMode.APAP, 2: TherapyMode.BIPAP}
 
     def __init__(self) -> None:
         """Initialize ResMed parser."""
@@ -392,6 +424,9 @@ class ResmedEDFParser(DeviceParser):
         """Parse sessions sequentially (original behavior)."""
         sessions_yielded = 0
 
+        str_file = path / "STR.edf"
+        str_settings_cache = self._preload_str_settings(str_file)
+
         for night_date, segments in night_items:
             if date_from or date_to:
                 try:
@@ -421,7 +456,7 @@ class ResmedEDFParser(DeviceParser):
 
             try:
                 session = self._parse_night_session(
-                    night_date, segments, device_info, path
+                    night_date, segments, device_info, path, str_settings_cache
                 )
 
                 if session is None:
@@ -497,12 +532,20 @@ class ResmedEDFParser(DeviceParser):
             f"Parsing {len(filtered_items)} nights in parallel with {os.cpu_count()} workers"
         )
 
+        str_file = path / "STR.edf"
+        str_settings_cache = self._preload_str_settings(str_file)
+
         sessions_yielded = 0
 
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             futures = {
                 executor.submit(
-                    self._parse_night_session, night_date, segments, device_info, path
+                    self._parse_night_session,
+                    night_date,
+                    segments,
+                    device_info,
+                    path,
+                    str_settings_cache,
                 ): night_date
                 for night_date, segments in filtered_items
             }
@@ -559,8 +602,6 @@ class ResmedEDFParser(DeviceParser):
         Returns:
             Night date as YYYYMMDD string
         """
-        # ResMed splits days at noon - sessions before noon go to previous day
-        # Reference: OSCAR resmed_loader.cpp lines 1112-1116
         if timestamp.hour < 12:
             night_date = (timestamp - timedelta(days=1)).date()
         else:
@@ -657,6 +698,7 @@ class ResmedEDFParser(DeviceParser):
         segments: dict[str, dict[str, Path]],
         device_info: DeviceInfo,
         base_path: Path,
+        str_settings_cache: dict[date, dict[str, float]] | None = None,
     ) -> UnifiedSession | None:
         """
         Parse all segments for a single night into one unified session.
@@ -670,6 +712,7 @@ class ResmedEDFParser(DeviceParser):
             segments: Dict mapping session_id to file dict
             device_info: Device information
             base_path: Base data path
+            str_settings_cache: Pre-loaded STR.edf settings cache (optional)
 
         Returns:
             Single UnifiedSession representing the entire night
@@ -681,8 +724,6 @@ class ResmedEDFParser(DeviceParser):
             f"{[seg_id for seg_id, _ in sorted_segments]}"
         )
 
-        # Collect ALL EVE files from all segments (including zero-record ones)
-        # Per OSCAR's behavior: EVE files store data for whole day and should be applied to all sessions
         eve_files = []
         for segment_id, files in sorted_segments:
             if "EVE" in files:
@@ -695,7 +736,7 @@ class ResmedEDFParser(DeviceParser):
         for segment_id, files in sorted_segments:
             try:
                 segment_session = self._parse_session_group(
-                    segment_id, files, device_info, base_path
+                    segment_id, files, device_info, base_path, str_settings_cache
                 )
                 segment_sessions.append(segment_session)
             except ValueError as e:
@@ -707,8 +748,6 @@ class ResmedEDFParser(DeviceParser):
                 continue
 
         if not segment_sessions:
-            # OSCAR allows "summary only" nights with CSL/EVE but no waveform data
-            # These occur from device self-tests, brief power-ons, or compliance checks
             logger.warning(
                 f"Night {night_date} has no valid therapy segments (only CSL/EVE stub files). "
                 f"This is likely a device self-test or brief power-on event. Skipping night."
@@ -814,6 +853,7 @@ class ResmedEDFParser(DeviceParser):
         files: dict[str, Path],
         device_info: DeviceInfo,
         base_path: Path,
+        str_settings_cache: dict[date, dict[str, float]] | None = None,
     ) -> UnifiedSession:
         """Parse a single session from its file group."""
         from .formats.edf import get_edf_record_count
@@ -862,6 +902,18 @@ class ResmedEDFParser(DeviceParser):
 
         if "PLD" in files:
             self._parse_pressure_leak(files["PLD"], session)
+
+        if str_settings_cache:
+            session_date = session.start_time.date()
+            if session_date in str_settings_cache:
+                settings = self._convert_str_to_therapy_settings(
+                    str_settings_cache[session_date]
+                )
+                if settings:
+                    session.settings = settings
+                    logger.debug(
+                        f"Loaded settings for session {session_id}: mode={settings.mode}"
+                    )
 
         return session
 
@@ -1280,7 +1332,6 @@ class ResmedEDFParser(DeviceParser):
                 for annotation in annotations:
                     event_timestamp = annotation.to_datetime(eve_start_time)
 
-                    # Check if event falls within session time range (OSCAR's checkInside logic)
                     if not (session.start_time <= event_timestamp <= session.end_time):
                         total_events_filtered += 1
                         continue
@@ -1326,3 +1377,220 @@ class ResmedEDFParser(DeviceParser):
                 f"No events within session time range (found {total_events_found} total events, "
                 f"all filtered out)"
             )
+
+    def _parse_str_settings(
+        self, str_file: Path, session_date: date
+    ) -> TherapySettings | None:
+        """
+        Parse therapy settings from STR.edf for a specific session date.
+
+        STR.edf contains one data record per day since device initialization.
+        Each signal has one sample per record, representing that day's setting value.
+
+        Args:
+            str_file: Path to STR.edf file
+            session_date: Date of session to get settings for
+
+        Returns:
+            TherapySettings populated from STR.edf, or None if not found
+        """
+        try:
+            with EDFReader(str_file) as edf:
+                header = edf.get_header()
+
+                str_start_date = header.start_datetime.date()
+                days_offset = (session_date - str_start_date).days
+
+                if days_offset < 0 or days_offset >= header.num_data_records:
+                    logger.warning(
+                        f"Session date {session_date} outside STR.edf range "
+                        f"({str_start_date} + {header.num_data_records} days)"
+                    )
+                    return None
+
+                settings_values = {}
+                signals = edf.get_signal_info()
+
+                for signal_label, setting_key in self.STR_SETTINGS_MAP.items():
+                    if signal_label in signals:
+                        data, _ = edf.read_signal(signal_label)
+                        if len(data) > days_offset:
+                            settings_values[setting_key] = data[days_offset]
+
+                if not settings_values:
+                    logger.debug(f"No settings found in STR.edf for {session_date}")
+                    return None
+
+                return self._convert_str_to_therapy_settings(settings_values)
+
+        except Exception as e:
+            logger.warning(f"Failed to parse STR.edf settings: {e}")
+            return None
+
+    def _preload_str_settings(
+        self, str_file: Path
+    ) -> dict[date, dict[str, float]] | None:
+        """
+        Pre-read all settings from STR.edf for all dates.
+
+        This method reads the entire STR.edf file once and caches all settings
+        in memory. Used to avoid concurrent file access issues when parsing
+        sessions in parallel.
+
+        Args:
+            str_file: Path to STR.edf file
+
+        Returns:
+            Dictionary mapping date -> {setting_name: value}, or None if file
+            doesn't exist or can't be read
+        """
+        if not str_file.exists():
+            return None
+
+        try:
+            with EDFReader(str_file) as edf:
+                header = edf.get_header()
+                start_date = header.start_datetime.date()
+                num_records = header.num_data_records
+
+                all_settings: dict[date, dict[str, float]] = {}
+                signals = edf.get_signal_info()
+
+                for signal_label, setting_name in self.STR_SETTINGS_MAP.items():
+                    if signal_label in signals:
+                        data, _ = edf.read_signal(signal_label)
+
+                        for record_idx in range(min(num_records, len(data))):
+                            record_date = start_date + timedelta(days=record_idx)
+
+                            if record_date not in all_settings:
+                                all_settings[record_date] = {}
+
+                            all_settings[record_date][setting_name] = float(
+                                data[record_idx]
+                            )
+
+                logger.info(
+                    f"Preloaded STR.edf settings for {len(all_settings)} days "
+                    f"({start_date} to {start_date + timedelta(days=num_records - 1)})"
+                )
+                return all_settings
+
+        except Exception as e:
+            logger.warning(f"Failed to preload STR.edf settings: {e}")
+            return None
+
+    def _convert_str_to_therapy_settings(
+        self, values: dict[str, float]
+    ) -> TherapySettings:
+        """
+        Convert raw STR.edf values to TherapySettings model.
+
+        Args:
+            values: Dictionary of setting keys to raw float values
+
+        Returns:
+            TherapySettings instance with proper type conversions
+        """
+        mode_value = values.get("mode")
+        mode = (
+            self.MODE_MAP.get(int(mode_value), TherapyMode.APAP)
+            if mode_value is not None
+            else TherapyMode.APAP
+        )
+
+        epr_type_value = values.get("epr_mode")
+        epr_mode = (
+            self.EPR_TYPE_MAP.get(int(epr_type_value), "Unknown")
+            if epr_type_value is not None
+            else None
+        )
+
+        mask_value = values.get("mask_type")
+        mask_type = (
+            self.MASK_TYPE_MAP.get(int(mask_value), "Unknown")
+            if mask_value is not None
+            else None
+        )
+
+        ramp_enabled_val = values.get("ramp_enabled")
+        ramp_enabled = ramp_enabled_val == 2 if ramp_enabled_val is not None else None
+        humidity_enabled_val = values.get("humidity_enabled")
+        humidity_enabled = (
+            humidity_enabled_val == 2 if humidity_enabled_val is not None else None
+        )
+        tube_temp_enabled_val = values.get("tube_temp_enabled")
+        tube_temp_enabled = (
+            tube_temp_enabled_val == 2 if tube_temp_enabled_val is not None else None
+        )
+        smart_start_val = values.get("smart_start")
+        smart_start = smart_start_val == 2 if smart_start_val is not None else None
+
+        climate_value = values.get("climate_control")
+        climate_control = (
+            self.CLIMATE_CONTROL_MAP.get(int(climate_value), "Manual")
+            if climate_value is not None
+            else None
+        )
+
+        def _validate_positive(
+            value: float | None, min_val: float = 0.0
+        ) -> float | None:
+            """Return value if >= min_val, else None (filters sentinel values)."""
+            return value if value is not None and value >= min_val else None
+
+        ramp_time_value = values.get("ramp_time")
+        ramp_time = (
+            int(ramp_time_value)
+            if ramp_time_value is not None and ramp_time_value >= 0 and ramp_enabled
+            else None
+        )
+
+        epr_level_value = values.get("epr_level")
+        epr_level = (
+            int(epr_level_value)
+            if epr_level_value is not None and 0 <= epr_level_value <= 3
+            else None
+        )
+
+        humidity_level_value = values.get("humidity_level")
+        humidity_level = (
+            int(humidity_level_value)
+            if humidity_level_value is not None and humidity_level_value >= 0
+            else None
+        )
+
+        pressure_fixed = _validate_positive(values.get("pressure_fixed"), min_val=1.0)
+        pressure_min = _validate_positive(values.get("pressure_min"), min_val=1.0)
+        pressure_max = _validate_positive(values.get("pressure_max"), min_val=1.0)
+        ramp_start_pressure = _validate_positive(
+            values.get("ramp_start_pressure"), min_val=1.0
+        )
+        tube_temp = _validate_positive(values.get("tube_temp"), min_val=1.0)
+
+        ab_filter_value = values.get("ab_filter")
+        ab_filter = (
+            self.AB_FILTER_MAP.get(int(ab_filter_value), "Unknown")
+            if ab_filter_value is not None and ab_filter_value >= 0
+            else None
+        )
+
+        return TherapySettings(
+            mode=mode,
+            pressure_fixed=pressure_fixed,
+            pressure_min=pressure_min,
+            pressure_max=pressure_max,
+            epr_level=epr_level,
+            epr_mode=epr_mode,
+            ramp_enabled=ramp_enabled,
+            ramp_time=ramp_time,
+            ramp_start_pressure=ramp_start_pressure,
+            humidity_enabled=humidity_enabled,
+            humidity_level=humidity_level,
+            tube_temp_enabled=tube_temp_enabled,
+            tube_temp=tube_temp,
+            climate_control=climate_control,
+            smart_start=smart_start,
+            mask_type=mask_type,
+            ab_filter=ab_filter,
+        )

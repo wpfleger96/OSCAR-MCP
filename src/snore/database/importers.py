@@ -401,11 +401,18 @@ class SessionImporter:
             "ipap": settings.ipap,
             "epap": settings.epap,
             "epr_level": settings.epr_level,
+            "epr_mode": settings.epr_mode,
             "ramp_time": settings.ramp_time,
+            "ramp_enabled": settings.ramp_enabled,
             "ramp_start_pressure": settings.ramp_start_pressure,
             "humidity_level": settings.humidity_level,
+            "humidity_enabled": settings.humidity_enabled,
             "tube_temp": settings.tube_temp,
+            "tube_temp_enabled": settings.tube_temp_enabled,
+            "climate_control": settings.climate_control,
             "mask_type": settings.mask_type,
+            "smart_start": settings.smart_start,
+            "ab_filter": settings.ab_filter,
         }
 
         if settings.other_settings:
