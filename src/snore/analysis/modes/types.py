@@ -1,6 +1,6 @@
 """Detection mode type definitions."""
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -9,14 +9,14 @@ from snore.analysis.shared.types import ApneaEvent, HypopneaEvent, RERAEvent
 from snore.constants import EventDetectionConstants as EDC
 
 
-class BaselineMethod(str, Enum):
+class BaselineMethod(StrEnum):
     """Method for calculating breath baseline."""
 
     TIME = "time"  # Time-based window (AASM-compliant)
     BREATH = "breath"  # Breath-count window
 
 
-class HypopneaMode(str, Enum):
+class HypopneaMode(StrEnum):
     """Method for detecting hypopnea events."""
 
     AASM_3PCT = "aasm_3pct"  # 30% flow + 3% SpO2 drop (AASM recommended)

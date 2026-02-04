@@ -689,8 +689,6 @@ Options:
   --profile TEXT        Profile username (optional if default set)
   --db PATH             Database path
   -m, --mode TEXT       Detection mode to compare (default: aasm)
-  -i, --interactive     Enable interactive zoom/pan mode (vim-style h/j/k/l or
-                        arrows, q to quit)
   --help                Show this message and exit.
 ```
 

@@ -27,6 +27,8 @@ from snore.constants import (
 from snore.logging_config import setup_logging
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
+from snore.waveform import format_time_offset
+from snore.waveform.inspector import parse_time_offset
 
 logger = logging.getLogger(__name__)
 
@@ -1622,7 +1624,7 @@ def _display_analysis_result(
                 fn_text = format_event_list(
                     validation["false_negatives"],
                     "  Missed events",
-                    _format_time_offset,
+                    format_time_offset,
                 )
                 con.print(fn_text)
 
@@ -1630,7 +1632,7 @@ def _display_analysis_result(
                 fp_text = format_event_list(
                     validation["false_positives"],
                     "  Extra events",
-                    _format_time_offset,
+                    format_time_offset,
                 )
                 con.print(fp_text)
 
@@ -2605,7 +2607,7 @@ def export_events(
                 export_events_list.append(
                     {
                         "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "time_into_session": _format_time_offset(time_offset),
+                        "time_into_session": format_time_offset(time_offset),
                         "event_type": abbreviate_event_type(event.event_type),
                         "duration_sec": f"{event.duration:.1f}",
                         "source": "machine",
@@ -2619,7 +2621,7 @@ def export_events(
                 export_events_list.append(
                     {
                         "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "time_into_session": _format_time_offset(time_offset),
+                        "time_into_session": format_time_offset(time_offset),
                         "event_type": apnea.event_type,
                         "duration_sec": f"{apnea.duration:.1f}",
                         "source": "programmatic",
@@ -2633,7 +2635,7 @@ def export_events(
                 export_events_list.append(
                     {
                         "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "time_into_session": _format_time_offset(time_offset),
+                        "time_into_session": format_time_offset(time_offset),
                         "event_type": "H",
                         "duration_sec": f"{hypopnea.duration:.1f}",
                         "source": "programmatic",
@@ -2646,19 +2648,19 @@ def export_events(
             import bisect
 
             prog_times = sorted(
-                _parse_time_offset(e["time_into_session"])
+                parse_time_offset(e["time_into_session"])
                 for e in export_events_list
                 if e["source"] == "programmatic"
             )
             machine_times = sorted(
-                _parse_time_offset(e["time_into_session"])
+                parse_time_offset(e["time_into_session"])
                 for e in export_events_list
                 if e["source"] == "machine"
             )
 
             for i, event_dict in enumerate(export_events_list):
                 if event_dict["source"] == "machine":
-                    machine_time = _parse_time_offset(event_dict["time_into_session"])
+                    machine_time = parse_time_offset(event_dict["time_into_session"])
                     idx = bisect.bisect_left(prog_times, machine_time - 5.0)
                     is_matched = any(
                         abs(machine_time - prog_times[j]) <= 5.0
@@ -2666,7 +2668,7 @@ def export_events(
                     )
                     export_events_list[i]["matched"] = "yes" if is_matched else "no"
                 else:
-                    prog_time = _parse_time_offset(event_dict["time_into_session"])
+                    prog_time = parse_time_offset(event_dict["time_into_session"])
                     idx = bisect.bisect_left(machine_times, prog_time - 5.0)
                     is_matched = any(
                         abs(prog_time - machine_times[j]) <= 5.0
@@ -2705,20 +2707,6 @@ def export_events(
             sys.exit(1)
 
 
-def _format_time_offset(seconds: float) -> str:
-    """Format time offset as HH:MM:SS."""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
-def _parse_time_offset(time_str: str) -> float:
-    """Parse HH:MM:SS to seconds."""
-    parts = time_str.split(":")
-    return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-
-
 @cli.group()
 def waveform() -> None:
     """Waveform inspection and visualization commands."""
@@ -2753,12 +2741,6 @@ def waveform() -> None:
 @click.option(
     "--mode", "-m", default="aasm", help="Detection mode to compare (default: aasm)"
 )
-@click.option(
-    "--interactive",
-    "-i",
-    is_flag=True,
-    help="Enable interactive zoom/pan mode (vim-style h/j/k/l or arrows, q to quit)",
-)
 def show_waveform(
     session_id: int | None,
     date: datetime | None,
@@ -2768,7 +2750,6 @@ def show_waveform(
     output: str | None,
     db: str | None,
     mode: str,
-    interactive: bool,
 ) -> None:
     """
     Display flow waveform at a specific time.
@@ -2784,7 +2765,6 @@ def show_waveform(
     from snore.database import models
     from snore.database.session import init_database, session_scope
     from snore.waveform import WaveformInspector, WaveformRenderer
-    from snore.waveform.inspector import parse_time_offset
 
     if session_id is None and date is None:
         click.echo("Error: Either --session-id or --date must be provided", err=True)
@@ -3034,7 +3014,7 @@ def compare_events(
                 f"FALSE NEGATIVES (machine events missed by programmatic): {len(false_negatives)}"
             )
             for event in false_negatives:
-                time_str = _format_time_offset(event.start_time)
+                time_str = format_time_offset(event.start_time)
                 event_type = getattr(event, "event_type", "H")
                 click.echo(f"  {event_type} at {time_str} ({event.duration:.1f}s)")
                 click.echo(
@@ -3051,7 +3031,7 @@ def compare_events(
             )
 
             for event in false_positives_apnea:
-                time_str = _format_time_offset(event.start_time)
+                time_str = format_time_offset(event.start_time)
                 event_type = event.event_type
                 conf = getattr(event, "confidence", 0)
                 flow_red = getattr(event, "flow_reduction", 0)
@@ -3063,7 +3043,7 @@ def compare_events(
                 )
 
             for event in false_positives_hypopnea:
-                time_str = _format_time_offset(event.start_time)
+                time_str = format_time_offset(event.start_time)
                 conf = getattr(event, "confidence", 0)
                 flow_red = getattr(event, "flow_reduction", 0)
                 click.echo(

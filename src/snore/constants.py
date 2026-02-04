@@ -4,12 +4,12 @@ Constants and mappings for OSCAR CPAP data analysis.
 Based on OSCAR's schema.h and machine_common.h definitions.
 """
 
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal, TypedDict
 
 
-class MachineType(str, Enum):
+class MachineType(StrEnum):
     """CPAP device types supported by OSCAR."""
 
     CPAP = "CPAP"
@@ -21,7 +21,7 @@ class MachineType(str, Enum):
     SLEEP_STAGE = "SleepStage"
 
 
-class ChannelType(str, Enum):
+class ChannelType(StrEnum):
     """Types of data channels in OSCAR."""
 
     DATA = "DATA"  # Single values (height, weight)
@@ -33,7 +33,7 @@ class ChannelType(str, Enum):
     UNKNOWN = "UNKNOWN"  # Unclassified
 
 
-class CalculationType(str, Enum):
+class CalculationType(StrEnum):
     """Statistical calculation types available for channels."""
 
     MIN = "min"
