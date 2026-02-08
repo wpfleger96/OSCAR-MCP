@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 WAVEFORM_UNITS = {
     "flow": "L/min",
     "pressure": "cmH2O",
+    "therapy_pressure": "cmH2O",
+    "epap": "cmH2O",
     "leak": "L/min",
     "mv": "L/min",
     "rr": "breaths/min",
@@ -28,6 +30,8 @@ WAVEFORM_UNITS = {
 WAVEFORM_LABELS = {
     "flow": "Flow",
     "pressure": "Pressure",
+    "therapy_pressure": "Therapy Pressure",
+    "epap": "EPAP",
     "leak": "Leak",
     "mv": "Minute Ventilation",
     "rr": "Respiratory Rate",

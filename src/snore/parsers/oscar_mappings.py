@@ -3,6 +3,7 @@
 from snore.constants import (
     CPAP_CLEAR_AIRWAY,
     CPAP_CSR,
+    CPAP_EPAP,
     CPAP_FLOW_LIMIT,
     CPAP_FLOW_RATE,
     CPAP_HYPOPNEA,
@@ -11,6 +12,7 @@ from snore.constants import (
     CPAP_MINUTE_VENT,
     CPAP_OBSTRUCTIVE,
     CPAP_PERIODIC_BREATHING,
+    CPAP_PRESSURE,
     CPAP_RERA,
     CPAP_RESPRATE,
     CPAP_TIDAL_VOLUME,
@@ -39,7 +41,9 @@ OSCAR_EVENT_TYPE_MAP: dict[int, RespiratoryEventType] = {
 
 OSCAR_WAVEFORM_TYPE_MAP: dict[int, WaveformType] = {
     CPAP_FLOW_RATE: WaveformType.FLOW_RATE,
+    CPAP_PRESSURE: WaveformType.THERAPY_PRESSURE,
     CPAP_MASK_PRESSURE: WaveformType.MASK_PRESSURE,
+    CPAP_EPAP: WaveformType.EPAP,
     CPAP_LEAK: WaveformType.LEAK_RATE,
     CPAP_RESPRATE: WaveformType.RESPIRATORY_RATE,
     CPAP_TIDAL_VOLUME: WaveformType.TIDAL_VOLUME,
@@ -50,7 +54,9 @@ OSCAR_WAVEFORM_TYPE_MAP: dict[int, WaveformType] = {
 
 OSCAR_WAVEFORM_UNITS: dict[int, str] = {
     CPAP_FLOW_RATE: "L/min",
+    CPAP_PRESSURE: "cmH₂O",
     CPAP_MASK_PRESSURE: "cmH₂O",
+    CPAP_EPAP: "cmH₂O",
     CPAP_LEAK: "L/min",
     CPAP_RESPRATE: "bpm",
     CPAP_TIDAL_VOLUME: "mL",

@@ -93,18 +93,29 @@ Complete project overview showing implemented features and future development pl
 
 ---
 
+## Recently Completed ✅
+
+### Statistics Enhancement (2026-02-08)
+- [x] **Multi-period summaries** - Week, month, 6-month, year reports (`stats --period`)
+- [x] **Trend analysis** - AHI trends over time with plotext charts (`stats --trend`)
+
+### Data Discoverability (2026-02-08)
+- [x] **Waveform type selection** - Add `--type` option to `waveform show` (flow, leak, pressure, therapy_pressure, epap, spo2, pulse, mv, rr, tv)
+- [x] **Multi-waveform view** - Support `--type flow,leak,pressure` to view multiple waveforms simultaneously with stacked subplots
+- [x] **Waveform auto-discovery** - `waveform list` command shows available waveform types for a session
+- [x] **Enhanced session display** - Full statistics in `session show` (pressure, EPAP, leak, SpO2/pulse, RR/TV/MV, REI)
+- [x] **Stats detail enhancement** - SpO2 time below 90%, respiratory metrics (RR/TV/MV), pulse, REI in `stats` command
+
+### Pressure Data Model (2026-02-08)
+- [x] **Therapy pressure vs mask pressure separation** - THERAPY_PRESSURE, MASK_PRESSURE, and EPAP as distinct waveform types
+- [x] **ResMed PLD parser fix** - Correctly extracts all 3 pressure signals (Press.2s, MaskPress.2s, EPRPress.2s)
+- [x] **STR.edf daily summaries** - Import machine-computed percentiles (MaskPress, TgtEPAP, Leak, RR, TV, MV)
+- [x] **OSCAR pressure channels** - Import therapy pressure and EPAP from OSCAR binary database
+- [x] **OSCAR device settings** - Import EPR level, therapy mode, pressure min/max from OSCAR summary
+
 ## In Progress 🚧
 
-### Statistics Enhancement
-- [ ] **Multi-period summaries** - Week, month, 6-month, year reports
-- [ ] **Trend analysis** - AHI trends, usage trends, effectiveness over time
-
-### Data Discoverability
-- [ ] **Waveform type selection** - Add `--type` option to `waveform show` (flow, leak, pressure, spo2, pulse, mv, rr, tv)
-- [ ] **Multi-waveform view** - Support `--type flow,leak,pressure` to view multiple waveforms simultaneously
-- [ ] **Waveform auto-discovery** - Show what waveform types are available for a session
-- [ ] **Enhanced session display** - Add full statistics to `session show` (pressure, leak, SpO2/pulse, RR/TV/MV, REI)
-- [ ] **Stats detail enhancement** - Add SpO2 time below 90%, respiratory metrics summary to `stats` command
+_(No active development)_
 
 ---
 
@@ -123,26 +134,7 @@ Complete project overview showing implemented features and future development pl
 
 ---
 
-### Phase 2: Reporting & Data Management
-
-**Goal:** Generate reports and manage data lifecycle
-
-- [ ] **HTML statistics report** - Multi-period reports with charts and tables
-- [ ] **CSV export enhancements:**
-  - Summary mode: Per-day aggregated statistics
-  - Sessions mode: Per-session data
-  - Details mode: Events with full session context
-  - Export all waveform types to CSV (not just flow)
-  - Include therapy settings in session exports
-  - Include all statistics fields in summary exports
-- [ ] **PDF report generation** - Printable reports with graphs
-- [ ] **Journal/notes per day** - User annotations and observations
-- [ ] **Database backup/restore** - Export/import database with integrity checks
-- [ ] **Minutes at pressure distribution** - Histogram of time spent at each pressure level
-
----
-
-### Phase 3: Web UI
+### Phase 2: Web UI
 
 **Goal:** Browser-based visualization and interaction
 
@@ -169,6 +161,25 @@ Complete project overview showing implemented features and future development pl
 - Backend: FastAPI + SQLAlchemy
 - Frontend: React/Vue + Plotly.js/Chart.js
 - Deployment: Docker container
+
+---
+
+### Phase 3: Reporting & Data Management
+
+**Goal:** Generate reports and manage data lifecycle
+
+- [ ] **HTML statistics report** - Multi-period reports with charts and tables
+- [ ] **CSV export enhancements:**
+  - Summary mode: Per-day aggregated statistics
+  - Sessions mode: Per-session data
+  - Details mode: Events with full session context
+  - Export all waveform types to CSV (not just flow)
+  - Include therapy settings in session exports
+  - Include all statistics fields in summary exports
+- [ ] **PDF report generation** - Printable reports with graphs
+- [ ] **Journal/notes per day** - User annotations and observations
+- [ ] **Database backup/restore** - Export/import database with integrity checks
+- [ ] **Minutes at pressure distribution** - Histogram of time spent at each pressure level
 
 ---
 

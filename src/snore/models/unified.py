@@ -40,6 +40,8 @@ class WaveformType(Enum):
 
     FLOW_RATE = "flow"  # L/min
     MASK_PRESSURE = "pressure"  # cmH2O
+    THERAPY_PRESSURE = "therapy_pressure"  # cmH2O
+    EPAP = "epap"  # cmH2O
     LEAK_RATE = "leak"  # L/min
     MINUTE_VENTILATION = "mv"  # L/min
     RESPIRATORY_RATE = "rr"  # breaths/min
@@ -150,6 +152,12 @@ class SessionStatistics(BaseModel):
     pressure_95th: float | None = Field(
         default=None, description="95th percentile pressure"
     )
+
+    epap_min: float | None = Field(default=None, description="Minimum EPAP")
+    epap_max: float | None = Field(default=None, description="Maximum EPAP")
+    epap_median: float | None = Field(default=None, description="Median EPAP")
+    epap_mean: float | None = Field(default=None, description="Mean EPAP")
+    epap_95th: float | None = Field(default=None, description="95th percentile EPAP")
 
     leak_min: float | None = Field(default=None, description="Minimum leak")
     leak_max: float | None = Field(default=None, description="Maximum leak")
@@ -427,18 +435,25 @@ class UnifiedSession(BaseModel):
             self.statistics.hi = event_counts["H"] / hours if hours > 0 else None
             self.statistics.usage_hours = hours
 
-        pressure_wf = self.waveforms.get(WaveformType.MASK_PRESSURE)
-        if (
-            pressure_wf
-            and pressure_wf.values is not None
-            and len(pressure_wf.values) > 0
-        ):
-            data = pressure_wf.values
-            self.statistics.pressure_min = pressure_wf.min_value
-            self.statistics.pressure_max = pressure_wf.max_value
-            self.statistics.pressure_mean = pressure_wf.mean_value
+        therapy_wf = self.waveforms.get(WaveformType.THERAPY_PRESSURE)
+        if therapy_wf is None:
+            therapy_wf = self.waveforms.get(WaveformType.MASK_PRESSURE)
+        if therapy_wf and therapy_wf.values is not None and len(therapy_wf.values) > 0:
+            data = therapy_wf.values
+            self.statistics.pressure_min = therapy_wf.min_value
+            self.statistics.pressure_max = therapy_wf.max_value
+            self.statistics.pressure_mean = therapy_wf.mean_value
             self.statistics.pressure_median = float(np.median(data))
             self.statistics.pressure_95th = float(np.percentile(data, 95))
+
+        epap_wf = self.waveforms.get(WaveformType.EPAP)
+        if epap_wf and epap_wf.values is not None and len(epap_wf.values) > 0:
+            data = epap_wf.values
+            self.statistics.epap_min = epap_wf.min_value
+            self.statistics.epap_max = epap_wf.max_value
+            self.statistics.epap_mean = epap_wf.mean_value
+            self.statistics.epap_median = float(np.median(data))
+            self.statistics.epap_95th = float(np.percentile(data, 95))
 
         leak_wf = self.waveforms.get(WaveformType.LEAK_RATE)
         if leak_wf and leak_wf.values is not None and len(leak_wf.values) > 0:

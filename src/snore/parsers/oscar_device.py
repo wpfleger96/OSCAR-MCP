@@ -18,13 +18,19 @@ import numpy as np
 
 from snore.constants import (
     CPAP_CLEAR_AIRWAY,
+    CPAP_EPAP,
+    CPAP_EPR_LEVEL,
     CPAP_FLOW_LIMIT,
     CPAP_HYPOPNEA,
     CPAP_LEAK,
     CPAP_MASK_PRESSURE,
     CPAP_MINUTE_VENT,
+    CPAP_MODE,
     CPAP_OBSTRUCTIVE,
     CPAP_PERIODIC_BREATHING,
+    CPAP_PRESSURE,
+    CPAP_PRESSURE_MAX,
+    CPAP_PRESSURE_MIN,
     CPAP_RERA,
     CPAP_RESPRATE,
     CPAP_TIDAL_VOLUME,
@@ -35,6 +41,8 @@ from snore.constants import (
 from snore.models.unified import (
     DeviceInfo,
     RespiratoryEvent,
+    TherapyMode,
+    TherapySettings,
     UnifiedSession,
     WaveformData,
 )
@@ -480,6 +488,9 @@ class OscarDeviceParser(DeviceParser):
 
         if summary:
             self._populate_statistics_from_summary(summary, session)
+            settings = self._convert_summary_to_therapy_settings(summary)
+            if settings:
+                session.settings = settings
 
         if events:
             self._populate_waveforms_from_events(events, session)
@@ -505,9 +516,19 @@ class OscarDeviceParser(DeviceParser):
                 f"Periodic breathing events: {int(summary.counts[CPAP_PERIODIC_BREATHING])}"
             )
 
-        stats.pressure_min = summary.minimums.get(CPAP_MASK_PRESSURE)
-        stats.pressure_max = summary.maximums.get(CPAP_MASK_PRESSURE)
-        stats.pressure_mean = summary.averages.get(CPAP_MASK_PRESSURE)
+        stats.pressure_min = summary.minimums.get(
+            CPAP_PRESSURE
+        ) or summary.minimums.get(CPAP_MASK_PRESSURE)
+        stats.pressure_max = summary.maximums.get(
+            CPAP_PRESSURE
+        ) or summary.maximums.get(CPAP_MASK_PRESSURE)
+        stats.pressure_mean = summary.averages.get(
+            CPAP_PRESSURE
+        ) or summary.averages.get(CPAP_MASK_PRESSURE)
+
+        stats.epap_min = summary.minimums.get(CPAP_EPAP)
+        stats.epap_max = summary.maximums.get(CPAP_EPAP)
+        stats.epap_mean = summary.averages.get(CPAP_EPAP)
 
         stats.leak_min = summary.minimums.get(CPAP_LEAK)
         stats.leak_max = summary.maximums.get(CPAP_LEAK)
@@ -541,6 +562,45 @@ class OscarDeviceParser(DeviceParser):
         stats.usage_hours = duration_ms / (1000 * 3600)
 
         session.has_statistics = True
+
+    def _convert_summary_to_therapy_settings(
+        self, summary: SessionSummary
+    ) -> TherapySettings | None:
+        """
+        Convert OSCAR summary settings dict to TherapySettings model.
+
+        Args:
+            summary: Parsed OSCAR summary data
+
+        Returns:
+            TherapySettings instance or None if no settings available
+        """
+        if not summary.settings:
+            return None
+
+        mode_value = summary.settings.get(CPAP_MODE)
+        mode_map = {0: TherapyMode.CPAP, 1: TherapyMode.APAP, 2: TherapyMode.BIPAP}
+        mode = (
+            mode_map.get(int(mode_value), TherapyMode.APAP)
+            if mode_value is not None
+            else TherapyMode.APAP
+        )
+
+        settings = TherapySettings(mode=mode)
+
+        epr_level = summary.settings.get(CPAP_EPR_LEVEL)
+        if epr_level is not None:
+            settings.epr_level = int(epr_level)
+
+        pressure_min = summary.settings.get(CPAP_PRESSURE_MIN)
+        if pressure_min is not None:
+            settings.pressure_min = float(pressure_min)
+
+        pressure_max = summary.settings.get(CPAP_PRESSURE_MAX)
+        if pressure_max is not None:
+            settings.pressure_max = float(pressure_max)
+
+        return settings
 
     def _populate_waveforms_from_events(
         self, events: SessionEvents, session: UnifiedSession

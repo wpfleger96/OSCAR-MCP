@@ -609,6 +609,7 @@ def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> 
             "mv": 0.0,
             "pulse": 0.0,
             "rei": 0.0,
+            "epap": 0.0,
         }
         usage_hours_for: dict[str, float] = {
             "rr": 0.0,
@@ -616,6 +617,7 @@ def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> 
             "mv": 0.0,
             "pulse": 0.0,
             "rei": 0.0,
+            "epap": 0.0,
         }
         total_spo2_time_below_90 = 0
 
@@ -629,6 +631,7 @@ def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> 
                 ("minute_ventilation_mean", "mv"),
                 ("pulse_mean", "pulse"),
                 ("rei", "rei"),
+                ("epap_mean", "epap"),
             ]:
                 val = getattr(stat, field)
                 if val is not None:
@@ -649,6 +652,7 @@ def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> 
         avg_mv = _avg("mv")
         avg_pulse = _avg("pulse")
         avg_rei = _avg("rei")
+        avg_epap = _avg("epap")
 
         click.echo("\n📈 Therapy Statistics")
         click.echo(f"{'=' * 50}")
@@ -674,10 +678,14 @@ def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> 
             click.echo(f"  Average REI: {avg_rei:.1f}")
 
         if avg_pressure is not None:
-            click.echo("\nMask Pressure")
+            click.echo("\nPressure")
             click.echo(f"  Average: {avg_pressure:.1f} cmH₂O")
             if min_pressure is not None and max_pressure is not None:
                 click.echo(f"  Range: {min_pressure:.1f} - {max_pressure:.1f} cmH₂O")
+
+        if avg_epap is not None:
+            click.echo("\nEPAP")
+            click.echo(f"  Average: {avg_epap:.1f} cmH₂O")
 
         if avg_leak is not None:
             click.echo("\nLeak")
@@ -1354,7 +1362,7 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
                 ]
             )
             if has_pressure:
-                click.echo("\n    Mask Pressure:")
+                click.echo("\n    Pressure:")
                 if stats.pressure_mean is not None:
                     click.echo(f"      Mean: {stats.pressure_mean:.1f} cmH₂O")
                 if stats.pressure_min is not None and stats.pressure_max is not None:
@@ -1365,6 +1373,25 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
                     click.echo(
                         f"      95th percentile: {stats.pressure_95th:.1f} cmH₂O"
                     )
+
+            has_epap = any(
+                [
+                    stats.epap_mean is not None,
+                    stats.epap_min is not None,
+                    stats.epap_max is not None,
+                    stats.epap_95th is not None,
+                ]
+            )
+            if has_epap:
+                click.echo("\n    EPAP:")
+                if stats.epap_mean is not None:
+                    click.echo(f"      Mean: {stats.epap_mean:.1f} cmH₂O")
+                if stats.epap_min is not None and stats.epap_max is not None:
+                    click.echo(
+                        f"      Range: {stats.epap_min:.1f} - {stats.epap_max:.1f} cmH₂O"
+                    )
+                if stats.epap_95th is not None:
+                    click.echo(f"      95th percentile: {stats.epap_95th:.1f} cmH₂O")
 
             has_leak = any(
                 [

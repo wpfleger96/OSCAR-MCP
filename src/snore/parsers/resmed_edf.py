@@ -129,6 +129,28 @@ class ResmedEDFParser(DeviceParser):
         "S.Mask": "mask_type",
     }
 
+    STR_SUMMARY_SIGNALS = {
+        ("MaskPress.50", "Mask Pres Med"): "pressure_median",
+        ("MaskPress.95", "Mask Pres 95"): "pressure_95th",
+        ("MaskPress.Max", "Mask Pres Max"): "pressure_max",
+        ("TgtEPAP.50", "Exp Pres Med"): "epap_median",
+        ("TgtEPAP.95", "Exp Pres 95"): "epap_95th",
+        ("TgtEPAP.Max", "Exp Pres Max"): "epap_max",
+        ("TgtIPAP.50", "Insp Pres Med"): "ipap_median",
+        ("TgtIPAP.95", "Insp Pres 95"): "ipap_95th",
+        ("TgtIPAP.Max", "Insp Pres Max"): "ipap_max",
+        ("Leak.50", "Leak Med"): "leak_median",
+        ("Leak.95", "Leak 95"): "leak_95th",
+        ("Leak.Max", "Leak Max"): "leak_max",
+        ("RespRate.50", "RR Med"): "respiratory_rate_mean",
+        ("TidVol.50", "Tid Vol Med"): "tidal_volume_mean",
+        ("MinVent.50", "Min Vent Med"): "minute_ventilation_mean",
+        ("AHI", "AHI"): "ahi",
+        ("OAI", "OAI"): "oai",
+        ("CAI", "CAI"): "cai",
+        ("HI", "HI"): "hi",
+    }
+
     EPR_TYPE_MAP = {0: "Off", 1: "Ramp Only", 2: "Full Time"}
     MASK_TYPE_MAP = {
         0: "Pillows",
@@ -447,6 +469,7 @@ class ResmedEDFParser(DeviceParser):
 
         str_file = path / "STR.edf"
         str_settings_cache = self._preload_str_settings(str_file)
+        str_summaries_cache = self._preload_str_summaries(str_file)
 
         for night_date, segments in night_items:
             if date_from or date_to:
@@ -477,7 +500,12 @@ class ResmedEDFParser(DeviceParser):
 
             try:
                 session = self._parse_night_session(
-                    night_date, segments, device_info, path, str_settings_cache
+                    night_date,
+                    segments,
+                    device_info,
+                    path,
+                    str_settings_cache,
+                    str_summaries_cache,
                 )
 
                 if session is None:
@@ -555,6 +583,7 @@ class ResmedEDFParser(DeviceParser):
 
         str_file = path / "STR.edf"
         str_settings_cache = self._preload_str_settings(str_file)
+        str_summaries_cache = self._preload_str_summaries(str_file)
 
         sessions_yielded = 0
 
@@ -567,6 +596,7 @@ class ResmedEDFParser(DeviceParser):
                     device_info,
                     path,
                     str_settings_cache,
+                    str_summaries_cache,
                 ): night_date
                 for night_date, segments in filtered_items
             }
@@ -720,6 +750,7 @@ class ResmedEDFParser(DeviceParser):
         device_info: DeviceInfo,
         base_path: Path,
         str_settings_cache: dict[date, dict[str, float]] | None = None,
+        str_summaries_cache: dict[date, dict[str, float]] | None = None,
     ) -> UnifiedSession | None:
         """
         Parse all segments for a single night into one unified session.
@@ -734,6 +765,7 @@ class ResmedEDFParser(DeviceParser):
             device_info: Device information
             base_path: Base data path
             str_settings_cache: Pre-loaded STR.edf settings cache (optional)
+            str_summaries_cache: Pre-loaded STR.edf summaries cache (optional)
 
         Returns:
             Single UnifiedSession representing the entire night
@@ -757,7 +789,12 @@ class ResmedEDFParser(DeviceParser):
         for segment_id, files in sorted_segments:
             try:
                 segment_session = self._parse_session_group(
-                    segment_id, files, device_info, base_path, str_settings_cache
+                    segment_id,
+                    files,
+                    device_info,
+                    base_path,
+                    str_settings_cache,
+                    str_summaries_cache,
                 )
                 segment_sessions.append(segment_session)
             except ValueError as e:
@@ -875,6 +912,7 @@ class ResmedEDFParser(DeviceParser):
         device_info: DeviceInfo,
         base_path: Path,
         str_settings_cache: dict[date, dict[str, float]] | None = None,
+        str_summaries_cache: dict[date, dict[str, float]] | None = None,
     ) -> UnifiedSession:
         """Parse a single session from its file group."""
         from .formats.edf import get_edf_record_count
@@ -934,6 +972,24 @@ class ResmedEDFParser(DeviceParser):
                     session.settings = settings
                     logger.debug(
                         f"Loaded settings for session {session_id}: mode={settings.mode}"
+                    )
+
+        if str_summaries_cache:
+            session_date = session.start_time.date()
+            if session_date in str_summaries_cache:
+                summaries = str_summaries_cache[session_date]
+                stats = session.statistics
+
+                for stat_name, value in summaries.items():
+                    if hasattr(stats, stat_name):
+                        setattr(stats, stat_name, value)
+
+                if summaries:
+                    logger.debug(
+                        f"Applied {len(summaries)} STR.edf summary stats to session {session_id}"
+                    )
+                    session.data_quality_notes.append(
+                        f"Statistics supplemented with {len(summaries)} values from STR.edf"
                     )
 
         return session
@@ -1132,6 +1188,20 @@ class ResmedEDFParser(DeviceParser):
                     return signal
         return None
 
+    def _find_signal_excluding(
+        self, edf: Any, patterns: list[str], exclude: set[str]
+    ) -> str | None:
+        """Find signal name matching any of the patterns, excluding already-matched signals."""
+        signals = edf.list_signal_labels()
+        for pattern in patterns:
+            signal: str
+            for signal in signals:
+                if signal in exclude:
+                    continue
+                if pattern.lower() in signal.lower():
+                    return signal
+        return None
+
     def _parse_pressure_leak(self, file_path: Path, session: UnifiedSession) -> None:
         """Parse PLD pressure/leak file."""
         from .formats.edf import get_edf_record_count
@@ -1154,19 +1224,30 @@ class ResmedEDFParser(DeviceParser):
             )
 
             with EDFReader(file_path) as edf:
-                # ResMed uses names like "Press.2s", "MaskPress.2s", "Pressure", "MaskPressure"
-                pressure_signal = self._find_signal(edf, ["Press", "MaskPress"])
+                # Parse all three pressure signals separately
+                # ResMed signal names: "MaskPress.2s", "EPRPress.2s", "Press.2s" (AirSense 11)
+                # or "MaskPressure", "Exp Pres", "Pressure" (older devices)
+                mask_signal = self._find_signal(edf, ["MaskPress", "Mask Pres"])
+                epap_signal = self._find_signal(edf, ["EPRPress", "Exp Pres"])
 
-                if pressure_signal:
-                    data, info = edf.read_signal(pressure_signal)
-                    timestamps_seconds = edf.get_timestamps(pressure_signal, data)
+                claimed = {s for s in (mask_signal, epap_signal) if s is not None}
+                therapy_signal = self._find_signal_excluding(
+                    edf, ["Press", "Therapy Pres", "Pressure"], exclude=claimed
+                )
+
+                # Parse therapy pressure (device's target pressure)
+                if therapy_signal:
+                    data, info = edf.read_signal(therapy_signal)
+                    timestamps_seconds = edf.get_timestamps(therapy_signal, data)
 
                     if len(data) == 0:
-                        logger.warning(f"No data in pressure signal {pressure_signal}")
+                        logger.warning(
+                            f"No data in therapy pressure signal {therapy_signal}"
+                        )
                     else:
                         waveform = WaveformData(
-                            waveform_type=WaveformType.MASK_PRESSURE,
-                            sample_rate=edf.get_sample_rate(pressure_signal),
+                            waveform_type=WaveformType.THERAPY_PRESSURE,
+                            sample_rate=edf.get_sample_rate(therapy_signal),
                             unit=info.physical_dimension or "cmH2O",
                             timestamps=timestamps_seconds,
                             values=data,
@@ -1174,7 +1255,46 @@ class ResmedEDFParser(DeviceParser):
                             max_value=float(np.max(data)),
                             mean_value=float(np.mean(data)),
                         )
+                        session.add_waveform(waveform)
 
+                # Parse mask pressure (measured at mask)
+                if mask_signal:
+                    data, info = edf.read_signal(mask_signal)
+                    timestamps_seconds = edf.get_timestamps(mask_signal, data)
+
+                    if len(data) == 0:
+                        logger.warning(f"No data in mask pressure signal {mask_signal}")
+                    else:
+                        waveform = WaveformData(
+                            waveform_type=WaveformType.MASK_PRESSURE,
+                            sample_rate=edf.get_sample_rate(mask_signal),
+                            unit=info.physical_dimension or "cmH2O",
+                            timestamps=timestamps_seconds,
+                            values=data,
+                            min_value=float(np.min(data)),
+                            max_value=float(np.max(data)),
+                            mean_value=float(np.mean(data)),
+                        )
+                        session.add_waveform(waveform)
+
+                # Parse EPAP (therapy pressure minus EPR)
+                if epap_signal:
+                    data, info = edf.read_signal(epap_signal)
+                    timestamps_seconds = edf.get_timestamps(epap_signal, data)
+
+                    if len(data) == 0:
+                        logger.warning(f"No data in EPAP signal {epap_signal}")
+                    else:
+                        waveform = WaveformData(
+                            waveform_type=WaveformType.EPAP,
+                            sample_rate=edf.get_sample_rate(epap_signal),
+                            unit=info.physical_dimension or "cmH2O",
+                            timestamps=timestamps_seconds,
+                            values=data,
+                            min_value=float(np.min(data)),
+                            max_value=float(np.max(data)),
+                            mean_value=float(np.mean(data)),
+                        )
                         session.add_waveform(waveform)
 
                 # ResMed uses names like "Leak.2s", "LeakRate"
@@ -1499,6 +1619,65 @@ class ResmedEDFParser(DeviceParser):
 
         except Exception as e:
             logger.warning(f"Failed to preload STR.edf settings: {e}")
+            return None
+
+    def _preload_str_summaries(
+        self, str_file: Path
+    ) -> dict[date, dict[str, float]] | None:
+        """
+        Pre-read all summary percentiles from STR.edf for all dates.
+
+        STR.edf contains pre-computed per-day statistics (medians, 95th percentiles, etc.)
+        that can supplement or validate waveform-derived statistics.
+
+        Args:
+            str_file: Path to STR.edf file
+
+        Returns:
+            Dictionary mapping date -> {stat_name: value}, or None if file
+            doesn't exist or can't be read
+        """
+        if not str_file.exists():
+            return None
+
+        try:
+            with EDFReader(str_file) as edf:
+                header = edf.get_header()
+                start_date = header.start_datetime.date()
+                num_records = header.num_data_records
+
+                all_summaries: dict[date, dict[str, float]] = {}
+                signals = edf.get_signal_info()
+
+                for signal_patterns, stat_name in self.STR_SUMMARY_SIGNALS.items():
+                    matched_signal = None
+                    for pattern in signal_patterns:
+                        if pattern in signals:
+                            matched_signal = pattern
+                            break
+
+                    if matched_signal:
+                        data, _ = edf.read_signal(matched_signal)
+
+                        for record_idx in range(min(num_records, len(data))):
+                            record_date = start_date + timedelta(days=record_idx)
+
+                            if record_date not in all_summaries:
+                                all_summaries[record_date] = {}
+
+                            all_summaries[record_date][stat_name] = float(
+                                data[record_idx]
+                            )
+
+                if all_summaries:
+                    logger.info(
+                        f"Preloaded STR.edf summaries for {len(all_summaries)} days "
+                        f"({start_date} to {start_date + timedelta(days=num_records - 1)})"
+                    )
+                return all_summaries if all_summaries else None
+
+        except Exception as e:
+            logger.warning(f"Failed to preload STR.edf summaries: {e}")
             return None
 
     def _convert_str_to_therapy_settings(

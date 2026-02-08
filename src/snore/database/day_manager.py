@@ -182,6 +182,22 @@ class DayManager:
                     stats_records, sessions, "pressure_95th"
                 )
 
+            epap_mins = [s.epap_min for s in stats_records if s.epap_min]
+            epap_maxs = [s.epap_max for s in stats_records if s.epap_max]
+            day.epap_min = min(epap_mins) if epap_mins else None
+            day.epap_max = max(epap_maxs) if epap_maxs else None
+
+            if total_hours > 0:
+                day.epap_median = cls._weighted_average(
+                    stats_records, sessions, "epap_median"
+                )
+                day.epap_mean = cls._weighted_average(
+                    stats_records, sessions, "epap_mean"
+                )
+                day.epap_95th = cls._weighted_average(
+                    stats_records, sessions, "epap_95th"
+                )
+
             leak_mins = [s.leak_min for s in stats_records if s.leak_min]
             leak_maxs = [s.leak_max for s in stats_records if s.leak_max]
             day.leak_min = min(leak_mins) if leak_mins else None

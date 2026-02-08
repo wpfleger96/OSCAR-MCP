@@ -123,6 +123,12 @@ class Day(Base):
     pressure_mean: Mapped[float | None] = mapped_column(Float)
     pressure_95th: Mapped[float | None] = mapped_column(Float)
 
+    epap_min: Mapped[float | None] = mapped_column(Float)
+    epap_max: Mapped[float | None] = mapped_column(Float)
+    epap_median: Mapped[float | None] = mapped_column(Float)
+    epap_mean: Mapped[float | None] = mapped_column(Float)
+    epap_95th: Mapped[float | None] = mapped_column(Float)
+
     leak_min: Mapped[float | None] = mapped_column(Float)
     leak_max: Mapped[float | None] = mapped_column(Float)
     leak_median: Mapped[float | None] = mapped_column(Float)
@@ -290,6 +296,12 @@ class Statistics(Base):
     pressure_median: Mapped[float | None] = mapped_column(Float)
     pressure_mean: Mapped[float | None] = mapped_column(Float)
     pressure_95th: Mapped[float | None] = mapped_column(Float)
+
+    epap_min: Mapped[float | None] = mapped_column(Float)
+    epap_max: Mapped[float | None] = mapped_column(Float)
+    epap_median: Mapped[float | None] = mapped_column(Float)
+    epap_mean: Mapped[float | None] = mapped_column(Float)
+    epap_95th: Mapped[float | None] = mapped_column(Float)
 
     leak_min: Mapped[float | None] = mapped_column(Float)
     leak_max: Mapped[float | None] = mapped_column(Float)
