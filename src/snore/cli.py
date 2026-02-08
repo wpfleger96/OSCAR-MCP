@@ -507,7 +507,12 @@ def import_data(
     help="Show statistics broken down by period",
 )
 @click.option("--trend", is_flag=True, help="Show trend analysis chart")
-def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> None:
+@click.option(
+    "--records", is_flag=True, help="Show top 5 best/worst days for key metrics"
+)
+def stats(
+    db: str | None, days: int | None, period: str | None, trend: bool, records: bool
+) -> None:
     """Show therapy usage and clinical statistics."""
     from datetime import date, timedelta
 
@@ -517,6 +522,7 @@ def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> 
         assess_therapy_effectiveness,
         calculate_average_ahi,
         calculate_period_statistics,
+        calculate_records,
         calculate_trends,
     )
     from snore.database import models
@@ -818,6 +824,53 @@ def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> 
 
                         click.echo("=" * 80)
 
+        if records:
+            records_data = calculate_records(day_records, top_n=5)
+
+            if records_data:
+                click.echo("\n\nRecords (Top 5)")
+                click.echo("=" * 80)
+
+                metric_labels = {
+                    "ahi": ("Best AHI", "Worst AHI"),
+                    "leak": ("Best Leak", "Worst Leak"),
+                    "therapy_hours": ("Longest Sessions", "Shortest Sessions"),
+                    "spo2_min": ("Best SpO2 Min", "Worst SpO2 Min"),
+                }
+
+                for metric, (best_label, worst_label) in metric_labels.items():
+                    if metric not in records_data:
+                        continue
+
+                    best_records = records_data[metric]["best"]
+                    worst_records = records_data[metric]["worst"]
+
+                    click.echo(f"\n{best_label:<35} {worst_label}")
+                    click.echo("-" * 80)
+
+                    max_rows = max(len(best_records), len(worst_records))
+                    for i in range(max_rows):
+                        best_str = ""
+                        worst_str = ""
+
+                        if i < len(best_records):
+                            dt, val = best_records[i]
+                            if metric == "therapy_hours":
+                                best_str = f"  {dt}: {val:.1f}h"
+                            else:
+                                best_str = f"  {dt}: {val:.1f}"
+
+                        if i < len(worst_records):
+                            dt, val = worst_records[i]
+                            if metric == "therapy_hours":
+                                worst_str = f"{dt}: {val:.1f}h"
+                            else:
+                                worst_str = f"{dt}: {val:.1f}"
+
+                        click.echo(f"{best_str:<35} {worst_str}")
+
+                click.echo("=" * 80)
+
         click.echo(f"\n{'=' * 50}\n")
 
 
@@ -1112,6 +1165,7 @@ def session() -> None:
     default="date-desc",
     help="Sort order for results (default: date-desc)",
 )
+@click.option("--all", "show_all", is_flag=True, help="Include disabled sessions")
 @click.option("--db", type=click.Path(), help="Database path")
 def session_list(
     device: str | None,
@@ -1119,6 +1173,7 @@ def session_list(
     to_date: datetime | None,
     limit: int,
     sort_by: str,
+    show_all: bool,
     db: str | None,
 ) -> None:
     """List imported sessions."""
@@ -1134,6 +1189,9 @@ def session_list(
     with session_scope() as db_session:
         where_clause = "WHERE 1=1"
         params: dict[str, Any] = {}
+
+        if not show_all:
+            where_clause += " AND sessions.enabled = 1"
 
         if device:
             where_clause += " AND devices.serial_number = :device"
@@ -1169,6 +1227,7 @@ def session_list(
                 sessions.id,
                 sessions.start_time,
                 sessions.duration_seconds,
+                sessions.enabled,
                 devices.manufacturer,
                 devices.model,
                 devices.serial_number,
@@ -1206,6 +1265,7 @@ def session_list(
             )
             device_name = f"{sess.manufacturer} {sess.model}"
             ahi_str = f"{sess.ahi:.1f}" if sess.ahi is not None else "N/A"
+            status_marker = "" if sess.enabled else "[disabled]"
 
             click.echo(
                 f"{sess.id:<5} "
@@ -1213,7 +1273,7 @@ def session_list(
                 f"{duration_hours:>6.1f}h    "
                 f"{device_name:<30} "
                 f"{sess.serial_number:<15} "
-                f"{ahi_str:<8}"
+                f"{ahi_str:<8} {status_marker}"
             )
 
         if total_count is not None and limit > 0 and total_count > limit:
@@ -1692,6 +1752,66 @@ def session_delete(
             click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
 
         return 0
+
+
+def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
+    """Enable or disable a session and recalculate day statistics."""
+    from snore.database import models
+    from snore.database.day_manager import DayManager
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as db_session:
+        sess = (
+            db_session.query(models.Session)
+            .filter(models.Session.id == session_id)
+            .first()
+        )
+
+        if not sess:
+            click.echo(f"Error: Session {session_id} not found", err=True)
+            sys.exit(1)
+
+        if sess.enabled == enabled:
+            status = "enabled" if enabled else "disabled"
+            click.echo(f"Session {session_id} is already {status}")
+            return
+
+        sess.enabled = enabled
+
+        if sess.day_id:
+            day = (
+                db_session.query(models.Day)
+                .filter(models.Day.id == sess.day_id)
+                .first()
+            )
+            if day:
+                DayManager.recalculate_day(day, db_session)
+
+        db_session.commit()
+
+        status = "enabled" if enabled else "disabled"
+        click.echo(f"Session {session_id} {status} and day statistics recalculated")
+
+
+@session.command("enable")
+@click.argument("session_id", type=int)
+@click.option("--db", type=click.Path(), help="Database path")
+def session_enable(session_id: int, db: str | None) -> None:
+    """Enable a session and recalculate day statistics."""
+    _toggle_session(session_id, enabled=True, db=db)
+
+
+@session.command("disable")
+@click.argument("session_id", type=int)
+@click.option("--db", type=click.Path(), help="Database path")
+def session_disable(session_id: int, db: str | None) -> None:
+    """Disable a session and recalculate day statistics."""
+    _toggle_session(session_id, enabled=False, db=db)
 
 
 @cli.group()
@@ -3634,6 +3754,269 @@ def compare_events(
                 click.echo(
                     f"    → View: snore waveform show --session-id {session_id} --time {time_str}"
                 )
+
+
+@cli.group()
+def rx() -> None:
+    """RX (prescription) settings tracking and analysis."""
+    pass
+
+
+@rx.command("history")
+@click.option("--db", type=click.Path(), help="Database path")
+def rx_history(db: str | None) -> None:
+    """
+    Show RX settings history with average outcomes.
+
+    Displays all prescription periods in chronological order with settings
+    and key metrics like average AHI and therapy hours.
+
+    Example:
+        snore rx history
+    """
+    from pathlib import Path
+
+    from snore.analysis.rx_tracker import RxTracker
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as db_session:
+        tracker = RxTracker()
+        periods = tracker.compute_periods(db_session)
+
+        if not periods:
+            click.echo("No RX periods found")
+            return
+
+        stats_periods = tracker.compute_period_stats(periods)
+
+        click.echo("RX Settings History")
+        click.echo("=" * 80)
+
+        for i, period in enumerate(stats_periods, 1):
+            days_count = len(period.days)
+            end_str = (
+                period.end_date.strftime("%Y-%m-%d")
+                if i < len(stats_periods)
+                else "present"
+            )
+
+            click.echo(
+                f"\nPeriod {i}: {period.start_date.strftime('%Y-%m-%d')} to {end_str} ({days_count} days)"
+            )
+
+            mode = period.settings.get("mode", "?")
+            epr_level = period.settings.get("epr_level", "?")
+            epr_mode = period.settings.get("epr_mode", "?")
+
+            if "pressure_min" in period.settings and "pressure_max" in period.settings:
+                pressure_str = f"{period.settings['pressure_min']}-{period.settings['pressure_max']} cmH2O"
+            elif "pressure_fixed" in period.settings:
+                pressure_str = f"{period.settings['pressure_fixed']} cmH2O (Fixed)"
+            else:
+                pressure_str = "?"
+
+            click.echo(
+                f"  Mode: {mode} | Pressure: {pressure_str} | EPR: {epr_level} {epr_mode}"
+            )
+
+            if period.avg_ahi is not None:
+                click.echo(f"  Avg AHI: {period.avg_ahi:.1f}", nl=False)
+            else:
+                click.echo("  Avg AHI: N/A", nl=False)
+
+            if period.avg_hours is not None:
+                click.echo(f" | Avg Hours: {period.avg_hours:.1f}", nl=False)
+
+            if period.avg_leak is not None:
+                click.echo(f" | Avg Leak: {period.avg_leak:.1f}")
+            else:
+                click.echo()
+
+        click.echo("\n" + "=" * 80)
+
+
+@rx.command("current")
+@click.option("--db", type=click.Path(), help="Database path")
+def rx_current(db: str | None) -> None:
+    """
+    Show current RX settings period.
+
+    Displays the most recent prescription settings along with outcomes.
+
+    Example:
+        snore rx current
+    """
+    from pathlib import Path
+
+    from snore.analysis.rx_tracker import RxTracker
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as db_session:
+        tracker = RxTracker()
+        periods = tracker.compute_periods(db_session)
+
+        if not periods:
+            click.echo("No RX periods found")
+            return
+
+        stats_periods = tracker.compute_period_stats(periods)
+        current = stats_periods[-1]
+
+        days_count = len(current.days)
+
+        click.echo("Current RX Settings")
+        click.echo("=" * 80)
+        click.echo(
+            f"Period: {current.start_date.strftime('%Y-%m-%d')} to present ({days_count} days)"
+        )
+
+        mode = current.settings.get("mode", "?")
+        epr_level = current.settings.get("epr_level", "?")
+        epr_mode = current.settings.get("epr_mode", "?")
+
+        if "pressure_min" in current.settings and "pressure_max" in current.settings:
+            pressure_str = f"{current.settings['pressure_min']}-{current.settings['pressure_max']} cmH2O"
+        elif "pressure_fixed" in current.settings:
+            pressure_str = f"{current.settings['pressure_fixed']} cmH2O (Fixed)"
+        else:
+            pressure_str = "?"
+
+        click.echo(f"\nMode: {mode}")
+        click.echo(f"Pressure: {pressure_str}")
+        click.echo(f"EPR: {epr_level} {epr_mode}")
+
+        click.echo("\nOutcomes:")
+        if current.avg_ahi is not None:
+            click.echo(f"  Avg AHI: {current.avg_ahi:.1f}")
+        else:
+            click.echo("  Avg AHI: N/A")
+
+        if current.median_ahi is not None:
+            click.echo(f"  Median AHI: {current.median_ahi:.1f}")
+
+        if current.avg_hours is not None:
+            click.echo(f"  Avg Hours: {current.avg_hours:.1f}")
+
+        if current.avg_leak is not None:
+            click.echo(f"  Avg Leak: {current.avg_leak:.1f}")
+
+        click.echo("=" * 80)
+
+
+@rx.command("compare")
+@click.option("--db", type=click.Path(), help="Database path")
+@click.option(
+    "--min-days",
+    type=int,
+    default=7,
+    help="Minimum days for period to be included (default: 7)",
+)
+def rx_compare(db: str | None, min_days: int) -> None:
+    """
+    Compare RX periods and identify best/worst settings.
+
+    Shows a table of all prescription periods with statistics side-by-side
+    and highlights the best and worst periods based on average AHI.
+
+    Example:
+        snore rx compare
+        snore rx compare --min-days 14
+    """
+    from pathlib import Path
+
+    from snore.analysis.rx_tracker import RxTracker
+    from snore.database.session import init_database, session_scope
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as db_session:
+        tracker = RxTracker()
+        periods = tracker.compute_periods(db_session)
+
+        if not periods:
+            click.echo("No RX periods found")
+            return
+
+        stats_periods = tracker.compute_period_stats(periods)
+
+        if len(stats_periods) < 2:
+            click.echo(
+                "At least 2 periods are needed for comparison. Use 'snore rx history' to view the single period."
+            )
+            return
+
+        best, worst = tracker.best_worst(stats_periods, min_days=min_days)
+
+        click.echo("RX Period Comparison")
+        click.echo("=" * 100)
+        click.echo(
+            f"{'Dates':<25} {'Days':<6} {'Avg AHI':<10} {'Avg Leak':<10} {'Mode':<8} {'Pressure':<15} {'EPR':<10}"
+        )
+        click.echo("=" * 100)
+
+        for idx, period in enumerate(stats_periods):
+            days_count = len(period.days)
+            start_str = period.start_date.strftime("%Y-%m-%d")
+            end_str = (
+                period.end_date.strftime("%Y-%m-%d")
+                if idx < len(stats_periods) - 1
+                else "present"
+            )
+            date_range = f"{start_str}..{end_str}"
+
+            mode = period.settings.get("mode", "?")[:7]
+            epr = f"{period.settings.get('epr_level', '?')} {period.settings.get('epr_mode', '?')[:2]}"
+
+            if "pressure_min" in period.settings and "pressure_max" in period.settings:
+                pressure_str = f"{period.settings['pressure_min']}-{period.settings['pressure_max']}"
+            elif "pressure_fixed" in period.settings:
+                pressure_str = f"{period.settings['pressure_fixed']} (F)"
+            else:
+                pressure_str = "?"
+
+            ahi_str = f"{period.avg_ahi:.1f}" if period.avg_ahi is not None else "N/A"
+            leak_str = (
+                f"{period.avg_leak:.1f}" if period.avg_leak is not None else "N/A"
+            )
+
+            marker = ""
+            if best and period is best:
+                marker = "  <- Best"
+            elif worst and period is worst:
+                marker = "  <- Worst"
+
+            click.echo(
+                f"{date_range:<25} {days_count:<6} {ahi_str:<10} {leak_str:<10} {mode:<8} {pressure_str:<15} {epr:<10}{marker}"
+            )
+
+        click.echo("=" * 100)
+
+        if best:
+            click.echo(f"\nBest Period (Avg AHI: {best.avg_ahi:.1f}):")
+            click.echo(
+                f"  {best.start_date.strftime('%Y-%m-%d')} to {best.end_date.strftime('%Y-%m-%d')} ({len(best.days)} days)"
+            )
+            click.echo(f"  Settings: {best.settings}")
+
+        if worst:
+            click.echo(f"\nWorst Period (Avg AHI: {worst.avg_ahi:.1f}):")
+            click.echo(
+                f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({len(worst.days)} days)"
+            )
+            click.echo(f"  Settings: {worst.settings}")
 
 
 def main() -> None:

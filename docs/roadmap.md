@@ -113,6 +113,31 @@ Complete project overview showing implemented features and future development pl
 - [x] **OSCAR pressure channels** - Import therapy pressure and EPAP from OSCAR binary database
 - [x] **OSCAR device settings** - Import EPR level, therapy mode, pressure min/max from OSCAR summary
 
+### Phase 1: Analysis Parity (2026-02-08)
+- [x] **Session enable/disable** - Exclude sessions from statistics (bad data, testing)
+  - Add enabled flag to Session model (defaults to true)
+  - Filter disabled sessions from day aggregation and statistics
+  - CLI: `snore session enable/disable <id>` with automatic day recalculation
+  - CLI: `snore session list --all` to show disabled sessions
+- [x] **Records tracking** - Track best/worst metrics (AHI, leak, pressure, SpO2)
+  - Top 5 best/worst days for AHI (lowest/highest), leak (lowest), therapy hours (longest/shortest), SpO2 min (highest/lowest)
+  - CLI: `snore stats --records`
+- [x] **Pulse change detection** - Detect pulse rate changes ≥ threshold for ≥ duration
+  - OSCAR-compatible algorithm: ≥5 BPM changes within 8-second sliding windows
+  - Integrated into analysis pipeline with pulse_change_count and pulse_change_index
+- [x] **Enhanced pattern detection** - Improve CSR/periodic breathing algorithms
+  - Windowed episode detection (10-min windows, 2-min steps)
+  - Time-localized episodes instead of whole-session summaries
+  - Improved waxing-waning scoring with envelope amplitude ratio check
+- [x] **RX change tracking** - Detect when therapy settings change between sessions
+  - Groups consecutive days by therapy settings (mode, pressure, EPR)
+  - CLI: `snore rx history` shows all RX periods with settings and avg AHI
+  - CLI: `snore rx current` shows current settings period
+- [x] **RX-to-event correlation** - Analyze how settings changes affect AHI/events
+  - Compute AHI, leak, and usage statistics per RX period
+  - Identify best/worst settings periods (min 7 days filter)
+  - CLI: `snore rx compare` shows comparison table with best/worst markers
+
 ## In Progress 🚧
 
 _(No active development)_
@@ -120,19 +145,6 @@ _(No active development)_
 ---
 
 ## Planned Features 📋
-
-### Phase 1: Analysis Parity
-
-**Goal:** Match OSCAR's core analysis capabilities
-
-- [ ] **Records tracking** - Track best/worst metrics (AHI, leak, pressure, SpO2)
-- [ ] **Session enable/disable** - Exclude sessions from statistics (bad data, testing)
-- [ ] **Pulse change detection** - Detect pulse rate changes ≥ threshold for ≥ duration
-- [ ] **Enhanced pattern detection** - Improve CSR/periodic breathing algorithms
-- [ ] **RX change tracking** - Detect when therapy settings change between sessions
-- [ ] **RX-to-event correlation** - Analyze how settings changes affect AHI/events
-
----
 
 ### Phase 2: Web UI
 
@@ -256,6 +268,7 @@ _(No active development)_
 - [ ] **Position-correlated statistics** - Pressure, leak, SpO2 by position
 
 **Note:** ResMed CPAP devices do NOT have position sensors. Requires external device (Somnopose or phone app).
+
 
 ---
 

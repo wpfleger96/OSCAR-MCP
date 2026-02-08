@@ -49,10 +49,22 @@ class AnalysisResult(BaseModel):
         default=None, description="Flow limitation analysis"
     )
     csr_detection: dict[str, Any] | None = Field(
-        default=None, description="Cheyne-Stokes Respiration detection"
+        default=None, description="Cheyne-Stokes Respiration detection (summary)"
     )
     periodic_breathing: dict[str, Any] | None = Field(
-        default=None, description="Periodic breathing detection"
+        default=None, description="Periodic breathing detection (summary)"
+    )
+    csr_episodes: list[dict[str, Any]] | None = Field(
+        default=None, description="Time-localized CSR episodes"
+    )
+    periodic_breathing_episodes: list[dict[str, Any]] | None = Field(
+        default=None, description="Time-localized periodic breathing episodes"
+    )
+    pulse_change_count: int | None = Field(
+        default=None, description="Total pulse change events detected"
+    )
+    pulse_change_index: float | None = Field(
+        default=None, description="Pulse changes per hour"
     )
     timestamp_start: float = Field(default=0.0, description="Session start timestamp")
     timestamp_end: float = Field(default=0.0, description="Session end timestamp")

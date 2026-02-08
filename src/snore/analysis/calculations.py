@@ -289,3 +289,66 @@ def calculate_trends(
         trends["leak"].append((stat.period_start, stat.avg_leak))
 
     return trends
+
+
+def calculate_records(
+    days: list[models.Day],
+    top_n: int = 5,
+) -> dict[str, dict[str, list[tuple[date, float]]]]:
+    """
+    Calculate top best/worst days for key metrics.
+
+    Args:
+        days: List of Day records
+        top_n: Number of records to return (default: 5)
+
+    Returns:
+        Dictionary mapping metric names to best/worst records.
+        Structure: {"ahi": {"best": [(date, value), ...], "worst": [...]}, ...}
+    """
+    qualified_days = [day for day in days if (day.total_therapy_hours or 0) >= 1.0]
+
+    if not qualified_days:
+        return {}
+
+    records: dict[str, dict[str, list[tuple[date, float]]]] = {}
+
+    ahi_days = [(day.date, day.ahi) for day in qualified_days if day.ahi is not None]
+    if ahi_days:
+        records["ahi"] = {
+            "best": sorted(ahi_days, key=lambda x: x[1])[:top_n],
+            "worst": sorted(ahi_days, key=lambda x: x[1], reverse=True)[:top_n],
+        }
+
+    leak_days = [
+        (day.date, day.leak_median)
+        for day in qualified_days
+        if day.leak_median is not None
+    ]
+    if leak_days:
+        records["leak"] = {
+            "best": sorted(leak_days, key=lambda x: x[1])[:top_n],
+            "worst": sorted(leak_days, key=lambda x: x[1], reverse=True)[:top_n],
+        }
+
+    therapy_days = [
+        (day.date, day.total_therapy_hours)
+        for day in qualified_days
+        if day.total_therapy_hours is not None
+    ]
+    if therapy_days:
+        records["therapy_hours"] = {
+            "best": sorted(therapy_days, key=lambda x: x[1], reverse=True)[:top_n],
+            "worst": sorted(therapy_days, key=lambda x: x[1])[:top_n],
+        }
+
+    spo2_days = [
+        (day.date, day.spo2_min) for day in qualified_days if day.spo2_min is not None
+    ]
+    if spo2_days:
+        records["spo2_min"] = {
+            "best": sorted(spo2_days, key=lambda x: x[1], reverse=True)[:top_n],
+            "worst": sorted(spo2_days, key=lambda x: x[1])[:top_n],
+        }
+
+    return records

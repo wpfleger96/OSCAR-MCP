@@ -179,6 +179,7 @@ class Session(Base):
     has_waveform_data: Mapped[bool] = mapped_column(Boolean, default=False)
     has_event_data: Mapped[bool] = mapped_column(Boolean, default=False)
     has_statistics: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     device = relationship("Device", back_populates="sessions")
     day = relationship("Day", back_populates="sessions")

@@ -8,6 +8,9 @@ analysis and clustering techniques.
 
 import logging
 
+from collections.abc import Callable, Sequence
+from typing import TypeVar
+
 import numpy as np
 
 from scipy import signal, stats
@@ -17,6 +20,8 @@ from snore.analysis.shared.types import (
     PeriodicBreathingDetection,
 )
 from snore.constants import PatternDetectionConstants as PDC
+
+T = TypeVar("T", CSRDetection, PeriodicBreathingDetection)
 
 logger = logging.getLogger(__name__)
 
@@ -245,11 +250,17 @@ class ComplexPatternDetector:
             return 0.0
 
         envelope_upper = self._extract_envelope(signal_data, upper=True)
-        self._extract_envelope(signal_data, upper=False)
 
         envelope_variation = np.std(envelope_upper) / np.mean(envelope_upper)
 
         if envelope_variation < PDC.ENVELOPE_VARIATION_MIN:
+            return 0.0
+
+        envelope_max = np.max(envelope_upper)
+        envelope_min = np.min(envelope_upper)
+        amplitude_ratio = envelope_max / envelope_min if envelope_min > 0 else 0.0
+
+        if amplitude_ratio < PDC.CSR_MIN_ENVELOPE_RATIO:
             return 0.0
 
         gradients = np.gradient(envelope_upper)
@@ -361,3 +372,226 @@ class ComplexPatternDetector:
             confidence += 0.2
 
         return min(1.0, confidence)
+
+    def detect_csr_episodes(
+        self,
+        timestamps: np.ndarray,
+        tidal_volumes: np.ndarray,
+        window_minutes: float = 10.0,
+        step_minutes: float = 2.0,
+    ) -> list[CSRDetection]:
+        """
+        Detect CSR episodes using windowed analysis.
+
+        Uses a sliding window approach to identify time-localized CSR patterns
+        rather than analyzing the entire session as a single window.
+
+        Args:
+            timestamps: Time values (seconds from session start)
+            tidal_volumes: Tidal volume measurements (mL)
+            window_minutes: Analysis window size (minutes)
+            step_minutes: Step size for sliding window (minutes)
+
+        Returns:
+            List of CSRDetection objects with accurate per-episode timing
+        """
+        if len(timestamps) == 0 or len(tidal_volumes) == 0:
+            return []
+
+        window_seconds = window_minutes * 60.0
+        step_seconds = step_minutes * 60.0
+
+        session_duration = timestamps[-1] - timestamps[0]
+        if session_duration < window_seconds:
+            detection = self.detect_csr(timestamps, tidal_volumes, window_minutes)
+            return [detection] if detection else []
+
+        episodes: list[CSRDetection] = []
+        current_time = timestamps[0]
+
+        while current_time + window_seconds <= timestamps[-1]:
+            window_end = current_time + window_seconds
+
+            mask = (timestamps >= current_time) & (timestamps < window_end)
+            window_timestamps = timestamps[mask]
+            window_tv = tidal_volumes[mask]
+
+            if len(window_timestamps) > 10:
+                detection = self.detect_csr(
+                    window_timestamps, window_tv, window_minutes
+                )
+                if detection:
+                    episodes.append(detection)
+
+            current_time += step_seconds
+
+        merged_episodes = self._merge_overlapping_episodes(
+            episodes, gap_threshold=PDC.CSR_EPISODE_MERGE_GAP_SECONDS
+        )
+
+        logger.debug(
+            f"Detected {len(episodes)} CSR windows, merged to {len(merged_episodes)} episodes"
+        )
+
+        return merged_episodes
+
+    def detect_periodic_breathing_episodes(
+        self,
+        timestamps: np.ndarray,
+        tidal_volumes: np.ndarray,
+        respiratory_rate: np.ndarray,
+        window_minutes: float = 10.0,
+        step_minutes: float = 2.0,
+    ) -> list[PeriodicBreathingDetection]:
+        """
+        Detect periodic breathing episodes using windowed analysis.
+
+        Args:
+            timestamps: Time values (seconds from session start)
+            tidal_volumes: Tidal volume measurements (mL)
+            respiratory_rate: Respiratory rate measurements (breaths/min)
+            window_minutes: Analysis window size (minutes)
+            step_minutes: Step size for sliding window (minutes)
+
+        Returns:
+            List of PeriodicBreathingDetection objects
+        """
+        if len(timestamps) == 0 or len(tidal_volumes) == 0:
+            return []
+
+        window_seconds = window_minutes * 60.0
+        step_seconds = step_minutes * 60.0
+
+        session_duration = timestamps[-1] - timestamps[0]
+        if session_duration < window_seconds:
+            detection = self.detect_periodic_breathing(
+                timestamps, tidal_volumes, respiratory_rate
+            )
+            return [detection] if detection else []
+
+        episodes: list[PeriodicBreathingDetection] = []
+        current_time = timestamps[0]
+
+        while current_time + window_seconds <= timestamps[-1]:
+            window_end = current_time + window_seconds
+
+            mask = (timestamps >= current_time) & (timestamps < window_end)
+            window_timestamps = timestamps[mask]
+            window_tv = tidal_volumes[mask]
+            window_rr = respiratory_rate[mask]
+
+            if len(window_timestamps) > 10:
+                detection = self.detect_periodic_breathing(
+                    window_timestamps, window_tv, window_rr
+                )
+                if detection:
+                    episodes.append(detection)
+
+            current_time += step_seconds
+
+        merged_episodes = self._merge_overlapping_pb_episodes(
+            episodes, gap_threshold=PDC.CSR_EPISODE_MERGE_GAP_SECONDS
+        )
+
+        logger.debug(
+            f"Detected {len(episodes)} periodic breathing windows, "
+            f"merged to {len(merged_episodes)} episodes"
+        )
+
+        return merged_episodes
+
+    def _merge_episodes_generic(
+        self,
+        episodes: Sequence[T],
+        gap_threshold: float,
+        merge_fn: Callable[[T, T], T],
+    ) -> list[T]:
+        """
+        Generic merge for overlapping or nearby episodes.
+
+        Args:
+            episodes: List of episode objects (CSRDetection or PeriodicBreathingDetection)
+            gap_threshold: Maximum gap in seconds to merge episodes
+            merge_fn: Callback function to merge two episodes
+
+        Returns:
+            List of merged episode objects
+        """
+        if not episodes:
+            return []
+
+        sorted_episodes = sorted(episodes, key=lambda e: e.start_time)
+        merged = []
+
+        current = sorted_episodes[0]
+
+        for next_episode in sorted_episodes[1:]:
+            gap = next_episode.start_time - current.end_time
+
+            if gap <= gap_threshold:
+                current = merge_fn(current, next_episode)
+            else:
+                merged.append(current)
+                current = next_episode
+
+        merged.append(current)
+        return merged
+
+    def _merge_overlapping_episodes(
+        self, episodes: list[CSRDetection], gap_threshold: float
+    ) -> list[CSRDetection]:
+        """
+        Merge overlapping or nearby CSR episodes.
+
+        Args:
+            episodes: List of CSRDetection objects
+            gap_threshold: Maximum gap in seconds to merge episodes
+
+        Returns:
+            List of merged CSRDetection objects
+        """
+
+        def merge_csr(current: CSRDetection, next_ep: CSRDetection) -> CSRDetection:
+            return CSRDetection(
+                start_time=current.start_time,
+                end_time=next_ep.end_time,
+                cycle_length=(current.cycle_length + next_ep.cycle_length) / 2,
+                amplitude_variation=(
+                    current.amplitude_variation + next_ep.amplitude_variation
+                )
+                / 2,
+                csr_index=(current.csr_index + next_ep.csr_index) / 2,
+                confidence=max(current.confidence, next_ep.confidence),
+                cycle_count=current.cycle_count + next_ep.cycle_count,
+            )
+
+        return self._merge_episodes_generic(episodes, gap_threshold, merge_csr)
+
+    def _merge_overlapping_pb_episodes(
+        self, episodes: list[PeriodicBreathingDetection], gap_threshold: float
+    ) -> list[PeriodicBreathingDetection]:
+        """
+        Merge overlapping or nearby periodic breathing episodes.
+
+        Args:
+            episodes: List of PeriodicBreathingDetection objects
+            gap_threshold: Maximum gap in seconds to merge episodes
+
+        Returns:
+            List of merged PeriodicBreathingDetection objects
+        """
+
+        def merge_pb(
+            current: PeriodicBreathingDetection, next_ep: PeriodicBreathingDetection
+        ) -> PeriodicBreathingDetection:
+            return PeriodicBreathingDetection(
+                start_time=current.start_time,
+                end_time=next_ep.end_time,
+                cycle_length=(current.cycle_length + next_ep.cycle_length) / 2,
+                regularity_score=(current.regularity_score + next_ep.regularity_score)
+                / 2,
+                confidence=max(current.confidence, next_ep.confidence),
+                has_apneas=current.has_apneas or next_ep.has_apneas,
+            )
+
+        return self._merge_episodes_generic(episodes, gap_threshold, merge_pb)

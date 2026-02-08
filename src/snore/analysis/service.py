@@ -21,9 +21,12 @@ from snore.analysis.shared.breath_segmenter import BreathSegmenter
 from snore.analysis.shared.feature_extractors import WaveformFeatureExtractor
 from snore.analysis.shared.flow_limitation import FlowLimitationClassifier
 from snore.analysis.shared.pattern_detector import ComplexPatternDetector
+from snore.analysis.shared.pulse_detector import PulseChangeDetector
 from snore.analysis.types import AnalysisResult
 from snore.constants import BreathSegmentationConstants as BSC
 from snore.constants import FlowLimitationConstants as FLC
+from snore.constants import PatternDetectionConstants as PDC
+from snore.constants import PulseChangeConstants as PCC
 from snore.database import models
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,10 @@ class AnalysisService:
             confidence_threshold=confidence_threshold
         )
         self.pattern_detector = ComplexPatternDetector()
+        self.pulse_detector = PulseChangeDetector(
+            bpm_threshold=PCC.BPM_THRESHOLD,
+            duration_threshold=PCC.DURATION_THRESHOLD,
+        )
 
     def _load_machine_events(self, session_id: int) -> list[AnalysisEvent]:
         """
@@ -215,9 +222,46 @@ class AnalysisService:
             breath_timestamps, tidal_volumes, window_minutes=10.0
         )
 
+        csr_episodes_list = self.pattern_detector.detect_csr_episodes(
+            breath_timestamps,
+            tidal_volumes,
+            window_minutes=PDC.CSR_WINDOW_MINUTES,
+            step_minutes=PDC.CSR_WINDOW_STEP_MINUTES,
+        )
+
         periodic_breathing = self.pattern_detector.detect_periodic_breathing(
             breath_timestamps, tidal_volumes, respiratory_rates
         )
+
+        pb_episodes_list = self.pattern_detector.detect_periodic_breathing_episodes(
+            breath_timestamps,
+            tidal_volumes,
+            respiratory_rates,
+            window_minutes=PDC.CSR_WINDOW_MINUTES,
+            step_minutes=PDC.CSR_WINDOW_STEP_MINUTES,
+        )
+
+        pulse_change_count = None
+        pulse_change_index = None
+        try:
+            pulse_timestamps, pulse_values, pulse_metadata = (
+                self.waveform_loader.load_waveform(
+                    session_id=session_id, waveform_type="pulse", apply_filter=False
+                )
+            )
+            pulse_events = self.pulse_detector.detect(pulse_timestamps, pulse_values)
+            pulse_change_count = len(pulse_events)
+            pulse_change_index = (
+                pulse_change_count / session_duration_hours
+                if session_duration_hours > 0
+                else 0.0
+            )
+            logger.info(
+                f"Pulse changes: {pulse_change_count} total, "
+                f"{pulse_change_index:.1f} per hour"
+            )
+        except Exception as e:
+            logger.debug(f"Pulse waveform not available or detection failed: {e}")
 
         mode_results = {}
         for mode_name in modes:
@@ -252,6 +296,10 @@ class AnalysisService:
             periodic_breathing=periodic_breathing.model_dump()
             if periodic_breathing
             else None,
+            csr_episodes=[ep.model_dump() for ep in csr_episodes_list],
+            periodic_breathing_episodes=[ep.model_dump() for ep in pb_episodes_list],
+            pulse_change_count=pulse_change_count,
+            pulse_change_index=pulse_change_index,
             timestamp_start=float(timestamps[0]) if len(timestamps) > 0 else 0.0,
             timestamp_end=float(timestamps[-1]) if len(timestamps) > 0 else 0.0,
         )

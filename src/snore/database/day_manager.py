@@ -114,7 +114,9 @@ class DayManager:
             day: Day object to update
             db_session: SQLAlchemy database session
         """
-        sessions = db_session.query(SessionModel).filter_by(day_id=day.id).all()
+        sessions = (
+            db_session.query(SessionModel).filter_by(day_id=day.id, enabled=True).all()
+        )
 
         if not sessions:
             day.session_count = 0
@@ -253,6 +255,17 @@ class DayManager:
         cls._aggregate_day_statistics(day, db_session)
 
         return day
+
+    @classmethod
+    def recalculate_day(cls, day: Day, db_session: Session) -> None:
+        """
+        Recalculate aggregated statistics for a day.
+
+        Args:
+            day: Day object to recalculate
+            db_session: SQLAlchemy database session
+        """
+        cls._aggregate_day_statistics(day, db_session)
 
     @classmethod
     def recalculate_all_days_for_device(

@@ -471,6 +471,10 @@ class PatternDetectionConstants:
 
     PERIODIC_HIGH_REGULARITY = 0.7
 
+    CSR_WINDOW_STEP_MINUTES = 2.0
+    CSR_EPISODE_MERGE_GAP_SECONDS = 60.0
+    CSR_MIN_ENVELOPE_RATIO = 2.0
+
 
 class FlowLimitationConstants:
     """Constants for flow limitation classification (flow_limitation.py)."""
@@ -530,6 +534,13 @@ class AnalysisEngineConstants:
     CSR_MIN_CONFIDENCE = 0.6
     PERIODIC_MIN_CONFIDENCE = 0.6
     POSITIONAL_MIN_CONFIDENCE = 0.6
+
+
+class PulseChangeConstants:
+    """Constants for pulse change detection (pulse_detector.py)."""
+
+    BPM_THRESHOLD = 5.0
+    DURATION_THRESHOLD = 8.0
 
 
 # ============================================================================
