@@ -56,6 +56,7 @@ class WaveformInspector:
         session_id: int,
         center_seconds: float,
         window_seconds: float = 60.0,
+        waveform_type: str = "flow",
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         """
         Extract waveform data window centered on a specific time.
@@ -64,13 +65,14 @@ class WaveformInspector:
             session_id: Session ID
             center_seconds: Center time in seconds from session start
             window_seconds: Window size in seconds (default: 60)
+            waveform_type: Type of waveform to load (default: "flow")
 
         Returns:
-            Tuple of (timestamps, flow_values, metadata)
+            Tuple of (timestamps, values, metadata)
         """
-        timestamps, flow_values, metadata = self.loader.load_waveform(
+        timestamps, values, metadata = self.loader.load_waveform(
             session_id=session_id,
-            waveform_type="flow",
+            waveform_type=waveform_type,
             apply_filter=False,
         )
 
@@ -79,9 +81,9 @@ class WaveformInspector:
 
         mask = (timestamps >= start) & (timestamps <= end)
         windowed_timestamps = timestamps[mask]
-        windowed_flow = flow_values[mask]
+        windowed_values = values[mask]
 
-        return windowed_timestamps, windowed_flow, metadata
+        return windowed_timestamps, windowed_values, metadata
 
     def find_events_in_window(
         self,

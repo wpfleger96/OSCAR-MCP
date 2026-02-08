@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from snore.analysis.modes.types import ModeResult
@@ -501,7 +501,13 @@ def import_data(
 @cli.command()
 @click.option("--db", type=click.Path(), help="Database path")
 @click.option("--days", type=int, help="Limit to last N days")
-def stats(db: str | None, days: int | None) -> None:
+@click.option(
+    "--period",
+    type=click.Choice(["week", "month", "6month", "year"]),
+    help="Show statistics broken down by period",
+)
+@click.option("--trend", is_flag=True, help="Show trend analysis chart")
+def stats(db: str | None, days: int | None, period: str | None, trend: bool) -> None:
     """Show therapy usage and clinical statistics."""
     from datetime import date, timedelta
 
@@ -510,9 +516,15 @@ def stats(db: str | None, days: int | None) -> None:
     from snore.analysis.calculations import (
         assess_therapy_effectiveness,
         calculate_average_ahi,
+        calculate_period_statistics,
+        calculate_trends,
     )
     from snore.database import models
     from snore.database.session import init_database, session_scope
+    from snore.models.statistics import PeriodStatistics
+
+    if trend and not period:
+        period = "week"
 
     init_database(str(Path(db)) if db else None)
 
@@ -583,6 +595,61 @@ def stats(db: str | None, days: int | None) -> None:
 
         total_events = sum(count for _, count in event_counts)
 
+        stats_records = (
+            session.query(models.Statistics)
+            .join(models.Session)
+            .join(models.Day)
+            .filter(models.Day.id.in_(day_ids))
+            .all()
+        )
+
+        weighted_sums: dict[str, float] = {
+            "rr": 0.0,
+            "tv": 0.0,
+            "mv": 0.0,
+            "pulse": 0.0,
+            "rei": 0.0,
+        }
+        usage_hours_for: dict[str, float] = {
+            "rr": 0.0,
+            "tv": 0.0,
+            "mv": 0.0,
+            "pulse": 0.0,
+            "rei": 0.0,
+        }
+        total_spo2_time_below_90 = 0
+
+        for stat in stats_records:
+            if not stat.usage_hours or stat.usage_hours <= 0:
+                continue
+            hours = stat.usage_hours
+            for field, key in [
+                ("respiratory_rate_mean", "rr"),
+                ("tidal_volume_mean", "tv"),
+                ("minute_ventilation_mean", "mv"),
+                ("pulse_mean", "pulse"),
+                ("rei", "rei"),
+            ]:
+                val = getattr(stat, field)
+                if val is not None:
+                    weighted_sums[key] += val * hours
+                    usage_hours_for[key] += hours
+            if stat.spo2_time_below_90 is not None:
+                total_spo2_time_below_90 += stat.spo2_time_below_90
+
+        def _avg(key: str) -> float | None:
+            return (
+                weighted_sums[key] / usage_hours_for[key]
+                if usage_hours_for[key] > 0
+                else None
+            )
+
+        avg_rr = _avg("rr")
+        avg_tv = _avg("tv")
+        avg_mv = _avg("mv")
+        avg_pulse = _avg("pulse")
+        avg_rei = _avg("rei")
+
         click.echo("\n📈 Therapy Statistics")
         click.echo(f"{'=' * 50}")
 
@@ -603,8 +670,11 @@ def stats(db: str | None, days: int | None) -> None:
             click.echo("  Average AHI: N/A")
         click.echo(f"  Effectiveness: {effectiveness}")
 
+        if avg_rei is not None:
+            click.echo(f"  Average REI: {avg_rei:.1f}")
+
         if avg_pressure is not None:
-            click.echo("\nPressure")
+            click.echo("\nMask Pressure")
             click.echo(f"  Average: {avg_pressure:.1f} cmH₂O")
             if min_pressure is not None and max_pressure is not None:
                 click.echo(f"  Range: {min_pressure:.1f} - {max_pressure:.1f} cmH₂O")
@@ -621,11 +691,124 @@ def stats(db: str | None, days: int | None) -> None:
             if min_spo2 is not None:
                 click.echo(f"  Minimum recorded: {min_spo2:.0f}%")
 
+        if total_spo2_time_below_90 > 0:
+            minutes_below_90 = total_spo2_time_below_90 / 60
+            click.echo(f"  Time below 90%: {minutes_below_90:.1f} minutes")
+
+        if avg_pulse is not None:
+            click.echo("\nPulse")
+            click.echo(f"  Average: {avg_pulse:.1f} BPM")
+
+        if avg_rr is not None or avg_tv is not None or avg_mv is not None:
+            click.echo("\nRespiratory")
+            if avg_rr is not None:
+                click.echo(f"  Respiratory Rate: {avg_rr:.1f} breaths/min")
+            if avg_tv is not None:
+                click.echo(f"  Tidal Volume: {avg_tv:.0f} mL")
+            if avg_mv is not None:
+                click.echo(f"  Minute Ventilation: {avg_mv:.1f} L/min")
+
         if event_counts:
             click.echo("\nEvents")
             for event_type, count in event_counts:
                 pct = (count / total_events * 100) if total_events > 0 else 0
                 click.echo(f"  {event_type}: {count:,} ({pct:.1f}%)")
+
+        if period:
+            period_literal = cast(Literal["week", "month", "6month", "year"], period)
+            period_stats: list[PeriodStatistics] = calculate_period_statistics(
+                day_records, period_literal
+            )
+
+            if period_stats:
+                period_names = {
+                    "week": "Weekly",
+                    "month": "Monthly",
+                    "6month": "6-Month",
+                    "year": "Yearly",
+                }
+
+                click.echo(f"\n\nTherapy Statistics ({period_names[period]})")
+                click.echo(f"{'=' * 80}")
+
+                click.echo(
+                    f"{'Period':<20} {'Days':<6} {'Avg Hours':<11} {'Avg AHI':<9} {'Med AHI':<9}"
+                )
+                click.echo("-" * 80)
+
+                for period_stat in period_stats:  # type: PeriodStatistics
+                    if period == "week":
+                        period_label = f"{period_stat.period_start.strftime('%Y-W%U')}"
+                    elif period == "month":
+                        period_label = period_stat.period_start.strftime("%b %Y")
+                    elif period == "6month":
+                        half = "H1" if period_stat.period_start.month == 1 else "H2"
+                        period_label = f"{period_stat.period_start.year} {half}"
+                    else:
+                        period_label = str(period_stat.period_start.year)
+
+                    days_str = f"{period_stat.days_used}/{period_stat.days_in_period}"
+
+                    hours_str = (
+                        f"{period_stat.avg_hours_per_day:.1f}h"
+                        if period_stat.avg_hours_per_day is not None
+                        else "N/A"
+                    )
+
+                    avg_ahi_str = (
+                        f"{period_stat.avg_ahi:.1f}"
+                        if period_stat.avg_ahi is not None
+                        else "N/A"
+                    )
+
+                    med_ahi_str = (
+                        f"{period_stat.median_ahi:.1f}"
+                        if period_stat.median_ahi is not None
+                        else "N/A"
+                    )
+
+                    click.echo(
+                        f"{period_label:<20} {days_str:<6} {hours_str:<11} {avg_ahi_str:<9} {med_ahi_str:<9}"
+                    )
+
+                click.echo("=" * 80)
+
+                if trend:
+                    import plotext as plt
+
+                    trends = calculate_trends(period_stats)
+                    ahi_trend = trends["ahi"]
+
+                    ahi_values = [v for _, v in ahi_trend if v is not None]
+                    if ahi_values:
+                        dates_for_plot = [d for d, v in ahi_trend if v is not None]
+                        date_labels = [d.strftime("%Y-%m-%d") for d in dates_for_plot]
+                        x_indices = list(range(len(ahi_values)))
+
+                        latest_ahi = ahi_values[-1]
+                        if len(ahi_values) > 1:
+                            prior_avg = sum(ahi_values[:-1]) / len(ahi_values[:-1])
+                            if latest_ahi < prior_avg * 0.9:
+                                direction = "(improving)"
+                            elif latest_ahi > prior_avg * 1.1:
+                                direction = "(worsening)"
+                            else:
+                                direction = "(stable)"
+                        else:
+                            direction = ""
+
+                        click.echo("\n\nAHI Trend")
+                        click.echo("=" * 80)
+
+                        plt.clf()
+                        plt.plot(x_indices, ahi_values, marker="braille")
+                        plt.xticks(x_indices, date_labels)
+                        plt.title(f"AHI Over Time {direction}")
+                        plt.xlabel("Period")
+                        plt.ylabel("AHI (events/hour)")
+                        plt.show()
+
+                        click.echo("=" * 80)
 
         click.echo(f"\n{'=' * 50}\n")
 
@@ -659,16 +842,16 @@ def init(db: str | None) -> int | None:
         click.secho(
             f"✓ Database already initialized at {db_path}", fg="blue", bold=True
         )
-        click.echo("  Verified tables:")
+        click.echo("\nVerified tables:")
     else:
         click.secho(f"✓ Created new database at {db_path}", fg="green", bold=True)
-        click.echo("  Initialized tables:")
+        click.echo("\nInitialized tables:")
 
     for table_name in table_names:
         click.echo(f"    - {table_name}")
 
     if db_existed:
-        click.echo("  No changes needed - all tables exist")
+        click.echo("\nNo changes needed - all tables exist")
 
     return None
 
@@ -1077,6 +1260,13 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
             .filter(models.Waveform.session_id == sess.id)
             .count()
         )
+        waveform_types = (
+            db_session.query(models.Waveform.waveform_type)
+            .filter(models.Waveform.session_id == sess.id)
+            .distinct()
+            .all()
+        )
+        waveform_type_list = [wt[0] for wt in waveform_types]
 
         click.echo(f"\nSession ID: {sess.id}")
         click.echo(f"  Device Session ID: {sess.device_session_id}")
@@ -1097,17 +1287,157 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
         click.echo("\n  Data:")
         click.echo(f"    Events: {event_count}")
         click.echo(f"    Waveforms: {waveform_count}")
+        if waveform_type_list:
+            click.echo(f"    Available types: {', '.join(sorted(waveform_type_list))}")
         click.echo(f"    Has Statistics: {sess.has_statistics}")
         click.echo(f"    Has Event Data: {sess.has_event_data}")
 
         if stats:
             click.echo("\n  Statistics:")
-            if stats.ahi is not None:
-                click.echo(f"    AHI: {stats.ahi:.1f}")
+
             if stats.usage_hours is not None:
                 click.echo(f"    Usage: {stats.usage_hours:.1f}h")
-            if stats.leak_percentile_70 is not None:
-                click.echo(f"    Leak (70th): {stats.leak_percentile_70:.1f} L/min")
+
+            has_event_indices = any(
+                [
+                    stats.ahi is not None,
+                    stats.rei is not None,
+                    stats.oai is not None,
+                    stats.cai is not None,
+                    stats.hi is not None,
+                ]
+            )
+            if has_event_indices:
+                click.echo("\n    Event Indices:")
+                if stats.ahi is not None:
+                    click.echo(f"      AHI: {stats.ahi:.1f}")
+                if stats.rei is not None:
+                    click.echo(f"      REI: {stats.rei:.1f}")
+                if stats.oai is not None:
+                    click.echo(f"      OAI: {stats.oai:.1f}")
+                if stats.cai is not None:
+                    click.echo(f"      CAI: {stats.cai:.1f}")
+                if stats.hi is not None:
+                    click.echo(f"      HI: {stats.hi:.1f}")
+
+            has_event_counts = any(
+                [
+                    stats.obstructive_apneas > 0,
+                    stats.central_apneas > 0,
+                    stats.mixed_apneas > 0,
+                    stats.hypopneas > 0,
+                    stats.reras > 0,
+                    stats.flow_limitations > 0,
+                ]
+            )
+            if has_event_counts:
+                click.echo("\n    Event Counts:")
+                if stats.obstructive_apneas > 0:
+                    click.echo(f"      Obstructive Apneas: {stats.obstructive_apneas}")
+                if stats.central_apneas > 0:
+                    click.echo(f"      Central Apneas: {stats.central_apneas}")
+                if stats.mixed_apneas > 0:
+                    click.echo(f"      Mixed Apneas: {stats.mixed_apneas}")
+                if stats.hypopneas > 0:
+                    click.echo(f"      Hypopneas: {stats.hypopneas}")
+                if stats.reras > 0:
+                    click.echo(f"      RERAs: {stats.reras}")
+                if stats.flow_limitations > 0:
+                    click.echo(f"      Flow Limitations: {stats.flow_limitations}")
+
+            has_pressure = any(
+                [
+                    stats.pressure_mean is not None,
+                    stats.pressure_min is not None,
+                    stats.pressure_max is not None,
+                    stats.pressure_95th is not None,
+                ]
+            )
+            if has_pressure:
+                click.echo("\n    Mask Pressure:")
+                if stats.pressure_mean is not None:
+                    click.echo(f"      Mean: {stats.pressure_mean:.1f} cmH₂O")
+                if stats.pressure_min is not None and stats.pressure_max is not None:
+                    click.echo(
+                        f"      Range: {stats.pressure_min:.1f} - {stats.pressure_max:.1f} cmH₂O"
+                    )
+                if stats.pressure_95th is not None:
+                    click.echo(
+                        f"      95th percentile: {stats.pressure_95th:.1f} cmH₂O"
+                    )
+
+            has_leak = any(
+                [
+                    stats.leak_mean is not None,
+                    stats.leak_percentile_70 is not None,
+                    stats.leak_95th is not None,
+                ]
+            )
+            if has_leak:
+                click.echo("\n    Leak:")
+                if stats.leak_mean is not None:
+                    click.echo(f"      Mean: {stats.leak_mean:.1f} L/min")
+                if stats.leak_percentile_70 is not None:
+                    click.echo(
+                        f"      70th percentile: {stats.leak_percentile_70:.1f} L/min"
+                    )
+                if stats.leak_95th is not None:
+                    click.echo(f"      95th percentile: {stats.leak_95th:.1f} L/min")
+
+            has_spo2 = any(
+                [
+                    stats.spo2_mean is not None,
+                    stats.spo2_min is not None,
+                    stats.spo2_time_below_90 is not None,
+                ]
+            )
+            if has_spo2:
+                click.echo("\n    SpO₂:")
+                if stats.spo2_mean is not None:
+                    click.echo(f"      Mean: {stats.spo2_mean:.1f}%")
+                if stats.spo2_min is not None:
+                    click.echo(f"      Minimum: {stats.spo2_min:.0f}%")
+                if stats.spo2_time_below_90 is not None:
+                    minutes_below_90 = stats.spo2_time_below_90 / 60
+                    click.echo(f"      Time below 90%: {minutes_below_90:.1f} minutes")
+
+            has_pulse = any(
+                [
+                    stats.pulse_mean is not None,
+                    stats.pulse_min is not None,
+                    stats.pulse_max is not None,
+                ]
+            )
+            if has_pulse:
+                click.echo("\n    Pulse:")
+                if stats.pulse_mean is not None:
+                    click.echo(f"      Mean: {stats.pulse_mean:.1f} BPM")
+                if stats.pulse_min is not None and stats.pulse_max is not None:
+                    click.echo(
+                        f"      Range: {stats.pulse_min:.0f} - {stats.pulse_max:.0f} BPM"
+                    )
+
+            has_respiratory = any(
+                [
+                    stats.respiratory_rate_mean is not None,
+                    stats.tidal_volume_mean is not None,
+                    stats.minute_ventilation_mean is not None,
+                ]
+            )
+            if has_respiratory:
+                click.echo("\n    Respiratory:")
+                if stats.respiratory_rate_mean is not None:
+                    click.echo(
+                        f"      Mean Respiratory Rate: {stats.respiratory_rate_mean:.1f} breaths/min"
+                    )
+                if stats.tidal_volume_mean is not None:
+                    click.echo(
+                        f"      Mean Tidal Volume: {stats.tidal_volume_mean:.0f} mL"
+                    )
+                if stats.minute_ventilation_mean is not None:
+                    click.echo(
+                        f"      Mean Minute Ventilation: {stats.minute_ventilation_mean:.1f} L/min"
+                    )
 
         if show_settings:
             settings_records = (
@@ -1185,11 +1515,11 @@ def session_delete(
 
     if not any([device, session_ids, from_date, to_date, delete_all]):
         click.echo("❌ Error: You must specify at least one filter:", err=True)
-        click.echo("  • --device <serial_number>")
-        click.echo("  • --session-id <ids>")
-        click.echo("  • --from <date>")
-        click.echo("  • --to <date>")
-        click.echo("  • --all")
+        click.echo("\n• --device <serial_number>")
+        click.echo("\n• --session-id <ids>")
+        click.echo("\n• --from <date>")
+        click.echo("\n• --to <date>")
+        click.echo("\n• --all")
         return 1
 
     with session_scope() as db_session:
@@ -2234,7 +2564,7 @@ def completions_bash() -> None:
         script = generate_completion_script("bash")
         click.echo(script)
         click.echo("\nTo install: Add the above to your ~/.bashrc or run:")
-        click.echo("  snore completions install")
+        click.echo("\nsnore completions install")
     except Exception as e:
         click.echo(f"Error generating completion script: {e}", err=True)
         sys.exit(1)
@@ -2249,7 +2579,7 @@ def completions_zsh() -> None:
         script = generate_completion_script("zsh")
         click.echo(script)
         click.echo("\nTo install: Add the above to your ~/.zshrc or run:")
-        click.echo("  snore completions install")
+        click.echo("\nsnore completions install")
     except Exception as e:
         click.echo(f"Error generating completion script: {e}", err=True)
         sys.exit(1)
@@ -2799,6 +3129,125 @@ def waveform() -> None:
     pass
 
 
+def _resolve_session_id(
+    db_session: Any,
+    session_id: int | None,
+    date: datetime | None,
+) -> int:
+    """
+    Resolve session ID from either explicit ID or date.
+
+    Args:
+        db_session: Database session
+        session_id: Explicit session ID (takes precedence)
+        date: Date to look up session
+
+    Returns:
+        Resolved session ID
+
+    Raises:
+        SystemExit: If session cannot be resolved
+    """
+    from snore.database import models
+
+    if session_id is not None:
+        return session_id
+
+    if date is None:
+        click.echo(
+            "Error: --date is required when --session-id is not provided",
+            err=True,
+        )
+        sys.exit(1)
+
+    session = (
+        db_session.query(models.Session)
+        .join(models.Day)
+        .filter(models.Day.date == date.date())
+        .first()
+    )
+
+    if not session:
+        click.echo(f"Error: No session found for date {date.date()}", err=True)
+        sys.exit(1)
+
+    return int(session.id)
+
+
+@waveform.command("list")
+@click.option("--session-id", type=int, help="Session ID")
+@click.option(
+    "--date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Session date (YYYY-MM-DD)",
+)
+@click.option("--db", type=click.Path(), help="Database path")
+def list_waveforms(
+    session_id: int | None,
+    date: datetime | None,
+    db: str | None,
+) -> None:
+    """
+    List available waveform types for a session.
+
+    Shows all waveform data available for the specified session, including
+    sample rates, sample counts, units, and durations.
+
+    Examples:
+        snore waveform list --session-id 37
+        snore waveform list --date 2025-10-25
+    """
+    from pathlib import Path
+
+    from snore.database import models
+    from snore.database.session import init_database, session_scope
+
+    if session_id is None and date is None:
+        click.echo("Error: Either --session-id or --date must be provided", err=True)
+        sys.exit(1)
+
+    if db:
+        init_database(str(Path(db)))
+    else:
+        init_database()
+
+    with session_scope() as db_session:
+        resolved_id = _resolve_session_id(db_session, session_id, date)
+
+        waveforms = (
+            db_session.query(models.Waveform)
+            .filter(models.Waveform.session_id == resolved_id)
+            .order_by(models.Waveform.waveform_type)
+            .all()
+        )
+
+        if not waveforms:
+            click.echo(f"No waveforms found for session {resolved_id}")
+            return
+
+        click.echo(f"Available waveforms for session {resolved_id}:")
+        click.echo(
+            f"  {'TYPE':<12} {'RATE':<12} {'SAMPLES':<10} {'UNIT':<10} {'DURATION'}"
+        )
+
+        for wf in waveforms:
+            sample_count = wf.sample_count or 0
+            duration_seconds = (
+                sample_count / wf.sample_rate if wf.sample_rate > 0 else 0
+            )
+            duration_hours = duration_seconds / 3600
+            unit = wf.unit or "?"
+            rate_str = f"{wf.sample_rate:.1f}Hz"
+
+            click.echo(
+                f"  {wf.waveform_type:<12} "
+                f"{rate_str:<12} "
+                f"{sample_count:<10} "
+                f"{unit:<10} "
+                f"{duration_hours:.1f}h"
+            )
+
+
 @waveform.command("show")
 @click.option("--session-id", type=int, help="Session ID")
 @click.option(
@@ -2827,6 +3276,12 @@ def waveform() -> None:
 @click.option(
     "--mode", "-m", default="aasm", help="Detection mode to compare (default: aasm)"
 )
+@click.option(
+    "--type",
+    "waveform_type",
+    default="flow",
+    help="Waveform type to display (default: flow)",
+)
 def show_waveform(
     session_id: int | None,
     date: datetime | None,
@@ -2836,19 +3291,20 @@ def show_waveform(
     output: str | None,
     db: str | None,
     mode: str,
+    waveform_type: str,
 ) -> None:
     """
-    Display flow waveform at a specific time.
+    Display waveform at a specific time.
 
-    View the flow waveform data centered on a specific time offset to visually
-    inspect detected respiratory events.
+    View waveform data centered on a specific time offset to visually
+    inspect detected respiratory events (for flow waveforms).
 
     Examples:
         snore waveform show --session-id 37 --time 05:56:22 --window 30
-        snore waveform show --date 2025-10-25 --time 01:25:16 --format csv --output waveform.csv
+        snore waveform show --date 2025-10-25 --time 01:25:16 --type pressure
+        snore waveform show --session-id 37 --time 01:25:16 --format csv --output waveform.csv
     """
     from snore.analysis.service import AnalysisService
-    from snore.database import models
     from snore.database.session import init_database, session_scope
     from snore.waveform import WaveformInspector, WaveformRenderer
 
@@ -2858,6 +3314,16 @@ def show_waveform(
 
     if output_format == "csv" and output is None:
         click.echo("Error: --output is required for csv format", err=True)
+        sys.exit(1)
+
+    waveform_types = [t.strip() for t in waveform_type.split(",")]
+
+    if output_format == "csv" and len(waveform_types) > 1:
+        click.echo("Error: CSV export only supports single waveform type", err=True)
+        sys.exit(1)
+
+    if len(waveform_types) > 4:
+        click.echo("Error: Maximum 4 waveform types supported", err=True)
         sys.exit(1)
 
     if db:
@@ -2872,92 +3338,115 @@ def show_waveform(
         sys.exit(1)
 
     with session_scope() as db_session:
-        if session_id is None:
-            if date is None:
-                click.echo(
-                    "Error: --date is required when --session-id is not provided",
-                    err=True,
-                )
-                sys.exit(1)
-
-            session = (
-                db_session.query(models.Session)
-                .join(models.Day)
-                .filter(models.Day.date == date.date())
-                .first()
-            )
-
-            if not session:
-                click.echo(f"Error: No session found for date {date.date()}", err=True)
-                sys.exit(1)
-
-            session_id = session.id
+        session_id = _resolve_session_id(db_session, session_id, date)
 
         inspector = WaveformInspector(db_session)
-        try:
-            timestamps, flow_values, metadata = inspector.get_window(
-                session_id=session_id,
-                center_seconds=center_seconds,
-                window_seconds=float(window),
-            )
-        except Exception as e:
-            click.echo(f"Error loading waveform: {e}", err=True)
-            sys.exit(1)
 
-        if len(timestamps) == 0:
-            click.echo("No data in window", err=True)
-            sys.exit(1)
+        if len(waveform_types) == 1:
+            waveform_type_single = waveform_types[0]
+            try:
+                timestamps, values, metadata = inspector.get_window(
+                    session_id=session_id,
+                    center_seconds=center_seconds,
+                    window_seconds=float(window),
+                    waveform_type=waveform_type_single,
+                )
+            except Exception as e:
+                click.echo(f"Error loading waveform: {e}", err=True)
+                sys.exit(1)
 
-        analysis_service = AnalysisService(db_session)
-        try:
-            result = analysis_service.get_analysis_result(session_id)
-        except Exception:
-            result = None
+            if len(timestamps) == 0:
+                click.echo("No data in window", err=True)
+                sys.exit(1)
 
-        machine_events = []
-        programmatic_events = []
+            machine_events = []
+            programmatic_events = []
 
-        if result:
-            start_time = center_seconds - window / 2
-            end_time = center_seconds + window / 2
+            if waveform_type_single == "flow":
+                analysis_service = AnalysisService(db_session)
+                try:
+                    result = analysis_service.get_analysis_result(session_id)
+                except Exception:
+                    result = None
 
-            if result.machine_events:
-                machine_events = inspector.find_events_in_window(
-                    result.machine_events, start_time, end_time
+                if result:
+                    start_time = center_seconds - window / 2
+                    end_time = center_seconds + window / 2
+
+                    if result.machine_events:
+                        machine_events = inspector.find_events_in_window(
+                            result.machine_events, start_time, end_time
+                        )
+
+                    if mode in result.mode_results:
+                        mode_result = result.mode_results[mode]
+                        all_prog_events = list(mode_result.apneas) + list(
+                            mode_result.hypopneas
+                        )
+                        programmatic_events = inspector.find_events_in_window(
+                            all_prog_events, start_time, end_time
+                        )
+
+            if output_format == "plot":
+                show_events = waveform_type_single == "flow"
+                renderer = WaveformRenderer(
+                    width=80, height=20, show_events=show_events
+                )
+                renderer.render(
+                    timestamps=timestamps,
+                    values=values,
+                    machine_events=machine_events,
+                    programmatic_events=programmatic_events,
+                    session_id=session_id,
+                    center_time=time,
+                    waveform_type=waveform_type_single,
                 )
 
-            if mode in result.mode_results:
-                mode_result = result.mode_results[mode]
-                all_prog_events = list(mode_result.apneas) + list(mode_result.hypopneas)
-                programmatic_events = inspector.find_events_in_window(
-                    all_prog_events, start_time, end_time
-                )
+            elif output_format == "csv":
+                import csv
 
-        if output_format == "plot":
-            renderer = WaveformRenderer(width=80, height=20, show_events=True)
-            renderer.render(
-                timestamps=timestamps,
-                flow_values=flow_values,
-                machine_events=machine_events,
-                programmatic_events=programmatic_events,
+                assert output is not None
+                column_name = f"{waveform_type_single}_value"
+                with open(output, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["timestamp_seconds", column_name])
+                    for ts, value in zip(timestamps, values, strict=True):
+                        writer.writerow([f"{ts:.3f}", f"{value:.3f}"])
+
+                click.echo(f"Exported {len(timestamps)} samples to {output}")
+
+        else:
+            waveform_data = []
+            for wf_type in waveform_types:
+                try:
+                    timestamps, values, metadata = inspector.get_window(
+                        session_id=session_id,
+                        center_seconds=center_seconds,
+                        window_seconds=float(window),
+                        waveform_type=wf_type,
+                    )
+                    if len(timestamps) > 0:
+                        waveform_data.append((timestamps, values, wf_type))
+                    else:
+                        click.echo(
+                            f"Warning: No data for waveform type '{wf_type}'", err=True
+                        )
+                except Exception as e:
+                    click.echo(
+                        f"Warning: Failed to load waveform type '{wf_type}': {e}",
+                        err=True,
+                    )
+
+            if not waveform_data:
+                click.echo("Error: No waveform data loaded", err=True)
+                sys.exit(1)
+
+            renderer = WaveformRenderer(width=80, height=20, show_events=False)
+            renderer.render_multi(
+                waveform_data=waveform_data,
                 session_id=session_id,
                 center_time=time,
             )
-
-        elif output_format == "csv":
-            import csv
-
-            if output is None:
-                click.echo("Error: --output is required for csv format", err=True)
-                sys.exit(1)
-
-            with open(output, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["timestamp_seconds", "flow_lpm"])
-                for ts, flow in zip(timestamps, flow_values, strict=True):
-                    writer.writerow([f"{ts:.3f}", f"{flow:.3f}"])
-
-            click.echo(f"Exported {len(timestamps)} samples to {output}")
 
 
 @waveform.command("compare")
@@ -2990,7 +3479,6 @@ def compare_events(
     """
     from snore.analysis.service import AnalysisService
     from snore.analysis.utils import convert_machine_events
-    from snore.database import models
     from snore.database.session import init_database, session_scope
 
     if session_id is None and date is None:
@@ -3003,26 +3491,7 @@ def compare_events(
         init_database()
 
     with session_scope() as db_session:
-        if session_id is None:
-            if date is None:
-                click.echo(
-                    "Error: --date is required when --session-id is not provided",
-                    err=True,
-                )
-                sys.exit(1)
-
-            session = (
-                db_session.query(models.Session)
-                .join(models.Day)
-                .filter(models.Day.date == date.date())
-                .first()
-            )
-
-            if not session:
-                click.echo(f"Error: No session found for date {date.date()}", err=True)
-                sys.exit(1)
-
-            session_id = session.id
+        session_id = _resolve_session_id(db_session, session_id, date)
 
         analysis_service = AnalysisService(db_session)
         try:

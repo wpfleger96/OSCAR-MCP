@@ -12,6 +12,32 @@ if TYPE_CHECKING:
 
     EventType = AnalysisEvent | ApneaEvent | HypopneaEvent
 
+WAVEFORM_UNITS = {
+    "flow": "L/min",
+    "pressure": "cmH2O",
+    "leak": "L/min",
+    "mv": "L/min",
+    "rr": "breaths/min",
+    "tv": "mL",
+    "spo2": "%",
+    "pulse": "BPM",
+    "fl": "a.u.",
+    "snore": "a.u.",
+}
+
+WAVEFORM_LABELS = {
+    "flow": "Flow",
+    "pressure": "Pressure",
+    "leak": "Leak",
+    "mv": "Minute Ventilation",
+    "rr": "Respiratory Rate",
+    "tv": "Tidal Volume",
+    "spo2": "SpO2",
+    "pulse": "Pulse",
+    "fl": "Flow Limitation",
+    "snore": "Snore",
+}
+
 
 def format_time_offset(seconds: float) -> str:
     """Format seconds to HH:MM:SS."""
@@ -45,40 +71,43 @@ class WaveformRenderer:
     def render(
         self,
         timestamps: np.ndarray,
-        flow_values: np.ndarray,
+        values: np.ndarray,
         machine_events: Sequence["EventType"] | None = None,
         programmatic_events: Sequence["EventType"] | None = None,
         session_id: int | None = None,
         center_time: str | None = None,
+        waveform_type: str = "flow",
     ) -> None:
         """
         Generate high-resolution waveform visualization using plotext.
 
         Args:
             timestamps: Timestamp array in seconds
-            flow_values: Flow value array in L/min
+            values: Waveform value array
             machine_events: Machine-detected events in window
             programmatic_events: Programmatically-detected events in window
             session_id: Session ID for title
             center_time: Center time for title
+            waveform_type: Type of waveform (default: "flow")
 
         Note:
             This method prints directly to stdout and returns None.
         """
-        if len(timestamps) == 0 or len(flow_values) == 0:
+        if len(timestamps) < 2 or len(values) < 2 or timestamps[-1] == timestamps[0]:
             print("No data in window")
             return
+
+        label = WAVEFORM_LABELS.get(waveform_type, waveform_type.capitalize())
+        unit = WAVEFORM_UNITS.get(waveform_type, "?")
 
         if session_id is not None:
             window_size = timestamps[-1] - timestamps[0]
             if center_time:
-                title = (
-                    f"Session {session_id} - Flow at {center_time} ({window_size:.0f}s)"
-                )
+                title = f"Session {session_id} - {label} at {center_time} ({window_size:.0f}s)"
             else:
-                title = f"Session {session_id} - Flow Waveform"
+                title = f"Session {session_id} - {label} Waveform"
         else:
-            title = "Flow Waveform"
+            title = f"{label} Waveform"
 
         sample_rate = len(timestamps) / (timestamps[-1] - timestamps[0])
         print(f"Sample rate: {sample_rate:.0f}Hz | Samples: {len(timestamps)}")
@@ -91,9 +120,9 @@ class WaveformRenderer:
         relative_timestamps = timestamps - start_time
         window_duration = timestamps[-1] - start_time
 
-        plt.plot(relative_timestamps, flow_values, marker="braille")
+        plt.plot(relative_timestamps, values, marker="braille")
         plt.title(title)
-        plt.ylabel("L/min")
+        plt.ylabel(unit)
 
         tick_interval = (
             10 if window_duration <= 60 else (15 if window_duration <= 120 else 30)
@@ -139,3 +168,87 @@ class WaveformRenderer:
                         )
             else:
                 print("  Programmatic: (none)")
+
+    def render_multi(
+        self,
+        waveform_data: list[tuple[np.ndarray, np.ndarray, str]],
+        session_id: int | None = None,
+        center_time: str | None = None,
+    ) -> None:
+        """
+        Generate multi-waveform visualization with stacked subplots.
+
+        Args:
+            waveform_data: List of (timestamps, values, waveform_type) tuples
+            session_id: Session ID for title
+            center_time: Center time for title
+
+        Note:
+            This method prints directly to stdout and returns None.
+            Maximum 4 waveforms supported.
+        """
+        if not waveform_data:
+            print("No waveform data provided")
+            return
+
+        if len(waveform_data) > 4:
+            print("Warning: Maximum 4 waveforms supported, using first 4")
+            waveform_data = waveform_data[:4]
+
+        num_plots = len(waveform_data)
+        plot_height = max(8, self.height // num_plots)
+
+        plt.clear_figure()
+        plt.theme("clear")
+        plt.subplots(num_plots, 1)
+
+        for idx, (timestamps, values, waveform_type) in enumerate(waveform_data):
+            if len(timestamps) == 0 or len(values) == 0:
+                continue
+
+            label = WAVEFORM_LABELS.get(waveform_type, waveform_type.capitalize())
+            unit = WAVEFORM_UNITS.get(waveform_type, "?")
+
+            start_time = timestamps[0]
+            relative_timestamps = timestamps - start_time
+            window_duration = timestamps[-1] - start_time
+
+            plt.subplot(idx + 1, 1)
+            plt.plot(relative_timestamps, values, marker="braille")
+
+            if idx == 0 and session_id is not None:
+                window_size = timestamps[-1] - timestamps[0]
+                if center_time:
+                    title = f"Session {session_id} - Multi-waveform at {center_time} ({window_size:.0f}s)"
+                else:
+                    title = f"Session {session_id} - Multi-waveform"
+                plt.title(title)
+
+            plt.ylabel(f"{label} ({unit})")
+
+            if idx == num_plots - 1:
+                tick_interval = (
+                    10
+                    if window_duration <= 60
+                    else (15 if window_duration <= 120 else 30)
+                )
+                tick_positions = list(range(0, int(window_duration) + 1, tick_interval))
+                tick_labels = [
+                    format_time_offset(start_time + t) for t in tick_positions
+                ]
+                plt.xticks(tick_positions, tick_labels)
+
+            plt.plotsize(self.width, plot_height)
+
+        plt.show()
+
+        sample_rates = []
+        for timestamps, _values, waveform_type in waveform_data:
+            if len(timestamps) > 1 and (timestamps[-1] - timestamps[0]) > 0:
+                rate = len(timestamps) / (timestamps[-1] - timestamps[0])
+                label = WAVEFORM_LABELS.get(waveform_type, waveform_type)
+                sample_rates.append(f"{label}: {rate:.0f}Hz")
+
+        if sample_rates:
+            print()
+            print("Sample rates: " + " | ".join(sample_rates))

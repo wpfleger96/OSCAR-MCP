@@ -89,6 +89,103 @@ def populated_test_db(temp_db):
     return temp_db
 
 
+@pytest.fixture
+def populated_test_db_full(temp_db):
+    """Create a database populated with full Statistics and Waveform records."""
+    import numpy as np
+
+    init_database(str(temp_db))
+
+    with session_scope() as session:
+        device = models.Device(
+            manufacturer="ResMed",
+            model="AirSense 10",
+            serial_number="TEST12345",
+        )
+        session.add(device)
+        session.flush()
+
+        base_time = datetime(2025, 10, 1, 22, 0, 0)
+        for i in range(10):
+            start_time = base_time + timedelta(days=i)
+            end_time = start_time + timedelta(hours=8)
+
+            sess = models.Session(
+                device_id=device.id,
+                device_session_id=f"test_session_{i}",
+                start_time=start_time,
+                end_time=end_time,
+                duration_seconds=8 * 3600,
+                has_statistics=True,
+                has_event_data=True,
+                has_waveform_data=True,
+            )
+            session.add(sess)
+            session.flush()
+
+            day_date = DayManager.get_day_for_session(start_time)
+            day = DayManager.create_or_update_day(device.id, day_date, session)
+            sess.day_id = day.id
+
+            session.add(models.Setting(session_id=sess.id, key="mode", value="CPAP"))
+
+            session.add(
+                models.Event(
+                    session_id=sess.id,
+                    event_type="Apnea",
+                    start_time=start_time + timedelta(hours=2),
+                    duration_seconds=15.0,
+                )
+            )
+
+            session.add(
+                models.Statistics(
+                    session_id=sess.id,
+                    ahi=5.2 + i * 0.3,
+                    usage_hours=7.8,
+                    rei=4.5,
+                    obstructive_apneas=3,
+                    central_apneas=1,
+                    hypopneas=5,
+                    pressure_mean=10.5,
+                    pressure_min=8.0,
+                    pressure_max=13.0,
+                    pressure_95th=12.5,
+                    leak_mean=12.0,
+                    leak_percentile_70=15.0,
+                    leak_95th=22.0,
+                    spo2_mean=95.5,
+                    spo2_min=88.0,
+                    spo2_time_below_90=120,
+                    pulse_mean=72.0,
+                    pulse_min=55.0,
+                    pulse_max=95.0,
+                    respiratory_rate_mean=15.0,
+                    tidal_volume_mean=450.0,
+                    minute_ventilation_mean=6.8,
+                )
+            )
+
+            dummy_blob = np.array([[0.0, 1.0], [1.0, 2.0]], dtype=np.float32).tobytes()
+            for wtype in ["flow", "pressure", "leak"]:
+                session.add(
+                    models.Waveform(
+                        session_id=sess.id,
+                        waveform_type=wtype,
+                        sample_rate=25.0 if wtype == "flow" else 0.5,
+                        unit={"flow": "L/min", "pressure": "cmH2O", "leak": "L/min"}[
+                            wtype
+                        ],
+                        data_blob=dummy_blob,
+                        sample_count=2,
+                    )
+                )
+
+        session.commit()
+
+    return temp_db
+
+
 class TestSessionDeleteCommand:
     """Test session delete command with various scenarios."""
 
@@ -922,3 +1019,157 @@ class TestSessionShowCommand:
         assert result.exit_code == 0
         assert "Settings:" in result.output
         assert "mode:" in result.output
+
+
+class TestWaveformListCommand:
+    """Test waveform list command."""
+
+    def test_waveform_list_shows_types(self, cli_runner, populated_test_db_full):
+        """Test waveform list displays available types."""
+        result = cli_runner.invoke(
+            cli,
+            [
+                "waveform",
+                "list",
+                "--db",
+                str(populated_test_db_full),
+                "--session-id",
+                "1",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "flow" in result.output
+        assert "pressure" in result.output
+        assert "leak" in result.output
+
+    def test_waveform_list_no_session(self, cli_runner, populated_test_db_full):
+        """Test waveform list errors when session not specified."""
+        result = cli_runner.invoke(
+            cli,
+            ["waveform", "list", "--db", str(populated_test_db_full)],
+        )
+
+        assert result.exit_code != 0
+
+
+class TestSessionShowExpanded:
+    """Test expanded session show output with full statistics."""
+
+    def test_session_show_displays_full_stats(self, cli_runner, populated_test_db_full):
+        """Test session show displays comprehensive statistics."""
+        result = cli_runner.invoke(
+            cli,
+            ["session", "show", "1", "--db", str(populated_test_db_full)],
+        )
+
+        assert result.exit_code == 0
+        assert "AHI:" in result.output
+        assert "REI:" in result.output
+        assert "Pressure:" in result.output
+        assert "Leak:" in result.output
+        assert "SpO₂:" in result.output or "SpO2:" in result.output
+        assert "Pulse:" in result.output
+        assert "Respiratory:" in result.output or "Respiratory Rate:" in result.output
+
+    def test_session_show_displays_waveform_types(
+        self, cli_runner, populated_test_db_full
+    ):
+        """Test session show lists available waveform types."""
+        result = cli_runner.invoke(
+            cli,
+            ["session", "show", "1", "--db", str(populated_test_db_full)],
+        )
+
+        assert result.exit_code == 0
+        assert "flow" in result.output
+        assert "pressure" in result.output
+        assert "leak" in result.output
+
+
+class TestStatsEnhanced:
+    """Test enhanced stats command with respiratory, pulse, and SpO2 detail."""
+
+    def test_stats_shows_respiratory(self, cli_runner, populated_test_db_full):
+        """Test stats displays respiratory metrics."""
+        result = cli_runner.invoke(
+            cli,
+            ["stats", "--db", str(populated_test_db_full)],
+        )
+
+        assert result.exit_code == 0
+        assert "Respiratory Rate:" in result.output or "Respiratory" in result.output
+        assert "Tidal Volume:" in result.output or "Tidal" in result.output
+        assert "Minute Ventilation:" in result.output or "Ventilation" in result.output
+
+    def test_stats_shows_pulse(self, cli_runner, populated_test_db_full):
+        """Test stats displays pulse section."""
+        result = cli_runner.invoke(
+            cli,
+            ["stats", "--db", str(populated_test_db_full)],
+        )
+
+        assert result.exit_code == 0
+        assert "Pulse" in result.output
+
+    def test_stats_shows_spo2_below_90(self, cli_runner, populated_test_db_full):
+        """Test stats displays time below 90% SpO2."""
+        result = cli_runner.invoke(
+            cli,
+            ["stats", "--db", str(populated_test_db_full)],
+        )
+
+        assert result.exit_code == 0
+        assert "Time below 90%:" in result.output or "below 90" in result.output
+
+
+class TestStatsPeriod:
+    """Test stats command with period breakdown."""
+
+    def test_stats_period_month(self, cli_runner, populated_test_db_full):
+        """Test stats with monthly period breakdown."""
+        result = cli_runner.invoke(
+            cli,
+            ["stats", "--db", str(populated_test_db_full), "--period", "month"],
+        )
+
+        assert result.exit_code == 0
+        assert "Oct 2025" in result.output or "2025-10" in result.output
+
+    def test_stats_period_week(self, cli_runner, populated_test_db_full):
+        """Test stats with weekly period breakdown."""
+        result = cli_runner.invoke(
+            cli,
+            ["stats", "--db", str(populated_test_db_full), "--period", "week"],
+        )
+
+        assert result.exit_code == 0
+
+
+class TestStatsTrend:
+    """Test stats command with trend visualization."""
+
+    def test_stats_trend_defaults_to_week(self, cli_runner, populated_test_db_full):
+        """Test stats with trend flag defaults to weekly periods."""
+        result = cli_runner.invoke(
+            cli,
+            ["stats", "--db", str(populated_test_db_full), "--trend"],
+        )
+
+        assert result.exit_code == 0
+
+    def test_stats_trend_with_period(self, cli_runner, populated_test_db_full):
+        """Test stats with trend and custom period."""
+        result = cli_runner.invoke(
+            cli,
+            [
+                "stats",
+                "--db",
+                str(populated_test_db_full),
+                "--period",
+                "month",
+                "--trend",
+            ],
+        )
+
+        assert result.exit_code == 0
