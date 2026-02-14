@@ -56,7 +56,7 @@ class SessionService:
             SessionListResult with sessions and total count
         """
         where_clauses = []
-        params = {}
+        params: dict[str, str | int] = {}
 
         if not include_disabled:
             where_clauses.append("sessions.enabled = 1")
@@ -75,6 +75,7 @@ class SessionService:
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
+        # Built from hardcoded maps (safe from injection)
         sort_map = {
             "date-asc": "sessions.start_time ASC",
             "date-desc": "sessions.start_time DESC",
@@ -93,7 +94,11 @@ class SessionService:
         )
         total_count = self.db_session.execute(count_query, params).scalar() or 0
 
-        limit_sql = f"LIMIT {limit}" if limit > 0 else ""
+        if limit > 0:
+            limit_sql = "LIMIT :limit"
+            params["limit"] = limit
+        else:
+            limit_sql = ""
 
         list_query = text(
             f"""
@@ -429,6 +434,7 @@ class SessionService:
             .filter(models.Session.id.in_(session_ids))
             .delete(synchronize_session=False)
         )
+        # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
         self.db_session.commit()
 
         return count
@@ -468,6 +474,7 @@ class SessionService:
             if day:
                 DayManager.recalculate_day(day, self.db_session)
 
+        # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
         self.db_session.commit()
 
     def resolve_session_id(self, session_id: int | None, date: datetime | None) -> int:

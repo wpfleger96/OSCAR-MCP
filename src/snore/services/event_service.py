@@ -66,3 +66,42 @@ class EventService:
             false_positives=false_positives,
             false_negatives=false_negatives,
         )
+
+    def classify_matches(
+        self,
+        machine_times: list[float],
+        programmatic_times: list[float],
+        tolerance: float = EVENT_MATCH_TOLERANCE_SECONDS,
+    ) -> tuple[list[bool], list[bool]]:
+        """Classify each event as matched or unmatched.
+
+        Args:
+            machine_times: Sorted list of machine event timestamps (seconds)
+            programmatic_times: Sorted list of programmatic event timestamps (seconds)
+            tolerance: Maximum time difference for a match (default 5.0s)
+
+        Returns:
+            Tuple of (machine_matched, programmatic_matched) where each is a list of booleans
+        """
+        sorted_machine = sorted(machine_times)
+        sorted_prog = sorted(programmatic_times)
+
+        machine_matched = []
+        for t in sorted_machine:
+            idx = bisect.bisect_left(sorted_prog, t - tolerance)
+            matched = any(
+                abs(t - sorted_prog[j]) <= tolerance
+                for j in range(idx, min(idx + 10, len(sorted_prog)))
+            )
+            machine_matched.append(matched)
+
+        prog_matched = []
+        for t in sorted_prog:
+            idx = bisect.bisect_left(sorted_machine, t - tolerance)
+            matched = any(
+                abs(t - sorted_machine[j]) <= tolerance
+                for j in range(idx, min(idx + 10, len(sorted_machine)))
+            )
+            prog_matched.append(matched)
+
+        return machine_matched, prog_matched

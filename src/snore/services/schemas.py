@@ -4,9 +4,8 @@ These models define the contract between services and consumers (CLI/API).
 """
 
 from datetime import date, datetime
-from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "PeriodStatistics",
@@ -22,8 +21,10 @@ __all__ = [
     "EventTypeCount",
     "WaveformInfo",
     "AnalysisListItem",
+    "AnalysisSessionDetail",
     "AnalysisDeletePreview",
     "EventMatchResult",
+    "DeviceInfo",
 ]
 
 
@@ -52,8 +53,8 @@ class PeriodStatistics(BaseModel):
     avg_spo2: float | None = Field(default=None, description="Average SpO₂ (%)")
     min_spo2: float | None = Field(default=None, description="Minimum SpO₂ (%)")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "period_type": "monthly",
                 "period_start": "2024-01-01",
@@ -69,6 +70,7 @@ class PeriodStatistics(BaseModel):
                 "min_spo2": 89,
             }
         }
+    )
 
 
 class EventValidationResult(BaseModel):
@@ -299,6 +301,16 @@ class AnalysisListItem(BaseModel):
     analysis_id: int | None = None
 
 
+class AnalysisSessionDetail(BaseModel):
+    """Session detail for analysis deletion preview."""
+
+    id: int
+    start_time: datetime
+    manufacturer: str | None = None
+    model: str | None = None
+    version_count: int
+
+
 class AnalysisDeletePreview(BaseModel):
     """Preview of analysis data to be deleted."""
 
@@ -306,4 +318,13 @@ class AnalysisDeletePreview(BaseModel):
     total_analysis_records: int
     records_to_delete: int
     patterns_count: int
-    session_details: list[dict[str, Any]] = Field(default_factory=list)
+    session_details: list[AnalysisSessionDetail] = Field(default_factory=list)
+
+
+class DeviceInfo(BaseModel):
+    """Device information for listing."""
+
+    id: int
+    manufacturer: str
+    model: str
+    serial_number: str

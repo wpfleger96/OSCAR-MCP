@@ -67,14 +67,18 @@ class WaveformService:
         session_id: int,
         waveform_type: str,
         max_points: int | None = None,
+        start_seconds: float | None = None,
+        end_seconds: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         """
-        Load waveform data with optional LTTB downsampling.
+        Load waveform data with optional windowing and LTTB downsampling.
 
         Args:
             session_id: Database session ID
             waveform_type: Type of waveform to load
             max_points: If set, downsample to this many points using LTTB
+            start_seconds: If set, filter timestamps >= this value
+            end_seconds: If set, filter timestamps <= this value
 
         Returns:
             Tuple of (timestamps, values, metadata)
@@ -88,6 +92,15 @@ class WaveformService:
             waveform_type=waveform_type,
             apply_filter=False,
         )
+
+        if start_seconds is not None or end_seconds is not None:
+            mask = np.ones(len(timestamps), dtype=bool)
+            if start_seconds is not None:
+                mask &= timestamps >= start_seconds
+            if end_seconds is not None:
+                mask &= timestamps <= end_seconds
+            timestamps = timestamps[mask]
+            values = values[mask]
 
         if max_points and len(timestamps) > max_points:
             timestamps, values = lttb_downsample(timestamps, values, max_points)

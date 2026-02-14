@@ -73,8 +73,14 @@ def lttb_downsample(
         if avg_range_end <= avg_range_start:
             avg_range_end = min(avg_range_start + 1, len(timestamps) - 1)
 
-        avg_x = np.mean(timestamps[avg_range_start:avg_range_end])
-        avg_y = np.mean(values[avg_range_start:avg_range_end])
+        avg_slice_t = timestamps[avg_range_start:avg_range_end]
+        avg_slice_v = values[avg_range_start:avg_range_end]
+        if len(avg_slice_t) == 0:
+            avg_x = timestamps[avg_range_start]
+            avg_y = values[avg_range_start]
+        else:
+            avg_x = np.mean(avg_slice_t)
+            avg_y = np.mean(avg_slice_v)
 
         range_start = int(np.floor(i * bucket_size)) + 1
         range_end = int(np.floor((i + 1) * bucket_size)) + 1

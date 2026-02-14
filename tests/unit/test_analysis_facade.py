@@ -162,11 +162,11 @@ class TestGetDeletePreview:
         assert preview.records_to_delete == 2
         assert len(preview.session_details) == 2
 
-        detail1 = next(d for d in preview.session_details if d["id"] == sess1.id)
-        assert detail1["version_count"] == 2
+        detail1 = next(d for d in preview.session_details if d.id == sess1.id)
+        assert detail1.version_count == 2
 
-        detail2 = next(d for d in preview.session_details if d["id"] == sess2.id)
-        assert detail2["version_count"] == 1
+        detail2 = next(d for d in preview.session_details if d.id == sess2.id)
+        assert detail2.version_count == 1
 
     def test_delete_preview_latest_only(self, db_session, test_device):
         """Preview with all_versions=False only counts latest analysis."""
@@ -201,7 +201,7 @@ class TestDeleteAnalysis:
         service = AnalysisFacade(db_session)
         deleted = service.delete_analysis([sess.id], all_versions=True)
 
-        assert deleted == 1
+        assert deleted == 3
 
         remaining = (
             db_session.query(AnalysisResult).filter_by(session_id=sess.id).count()

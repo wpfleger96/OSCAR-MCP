@@ -7,7 +7,11 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from snore.database import models
-from snore.services.schemas import AnalysisDeletePreview, AnalysisListItem
+from snore.services.schemas import (
+    AnalysisDeletePreview,
+    AnalysisListItem,
+    AnalysisSessionDetail,
+)
 
 __all__ = ["AnalysisFacade"]
 
@@ -210,17 +214,17 @@ class AnalysisFacade:
         ).scalar()
 
         session_details = [
-            {
-                "id": s.id,
-                "start_time": (
+            AnalysisSessionDetail(
+                id=s.id,
+                start_time=(
                     datetime.fromisoformat(s.start_time)
                     if isinstance(s.start_time, str)
                     else s.start_time
                 ),
-                "manufacturer": s.manufacturer,
-                "model": s.model,
-                "version_count": analysis_count_dict.get(s.id, 0),
-            }
+                manufacturer=s.manufacturer,
+                model=s.model,
+                version_count=analysis_count_dict.get(s.id, 0),
+            )
             for s in sessions_with_analysis
         ]
 
@@ -247,14 +251,15 @@ class AnalysisFacade:
             Number of analysis records deleted
         """
         if all_versions:
-            self.db_session.execute(
+            result = self.db_session.execute(
                 text(
                     "DELETE FROM analysis_results WHERE session_id IN :session_ids"
                 ).bindparams(bindparam("session_ids", expanding=True)),
                 {"session_ids": session_ids},
             )
+            # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
             self.db_session.commit()
-            return len(session_ids)
+            return result.rowcount or 0  # type: ignore[attr-defined]
         else:
             deleted_count = 0
             for session_id in session_ids:
@@ -277,5 +282,6 @@ class AnalysisFacade:
                     )
                     deleted_count += 1
 
+            # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
             self.db_session.commit()
             return deleted_count

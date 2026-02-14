@@ -881,12 +881,8 @@ def vacuum(db: str | None) -> None:
 @click.option("--force", is_flag=True, help="Skip confirmation prompt")
 def drop(db: str | None, force: bool) -> None:
     """Drop database (permanently delete all CPAP data)."""
-    import os
-
-    from sqlalchemy import text
 
     from snore.constants import DEFAULT_DATABASE_PATH
-    from snore.database import models
     from snore.database.session import cleanup_database, init_database, session_scope
 
     if db:
@@ -901,39 +897,21 @@ def drop(db: str | None, force: bool) -> None:
     try:
         init_database(str(db_path))
         with session_scope() as session:
-            device_count = session.query(models.Device).count()
-            session_count = session.query(models.Session).count()
-            event_count = session.execute(text("SELECT COUNT(*) FROM events")).scalar()
+            from snore.services.database_service import DatabaseService
 
-            first_session = session.execute(
-                text("SELECT MIN(start_time) as first FROM sessions")
-            ).scalar()
-
-            last_session = session.execute(
-                text("SELECT MAX(start_time) as last FROM sessions")
-            ).scalar()
-
-            size_bytes = os.path.getsize(db_path) if db_path.exists() else 0
-            size_gb = size_bytes / (1024 * 1024 * 1024)
+            service = DatabaseService(session)
+            stats = service.get_stats(str(db_path))
 
             click.echo(f"\nDatabase: {db_path}")
-            click.echo(f"Size: {size_gb:.1f} GB")
-            click.echo(f"Devices: {device_count}")
-            click.echo(f"Sessions: {session_count}")
-            click.echo(f"Events: {event_count:,}")
+            click.echo(f"Size: {stats.size_mb:.1f} MB")
+            click.echo(f"Devices: {stats.device_count}")
+            click.echo(f"Sessions: {stats.session_count}")
+            click.echo(f"Events: {stats.event_count:,}")
 
-            if first_session and last_session:
-                first_dt = (
-                    datetime.fromisoformat(first_session)
-                    if isinstance(first_session, str)
-                    else first_session
+            if stats.first_session and stats.last_session:
+                click.echo(
+                    f"Date range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
                 )
-                last_dt = (
-                    datetime.fromisoformat(last_session)
-                    if isinstance(last_session, str)
-                    else last_session
-                )
-                click.echo(f"Date range: {first_dt:%Y-%m-%d} to {last_dt:%Y-%m-%d}")
 
     except Exception as e:
         click.echo(f"Warning: Could not read database stats: {e}")
@@ -1648,7 +1626,7 @@ def list_cmd(
         init_database()
 
     with session_scope() as session:
-        _list_sessions(session, None, start, end, limit, analyzed_only, sort_by)
+        _list_sessions(session, start, end, limit, analyzed_only, sort_by)
 
 
 @analysis.command("show")
@@ -2008,7 +1986,6 @@ def _analyze_batch(
 
 def _list_sessions(
     session: Any,
-    profile_id: int | None,
     start: datetime | None,
     end: datetime | None,
     limit: int,
@@ -2149,15 +2126,15 @@ def analysis_delete(
         click.echo("-" * 80)
 
         for detail in preview.session_details:
-            start = detail["start_time"]
+            start = detail.start_time
             if isinstance(start, str):
                 start = datetime.fromisoformat(start)
-            device_name = f"{detail['manufacturer']} {detail['model']}"
+            device_name = f"{detail.manufacturer} {detail.model}"
 
             click.echo(
-                f"{detail['id']:<8} "
+                f"{detail.id:<8} "
                 f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-                f"{detail['version_count']:<10} "
+                f"{detail.version_count:<10} "
                 f"{device_name:<25}"
             )
 
@@ -2202,7 +2179,7 @@ def analysis_delete(
                 click.echo("Deletion cancelled")
                 return 0
 
-        session_ids_to_delete = [d["id"] for d in preview.session_details]
+        session_ids_to_delete = [d.id for d in preview.session_details]
         deleted_count = facade.delete_analysis(session_ids_to_delete, all_versions)
 
         click.echo(
@@ -2730,36 +2707,36 @@ def export_events(
 
             export_events_list.sort(key=lambda x: x["time_into_session"])
 
-            import bisect
+            from snore.services.event_service import EventService
 
-            prog_times = sorted(
-                parse_time_offset(e["time_into_session"])
-                for e in export_events_list
-                if e["source"] == "programmatic"
-            )
-            machine_times = sorted(
+            machine_times = [
                 parse_time_offset(e["time_into_session"])
                 for e in export_events_list
                 if e["source"] == "machine"
+            ]
+            prog_times = [
+                parse_time_offset(e["time_into_session"])
+                for e in export_events_list
+                if e["source"] == "programmatic"
+            ]
+
+            event_service = EventService()
+            machine_matched, prog_matched = event_service.classify_matches(
+                machine_times, prog_times
             )
 
-            for i, event_dict in enumerate(export_events_list):
+            machine_match_map = dict(
+                zip(sorted(machine_times), machine_matched, strict=True)
+            )
+            prog_match_map = dict(zip(sorted(prog_times), prog_matched, strict=True))
+
+            for event_dict in export_events_list:
+                time_offset = parse_time_offset(event_dict["time_into_session"])
                 if event_dict["source"] == "machine":
-                    machine_time = parse_time_offset(event_dict["time_into_session"])
-                    idx = bisect.bisect_left(prog_times, machine_time - 5.0)
-                    is_matched = any(
-                        abs(machine_time - prog_times[j]) <= 5.0
-                        for j in range(idx, min(idx + 10, len(prog_times)))
-                    )
-                    export_events_list[i]["matched"] = "yes" if is_matched else "no"
+                    is_matched = machine_match_map[time_offset]
                 else:
-                    prog_time = parse_time_offset(event_dict["time_into_session"])
-                    idx = bisect.bisect_left(machine_times, prog_time - 5.0)
-                    is_matched = any(
-                        abs(prog_time - machine_times[j]) <= 5.0
-                        for j in range(idx, min(idx + 10, len(machine_times)))
-                    )
-                    export_events_list[i]["matched"] = "yes" if is_matched else "no"
+                    is_matched = prog_match_map[time_offset]
+                event_dict["matched"] = "yes" if is_matched else "no"
 
             output_path = Path(output)
             with open(output_path, "w", newline="") as f:

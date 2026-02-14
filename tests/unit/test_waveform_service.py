@@ -202,3 +202,115 @@ class TestWaveformService:
         assert len(values) == max_points
         assert isinstance(timestamps, np.ndarray)
         assert isinstance(values, np.ndarray)
+
+    def test_get_waveform_data_with_windowing(self, db_session, test_device):
+        """Windowing filters data to specified time range."""
+        now = datetime(2025, 1, 1, 0, 0, 0)
+        session = Session(
+            device_id=test_device.id,
+            device_session_id="test_window",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        db_session.add(session)
+        db_session.flush()
+
+        sample_count = 1000
+        sample_rate = 25.0
+        wf = Waveform(
+            session_id=session.id,
+            waveform_type="flow",
+            sample_rate=sample_rate,
+            unit="L/min",
+            sample_count=sample_count,
+            data_blob=_make_waveform_blob(sample_count, sample_rate),
+        )
+        db_session.add(wf)
+        db_session.commit()
+
+        service = WaveformService(db_session)
+
+        timestamps, values, _ = service.get_waveform_data(
+            session.id, "flow", start_seconds=10.0, end_seconds=20.0
+        )
+
+        assert len(timestamps) > 0
+        assert len(timestamps) < sample_count
+        assert timestamps.min() >= 10.0
+        assert timestamps.max() <= 20.0
+        assert len(timestamps) == len(values)
+
+    def test_get_waveform_data_with_start_only(self, db_session, test_device):
+        """Windowing with only start_seconds filters correctly."""
+        now = datetime(2025, 1, 1, 0, 0, 0)
+        session = Session(
+            device_id=test_device.id,
+            device_session_id="test_window_start",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        db_session.add(session)
+        db_session.flush()
+
+        sample_count = 1000
+        sample_rate = 25.0
+        wf = Waveform(
+            session_id=session.id,
+            waveform_type="flow",
+            sample_rate=sample_rate,
+            unit="L/min",
+            sample_count=sample_count,
+            data_blob=_make_waveform_blob(sample_count, sample_rate),
+        )
+        db_session.add(wf)
+        db_session.commit()
+
+        service = WaveformService(db_session)
+
+        timestamps, values, _ = service.get_waveform_data(
+            session.id, "flow", start_seconds=30.0
+        )
+
+        assert len(timestamps) > 0
+        assert len(timestamps) < sample_count
+        assert timestamps.min() >= 30.0
+        assert len(timestamps) == len(values)
+
+    def test_get_waveform_data_with_end_only(self, db_session, test_device):
+        """Windowing with only end_seconds filters correctly."""
+        now = datetime(2025, 1, 1, 0, 0, 0)
+        session = Session(
+            device_id=test_device.id,
+            device_session_id="test_window_end",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        db_session.add(session)
+        db_session.flush()
+
+        sample_count = 1000
+        sample_rate = 25.0
+        wf = Waveform(
+            session_id=session.id,
+            waveform_type="flow",
+            sample_rate=sample_rate,
+            unit="L/min",
+            sample_count=sample_count,
+            data_blob=_make_waveform_blob(sample_count, sample_rate),
+        )
+        db_session.add(wf)
+        db_session.commit()
+
+        service = WaveformService(db_session)
+
+        timestamps, values, _ = service.get_waveform_data(
+            session.id, "flow", end_seconds=10.0
+        )
+
+        assert len(timestamps) > 0
+        assert len(timestamps) < sample_count
+        assert timestamps.max() <= 10.0
+        assert len(timestamps) == len(values)
