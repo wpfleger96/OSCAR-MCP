@@ -514,20 +514,9 @@ def stats(
     db: str | None, days: int | None, period: str | None, trend: bool, records: bool
 ) -> None:
     """Show therapy usage and clinical statistics."""
-    from datetime import date, timedelta
-
-    from sqlalchemy import func, text
-
-    from snore.analysis.calculations import (
-        assess_therapy_effectiveness,
-        calculate_average_ahi,
-        calculate_period_statistics,
-        calculate_records,
-        calculate_trends,
-    )
-    from snore.database import models
     from snore.database.session import init_database, session_scope
     from snore.services.schemas import PeriodStatistics
+    from snore.services.stats_service import StatsService
 
     if trend and not period:
         period = "week"
@@ -535,203 +524,97 @@ def stats(
     init_database(str(Path(db)) if db else None)
 
     with session_scope() as session:
-        query = session.query(models.Day)
+        service = StatsService(session)
+        summary = service.get_summary(days)
 
-        if days:
-            cutoff_date = date.today() - timedelta(days=days)
-            query = query.filter(models.Day.date >= cutoff_date)
-
-        day_records = query.all()
-
-        if not day_records:
+        if not summary:
             click.echo("\n📈 Therapy Statistics")
             click.echo(f"{'=' * 50}")
             click.echo("\nNo therapy data found.")
             click.echo(f"{'=' * 50}\n")
             return
 
-        dates = [d.date for d in day_records]
-        first_date = min(dates)
-        last_date = max(dates)
-        days_since_last = (date.today() - last_date).days
-
-        day_ids = [d.id for d in day_records]
-        days_with_data = len(day_records)
-
-        total_duration = (
-            session.query(func.sum(models.Session.duration_seconds))
-            .join(models.Day)
-            .filter(models.Day.id.in_(day_ids))
-            .scalar()
-        )
-        total_hours = (total_duration or 0) / 3600
-        avg_hours = total_hours / days_with_data if days_with_data > 0 else 0
-
-        avg_ahi = calculate_average_ahi(day_records)
-        effectiveness = assess_therapy_effectiveness(avg_ahi) if avg_ahi else "unknown"
-
-        pressure_values = [
-            d.pressure_median for d in day_records if d.pressure_median is not None
-        ]
-        avg_pressure = (
-            sum(pressure_values) / len(pressure_values) if pressure_values else None
-        )
-        min_pressure = min(pressure_values) if pressure_values else None
-        max_pressure = max(pressure_values) if pressure_values else None
-
-        leak_values = [d.leak_median for d in day_records if d.leak_median is not None]
-        avg_leak = sum(leak_values) / len(leak_values) if leak_values else None
-
-        spo2_values = [d.spo2_mean for d in day_records if d.spo2_mean is not None]
-        avg_spo2 = sum(spo2_values) / len(spo2_values) if spo2_values else None
-        spo2_mins = [d.spo2_min for d in day_records if d.spo2_min is not None]
-        min_spo2 = min(spo2_mins) if spo2_mins else None
-
-        event_counts = (
-            session.query(
-                models.Event.event_type, func.count(models.Event.id).label("count")
-            )
-            .join(models.Session)
-            .join(models.Day)
-            .filter(models.Day.id.in_(day_ids))
-            .group_by(models.Event.event_type)
-            .order_by(text("count DESC"))
-            .all()
-        )
-
-        total_events = sum(count for _, count in event_counts)
-
-        stats_records = (
-            session.query(models.Statistics)
-            .join(models.Session)
-            .join(models.Day)
-            .filter(models.Day.id.in_(day_ids))
-            .all()
-        )
-
-        weighted_sums: dict[str, float] = {
-            "rr": 0.0,
-            "tv": 0.0,
-            "mv": 0.0,
-            "pulse": 0.0,
-            "rei": 0.0,
-            "epap": 0.0,
-        }
-        usage_hours_for: dict[str, float] = {
-            "rr": 0.0,
-            "tv": 0.0,
-            "mv": 0.0,
-            "pulse": 0.0,
-            "rei": 0.0,
-            "epap": 0.0,
-        }
-        total_spo2_time_below_90 = 0
-
-        for stat in stats_records:
-            if not stat.usage_hours or stat.usage_hours <= 0:
-                continue
-            hours = stat.usage_hours
-            for field, key in [
-                ("respiratory_rate_mean", "rr"),
-                ("tidal_volume_mean", "tv"),
-                ("minute_ventilation_mean", "mv"),
-                ("pulse_mean", "pulse"),
-                ("rei", "rei"),
-                ("epap_mean", "epap"),
-            ]:
-                val = getattr(stat, field)
-                if val is not None:
-                    weighted_sums[key] += val * hours
-                    usage_hours_for[key] += hours
-            if stat.spo2_time_below_90 is not None:
-                total_spo2_time_below_90 += stat.spo2_time_below_90
-
-        def _avg(key: str) -> float | None:
-            return (
-                weighted_sums[key] / usage_hours_for[key]
-                if usage_hours_for[key] > 0
-                else None
-            )
-
-        avg_rr = _avg("rr")
-        avg_tv = _avg("tv")
-        avg_mv = _avg("mv")
-        avg_pulse = _avg("pulse")
-        avg_rei = _avg("rei")
-        avg_epap = _avg("epap")
-
         click.echo("\n📈 Therapy Statistics")
         click.echo(f"{'=' * 50}")
 
         click.echo("\nDate Range")
-        click.echo(f"  First session: {first_date}")
-        click.echo(f"  Last session: {last_date}")
-        click.echo(f"  Days since last use: {days_since_last}")
+        click.echo(f"  First session: {summary.first_date}")
+        click.echo(f"  Last session: {summary.last_date}")
+        click.echo(f"  Days since last use: {summary.days_since_last}")
 
         click.echo("\nUsage")
-        click.echo(f"  Total therapy hours: {total_hours:,.1f} hrs")
-        click.echo(f"  Average per night: {avg_hours:.1f} hrs")
-        click.echo(f"  Days with data: {days_with_data}")
+        click.echo(f"  Total therapy hours: {summary.total_hours:,.1f} hrs")
+        click.echo(f"  Average per night: {summary.avg_hours:.1f} hrs")
+        click.echo(f"  Days with data: {summary.days_with_data}")
 
         click.echo("\nClinical")
-        if avg_ahi is not None:
-            click.echo(f"  Average AHI: {avg_ahi:.1f}")
+        if summary.avg_ahi is not None:
+            click.echo(f"  Average AHI: {summary.avg_ahi:.1f}")
         else:
             click.echo("  Average AHI: N/A")
-        click.echo(f"  Effectiveness: {effectiveness}")
+        click.echo(f"  Effectiveness: {summary.effectiveness}")
 
-        if avg_rei is not None:
-            click.echo(f"  Average REI: {avg_rei:.1f}")
+        if summary.avg_rei is not None:
+            click.echo(f"  Average REI: {summary.avg_rei:.1f}")
 
-        if avg_pressure is not None:
+        if summary.avg_pressure is not None:
             click.echo("\nPressure")
-            click.echo(f"  Average: {avg_pressure:.1f} cmH₂O")
-            if min_pressure is not None and max_pressure is not None:
-                click.echo(f"  Range: {min_pressure:.1f} - {max_pressure:.1f} cmH₂O")
+            click.echo(f"  Average: {summary.avg_pressure:.1f} cmH₂O")
+            if summary.min_pressure is not None and summary.max_pressure is not None:
+                click.echo(
+                    f"  Range: {summary.min_pressure:.1f} - {summary.max_pressure:.1f} cmH₂O"
+                )
 
-        if avg_epap is not None:
+        if summary.avg_epap is not None:
             click.echo("\nEPAP")
-            click.echo(f"  Average: {avg_epap:.1f} cmH₂O")
+            click.echo(f"  Average: {summary.avg_epap:.1f} cmH₂O")
 
-        if avg_leak is not None:
+        if summary.avg_leak is not None:
             click.echo("\nLeak")
-            click.echo(f"  Average: {avg_leak:.1f} L/min")
-            leak_assessment = "well controlled" if avg_leak < 24 else "elevated"
+            click.echo(f"  Average: {summary.avg_leak:.1f} L/min")
+            leak_assessment = "well controlled" if summary.avg_leak < 24 else "elevated"
             click.echo(f"  Assessment: {leak_assessment}")
 
-        if avg_spo2 is not None:
+        if summary.avg_spo2 is not None:
             click.echo("\nSpO₂")
-            click.echo(f"  Average: {avg_spo2:.1f}%")
-            if min_spo2 is not None:
-                click.echo(f"  Minimum recorded: {min_spo2:.0f}%")
+            click.echo(f"  Average: {summary.avg_spo2:.1f}%")
+            if summary.min_spo2 is not None:
+                click.echo(f"  Minimum recorded: {summary.min_spo2:.0f}%")
 
-        if total_spo2_time_below_90 > 0:
-            minutes_below_90 = total_spo2_time_below_90 / 60
+        if summary.total_spo2_time_below_90 > 0:
+            minutes_below_90 = summary.total_spo2_time_below_90 / 60
             click.echo(f"  Time below 90%: {minutes_below_90:.1f} minutes")
 
-        if avg_pulse is not None:
+        if summary.avg_pulse is not None:
             click.echo("\nPulse")
-            click.echo(f"  Average: {avg_pulse:.1f} BPM")
+            click.echo(f"  Average: {summary.avg_pulse:.1f} BPM")
 
-        if avg_rr is not None or avg_tv is not None or avg_mv is not None:
+        if (
+            summary.avg_respiratory_rate is not None
+            or summary.avg_tidal_volume is not None
+            or summary.avg_minute_ventilation is not None
+        ):
             click.echo("\nRespiratory")
-            if avg_rr is not None:
-                click.echo(f"  Respiratory Rate: {avg_rr:.1f} breaths/min")
-            if avg_tv is not None:
-                click.echo(f"  Tidal Volume: {avg_tv:.0f} mL")
-            if avg_mv is not None:
-                click.echo(f"  Minute Ventilation: {avg_mv:.1f} L/min")
+            if summary.avg_respiratory_rate is not None:
+                click.echo(
+                    f"  Respiratory Rate: {summary.avg_respiratory_rate:.1f} breaths/min"
+                )
+            if summary.avg_tidal_volume is not None:
+                click.echo(f"  Tidal Volume: {summary.avg_tidal_volume:.0f} mL")
+            if summary.avg_minute_ventilation is not None:
+                click.echo(
+                    f"  Minute Ventilation: {summary.avg_minute_ventilation:.1f} L/min"
+                )
 
-        if event_counts:
+        if summary.event_counts:
             click.echo("\nEvents")
-            for event_type, count in event_counts:
-                pct = (count / total_events * 100) if total_events > 0 else 0
-                click.echo(f"  {event_type}: {count:,} ({pct:.1f}%)")
+            for ec in summary.event_counts:
+                click.echo(f"  {ec.event_type}: {ec.count:,} ({ec.percentage:.1f}%)")
 
         if period:
             period_literal = cast(Literal["week", "month", "6month", "year"], period)
-            period_stats: list[PeriodStatistics] = calculate_period_statistics(
-                day_records, period_literal
+            period_stats: list[PeriodStatistics] = service.get_period_statistics(
+                period_literal, days
             )
 
             if period_stats:
@@ -790,7 +673,7 @@ def stats(
                 if trend:
                     import plotext as plt
 
-                    trends = calculate_trends(period_stats)
+                    trends = service.get_trends(period_stats)
                     ahi_trend = trends["ahi"]
 
                     ahi_values = [v for _, v in ahi_trend if v is not None]
@@ -825,7 +708,7 @@ def stats(
                         click.echo("=" * 80)
 
         if records:
-            records_data = calculate_records(day_records, top_n=5)
+            records_data = service.get_records(days, top_n=5)
 
             if records_data:
                 click.echo("\n\nRecords (Top 5)")
@@ -2132,43 +2015,15 @@ def _list_sessions(
     analyzed_only: bool,
     sort_by: str = "date-desc",
 ) -> None:
-    """List sessions and their analysis status.
+    """List sessions and their analysis status."""
+    from snore.services.analysis_facade import AnalysisFacade
 
-    Args:
-        profile_id: Profile ID to filter by, or None to show all profiles
-        limit: Maximum sessions to show (0 for unlimited)
-        sort_by: Sort order (date-asc, date-desc, profile, session-id, ahi)
-    """
+    facade = AnalysisFacade(session)
+    results = facade.list_sessions_with_status(
+        start=start, end=end, limit=limit, analyzed_only=analyzed_only, sort_by=sort_by
+    )
 
-    from snore.database import models
-
-    query = session.query(models.Session).join(models.Day)
-
-    if start:
-        query = query.filter(models.Day.date >= start.date())
-    if end:
-        query = query.filter(models.Day.date <= end.date())
-
-    sort_clauses = {
-        "date-asc": models.Day.date.asc(),
-        "date-desc": models.Day.date.desc(),
-        "session-id": models.Session.id.asc(),
-    }
-
-    sort_clause = sort_clauses.get(sort_by, models.Day.date.desc())
-    if isinstance(sort_clause, tuple):
-        query = query.order_by(*sort_clause)
-    else:
-        query = query.order_by(sort_clause)
-
-    total_sessions = query.count()
-
-    if limit > 0:
-        query = query.limit(limit)
-
-    sessions = query.all()
-
-    if not sessions:
+    if not results:
         click.echo("No sessions found")
         return
 
@@ -2177,50 +2032,18 @@ def _list_sessions(
     )
     click.echo("-" * 60)
 
-    displayed_count = 0
+    for item in results:
+        duration = f"{item.duration_hours:.1f}h" if item.duration_hours else "N/A"
+        analyzed_str = "✓" if item.has_analysis else "✗"
+        analysis_id_str = str(item.analysis_id) if item.analysis_id else "-"
 
-    for db_session in sessions:
-        analysis = (
-            session.query(models.AnalysisResult)
-            .filter_by(session_id=db_session.id)
-            .order_by(models.AnalysisResult.created_at.desc())
-            .first()
-        )
-
-        has_analysis = analysis is not None
-
-        if analyzed_only and not has_analysis:
-            continue
-
-        displayed_count += 1
-
-        duration = (
-            f"{db_session.duration_seconds / 3600:.1f}h"
-            if db_session.duration_seconds
-            else "N/A"
-        )
-        analyzed_str = "✓" if has_analysis else "✗"
-        analysis_id_str = str(analysis.id) if analysis else "-"
-
-        day_date = (
-            db_session.day.date if db_session.day else db_session.start_time.date()
-        )
         click.echo(
-            f"{day_date!s:<12} {db_session.id:<6} {duration:<10} "
+            f"{item.session_date!s:<12} {item.session_id:<6} {duration:<10} "
             f"{analyzed_str:<10} {analysis_id_str:<12}"
         )
 
-    if analyzed_only and displayed_count > 0:
-        click.echo(f"\nShowing {displayed_count} analyzed session(s)")
-    elif limit > 0 and total_sessions > limit:
-        click.echo(
-            f"\nShowing {limit} of {total_sessions} sessions (most recent first)"
-        )
-        click.echo(
-            "Tip: Use --limit <number> to see more sessions, or --limit 0 to see all"
-        )
-    elif limit == 0 and total_sessions > DEFAULT_LIST_SESSIONS_LIMIT:
-        click.echo(f"\nShowing all {total_sessions} sessions")
+    if analyzed_only and len(results) > 0:
+        click.echo(f"\nShowing {len(results)} analyzed session(s)")
 
 
 @analysis.command("delete")
@@ -2264,9 +2087,8 @@ def analysis_delete(
     db: str | None,
 ) -> int | None:
     """Delete analysis results without deleting the sessions themselves."""
-    from sqlalchemy import bindparam, text
-
     from snore.database.session import init_database, session_scope
+    from snore.services.analysis_facade import AnalysisFacade
 
     if db:
         init_database(str(Path(db)))
@@ -2282,90 +2104,37 @@ def analysis_delete(
             "  • --all"
         )
 
-    with session_scope() as session:
-        query = """
-            SELECT DISTINCT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                devices.manufacturer,
-                devices.model
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            JOIN analysis_results ON sessions.id = analysis_results.session_id
-            WHERE 1=1
-        """
-        params: dict[str, Any] = {}
-
-        if session_ids:
-            try:
-                id_list = [int(sid.strip()) for sid in session_ids.split(",")]
-                query += " AND sessions.id IN :session_ids"
-                params["session_ids"] = id_list
-            except ValueError:
-                click.echo(
-                    "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
-                    err=True,
-                )
-                return 1
-
-        if from_date:
-            query += " AND sessions.start_time >= :from_date"
-            params["from_date"] = from_date
-
-        if to_date:
-            query += " AND sessions.start_time <= :to_date"
-            params["to_date"] = to_date
-
-        query += " ORDER BY sessions.start_time DESC"
-
-        if "session_ids" in params:
-            result = session.execute(
-                text(query).bindparams(bindparam("session_ids", expanding=True)), params
+    id_list: list[int] | None = None
+    if session_ids:
+        try:
+            id_list = [int(sid.strip()) for sid in session_ids.split(",")]
+        except ValueError:
+            click.echo(
+                "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
+                err=True,
             )
-        else:
-            result = session.execute(text(query), params)
-        sessions_with_analysis = result.fetchall()
+            return 1
 
-        if not sessions_with_analysis:
+    with session_scope() as session:
+        facade = AnalysisFacade(session)
+
+        try:
+            preview = facade.get_delete_preview(
+                session_ids=id_list,
+                from_date=from_date,
+                to_date=to_date,
+                delete_all=delete_all,
+                all_versions=all_versions,
+            )
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            return 1
+
+        if preview.sessions_with_analysis == 0:
             click.echo(
                 "⚠️  No sessions with analysis results found matching the specified criteria"
             )
             return 0
-
-        session_ids_list = [s.id for s in sessions_with_analysis]
-
-        analysis_counts = session.execute(
-            text(
-                """
-                SELECT session_id, COUNT(*) as count
-                FROM analysis_results
-                WHERE session_id IN :session_ids
-                GROUP BY session_id
-            """
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_list},
-        ).fetchall()
-
-        analysis_count_dict = {row[0]: int(row[1]) for row in analysis_counts}
-
-        total_analysis_records = sum(analysis_count_dict.values())
-        records_to_delete = (
-            total_analysis_records if all_versions else len(sessions_with_analysis)
-        )
-
-        patterns_count = session.execute(
-            text(
-                """
-                SELECT COUNT(*) as count
-                FROM detected_patterns
-                WHERE analysis_result_id IN (
-                    SELECT id FROM analysis_results WHERE session_id IN :session_ids
-                )
-            """
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_list},
-        ).scalar()
 
         click.echo(f"\n{'=' * 80}")
         if dry_run:
@@ -2379,45 +2148,43 @@ def analysis_delete(
         )
         click.echo("-" * 80)
 
-        for sess in sessions_with_analysis:
-            start = (
-                datetime.fromisoformat(sess.start_time)
-                if isinstance(sess.start_time, str)
-                else sess.start_time
-            )
-            device_name = f"{sess.manufacturer} {sess.model}"
-            version_count = analysis_count_dict.get(sess.id, 0)
+        for detail in preview.session_details:
+            start = detail["start_time"]
+            if isinstance(start, str):
+                start = datetime.fromisoformat(start)
+            device_name = f"{detail['manufacturer']} {detail['model']}"
 
             click.echo(
-                f"{sess.id:<8} "
+                f"{detail['id']:<8} "
                 f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-                f"{version_count:<10} "
+                f"{detail['version_count']:<10} "
                 f"{device_name:<25}"
             )
 
         click.echo("\n" + "=" * 80)
         click.echo("📊 Deletion Summary")
         click.echo("=" * 80)
-        click.echo(f"Sessions with analysis:          {len(sessions_with_analysis)}")
+        click.echo(f"Sessions with analysis:          {preview.sessions_with_analysis}")
         click.echo(
-            f"Total analysis records:          {total_analysis_records}"
+            f"Total analysis records:          {preview.total_analysis_records}"
             + (
                 " (all versions)"
-                if all_versions or total_analysis_records == len(sessions_with_analysis)
+                if all_versions
+                or preview.total_analysis_records == preview.sessions_with_analysis
                 else ""
             )
         )
         click.echo(
-            f"Analysis records to delete:      {records_to_delete}"
+            f"Analysis records to delete:      {preview.records_to_delete}"
             + (
                 " (latest only)"
                 if not all_versions
-                and total_analysis_records > len(sessions_with_analysis)
+                and preview.total_analysis_records > preview.sessions_with_analysis
                 else ""
             )
         )
         click.echo(
-            f"Detected patterns to delete:     {patterns_count} (cascade delete)"
+            f"Detected patterns to delete:     {preview.patterns_count} (cascade delete)"
         )
         click.echo("=" * 80 + "\n")
 
@@ -2435,40 +2202,11 @@ def analysis_delete(
                 click.echo("Deletion cancelled")
                 return 0
 
-        if all_versions:
-            session.execute(
-                text(
-                    "DELETE FROM analysis_results WHERE session_id IN :session_ids"
-                ).bindparams(bindparam("session_ids", expanding=True)),
-                {"session_ids": session_ids_list},
-            )
-            deleted_count = records_to_delete
-        else:
-            deleted_count = 0
-            for session_id in session_ids_list:
-                latest_result = session.execute(
-                    text(
-                        """
-                        SELECT id FROM analysis_results
-                        WHERE session_id = :session_id
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """
-                    ),
-                    {"session_id": session_id},
-                ).fetchone()
-
-                if latest_result:
-                    session.execute(
-                        text("DELETE FROM analysis_results WHERE id = :analysis_id"),
-                        {"analysis_id": latest_result.id},
-                    )
-                    deleted_count += 1
-
-        session.commit()
+        session_ids_to_delete = [d["id"] for d in preview.session_details]
+        deleted_count = facade.delete_analysis(session_ids_to_delete, all_versions)
 
         click.echo(
-            f"\n✓ Successfully deleted {deleted_count} analysis record(s) for {len(sessions_with_analysis)} session(s)"
+            f"\n✓ Successfully deleted {deleted_count} analysis record(s) for {preview.sessions_with_analysis} session(s)"
         )
 
         if deleted_count > 10:
@@ -3113,10 +2851,8 @@ def list_waveforms(
         snore waveform list --session-id 37
         snore waveform list --date 2025-10-25
     """
-    from pathlib import Path
-
-    from snore.database import models
     from snore.database.session import init_database, session_scope
+    from snore.services.waveform_service import WaveformService
 
     if session_id is None and date is None:
         click.echo("Error: Either --session-id or --date must be provided", err=True)
@@ -3130,12 +2866,8 @@ def list_waveforms(
     with session_scope() as db_session:
         resolved_id = _resolve_session_id(db_session, session_id, date)
 
-        waveforms = (
-            db_session.query(models.Waveform)
-            .filter(models.Waveform.session_id == resolved_id)
-            .order_by(models.Waveform.waveform_type)
-            .all()
-        )
+        service = WaveformService(db_session)
+        waveforms = service.list_waveforms(resolved_id)
 
         if not waveforms:
             click.echo(f"No waveforms found for session {resolved_id}")
@@ -3147,20 +2879,15 @@ def list_waveforms(
         )
 
         for wf in waveforms:
-            sample_count = wf.sample_count or 0
-            duration_seconds = (
-                sample_count / wf.sample_rate if wf.sample_rate > 0 else 0
-            )
-            duration_hours = duration_seconds / 3600
             unit = wf.unit or "?"
             rate_str = f"{wf.sample_rate:.1f}Hz"
 
             click.echo(
                 f"  {wf.waveform_type:<12} "
                 f"{rate_str:<12} "
-                f"{sample_count:<10} "
+                f"{wf.sample_count:<10} "
                 f"{unit:<10} "
-                f"{duration_hours:.1f}h"
+                f"{wf.duration_hours:.1f}h"
             )
 
 
