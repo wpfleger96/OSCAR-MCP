@@ -95,6 +95,18 @@ Complete project overview showing implemented features and future development pl
 
 ## Recently Completed ✅
 
+### Phase 2.0b: Service Layer Extraction (2026-02-14)
+- [x] **8 services extracted from CLI** - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling (1,741 lines moved)
+- [x] **CLI reduced by 7.2%** - From 3,797 to 3,524 lines
+- [x] **93 new unit tests** - Total test count: 497 (up from 404)
+- [x] **API-ready services** - Constructor injection, typed Pydantic returns, transaction boundary docs
+- [x] **Comprehensive smoke test** - 57 CLI commands validated across all services
+
+### Phase 2.0a: Dead Code Cleanup (2026-02-12)
+- [x] **Deleted 7 dead modules** - ~1000+ lines of unused code removed
+- [x] **Model layer consolidated** - "Types live with the code that owns them" principle
+- [x] **Eliminated models/ package** - Pydantic types organized by ownership (parsers/unified.py, analysis/**/types.py, services/schemas.py)
+
 ### Statistics Enhancement (2026-02-08)
 - [x] **Multi-period summaries** - Week, month, 6-month, year reports (`stats --period`)
 - [x] **Trend analysis** - AHI trends over time with plotext charts (`stats --trend`)
@@ -140,39 +152,39 @@ Complete project overview showing implemented features and future development pl
 
 ## In Progress 🚧
 
-_(No active development)_
+### Phase 2: Web UI
+
+**Sub-phase 2.0a: Dead Code Cleanup & Model Consolidation** ✅ COMPLETE (2026-02-12)
+- [x] Deleted 7 dead modules (~1000+ lines of unused code)
+- [x] Model layer consolidated following "types live with the code that owns them" principle
+- [x] Eliminated `models/` package entirely
+- [x] Pydantic type ownership model: parsers/unified.py (parser types), analysis/**/types.py (domain types), services/schemas.py (service responses)
+
+**Sub-phase 2.0b: Service Layer Extraction** ✅ COMPLETE (2026-02-14)
+- [x] Extracted 8 services from CLI monolith (1,741 lines of business logic)
+  - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling
+- [x] CLI reduced from 3,797 to 3,524 lines (-7.2%)
+- [x] 93 new unit tests added (497 total tests, up from 404)
+- [x] SQL parameterization, Pydantic V2 migration, transaction boundary documentation
+- [x] Comprehensive CLI smoke test passed (57/57 commands, zero errors)
+- [x] Services are API-ready with typed Pydantic returns and constructor injection
+
+**Sub-phase 2.1: FastAPI Backend** 🚧 NEXT
+- [ ] REST API with OpenAPI docs
+- [ ] WebSocket support for real-time updates
+- [ ] Session/analysis/stats/waveform endpoints
+- [ ] LTTB downsampling API for progressive waveform loading
+
+**Sub-phase 2.2-2.4: Vue Frontend**
+- [ ] Interactive waveform viewer with zoom/pan
+- [ ] Dashboard with summary cards and trend charts
+- [ ] Event explorer and analysis comparison tools
 
 ---
 
 ## Planned Features 📋
 
-### Phase 2: Web UI
-
-**Goal:** Browser-based visualization and interaction
-
-**Backend:**
-- [ ] **FastAPI backend** - REST API exposing analysis endpoints
-- [ ] **WebSocket support** - Real-time updates for long operations
-- [ ] **Authentication** - Optional user authentication
-
-**Frontend:**
-- [ ] **Daily view** - Zoomable waveforms with event overlays
-- [ ] **Multi-waveform visualization** - Display leak, pressure, SpO2, pulse alongside flow
-- [ ] **Overview dashboard** - Trend charts, summary cards, calendar view
-- [ ] **Statistics page** - Multi-period comparisons with configurable date ranges
-- [ ] **Full statistics display** - Show all imported metrics (not just AHI)
-- [ ] **Therapy settings panel** - Display device configuration and settings history
-- [ ] **Event explorer** - Filter, search, and analyze events
-- [ ] **Analysis comparison tool** - Compare machine vs programmatic detection
-- [ ] **Session management** - Enable/disable sessions, add notes
-- [ ] **Interactive graph customization** - Choose channels, colors, scales
-- [ ] **Time range bookmarking** - Mark interesting sections for review
-- [ ] **Minutes at pressure visualization** - Interactive histogram
-
-**Technology stack:**
-- Backend: FastAPI + SQLAlchemy
-- Frontend: React/Vue + Plotly.js/Chart.js
-- Deployment: Docker container
+_(Phase 2: Web UI moved to "In Progress" section above)_
 
 ---
 
