@@ -1130,9 +1130,8 @@ def session_list(
     db: str | None,
 ) -> None:
     """List imported sessions."""
-    from sqlalchemy import text
-
     from snore.database.session import init_database, session_scope
+    from snore.services.session_service import SessionService
 
     if db:
         init_database(str(Path(db)))
@@ -1140,65 +1139,17 @@ def session_list(
         init_database()
 
     with session_scope() as db_session:
-        where_clause = "WHERE 1=1"
-        params: dict[str, Any] = {}
+        service = SessionService(db_session)
+        result = service.list_sessions(
+            device=device,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            sort_by=sort_by,
+            include_disabled=show_all,
+        )
 
-        if not show_all:
-            where_clause += " AND sessions.enabled = 1"
-
-        if device:
-            where_clause += " AND devices.serial_number = :device"
-            params["device"] = device
-
-        if from_date:
-            where_clause += " AND sessions.start_time >= :from_date"
-            params["from_date"] = from_date
-
-        if to_date:
-            where_clause += " AND sessions.start_time <= :to_date"
-            params["to_date"] = to_date
-
-        count_query = f"""
-            SELECT COUNT(*)
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            {where_clause}
-        """
-
-        total_count = db_session.execute(text(count_query), params).scalar()
-
-        sort_clauses = {
-            "date-asc": "sessions.start_time ASC",
-            "date-desc": "sessions.start_time DESC",
-            "session-id": "sessions.id ASC",
-            "duration": "sessions.duration_seconds DESC",
-        }
-        order_by = sort_clauses.get(sort_by, "sessions.start_time DESC")
-
-        list_query = f"""
-            SELECT
-                sessions.id,
-                sessions.start_time,
-                sessions.duration_seconds,
-                sessions.enabled,
-                devices.manufacturer,
-                devices.model,
-                devices.serial_number,
-                statistics.ahi
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            LEFT JOIN statistics ON sessions.id = statistics.session_id
-            {where_clause}
-            ORDER BY {order_by}
-        """
-
-        if limit > 0:
-            list_query += f" LIMIT {limit}"
-
-        result = db_session.execute(text(list_query), params)
-        sessions = result.fetchall()
-
-        if not sessions:
+        if not result.sessions:
             click.echo("No sessions found")
             return
 
@@ -1207,33 +1158,29 @@ def session_list(
         )
         click.echo("-" * 100)
 
-        for sess in sessions:
-            start = (
-                datetime.fromisoformat(sess.start_time)
-                if isinstance(sess.start_time, str)
-                else sess.start_time
-            )
-            duration_hours = (
-                sess.duration_seconds / 3600 if sess.duration_seconds else 0
-            )
+        for sess in result.sessions:
             device_name = f"{sess.manufacturer} {sess.model}"
             ahi_str = f"{sess.ahi:.1f}" if sess.ahi is not None else "N/A"
             status_marker = "" if sess.enabled else "[disabled]"
 
             click.echo(
                 f"{sess.id:<5} "
-                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-                f"{duration_hours:>6.1f}h    "
+                f"{sess.start_time:%Y-%m-%d}   {sess.start_time:%H:%M:%S}  "
+                f"{sess.duration_hours:>6.1f}h    "
                 f"{device_name:<30} "
                 f"{sess.serial_number:<15} "
                 f"{ahi_str:<8} {status_marker}"
             )
 
-        if total_count is not None and limit > 0 and total_count > limit:
-            click.echo(f"\nShowing {len(sessions)} of {total_count} sessions")
-            click.echo(f"Tip: Use '--limit {total_count}' or '--limit 0' to show all")
+        if result.total_count > 0 and limit > 0 and result.total_count > limit:
+            click.echo(
+                f"\nShowing {len(result.sessions)} of {result.total_count} sessions"
+            )
+            click.echo(
+                f"Tip: Use '--limit {result.total_count}' or '--limit 0' to show all"
+            )
         else:
-            click.echo(f"\nShowing all {len(sessions)} sessions")
+            click.echo(f"\nShowing all {len(result.sessions)} sessions")
 
 
 @session.command("show")
@@ -1242,8 +1189,8 @@ def session_list(
 @click.option("--db", type=click.Path(), help="Database path")
 def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
     """Show details for a specific session."""
-    from snore.database import models
     from snore.database.session import init_database, session_scope
+    from snore.services.session_service import SessionService
 
     if db:
         init_database(str(Path(db)))
@@ -1251,68 +1198,44 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
         init_database()
 
     with session_scope() as db_session:
-        sess = (
-            db_session.query(models.Session)
-            .filter(models.Session.id == session_id)
-            .first()
-        )
+        service = SessionService(db_session)
 
-        if not sess:
-            click.echo(f"Error: Session {session_id} not found", err=True)
+        try:
+            detail = service.get_session_detail(
+                session_id, include_settings=show_settings
+            )
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
-        device = (
-            db_session.query(models.Device)
-            .filter(models.Device.id == sess.device_id)
-            .first()
-        )
-        stats = (
-            db_session.query(models.Statistics)
-            .filter(models.Statistics.session_id == sess.id)
-            .first()
-        )
-        event_count = (
-            db_session.query(models.Event)
-            .filter(models.Event.session_id == sess.id)
-            .count()
-        )
-        waveform_count = (
-            db_session.query(models.Waveform)
-            .filter(models.Waveform.session_id == sess.id)
-            .count()
-        )
-        waveform_types = (
-            db_session.query(models.Waveform.waveform_type)
-            .filter(models.Waveform.session_id == sess.id)
-            .distinct()
-            .all()
-        )
-        waveform_type_list = [wt[0] for wt in waveform_types]
+        click.echo(f"\nSession ID: {detail.id}")
+        click.echo(f"  Device Session ID: {detail.device_session_id}")
 
-        click.echo(f"\nSession ID: {sess.id}")
-        click.echo(f"  Device Session ID: {sess.device_session_id}")
-
-        if device:
+        if detail.device_manufacturer and detail.device_model:
             click.echo(
-                f"  Device: {device.manufacturer} {device.model} (SN: {device.serial_number})"
+                f"  Device: {detail.device_manufacturer} {detail.device_model} (SN: {detail.device_serial})"
             )
 
-        click.echo(f"  Start: {sess.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        click.echo(f"  End: {sess.end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        duration_hours = sess.duration_seconds / 3600 if sess.duration_seconds else 0
-        click.echo(f"  Duration: {duration_hours:.2f}h ({sess.duration_seconds}s)")
+        click.echo(f"  Start: {detail.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo(f"  End: {detail.end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo(
+            f"  Duration: {detail.duration_hours:.2f}h ({detail.duration_seconds}s)"
+        )
 
-        if sess.therapy_mode:
-            click.echo(f"  Therapy Mode: {sess.therapy_mode}")
+        if detail.therapy_mode:
+            click.echo(f"  Therapy Mode: {detail.therapy_mode}")
 
         click.echo("\n  Data:")
-        click.echo(f"    Events: {event_count}")
-        click.echo(f"    Waveforms: {waveform_count}")
-        if waveform_type_list:
-            click.echo(f"    Available types: {', '.join(sorted(waveform_type_list))}")
-        click.echo(f"    Has Statistics: {sess.has_statistics}")
-        click.echo(f"    Has Event Data: {sess.has_event_data}")
+        click.echo(f"    Events: {detail.event_count}")
+        click.echo(f"    Waveforms: {detail.waveform_count}")
+        if detail.waveform_types:
+            click.echo(
+                f"    Available types: {', '.join(sorted(detail.waveform_types))}"
+            )
+        click.echo(f"    Has Statistics: {detail.has_statistics}")
+        click.echo(f"    Has Event Data: {detail.has_event_data}")
 
+        stats = detail.statistics
         if stats:
             click.echo("\n  Statistics:")
 
@@ -1343,27 +1266,27 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
 
             has_event_counts = any(
                 [
-                    stats.obstructive_apneas > 0,
-                    stats.central_apneas > 0,
-                    stats.mixed_apneas > 0,
-                    stats.hypopneas > 0,
-                    stats.reras > 0,
-                    stats.flow_limitations > 0,
+                    (stats.obstructive_apneas or 0) > 0,
+                    (stats.central_apneas or 0) > 0,
+                    (stats.mixed_apneas or 0) > 0,
+                    (stats.hypopneas or 0) > 0,
+                    (stats.reras or 0) > 0,
+                    (stats.flow_limitations or 0) > 0,
                 ]
             )
             if has_event_counts:
                 click.echo("\n    Event Counts:")
-                if stats.obstructive_apneas > 0:
+                if stats.obstructive_apneas and stats.obstructive_apneas > 0:
                     click.echo(f"      Obstructive Apneas: {stats.obstructive_apneas}")
-                if stats.central_apneas > 0:
+                if stats.central_apneas and stats.central_apneas > 0:
                     click.echo(f"      Central Apneas: {stats.central_apneas}")
-                if stats.mixed_apneas > 0:
+                if stats.mixed_apneas and stats.mixed_apneas > 0:
                     click.echo(f"      Mixed Apneas: {stats.mixed_apneas}")
-                if stats.hypopneas > 0:
+                if stats.hypopneas and stats.hypopneas > 0:
                     click.echo(f"      Hypopneas: {stats.hypopneas}")
-                if stats.reras > 0:
+                if stats.reras and stats.reras > 0:
                     click.echo(f"      RERAs: {stats.reras}")
-                if stats.flow_limitations > 0:
+                if stats.flow_limitations and stats.flow_limitations > 0:
                     click.echo(f"      Flow Limitations: {stats.flow_limitations}")
 
             has_pressure = any(
@@ -1479,30 +1402,23 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
                         f"      Mean Minute Ventilation: {stats.minute_ventilation_mean:.1f} L/min"
                     )
 
-        if show_settings:
-            settings_records = (
-                db_session.query(models.Setting)
-                .filter(models.Setting.session_id == sess.id)
-                .order_by(models.Setting.key)
-                .all()
-            )
-            if settings_records:
-                click.echo("\n  Settings:")
-                import pint
+        if detail.settings:
+            click.echo("\n  Settings:")
+            import pint
 
-                ureg = pint.get_application_registry()  # type: ignore[no-untyped-call]
-                for s in settings_records:
-                    if s.key == "tube_temp" and s.value:
-                        try:
-                            temp_c = ureg.Quantity(float(s.value), ureg.degC)
-                            temp_f = temp_c.to(ureg.degF)
-                            click.echo(f"    {s.key}: {temp_f.magnitude:.1f}°F")
-                        except (ValueError, TypeError):
-                            click.echo(f"    {s.key}: {s.value}")
-                    else:
+            ureg = pint.get_application_registry()  # type: ignore[no-untyped-call]
+            for s in detail.settings:
+                if s.key == "tube_temp" and s.value:
+                    try:
+                        temp_c = ureg.Quantity(float(s.value), ureg.degC)
+                        temp_f = temp_c.to(ureg.degF)
+                        click.echo(f"    {s.key}: {temp_f.magnitude:.1f}°F")
+                    except (ValueError, TypeError):
                         click.echo(f"    {s.key}: {s.value}")
-            else:
-                click.echo("\n  Settings: None recorded")
+                else:
+                    click.echo(f"    {s.key}: {s.value}")
+        elif show_settings:
+            click.echo("\n  Settings: None recorded")
 
         click.echo()
 
@@ -1544,100 +1460,43 @@ def session_delete(
     db: str | None,
 ) -> int | None:
     """Delete sessions from the database."""
-    from sqlalchemy import bindparam, text
-
     from snore.database.session import init_database, session_scope
+    from snore.services.session_service import SessionService
 
     if db:
         init_database(str(Path(db)))
     else:
         init_database()
 
-    if not any([device, session_ids, from_date, to_date, delete_all]):
-        click.echo("❌ Error: You must specify at least one filter:", err=True)
-        click.echo("\n• --device <serial_number>")
-        click.echo("\n• --session-id <ids>")
-        click.echo("\n• --from <date>")
-        click.echo("\n• --to <date>")
-        click.echo("\n• --all")
-        return 1
+    id_list = None
+    if session_ids:
+        try:
+            id_list = [int(sid.strip()) for sid in session_ids.split(",")]
+        except ValueError:
+            click.echo(
+                "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
+                err=True,
+            )
+            return 1
 
     with session_scope() as db_session:
-        query = """
-            SELECT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                sessions.duration_seconds,
-                devices.manufacturer,
-                devices.model,
-                devices.serial_number
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            WHERE 1=1
-        """
-        params: dict[str, Any] = {}
+        service = SessionService(db_session)
 
-        if device:
-            query += " AND devices.serial_number = :device"
-            params["device"] = device
-
-        if session_ids:
-            try:
-                id_list = [int(sid.strip()) for sid in session_ids.split(",")]
-                query += " AND sessions.id IN :session_ids"
-                params["session_ids"] = id_list
-            except ValueError:
-                click.echo(
-                    "❌ Error: Invalid session ID format. Use comma-separated integers (e.g., '1,2,3')",
-                    err=True,
-                )
-                return 1
-
-        if from_date:
-            query += " AND sessions.start_time >= :from_date"
-            params["from_date"] = from_date
-
-        if to_date:
-            query += " AND sessions.start_time <= :to_date"
-            params["to_date"] = to_date
-
-        query += " ORDER BY sessions.start_time DESC"
-
-        if "session_ids" in params:
-            result = db_session.execute(
-                text(query).bindparams(bindparam("session_ids", expanding=True)), params
+        try:
+            preview = service.get_delete_preview(
+                device=device,
+                session_ids=id_list,
+                from_date=from_date,
+                to_date=to_date,
+                delete_all=delete_all,
             )
-        else:
-            result = db_session.execute(text(query), params)
-        sessions = result.fetchall()
+        except ValueError as e:
+            click.echo(f"❌ Error: {e}", err=True)
+            return 1
 
-        if not sessions:
+        if not preview.sessions:
             click.echo("⚠️  No sessions found matching the specified criteria")
             return 0
-
-        session_ids_to_delete = [s.id for s in sessions]
-
-        event_count = db_session.execute(
-            text(
-                "SELECT COUNT(*) as count FROM events WHERE session_id IN :session_ids"
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_to_delete},
-        ).scalar()
-
-        waveform_count = db_session.execute(
-            text(
-                "SELECT COUNT(*) as count FROM waveforms WHERE session_id IN :session_ids"
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_to_delete},
-        ).scalar()
-
-        stats_count = db_session.execute(
-            text(
-                "SELECT COUNT(*) as count FROM statistics WHERE session_id IN :session_ids"
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_to_delete},
-        ).scalar()
 
         click.echo(f"\n{'=' * 80}")
         if dry_run:
@@ -1651,21 +1510,13 @@ def session_delete(
         )
         click.echo("-" * 80)
 
-        for sess in sessions:
-            start = (
-                datetime.fromisoformat(sess.start_time)
-                if isinstance(sess.start_time, str)
-                else sess.start_time
-            )
-            duration_hours = (
-                sess.duration_seconds / 3600 if sess.duration_seconds else 0
-            )
+        for sess in preview.sessions:
             device_name = f"{sess.manufacturer} {sess.model}"
 
             click.echo(
                 f"{sess.id:<5} "
-                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-                f"{duration_hours:>6.1f}h    "
+                f"{sess.start_time:%Y-%m-%d}   {sess.start_time:%H:%M:%S}  "
+                f"{sess.duration_hours:>6.1f}h    "
                 f"{device_name:<30} "
                 f"{sess.serial_number:<15}"
             )
@@ -1673,10 +1524,10 @@ def session_delete(
         click.echo("\n" + "=" * 80)
         click.echo("📊 Deletion Summary")
         click.echo("=" * 80)
-        click.echo(f"Sessions:    {len(sessions)}")
-        click.echo(f"Events:      {event_count}")
-        click.echo(f"Waveforms:   {waveform_count}")
-        click.echo(f"Statistics:  {stats_count}")
+        click.echo(f"Sessions:    {len(preview.sessions)}")
+        click.echo(f"Events:      {preview.event_count}")
+        click.echo(f"Waveforms:   {preview.waveform_count}")
+        click.echo(f"Statistics:  {preview.stats_count}")
         click.echo("=" * 80 + "\n")
 
         if dry_run:
@@ -1689,19 +1540,14 @@ def session_delete(
                 click.echo("Deletion cancelled")
                 return 0
 
-        db_session.execute(
-            text("DELETE FROM sessions WHERE id IN :session_ids").bindparams(
-                bindparam("session_ids", expanding=True)
-            ),
-            {"session_ids": session_ids_to_delete},
-        )
-        db_session.commit()
+        session_ids_to_delete = [s.id for s in preview.sessions]
+        deleted_count = service.delete_sessions(session_ids_to_delete)
 
         click.echo(
-            f"\n✓ Successfully deleted {len(sessions)} session(s) and related data"
+            f"\n✓ Successfully deleted {deleted_count} session(s) and related data"
         )
 
-        if len(sessions) > 10:
+        if deleted_count > 10:
             click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
 
         return 0
@@ -1709,9 +1555,8 @@ def session_delete(
 
 def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
     """Enable or disable a session and recalculate day statistics."""
-    from snore.database import models
-    from snore.database.day_manager import DayManager
     from snore.database.session import init_database, session_scope
+    from snore.services.session_service import SessionService
 
     if db:
         init_database(str(Path(db)))
@@ -1719,36 +1564,22 @@ def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
         init_database()
 
     with session_scope() as db_session:
-        sess = (
-            db_session.query(models.Session)
-            .filter(models.Session.id == session_id)
-            .first()
-        )
+        service = SessionService(db_session)
 
-        if not sess:
-            click.echo(f"Error: Session {session_id} not found", err=True)
-            sys.exit(1)
+        try:
+            detail = service.get_session_detail(session_id)
+            if detail.enabled == enabled:
+                status = "enabled" if enabled else "disabled"
+                click.echo(f"Session {session_id} is already {status}")
+                return
 
-        if sess.enabled == enabled:
+            service.set_session_enabled(session_id, enabled)
+
             status = "enabled" if enabled else "disabled"
-            click.echo(f"Session {session_id} is already {status}")
-            return
-
-        sess.enabled = enabled
-
-        if sess.day_id:
-            day = (
-                db_session.query(models.Day)
-                .filter(models.Day.id == sess.day_id)
-                .first()
-            )
-            if day:
-                DayManager.recalculate_day(day, db_session)
-
-        db_session.commit()
-
-        status = "enabled" if enabled else "disabled"
-        click.echo(f"Session {session_id} {status} and day statistics recalculated")
+            click.echo(f"Session {session_id} {status} and day statistics recalculated")
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
 
 @session.command("enable")
@@ -3248,30 +3079,15 @@ def _resolve_session_id(
     Raises:
         SystemExit: If session cannot be resolved
     """
-    from snore.database import models
+    from snore.services.session_service import SessionService
 
-    if session_id is not None:
-        return session_id
+    service = SessionService(db_session)
 
-    if date is None:
-        click.echo(
-            "Error: --date is required when --session-id is not provided",
-            err=True,
-        )
+    try:
+        return service.resolve_session_id(session_id, date)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
         sys.exit(1)
-
-    session = (
-        db_session.query(models.Session)
-        .join(models.Day)
-        .filter(models.Day.date == date.date())
-        .first()
-    )
-
-    if not session:
-        click.echo(f"Error: No session found for date {date.date()}", err=True)
-        sys.exit(1)
-
-    return int(session.id)
 
 
 @waveform.command("list")

@@ -4,6 +4,7 @@ These models define the contract between services and consumers (CLI/API).
 """
 
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,18 @@ __all__ = [
     "PeriodStatistics",
     "EventValidationResult",
     "DatabaseStats",
+    "SessionListItem",
+    "SessionListResult",
+    "SessionDetail",
+    "SessionStatistics",
+    "SessionSetting",
+    "DeletePreview",
+    "TherapySummary",
+    "EventTypeCount",
+    "WaveformInfo",
+    "AnalysisListItem",
+    "AnalysisDeletePreview",
+    "EventMatchResult",
 ]
 
 
@@ -122,3 +135,175 @@ class DatabaseStats(BaseModel):
     last_session: datetime | None = Field(
         default=None, description="Latest session date"
     )
+
+
+class SessionListItem(BaseModel):
+    """Single session item in a list view."""
+
+    id: int = Field(description="Session database ID")
+    start_time: datetime = Field(description="Session start timestamp")
+    duration_hours: float = Field(description="Session duration in hours")
+    enabled: bool = Field(description="Whether session is enabled for stats")
+    manufacturer: str = Field(description="Device manufacturer")
+    model: str = Field(description="Device model")
+    serial_number: str = Field(description="Device serial number")
+    ahi: float | None = Field(default=None, description="Apnea-Hypopnea Index")
+
+
+class SessionListResult(BaseModel):
+    """Result of a session list query with pagination info."""
+
+    sessions: list[SessionListItem] = Field(description="List of session items")
+    total_count: int = Field(description="Total sessions matching filters")
+    limit: int = Field(description="Result limit applied")
+
+
+class SessionStatistics(BaseModel):
+    """Statistics for a single session (from Statistics table)."""
+
+    usage_hours: float | None = None
+    ahi: float | None = None
+    rei: float | None = None
+    oai: float | None = None
+    cai: float | None = None
+    hi: float | None = None
+    obstructive_apneas: int | None = None
+    central_apneas: int | None = None
+    mixed_apneas: int | None = None
+    hypopneas: int | None = None
+    reras: int | None = None
+    flow_limitations: int | None = None
+    pressure_mean: float | None = None
+    pressure_min: float | None = None
+    pressure_max: float | None = None
+    pressure_95th: float | None = None
+    epap_mean: float | None = None
+    epap_min: float | None = None
+    epap_max: float | None = None
+    epap_95th: float | None = None
+    leak_mean: float | None = None
+    leak_percentile_70: float | None = None
+    leak_95th: float | None = None
+    spo2_mean: float | None = None
+    spo2_min: float | None = None
+    spo2_time_below_90: int | None = None
+    pulse_mean: float | None = None
+    pulse_min: float | None = None
+    pulse_max: float | None = None
+    respiratory_rate_mean: float | None = None
+    tidal_volume_mean: float | None = None
+    minute_ventilation_mean: float | None = None
+
+
+class SessionSetting(BaseModel):
+    """Single setting key-value pair for a session."""
+
+    key: str = Field(description="Setting key")
+    value: str | None = Field(default=None, description="Setting value")
+
+
+class SessionDetail(BaseModel):
+    """Detailed view of a single session with all metadata."""
+
+    id: int
+    device_session_id: str
+    device_manufacturer: str | None
+    device_model: str | None
+    device_serial: str | None
+    start_time: datetime
+    end_time: datetime
+    duration_hours: float
+    duration_seconds: float
+    therapy_mode: str | None
+    enabled: bool
+    event_count: int
+    waveform_count: int
+    waveform_types: list[str]
+    has_statistics: bool
+    has_event_data: bool
+    statistics: SessionStatistics | None = None
+    settings: list[SessionSetting] | None = None
+
+
+class DeletePreview(BaseModel):
+    """Preview of sessions and related data to be deleted."""
+
+    sessions: list[SessionListItem] = Field(description="Sessions to be deleted")
+    event_count: int = Field(description="Total events to be deleted")
+    waveform_count: int = Field(description="Total waveform records to be deleted")
+    stats_count: int = Field(description="Total statistics records to be deleted")
+
+
+class EventTypeCount(BaseModel):
+    """Event type with count and percentage."""
+
+    event_type: str
+    count: int
+    percentage: float
+
+
+class TherapySummary(BaseModel):
+    """Aggregated therapy statistics summary."""
+
+    first_date: date
+    last_date: date
+    days_since_last: int
+    total_hours: float
+    avg_hours: float
+    days_with_data: int
+    avg_ahi: float | None = None
+    effectiveness: str = "unknown"
+    avg_rei: float | None = None
+    avg_pressure: float | None = None
+    min_pressure: float | None = None
+    max_pressure: float | None = None
+    avg_epap: float | None = None
+    avg_leak: float | None = None
+    avg_spo2: float | None = None
+    min_spo2: float | None = None
+    total_spo2_time_below_90: int = 0
+    avg_pulse: float | None = None
+    avg_respiratory_rate: float | None = None
+    avg_tidal_volume: float | None = None
+    avg_minute_ventilation: float | None = None
+    event_counts: list[EventTypeCount] = Field(default_factory=list)
+
+
+class WaveformInfo(BaseModel):
+    """Waveform metadata for listing."""
+
+    waveform_type: str
+    sample_rate: float
+    sample_count: int
+    unit: str | None = None
+    duration_hours: float
+
+
+class EventMatchResult(BaseModel):
+    """Result of matching machine vs programmatic events."""
+
+    machine_count: int
+    programmatic_count: int
+    matched: int
+    false_positives: int
+    false_negatives: int
+
+
+class AnalysisListItem(BaseModel):
+    """Session with analysis status for listing."""
+
+    session_id: int
+    session_date: date
+    duration_hours: float | None = None
+    has_analysis: bool
+    analysis_id: int | None = None
+
+
+class AnalysisDeletePreview(BaseModel):
+    """Preview of analysis data to be deleted."""
+
+    sessions_with_analysis: int
+    total_analysis_records: int
+    records_to_delete: int
+    patterns_count: int
+    session_details: list[dict[str, Any]] = Field(default_factory=list)
