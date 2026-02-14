@@ -13,8 +13,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from snore.models.unified import DeviceInfo, UnifiedSession
 from snore.parsers.types import ParserMetadata
+from snore.parsers.unified import DeviceInfo, UnifiedSession
 
 __all__ = ["DeviceParser", "ParserDetectionResult", "ParserMetadata"]
 

@@ -1,8 +1,16 @@
-"""Pydantic models for Statistics and aggregate data."""
+"""Pydantic response schemas for service layer.
+
+These models define the contract between services and consumers (CLI/API).
+"""
 
 from datetime import date
 
 from pydantic import BaseModel, Field
+
+__all__ = [
+    "PeriodStatistics",
+    "EventValidationResult",
+]
 
 
 class PeriodStatistics(BaseModel):
@@ -49,25 +57,39 @@ class PeriodStatistics(BaseModel):
         }
 
 
-class TherapySummary(BaseModel):
-    """Overall therapy summary text report."""
+class EventValidationResult(BaseModel):
+    """
+    Validation results comparing programmatic vs machine-detected events.
 
-    profile_name: str
-    period_start: date
-    period_end: date
-    summary: str = Field(description="Human-readable summary of therapy")
+    Useful for tuning detection thresholds and assessing algorithm accuracy.
+    """
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "profile_name": "John Doe",
-                "period_start": "2024-01-01",
-                "period_end": "2024-01-31",
-                "summary": "John Doe used CPAP therapy for 29 out of 31 days in January 2024. "
-                "Average nightly usage was 7.2 hours with a total of 208.5 hours. "
-                "The average AHI was 2.8 events per hour, indicating excellent therapy control. "
-                "Pressure averaged 10.5 cmH₂O with good mask seal (average leak 9.2 L/min). "
-                "SpO₂ levels remained healthy with an average of 96.2%. "
-                "This represents highly effective therapy with strong adherence.",
-            }
-        }
+    machine_event_count: int = Field(description="Events detected by CPAP machine")
+    programmatic_event_count: int = Field(
+        description="Events detected programmatically"
+    )
+    matched_events: int = Field(
+        description="Events matched between machine and programmatic (within 5s)"
+    )
+    false_positives: int = Field(
+        description="Programmatic events not matched to machine events"
+    )
+    false_negatives: int = Field(
+        description="Machine events not matched to programmatic events"
+    )
+    sensitivity: float = Field(
+        ge=0, le=1, description="Recall: matched / (matched + false_negatives)"
+    )
+    precision: float = Field(
+        ge=0, le=1, description="Precision: matched / (matched + false_positives)"
+    )
+    f1_score: float = Field(
+        ge=0,
+        le=1,
+        description="F1 score: 2 * (precision * sensitivity) / (precision + sensitivity)",
+    )
+    agreement_percentage: float = Field(
+        ge=0,
+        le=100,
+        description="Overall agreement: matched / max(machine, programmatic) * 100",
+    )

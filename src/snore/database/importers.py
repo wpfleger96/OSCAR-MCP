@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from snore.database import models
 from snore.database.day_manager import DayManager
 from snore.database.session import session_scope
-from snore.models.unified import UnifiedSession, WaveformData
+from snore.parsers.unified import UnifiedSession, WaveformData
 
 logger = logging.getLogger(__name__)
 

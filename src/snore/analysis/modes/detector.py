@@ -1405,7 +1405,7 @@ class EventDetector:
         Returns:
             Dictionary with validation metrics for apneas and hypopneas
         """
-        from snore.models.analysis import EventValidationResult
+        from snore.services.schemas import EventValidationResult
 
         def validate_event_type(
             programmatic: Sequence[ApneaEvent | HypopneaEvent],

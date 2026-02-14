@@ -266,26 +266,3 @@ class DayManager:
             db_session: SQLAlchemy database session
         """
         cls._aggregate_day_statistics(day, db_session)
-
-    @classmethod
-    def recalculate_all_days_for_device(
-        cls, device_id: int, db_session: Session
-    ) -> int:
-        """
-        Recalculate all day records for a device.
-
-        Useful after bulk session imports or data corrections.
-
-        Args:
-            device_id: Device ID to recalculate
-            db_session: SQLAlchemy database session
-
-        Returns:
-            Number of day records updated
-        """
-        days = db_session.query(Day).filter_by(device_id=device_id).all()
-
-        for day in days:
-            cls._aggregate_day_statistics(day, db_session)
-
-        return len(days)

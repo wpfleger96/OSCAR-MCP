@@ -14,8 +14,8 @@ from datetime import datetime
 import numpy as np
 import pytest
 
-from snore.models.unified import RespiratoryEventType, UnifiedSession, WaveformType
 from snore.parsers.formats.edf import EDFReader
+from snore.parsers.unified import RespiratoryEventType, UnifiedSession, WaveformType
 
 
 class TestEDFSignalParsing:

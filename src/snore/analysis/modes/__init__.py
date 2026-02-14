@@ -18,7 +18,6 @@ __all__ = [
     "AVAILABLE_CONFIGS",
     "DEFAULT_MODE",
     "get_mode",
-    "get_all_modes",
 ]
 
 
@@ -43,16 +42,3 @@ def get_mode(name: str, **kwargs: Any) -> EventDetector:
 
     config = AVAILABLE_CONFIGS[name]
     return EventDetector(config)
-
-
-def get_all_modes(**kwargs: Any) -> list[EventDetector]:
-    """
-    Get instances of all available modes.
-
-    Args:
-        **kwargs: Reserved for future config overrides
-
-    Returns:
-        List of all available EventDetector instances
-    """
-    return [EventDetector(config) for config in AVAILABLE_CONFIGS.values()]

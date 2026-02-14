@@ -5,7 +5,7 @@ from statistics import median
 from typing import Literal
 
 from snore.database import models
-from snore.models.statistics import PeriodStatistics
+from snore.services.schemas import PeriodStatistics
 
 
 def calculate_average_ahi(days: list[models.Day]) -> float | None:
@@ -23,19 +23,6 @@ def calculate_average_ahi(days: list[models.Day]) -> float | None:
         return None
 
     return sum(ahi_values) / len(ahi_values)
-
-
-def calculate_total_hours(days: list[models.Day]) -> float:
-    """
-    Calculate total therapy hours across multiple days.
-
-    Args:
-        days: List of Day records
-
-    Returns:
-        Total hours
-    """
-    return sum(day.total_therapy_hours or 0 for day in days)
 
 
 def calculate_average_hours_per_day(days: list[models.Day]) -> float:
@@ -82,23 +69,6 @@ def assess_therapy_effectiveness(avg_ahi: float | None) -> str:
         return "fair"
     else:
         return "poor"
-
-
-def get_date_range(days: list[models.Day]) -> tuple[date, date] | None:
-    """
-    Get date range from list of days.
-
-    Args:
-        days: List of Day records
-
-    Returns:
-        Tuple of (start_date, end_date) or None if no days
-    """
-    if not days:
-        return None
-
-    dates = [day.date for day in days]
-    return min(dates), max(dates)
 
 
 def calculate_median_ahi(days: list[models.Day]) -> float | None:

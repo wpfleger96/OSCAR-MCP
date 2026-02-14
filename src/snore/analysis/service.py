@@ -15,14 +15,13 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from snore.analysis.data.waveform_loader import WaveformLoader
-from snore.analysis.events import AnalysisEvent
 from snore.analysis.modes import DEFAULT_MODE, get_mode
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
 from snore.analysis.shared.feature_extractors import WaveformFeatureExtractor
 from snore.analysis.shared.flow_limitation import FlowLimitationClassifier
 from snore.analysis.shared.pattern_detector import ComplexPatternDetector
 from snore.analysis.shared.pulse_detector import PulseChangeDetector
-from snore.analysis.types import AnalysisResult
+from snore.analysis.types import AnalysisEvent, AnalysisResult
 from snore.constants import BreathSegmentationConstants as BSC
 from snore.constants import FlowLimitationConstants as FLC
 from snore.constants import PatternDetectionConstants as PDC

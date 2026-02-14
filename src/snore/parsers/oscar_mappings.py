@@ -19,7 +19,7 @@ from snore.constants import (
     OXI_PULSE,
     OXI_SPO2,
 )
-from snore.models.unified import RespiratoryEventType, WaveformType
+from snore.parsers.unified import RespiratoryEventType, WaveformType
 
 __all__ = [
     "OSCAR_EVENT_TYPE_MAP",

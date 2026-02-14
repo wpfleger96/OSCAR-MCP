@@ -14,7 +14,6 @@ Key Features:
 import logging
 
 from pathlib import Path
-from typing import Any
 
 from snore.parsers.base import DeviceParser, ParserDetectionResult
 
@@ -77,33 +76,30 @@ class ParserRegistry:
 
         logger.info(f"Registered parser: {parser}")
 
-    def unregister(self, parser_id: str) -> bool:
+    def list_parsers(self) -> list[DeviceParser]:
         """
-        Unregister a parser by ID.
-
-        Args:
-            parser_id: ID of parser to remove
+        Get list of all registered parsers.
 
         Returns:
-            True if parser was removed, False if not found
+            List of all DeviceParser instances
+
+        Example:
+            for parser in registry.list_parsers():
+                print(f"{parser.manufacturer}: {parser.parser_id}")
         """
-        if parser_id not in self._parsers_by_id:
-            return False
+        return self._parsers.copy()
 
-        parser = self._parsers_by_id[parser_id]
+    def list_manufacturers(self) -> list[str]:
+        """
+        Get list of all supported manufacturers.
 
-        self._parsers.remove(parser)
+        Returns:
+            List of manufacturer names
 
-        del self._parsers_by_id[parser_id]
-
-        manufacturer = parser.manufacturer.lower()
-        if manufacturer in self._parsers_by_manufacturer:
-            self._parsers_by_manufacturer[manufacturer].remove(parser)
-            if not self._parsers_by_manufacturer[manufacturer]:
-                del self._parsers_by_manufacturer[manufacturer]
-
-        logger.info(f"Unregistered parser: {parser_id}")
-        return True
+        Example:
+            manufacturers = registry.list_manufacturers()
+        """
+        return list(set(p.manufacturer for p in self._parsers))
 
     def detect_parser(
         self, path: Path, manufacturer_hint: str | None = None
@@ -246,130 +242,5 @@ class ParserRegistry:
 
         return matches
 
-    def get_parser(self, parser_id: str) -> DeviceParser | None:
-        """
-        Get a specific parser by ID.
-
-        Args:
-            parser_id: Parser identifier (e.g., "resmed_edf")
-
-        Returns:
-            DeviceParser or None if not found
-
-        Example:
-            parser = registry.get_parser("resmed_edf")
-        """
-        return self._parsers_by_id.get(parser_id)
-
-    def get_parsers_by_manufacturer(self, manufacturer: str) -> list[DeviceParser]:
-        """
-        Get all parsers for a specific manufacturer.
-
-        Args:
-            manufacturer: Manufacturer name (case-insensitive)
-
-        Returns:
-            List of DeviceParser instances for that manufacturer
-
-        Example:
-            parsers = registry.get_parsers_by_manufacturer("ResMed")
-            # Returns: [ResmedEDFParser, ResmedS9Parser, ...]
-        """
-        manufacturer_lower = manufacturer.lower()
-        return self._parsers_by_manufacturer.get(manufacturer_lower, [])
-
-    def list_parsers(self) -> list[DeviceParser]:
-        """
-        Get list of all registered parsers.
-
-        Returns:
-            List of all DeviceParser instances
-
-        Example:
-            for parser in registry.list_parsers():
-                print(f"{parser.manufacturer}: {parser.parser_id}")
-        """
-        return self._parsers.copy()
-
-    def list_manufacturers(self) -> list[str]:
-        """
-        Get list of all supported manufacturers.
-
-        Returns:
-            List of manufacturer names
-
-        Example:
-            manufacturers = registry.list_manufacturers()
-            # Returns: ["ResMed", "Philips", ...]
-        """
-        return list(set(p.manufacturer for p in self._parsers))
-
-    def get_parser_info(self) -> dict[str, dict[str, Any]]:
-        """
-        Get detailed information about all registered parsers.
-
-        Returns:
-            Dictionary mapping parser IDs to their metadata
-
-        Example:
-            info = registry.get_parser_info()
-            # Returns:
-            # {
-            #     "resmed_edf": {
-            #         "manufacturer": "ResMed",
-            #         "version": "1.0.0",
-            #         "formats": ["EDF+", "EDF"],
-            #         "models": ["AirSense 10", "AirSense 11"],
-            #         ...
-            #     },
-            #     ...
-            # }
-        """
-        info = {}
-        for parser in self._parsers:
-            metadata = parser.metadata
-            info[parser.parser_id] = {
-                "manufacturer": metadata.manufacturer,
-                "version": metadata.parser_version,
-                "formats": metadata.supported_formats,
-                "models": metadata.supported_models,
-                "description": metadata.description,
-            }
-        return info
-
-    @property
-    def parser_count(self) -> int:
-        """Get number of registered parsers."""
-        return len(self._parsers)
-
-    def __len__(self) -> int:
-        """Return number of registered parsers."""
-        return len(self._parsers)
-
-    def __repr__(self) -> str:
-        """Developer representation."""
-        return f"<ParserRegistry parsers={self.parser_count} manufacturers={len(self.list_manufacturers())}>"
-
-    def __str__(self) -> str:
-        """Human-readable representation."""
-        manufacturers = self.list_manufacturers()
-        return f"ParserRegistry with {self.parser_count} parsers for {len(manufacturers)} manufacturers"
-
 
 parser_registry = ParserRegistry()
-
-
-def get_registry() -> ParserRegistry:
-    """
-    Get the global parser registry instance.
-
-    Returns:
-        Global ParserRegistry singleton
-
-    Example:
-        from snore.parsers.registry import get_registry
-
-        registry = get_registry()
-        parser = registry.detect_parser(path)
-    """
-    return parser_registry

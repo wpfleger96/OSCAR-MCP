@@ -38,14 +38,6 @@ from snore.constants import (
     OXI_SPO2,
     PARSER_MAX_SEARCH_DEPTH,
 )
-from snore.models.unified import (
-    DeviceInfo,
-    RespiratoryEvent,
-    TherapyMode,
-    TherapySettings,
-    UnifiedSession,
-    WaveformData,
-)
 from snore.parsers.base import (
     DeviceParser,
     ParserDetectionResult,
@@ -63,6 +55,14 @@ from snore.parsers.oscar_mappings import (
 )
 from snore.parsers.oscar_summary import parse_summary_file
 from snore.parsers.types import EventListType, SessionEvents, SessionSummary
+from snore.parsers.unified import (
+    DeviceInfo,
+    RespiratoryEvent,
+    TherapyMode,
+    TherapySettings,
+    UnifiedSession,
+    WaveformData,
+)
 
 logger = logging.getLogger(__name__)
 

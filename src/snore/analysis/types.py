@@ -1,11 +1,8 @@
 """Analysis pipeline type definitions."""
 
-from typing import Any, NewType
+from typing import Any
 
 from pydantic import BaseModel, Field
-
-UnixTimestamp = NewType("UnixTimestamp", float)
-SessionOffset = NewType("SessionOffset", float)
 
 from snore.analysis.modes.types import ModeResult
 

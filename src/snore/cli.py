@@ -527,7 +527,7 @@ def stats(
     )
     from snore.database import models
     from snore.database.session import init_database, session_scope
-    from snore.models.statistics import PeriodStatistics
+    from snore.services.schemas import PeriodStatistics
 
     if trend and not period:
         period = "week"

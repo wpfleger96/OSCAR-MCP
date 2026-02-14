@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from snore.models.unified import TherapyMode
+from snore.parsers.unified import TherapyMode
 
 
 class TestSTRSettingsParsing:

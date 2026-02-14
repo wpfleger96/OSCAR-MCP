@@ -27,7 +27,15 @@ from typing import Any
 import numpy as np
 
 from snore.constants import PARSER_MAX_SEARCH_DEPTH
-from snore.models.unified import (
+from snore.parsers.base import (
+    DeviceParser,
+    ParserDetectionResult,
+    ParserError,
+    ParserMetadata,
+)
+from snore.parsers.discovery import DataRoot, DataRootFinder
+from snore.parsers.formats.edf import EDFReader
+from snore.parsers.unified import (
     DeviceInfo,
     RespiratoryEvent,
     RespiratoryEventType,
@@ -37,14 +45,6 @@ from snore.models.unified import (
     WaveformData,
     WaveformType,
 )
-from snore.parsers.base import (
-    DeviceParser,
-    ParserDetectionResult,
-    ParserError,
-    ParserMetadata,
-)
-from snore.parsers.discovery import DataRoot, DataRootFinder
-from snore.parsers.formats.edf import EDFReader
 
 logger = logging.getLogger(__name__)
 

@@ -131,7 +131,7 @@ def import_to_test_db(
     brp_filename = files["BRP"].stem
     session_id = "_".join(brp_filename.split("_")[:2])
 
-    from snore.models.unified import DeviceInfo
+    from snore.parsers.unified import DeviceInfo
 
     device_info = DeviceInfo(
         manufacturer="ResMed",
