@@ -921,13 +921,9 @@ def init(db: str | None) -> int | None:
 @click.option("--db", type=click.Path(), help="Database path")
 def db_stats(db: str | None) -> None:
     """Show database statistics."""
-    import os
-
-    from sqlalchemy import text
-
     from snore.constants import DEFAULT_DATABASE_PATH
-    from snore.database import models
     from snore.database.session import init_database, session_scope
+    from snore.services.database_service import DatabaseService
 
     if db:
         init_database(str(Path(db)))
@@ -937,82 +933,39 @@ def db_stats(db: str | None) -> None:
         db_path = Path(DEFAULT_DATABASE_PATH)
 
     with session_scope() as session:
-        profile_count = session.query(models.Profile).count()
-        device_count = session.query(models.Device).count()
-        session_count = session.query(models.Session).count()
-        day_count = session.query(models.Day).count()
-        event_count = session.execute(text("SELECT COUNT(*) FROM events")).scalar()
-        waveform_count = session.query(models.Waveform).count()
-        analysis_count = session.query(models.AnalysisResult).count()
-        pattern_count = session.query(models.DetectedPattern).count()
-
-        sessions_with_waveforms = (
-            session.query(models.Session)
-            .filter(models.Session.has_waveform_data == True)
-            .count()
-        )
-        sessions_with_events = (
-            session.query(models.Session)
-            .filter(models.Session.has_event_data == True)
-            .count()
-        )
-
-        first_session = session.execute(
-            text("SELECT MIN(start_time) as first FROM sessions")
-        ).scalar()
-
-        last_session = session.execute(
-            text("SELECT MAX(start_time) as last FROM sessions")
-        ).scalar()
-
-        size_bytes = os.path.getsize(db_path) if db_path.exists() else 0
-        size_mb = size_bytes / (1024 * 1024)
+        service = DatabaseService(session)
+        stats = service.get_stats(str(db_path))
 
         click.echo("\n📊 Database Statistics")
         click.echo(f"{'=' * 50}")
-        click.echo(f"Database: {db_path}")
-        click.echo(f"Size: {size_mb:.1f} MB")
+        click.echo(f"Database: {stats.db_path}")
+        click.echo(f"Size: {stats.size_mb:.1f} MB")
 
         click.echo("\nRow Counts")
-        click.echo(f"  Profiles: {profile_count}")
-        click.echo(f"  Devices: {device_count}")
-        click.echo(f"  Sessions: {session_count}")
-        click.echo(f"  Days: {day_count}")
-        click.echo(f"  Events: {event_count}")
-        click.echo(f"  Waveforms: {waveform_count}")
-        click.echo(f"  Analysis Results: {analysis_count}")
-        click.echo(f"  Detected Patterns: {pattern_count}")
+        click.echo(f"  Profiles: {stats.profile_count}")
+        click.echo(f"  Devices: {stats.device_count}")
+        click.echo(f"  Sessions: {stats.session_count}")
+        click.echo(f"  Days: {stats.day_count}")
+        click.echo(f"  Events: {stats.event_count}")
+        click.echo(f"  Waveforms: {stats.waveform_count}")
+        click.echo(f"  Analysis Results: {stats.analysis_count}")
+        click.echo(f"  Detected Patterns: {stats.pattern_count}")
 
         click.echo("\nData Coverage")
-        wf_pct = (
-            (sessions_with_waveforms / session_count * 100) if session_count > 0 else 0
-        )
-        ev_pct = (
-            (sessions_with_events / session_count * 100) if session_count > 0 else 0
-        )
-        an_pct = (analysis_count / session_count * 100) if session_count > 0 else 0
         click.echo(
-            f"  Sessions with waveforms: {sessions_with_waveforms}/{session_count} ({wf_pct:.1f}%)"
+            f"  Sessions with waveforms: {stats.sessions_with_waveforms}/{stats.session_count} ({stats.waveform_coverage_pct:.1f}%)"
         )
         click.echo(
-            f"  Sessions with events: {sessions_with_events}/{session_count} ({ev_pct:.1f}%)"
+            f"  Sessions with events: {stats.sessions_with_events}/{stats.session_count} ({stats.event_coverage_pct:.1f}%)"
         )
         click.echo(
-            f"  Sessions analyzed: {analysis_count}/{session_count} ({an_pct:.1f}%)"
+            f"  Sessions analyzed: {stats.analysis_count}/{stats.session_count} ({stats.analysis_coverage_pct:.1f}%)"
         )
 
-        if first_session and last_session:
-            first_dt = (
-                datetime.fromisoformat(first_session)
-                if isinstance(first_session, str)
-                else first_session
+        if stats.first_session and stats.last_session:
+            click.echo(
+                f"\nDate range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
             )
-            last_dt = (
-                datetime.fromisoformat(last_session)
-                if isinstance(last_session, str)
-                else last_session
-            )
-            click.echo(f"\nDate range: {first_dt:%Y-%m-%d} to {last_dt:%Y-%m-%d}")
 
         click.echo(f"{'=' * 50}\n")
 

@@ -3,13 +3,14 @@
 These models define the contract between services and consumers (CLI/API).
 """
 
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
 __all__ = [
     "PeriodStatistics",
     "EventValidationResult",
+    "DatabaseStats",
 ]
 
 
@@ -92,4 +93,32 @@ class EventValidationResult(BaseModel):
         ge=0,
         le=100,
         description="Overall agreement: matched / max(machine, programmatic) * 100",
+    )
+
+
+class DatabaseStats(BaseModel):
+    """Database statistics including table row counts and coverage metrics."""
+
+    db_path: str = Field(description="Path to the database file")
+    size_mb: float = Field(description="Database file size in megabytes")
+    profile_count: int = Field(description="Number of profiles")
+    device_count: int = Field(description="Number of devices")
+    session_count: int = Field(description="Number of sessions")
+    day_count: int = Field(description="Number of days")
+    event_count: int = Field(description="Number of events")
+    waveform_count: int = Field(description="Number of waveform records")
+    analysis_count: int = Field(description="Number of analysis results")
+    pattern_count: int = Field(description="Number of detected patterns")
+    sessions_with_waveforms: int = Field(description="Sessions that have waveform data")
+    sessions_with_events: int = Field(description="Sessions that have event data")
+    waveform_coverage_pct: float = Field(
+        description="Percentage of sessions with waveforms"
+    )
+    event_coverage_pct: float = Field(description="Percentage of sessions with events")
+    analysis_coverage_pct: float = Field(description="Percentage of sessions analyzed")
+    first_session: datetime | None = Field(
+        default=None, description="Earliest session date"
+    )
+    last_session: datetime | None = Field(
+        default=None, description="Latest session date"
     )
