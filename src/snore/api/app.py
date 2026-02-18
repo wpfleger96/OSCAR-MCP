@@ -4,6 +4,8 @@ import os
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as get_version
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +26,11 @@ from snore.database.session import init_database
 
 API_V1_PREFIX = "/api/v1"
 
+try:
+    __version__ = get_version("snore")
+except PackageNotFoundError:
+    __version__ = "dev"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -35,7 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="SNORE API",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
 
