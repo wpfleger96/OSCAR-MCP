@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
 from snore.database import models
 from snore.database.day_manager import DayManager
+from snore.exceptions import NotFoundError
 from snore.services.schemas import (
     DeletePreview,
     SessionDetail,
@@ -38,6 +39,7 @@ class SessionService:
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = DEFAULT_LIST_SESSIONS_LIMIT,
+        offset: int = 0,
         sort_by: str = "date-desc",
         include_disabled: bool = False,
     ) -> SessionListResult:
@@ -49,6 +51,7 @@ class SessionService:
             from_date: Filter by start date (inclusive)
             to_date: Filter by end date (inclusive)
             limit: Maximum sessions to return (0 = unlimited)
+            offset: Number of sessions to skip for pagination
             sort_by: Sort order (date-asc, date-desc, session-id, duration)
             include_disabled: Include disabled sessions
 
@@ -100,6 +103,12 @@ class SessionService:
         else:
             limit_sql = ""
 
+        if offset > 0:
+            offset_sql = "OFFSET :offset"
+            params["offset"] = offset
+        else:
+            offset_sql = ""
+
         list_query = text(
             f"""
             SELECT
@@ -117,6 +126,7 @@ class SessionService:
             WHERE {where_sql}
             ORDER BY {order_by}
             {limit_sql}
+            {offset_sql}
             """
         )
 
@@ -170,7 +180,7 @@ class SessionService:
             .first()
         )
         if not session:
-            raise ValueError(f"Session {session_id} not found")
+            raise NotFoundError(f"Session {session_id} not found")
 
         device = (
             self.db_session.query(models.Device)
@@ -434,9 +444,6 @@ class SessionService:
             .filter(models.Session.id.in_(session_ids))
             .delete(synchronize_session=False)
         )
-        # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
-        self.db_session.commit()
-
         return count
 
     def set_session_enabled(self, session_id: int, enabled: bool) -> None:
@@ -458,12 +465,13 @@ class SessionService:
             .first()
         )
         if not session:
-            raise ValueError(f"Session {session_id} not found")
+            raise NotFoundError(f"Session {session_id} not found")
 
         if session.enabled == enabled:
             return
 
         session.enabled = enabled
+        self.db_session.flush()
 
         if session.day_id:
             day = (
@@ -473,9 +481,6 @@ class SessionService:
             )
             if day:
                 DayManager.recalculate_day(day, self.db_session)
-
-        # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
-        self.db_session.commit()
 
     def resolve_session_id(self, session_id: int | None, date: datetime | None) -> int:
         """

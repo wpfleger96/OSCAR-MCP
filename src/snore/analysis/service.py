@@ -386,7 +386,6 @@ class AnalysisService:
         )
 
         self.db_session.add(analysis)
-        self.db_session.commit()
 
         logger.info(f"Stored analysis result with ID {analysis.id}")
         return analysis.id

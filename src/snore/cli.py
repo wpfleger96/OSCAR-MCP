@@ -3492,6 +3492,29 @@ def rx_compare(db: str | None, min_days: int) -> None:
             click.echo(f"  Settings: {worst.settings}")
 
 
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", default=8000, type=int, help="Port to listen on")
+@click.option("--reload", is_flag=True, help="Enable auto-reload for development")
+@click.option("--db", default=None, help="Path to SQLite database file")
+def serve(host: str, port: int, reload: bool, db: str | None) -> None:
+    """Start the SNORE REST API server."""
+    import os
+
+    import uvicorn
+
+    if db:
+        os.environ["SNORE_DB_PATH"] = db
+
+    uvicorn.run(
+        "snore.api.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        reload=reload,
+    )
+
+
 def main() -> None:
     """Main CLI entry point."""
     cli()

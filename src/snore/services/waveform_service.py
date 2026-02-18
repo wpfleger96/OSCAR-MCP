@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from snore.analysis.data.waveform_loader import WaveformLoader
 from snore.database import models
+from snore.exceptions import NotFoundError
 from snore.services.lttb import lttb_downsample
 from snore.services.schemas import WaveformInfo
 
@@ -87,11 +88,14 @@ class WaveformService:
             ValueError: If waveform not found
         """
         loader = WaveformLoader(self.db_session)
-        timestamps, values, metadata = loader.load_waveform(
-            session_id=session_id,
-            waveform_type=waveform_type,
-            apply_filter=False,
-        )
+        try:
+            timestamps, values, metadata = loader.load_waveform(
+                session_id=session_id,
+                waveform_type=waveform_type,
+                apply_filter=False,
+            )
+        except ValueError as e:
+            raise NotFoundError(str(e)) from e
 
         if start_seconds is not None or end_seconds is not None:
             mask = np.ones(len(timestamps), dtype=bool)

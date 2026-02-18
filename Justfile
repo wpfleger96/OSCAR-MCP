@@ -45,3 +45,7 @@ test:
 # Generate CLI documentation
 docs:
     uv run python scripts/generate_cli_docs.py
+
+# Start the REST API server in development mode
+dev-api:
+    uv run snore serve --reload

@@ -25,6 +25,11 @@ __all__ = [
     "AnalysisDeletePreview",
     "EventMatchResult",
     "DeviceInfo",
+    # RX / Day / Event schemas (consumed by RxService, DayService, and API routers)
+    "DayListItem",
+    "DayDetail",
+    "RxPeriodResponse",
+    "RxComparisonResponse",
 ]
 
 
@@ -328,3 +333,47 @@ class DeviceInfo(BaseModel):
     manufacturer: str
     model: str
     serial_number: str
+
+
+class DayListItem(BaseModel):
+    """Summary of a single therapy day."""
+
+    date: date
+    device_id: int
+    session_count: int
+    total_therapy_hours: float | None = None
+    ahi: float | None = None
+
+
+class DayDetail(DayListItem):
+    """Full detail of a therapy day including per-metric stats."""
+
+    oai: float | None = None
+    cai: float | None = None
+    hi: float | None = None
+    avg_pressure: float | None = None
+    avg_leak: float | None = None
+    avg_spo2: float | None = None
+    session_ids: list[int] = Field(default_factory=list)
+
+
+class RxPeriodResponse(BaseModel):
+    """Single therapy prescription period with aggregated stats."""
+
+    settings: dict[str, str]
+    start_date: date
+    end_date: date
+    days_count: int
+    avg_ahi: float | None = None
+    median_ahi: float | None = None
+    avg_hours: float | None = None
+    total_hours: float = 0.0
+    avg_leak: float | None = None
+
+
+class RxComparisonResponse(BaseModel):
+    """RX period comparison result with best/worst indices."""
+
+    periods: list[RxPeriodResponse]
+    best_index: int | None = None
+    worst_index: int | None = None

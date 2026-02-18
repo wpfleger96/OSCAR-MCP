@@ -33,6 +33,7 @@ class AnalysisFacade:
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 20,
+        offset: int = 0,
         analyzed_only: bool = False,
         sort_by: str = "date-desc",
     ) -> list[AnalysisListItem]:
@@ -64,6 +65,16 @@ class AnalysisFacade:
         sort_clause = sort_clauses.get(sort_by, models.Day.date.desc())
         query = query.order_by(sort_clause)
 
+        if analyzed_only:
+            query = query.filter(
+                self.db_session.query(models.AnalysisResult)
+                .filter(models.AnalysisResult.session_id == models.Session.id)
+                .exists()
+            )
+
+        if offset > 0:
+            query = query.offset(offset)
+
         if limit > 0:
             query = query.limit(limit)
 
@@ -78,11 +89,6 @@ class AnalysisFacade:
                 .first()
             )
 
-            has_analysis = analysis is not None
-
-            if analyzed_only and not has_analysis:
-                continue
-
             session_date = (
                 session.day.date if session.day else session.start_time.date()
             )
@@ -96,12 +102,38 @@ class AnalysisFacade:
                         if session.duration_seconds
                         else None
                     ),
-                    has_analysis=has_analysis,
+                    has_analysis=analysis is not None,
                     analysis_id=analysis.id if analysis else None,
                 )
             )
 
         return results
+
+    def count_sessions_with_status(
+        self,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        analyzed_only: bool = False,
+    ) -> int:
+        """Return total count of sessions matching the same filters as list_sessions_with_status.
+
+        Used by the API to populate the `total` field in paginated responses.
+        """
+        query = self.db_session.query(models.Session).join(models.Day)
+
+        if start:
+            query = query.filter(models.Day.date >= start.date())
+        if end:
+            query = query.filter(models.Day.date <= end.date())
+
+        if analyzed_only:
+            query = query.filter(
+                self.db_session.query(models.AnalysisResult)
+                .filter(models.AnalysisResult.session_id == models.Session.id)
+                .exists()
+            )
+
+        return query.count()
 
     def get_delete_preview(
         self,
@@ -257,8 +289,6 @@ class AnalysisFacade:
                 ).bindparams(bindparam("session_ids", expanding=True)),
                 {"session_ids": session_ids},
             )
-            # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
-            self.db_session.commit()
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
             deleted_count = 0
@@ -282,6 +312,23 @@ class AnalysisFacade:
                     )
                     deleted_count += 1
 
-            # NOTE: Phase 2.1 will refactor to caller-controlled commits for FastAPI compatibility
-            self.db_session.commit()
             return deleted_count
+
+    def run_analysis(
+        self,
+        session_id: int,
+        modes: list[str] | None = None,
+        store_results: bool = True,
+    ) -> Any:
+        """Run analysis on a session. Returns AnalysisResult (Pydantic model)."""
+        from snore.analysis.service import AnalysisService
+
+        svc = AnalysisService(self.db_session)
+        return svc.analyze_session(session_id, modes=modes, store_results=store_results)
+
+    def get_analysis_result(self, session_id: int) -> Any:
+        """Get stored analysis result for a session, or None if not found."""
+        from snore.analysis.service import AnalysisService
+
+        svc = AnalysisService(self.db_session)
+        return svc.get_analysis_result(session_id)
