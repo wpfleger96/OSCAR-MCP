@@ -95,6 +95,16 @@ Complete project overview showing implemented features and future development pl
 
 ## Recently Completed ✅
 
+### Phase 2.1: FastAPI Backend (2026-02-17)
+- [x] **8 routers, 24 REST endpoints** - Full service layer exposed via HTTP API
+- [x] **`snore serve` CLI command** - Starts uvicorn with host/port/reload/db options
+- [x] **Two new services** - `RxService`, `DayService` bridge dataclasses/ORM to Pydantic
+- [x] **Caller-controlled transactions** - `get_db()` FastAPI dependency; commits removed from services
+- [x] **`NotFoundError` domain exception** - Replaces `ValueError` catch-all; genuine `ValueError` → 500
+- [x] **76 new integration tests** - Total test count: 573 (up from 497)
+- [x] **OpenAPI docs** - Auto-generated at `/docs`; 204 responses documented via `responses=` param
+- [x] **LTTB downsampling** - 720k-point waveforms served in <100ms via `max_points` query param
+
 ### Phase 2.0b: Service Layer Extraction (2026-02-14)
 - [x] **8 services extracted from CLI** - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling (1,741 lines moved)
 - [x] **CLI reduced by 7.2%** - From 3,797 to 3,524 lines
@@ -169,13 +179,25 @@ Complete project overview showing implemented features and future development pl
 - [x] Comprehensive CLI smoke test passed (57/57 commands, zero errors)
 - [x] Services are API-ready with typed Pydantic returns and constructor injection
 
-**Sub-phase 2.1: FastAPI Backend** 🚧 NEXT
-- [ ] REST API with OpenAPI docs
-- [ ] WebSocket support for real-time updates
-- [ ] Session/analysis/stats/waveform endpoints
-- [ ] LTTB downsampling API for progressive waveform loading
+**Sub-phase 2.1: FastAPI Backend** ✅ COMPLETE (2026-02-17)
+- [x] REST API with 8 routers and 24 endpoints (`snore serve`)
+  - Sessions (list, detail, enable/disable, delete, delete-preview)
+  - Waveforms (list types, get data with LTTB downsampling)
+  - Events (list, match machine vs programmatic)
+  - Analysis (list status, get result, run, delete, delete-preview)
+  - Stats (summary, periods, trends, records)
+  - Devices (list)
+  - Days (list, detail)
+  - RX (history, current, compare)
+- [x] New services: `RxService`, `DayService` (thin Pydantic bridges over `RxTracker` and Day ORM)
+- [x] Caller-controlled transactions (`get_db()` dependency handles commit/rollback)
+- [x] `NotFoundError` domain exception in `snore.exceptions` (replaces `ValueError` catch-all)
+- [x] Auth/rate-limit middleware stubs designed for production swap-in
+- [x] CORS configured for Vue dev server (`localhost:5173`)
+- [x] OpenAPI auto-generated docs at `/docs`
+- [x] 573 tests total (76 new API integration tests)
 
-**Sub-phase 2.2-2.4: Vue Frontend**
+**Sub-phase 2.2-2.4: Vue Frontend** 🚧 NEXT
 - [ ] Interactive waveform viewer with zoom/pan
 - [ ] Dashboard with summary cards and trend charts
 - [ ] Event explorer and analysis comparison tools
