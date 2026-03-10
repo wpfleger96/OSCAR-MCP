@@ -1,0 +1,155 @@
+<template>
+    <div class="calendar-heatmap">
+        <div class="month-labels" :style="{ gridTemplateColumns: `repeat(${weeks}, 14px)` }">
+            <span v-for="m in monthLabels" :key="m.offset" :style="{ gridColumn: m.offset }">
+                {{ m.label }}
+            </span>
+        </div>
+        <div class="day-labels">
+            <span>Mon</span>
+            <span />
+            <span>Wed</span>
+            <span />
+            <span>Fri</span>
+            <span />
+            <span />
+        </div>
+        <div class="grid" :style="{ gridTemplateColumns: `repeat(${weeks}, 14px)` }">
+            <div
+                v-for="cell in cells"
+                :key="cell.date"
+                class="cell"
+                :class="cell.class"
+                :title="`${cell.date}: AHI ${cell.ahi?.toFixed(1) ?? 'N/A'}`"
+                @click="cell.ahi != null && $emit('day-click', cell.date)"
+            />
+        </div>
+    </div>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import type { DayListItem } from '@/types'
+
+const props = defineProps<{
+    days: DayListItem[]
+    monthsBack?: number
+}>()
+
+defineEmits<{
+    'day-click': [date: string]
+}>()
+
+const monthsBack = computed(() => props.monthsBack ?? 6)
+
+function ahiClass(ahi: number | null): string {
+    if (ahi == null) return 'cell--empty'
+    if (ahi < 5) return 'cell--good'
+    if (ahi < 10) return 'cell--mild'
+    if (ahi < 15) return 'cell--moderate'
+    return 'cell--severe'
+}
+
+const dayMap = computed(() => {
+    const map = new Map<string, DayListItem>()
+    for (const d of props.days) map.set(d.date, d)
+    return map
+})
+
+const cells = computed(() => {
+    const end = new Date()
+    const start = new Date()
+    start.setMonth(start.getMonth() - monthsBack.value)
+    // Align start to Monday
+    const dayOfWeek = start.getDay()
+    const diff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek
+    start.setDate(start.getDate() + diff)
+
+    const result: { date: string; ahi: number | null; class: string }[] = []
+    const cur = new Date(start)
+    while (cur <= end) {
+        const iso = cur.toISOString().slice(0, 10)
+        const day = dayMap.value.get(iso)
+        result.push({ date: iso, ahi: day?.ahi ?? null, class: ahiClass(day?.ahi ?? null) })
+        cur.setDate(cur.getDate() + 1)
+    }
+    return result
+})
+
+const weeks = computed(() => Math.ceil(cells.value.length / 7))
+
+const monthLabels = computed(() => {
+    const labels: { label: string; offset: number }[] = []
+    let lastMonth = -1
+    for (let i = 0; i < cells.value.length; i += 7) {
+        const d = new Date(cells.value[i].date)
+        if (d.getMonth() !== lastMonth) {
+            lastMonth = d.getMonth()
+            labels.push({
+                label: d.toLocaleString(undefined, { month: 'short' }),
+                offset: Math.floor(i / 7) + 1,
+            })
+        }
+    }
+    return labels
+})
+</script>
+
+<style scoped>
+.calendar-heatmap {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.day-labels {
+    display: grid;
+    grid-template-rows: repeat(7, 14px);
+    gap: 2px;
+    font-size: 0.65rem;
+    color: var(--p-text-muted-color, #6b7280);
+    margin-top: 1.25rem;
+    text-align: right;
+    padding-right: 0.25rem;
+}
+
+.month-labels {
+    display: grid;
+    gap: 2px;
+    font-size: 0.65rem;
+    color: var(--p-text-muted-color, #6b7280);
+    height: 1rem;
+    margin-left: 2rem;
+}
+
+.grid {
+    display: grid;
+    grid-template-rows: repeat(7, 14px);
+    grid-auto-flow: column;
+    gap: 2px;
+    margin-top: 1.25rem;
+}
+
+.cell {
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    cursor: pointer;
+}
+
+.cell--empty {
+    background: var(--p-surface-200, #e5e7eb);
+    cursor: default;
+}
+.cell--good {
+    background: #22c55e;
+}
+.cell--mild {
+    background: #eab308;
+}
+.cell--moderate {
+    background: #f97316;
+}
+.cell--severe {
+    background: #ef4444;
+}
+</style>

@@ -1,0 +1,61 @@
+.page-title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 1.25rem;
+}
+
+.section-card {
+    background: var(--p-surface-card, #fff);
+    border: 1px solid var(--p-surface-border, #e2e8f0);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.section-card h2 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+}
+
+.loading-state,
+.error-state {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 2rem;
+    color: var(--p-text-muted-color, #6b7280);
+}
+
+.error-state {
+    color: var(--p-red-500, #ef4444);
+}
+
+.back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.875rem;
+    color: var(--p-primary-color, #3b82f6);
+    text-decoration: none;
+    margin-bottom: 1rem;
+}
+
+.back-link:hover {
+    text-decoration: underline;
+}
+
+.ahi-good {
+    color: #16a34a;
+    font-weight: 600;
+}
+
+.ahi-mild {
+    color: #ca8a04;
+    font-weight: 600;
+}
+
+.ahi-severe {
+    color: #dc2626;
+    font-weight: 600;
+}

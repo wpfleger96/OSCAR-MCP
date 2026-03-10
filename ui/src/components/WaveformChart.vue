@@ -182,6 +182,11 @@ defineExpose({
             max: props.timestamps[props.timestamps.length - 1],
         })
     },
+    setScaleX(min: number, max: number) {
+        if (!chart) return
+        isInitialRender = true
+        chart.setScale('x', { min, max })
+    },
 })
 </script>
 

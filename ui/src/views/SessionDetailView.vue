@@ -15,7 +15,7 @@
 
         <!-- Session header -->
         <div class="session-header">
-            <div class="session-header-main">
+            <div>
                 <h1>{{ formatDate(session.start_time) }}</h1>
                 <div class="session-meta">
                     <Tag v-if="session.therapy_mode" :value="session.therapy_mode" />
@@ -131,7 +131,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import Tag from 'primevue/tag'
 import Panel from 'primevue/panel'
 import WaveformChart from '@/components/WaveformChart.vue'
@@ -141,9 +142,11 @@ import StatCard from '@/components/StatCard.vue'
 import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { useWaveformData } from '@/composables/useWaveformData'
+import { ahiClass } from '@/utils/format'
 import type { SessionDetail, EventItem } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
+const route = useRoute()
 
 const session = ref<SessionDetail | null>(null)
 const events = ref<EventItem[]>([])
@@ -164,6 +167,24 @@ const {
 const singleChartRef = ref<InstanceType<typeof WaveformChart>>()
 const multiViewRef = ref<InstanceType<typeof MultiWaveformView>>()
 
+const jumpToTime = route.query.t ? Number(route.query.t) : null
+
+// Jump to timestamp from ?t= query param after first waveform load
+if (jumpToTime != null) {
+    const stopWatch = watch(waveformData, (data) => {
+        if (data) {
+            stopWatch()
+            nextTick(() => {
+                const padding = 300
+                singleChartRef.value?.setScaleX(
+                    Math.max(0, jumpToTime - padding),
+                    jumpToTime + padding,
+                )
+            })
+        }
+    })
+}
+
 function formatDate(iso: string): string {
     return new Date(iso).toLocaleDateString(undefined, {
         weekday: 'short',
@@ -171,12 +192,6 @@ function formatDate(iso: string): string {
         month: 'short',
         day: 'numeric',
     })
-}
-
-function ahiClass(ahi: number): string {
-    if (ahi < 5) return 'ahi-good'
-    if (ahi < 15) return 'ahi-mild'
-    return 'ahi-severe'
 }
 
 async function handleZoom(startSec: number, endSec: number): Promise<void> {
@@ -226,35 +241,8 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.loading-state,
-.error-state {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 2rem;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
-.error-state {
-    color: var(--p-red-500, #ef4444);
-}
-
 .session-detail {
     max-width: 1200px;
-}
-
-.back-link {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.875rem;
-    color: var(--p-primary-color, #3b82f6);
-    text-decoration: none;
-    margin-bottom: 1rem;
-}
-
-.back-link:hover {
-    text-decoration: underline;
 }
 
 .session-header {
@@ -334,15 +322,5 @@ onMounted(async () => {
 
 .setting-key {
     color: var(--p-text-muted-color, #6b7280);
-}
-
-.ahi-good {
-    color: #16a34a;
-}
-.ahi-mild {
-    color: #ca8a04;
-}
-.ahi-severe {
-    color: #dc2626;
 }
 </style>

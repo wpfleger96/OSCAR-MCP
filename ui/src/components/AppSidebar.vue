@@ -4,22 +4,22 @@
             <span class="sidebar-logo">SNORE</span>
         </div>
         <nav class="sidebar-nav">
+            <RouterLink to="/" class="nav-item">
+                <i class="pi pi-chart-bar" />
+                <span>Dashboard</span>
+            </RouterLink>
             <RouterLink to="/sessions" class="nav-item">
                 <i class="pi pi-list" />
                 <span>Sessions</span>
             </RouterLink>
-            <span class="nav-item nav-item--disabled" title="Coming soon">
-                <i class="pi pi-chart-bar" />
-                <span>Dashboard</span>
-            </span>
-            <span class="nav-item nav-item--disabled" title="Coming soon">
+            <RouterLink to="/stats" class="nav-item">
                 <i class="pi pi-chart-line" />
                 <span>Stats</span>
-            </span>
-            <span class="nav-item nav-item--disabled" title="Coming soon">
+            </RouterLink>
+            <RouterLink to="/rx" class="nav-item">
                 <i class="pi pi-cog" />
                 <span>RX History</span>
-            </span>
+            </RouterLink>
         </nav>
     </aside>
 </template>
@@ -67,7 +67,7 @@
     cursor: pointer;
 }
 
-.nav-item:hover:not(.nav-item--disabled) {
+.nav-item:hover {
     background: var(--p-surface-hover, #f1f5f9);
 }
 
@@ -75,10 +75,5 @@
     background: var(--p-primary-50, #eff6ff);
     color: var(--p-primary-color, #3b82f6);
     font-weight: 500;
-}
-
-.nav-item--disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
 }
 </style>

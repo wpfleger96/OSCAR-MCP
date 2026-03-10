@@ -137,6 +137,222 @@ export const WAVEFORM_LABELS: Record<string, string> = {
     snore: 'Snore',
 }
 
+// Devices
+export interface DeviceInfo {
+    id: number
+    manufacturer: string
+    model: string
+    serial_number: string
+}
+
+// Delete preview
+export interface DeletePreview {
+    sessions: SessionListItem[]
+    event_count: number
+    waveform_count: number
+    stats_count: number
+}
+
+// Stats
+export interface TherapySummary {
+    first_date: string
+    last_date: string
+    days_since_last: number
+    total_hours: number
+    avg_hours: number
+    days_with_data: number
+    avg_ahi: number | null
+    effectiveness: string
+    avg_rei: number | null
+    avg_pressure: number | null
+    min_pressure: number | null
+    max_pressure: number | null
+    avg_epap: number | null
+    avg_leak: number | null
+    avg_spo2: number | null
+    min_spo2: number | null
+    total_spo2_time_below_90: number
+    avg_pulse: number | null
+    avg_respiratory_rate: number | null
+    avg_tidal_volume: number | null
+    avg_minute_ventilation: number | null
+    event_counts: EventTypeCount[]
+}
+
+export interface EventTypeCount {
+    event_type: string
+    count: number
+    percentage: number
+}
+
+export interface PeriodStatistics {
+    period_type: string
+    period_start: string
+    period_end: string
+    days_used: number
+    days_in_period: number
+    avg_hours_per_day: number | null
+    avg_ahi: number | null
+    median_ahi: number | null
+    avg_pressure: number | null
+    avg_leak: number | null
+    avg_spo2: number | null
+    min_spo2: number | null
+}
+
+export interface TrendData {
+    ahi: [string, number | null][]
+    usage: [string, number | null][]
+    spo2: [string, number | null][]
+    leak: [string, number | null][]
+}
+
+export interface RecordsData {
+    [metric: string]: { best: [string, number][]; worst: [string, number][] }
+}
+
+// Days
+export interface DayListItem {
+    date: string
+    device_id: number
+    session_count: number
+    total_therapy_hours: number | null
+    ahi: number | null
+}
+
+export interface DayDetail extends DayListItem {
+    oai: number | null
+    cai: number | null
+    hi: number | null
+    avg_pressure: number | null
+    avg_leak: number | null
+    avg_spo2: number | null
+    session_ids: number[]
+}
+
+// RX
+export interface RxPeriodResponse {
+    settings: Record<string, string>
+    start_date: string
+    end_date: string
+    days_count: number
+    avg_ahi: number | null
+    median_ahi: number | null
+    avg_hours: number | null
+    total_hours: number
+    avg_leak: number | null
+}
+
+export interface RxComparisonResponse {
+    periods: RxPeriodResponse[]
+    best_index: number | null
+    worst_index: number | null
+}
+
+// Analysis
+export interface AnalysisListItem {
+    session_id: number
+    session_date: string
+    duration_hours: number | null
+    has_analysis: boolean
+    analysis_id: number | null
+}
+
+export interface AnalysisSessionDetail {
+    id: number
+    start_time: string
+    manufacturer: string | null
+    model: string | null
+    version_count: number
+}
+
+export interface AnalysisDeletePreview {
+    sessions_with_analysis: number
+    total_analysis_records: number
+    records_to_delete: number
+    patterns_count: number
+    session_details: AnalysisSessionDetail[]
+}
+
+export interface ApneaEvent {
+    start_time: number
+    end_time: number
+    duration: number
+    event_type: string
+    flow_reduction: number
+    confidence: number
+    classification_confidence: number
+    baseline_flow: number
+    detection_method: string
+}
+
+export interface HypopneaEvent {
+    start_time: number
+    end_time: number
+    duration: number
+    flow_reduction: number
+    confidence: number
+    baseline_flow: number
+    has_arousal: boolean | null
+    has_desaturation: boolean | null
+}
+
+export interface RERAEvent {
+    start_time: number
+    end_time: number
+    duration: number
+    obstructed_breath_count: number
+    recovery_amplitude_increase_pct: number
+    confidence: number
+    baseline_flow: number
+}
+
+export interface AnalysisEvent {
+    event_type: string
+    start_time: number
+    duration: number
+    source: string
+    confidence: number | null
+    flow_reduction: number | null
+    has_desaturation: boolean | null
+    baseline_flow: number | null
+}
+
+export interface ModeResult {
+    mode_name: string
+    apneas: ApneaEvent[]
+    hypopneas: HypopneaEvent[]
+    reras: RERAEvent[]
+    ahi: number
+    rdi: number
+    metadata: Record<string, unknown>
+}
+
+export interface AnalysisResult {
+    session_id: number
+    session_duration_hours: number
+    total_breaths: number
+    machine_events: AnalysisEvent[]
+    mode_results: Record<string, ModeResult>
+    flow_analysis: Record<string, unknown> | null
+    csr_detection: Record<string, unknown> | null
+    periodic_breathing: Record<string, unknown> | null
+    csr_episodes: Record<string, unknown>[] | null
+    periodic_breathing_episodes: Record<string, unknown>[] | null
+    pulse_change_count: number | null
+    pulse_change_index: number | null
+    timestamp_start: number
+    timestamp_end: number
+}
+
+export interface EventMatchResult {
+    machine_count: number
+    programmatic_count: number
+    matched: number
+    false_positives: number
+    false_negatives: number
+}
+
 // Event colors for waveform overlay
 export const EVENT_COLORS: Record<string, string> = {
     OA: 'rgba(220, 38, 38, 0.25)', // red — Obstructive Apnea
