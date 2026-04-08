@@ -220,6 +220,10 @@ class ExportService:
             warnings.append("No sessions found for the specified filters.")
             return ExportResult(format="csv", output_path=output, warnings=warnings)
 
+        session_ids = [s["id"] for s in sessions]
+        events_by_session = self._bulk_load_events(db_session, session_ids)
+        settings_by_session = self._bulk_load_settings(db_session, session_ids)
+
         # sessions.csv
         sessions_path = output / "sessions.csv"
         with open(sessions_path, "w", newline="") as f:
@@ -307,13 +311,7 @@ class ExportService:
                 ]
             )
             for s in sessions:
-                events = (
-                    db_session.query(models.Event)
-                    .filter_by(session_id=s["id"])
-                    .order_by(models.Event.start_time)
-                    .all()
-                )
-                for e in events:
+                for e in events_by_session.get(s["id"], []):
                     writer.writerow(
                         [
                             s["device_session_id"],
@@ -339,13 +337,7 @@ class ExportService:
                 ]
             )
             for s in sessions:
-                settings = (
-                    db_session.query(models.Setting)
-                    .filter_by(session_id=s["id"])
-                    .order_by(models.Setting.key)
-                    .all()
-                )
-                for st in settings:
+                for st in settings_by_session.get(s["id"], []):
                     writer.writerow(
                         [
                             s["device_session_id"],
@@ -410,8 +402,6 @@ class ExportService:
         device_serial: str | None = None,
     ) -> ExportResult:
         """Export parsed data as a single JSON document."""
-        from snore.database import models
-
         output.parent.mkdir(parents=True, exist_ok=True)
         warnings: list[str] = []
 
@@ -419,6 +409,10 @@ class ExportService:
 
         if not sessions:
             warnings.append("No sessions found for the specified filters.")
+
+        session_ids = [s["id"] for s in sessions]
+        events_by_session = self._bulk_load_events(db_session, session_ids)
+        settings_by_session = self._bulk_load_settings(db_session, session_ids)
 
         session_list: list[dict[str, Any]] = []
         nights: set[date] = set()
@@ -431,18 +425,8 @@ class ExportService:
             )
             nights.add(night)
 
-            events = (
-                db_session.query(models.Event)
-                .filter_by(session_id=s["id"])
-                .order_by(models.Event.start_time)
-                .all()
-            )
-            settings = (
-                db_session.query(models.Setting)
-                .filter_by(session_id=s["id"])
-                .order_by(models.Setting.key)
-                .all()
-            )
+            events = events_by_session.get(s["id"], [])
+            settings = settings_by_session.get(s["id"], [])
 
             session_list.append(
                 {
@@ -612,3 +596,49 @@ class ExportService:
             results.append(r)
 
         return results
+
+    @staticmethod
+    def _bulk_load_events(
+        db_session: DBSession, session_ids: list[int]
+    ) -> dict[int, list[Any]]:
+        """Load all events for the given session IDs in one query."""
+        from collections import defaultdict
+
+        from snore.database import models
+
+        if not session_ids:
+            return {}
+
+        events = (
+            db_session.query(models.Event)
+            .filter(models.Event.session_id.in_(session_ids))
+            .order_by(models.Event.session_id, models.Event.start_time)
+            .all()
+        )
+        grouped: dict[int, list[Any]] = defaultdict(list)
+        for e in events:
+            grouped[e.session_id].append(e)
+        return dict(grouped)
+
+    @staticmethod
+    def _bulk_load_settings(
+        db_session: DBSession, session_ids: list[int]
+    ) -> dict[int, list[Any]]:
+        """Load all settings for the given session IDs in one query."""
+        from collections import defaultdict
+
+        from snore.database import models
+
+        if not session_ids:
+            return {}
+
+        settings = (
+            db_session.query(models.Setting)
+            .filter(models.Setting.session_id.in_(session_ids))
+            .order_by(models.Setting.session_id, models.Setting.key)
+            .all()
+        )
+        grouped: dict[int, list[Any]] = defaultdict(list)
+        for s in settings:
+            grouped[s.session_id].append(s)
+        return dict(grouped)

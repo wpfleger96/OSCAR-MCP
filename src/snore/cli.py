@@ -208,7 +208,7 @@ def upgrade(check: bool, force: bool) -> None:
 )
 @click.option(
     "--backup-dir",
-    type=click.Path(),
+    type=click.Path(file_okay=False),
     help="Raw backup directory (default: ~/.snore/raw/)",
 )
 def import_data(
@@ -3356,7 +3356,9 @@ def export() -> None:
     is_flag=True,
     help="Trim STR.edf to only include the exported date range",
 )
-@click.option("--backup-dir", type=click.Path(), help="Raw backup directory")
+@click.option(
+    "--backup-dir", type=click.Path(file_okay=False), help="Raw backup directory"
+)
 def export_raw(
     output: str | None,
     date_from: datetime | None,

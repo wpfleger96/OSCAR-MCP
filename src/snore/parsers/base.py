@@ -64,6 +64,12 @@ class RawFileManifest:
     """Root path that all file paths are relative children of.
     Export uses file.relative_to(source_root) for destination path construction."""
 
+    files_copied: int = 0
+    """Number of files that were newly copied (not skipped)."""
+
+    files_skipped: int = 0
+    """Number of files that were skipped (already existed with matching size/mtime)."""
+
     @property
     def total_files(self) -> int:
         """Total number of files across device files and all nights."""

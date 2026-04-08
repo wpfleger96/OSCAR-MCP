@@ -742,6 +742,8 @@ class ResmedEDFParser(DeviceParser):
             device_files=device_files_copied,
             nights=nights_copied,
             source_root=dest_root,
+            files_copied=total_files_copied + len(device_files_copied),
+            files_skipped=total_files_skipped,
         )
 
     def get_raw_file_manifest(

@@ -101,20 +101,24 @@ class BackupService:
             source_root, dest_root, progress_callback=progress_callback
         )
 
-        files_copied = manifest.total_files
         logger.debug(
-            f"Backup complete: {files_copied} files, "
+            f"Backup complete: {manifest.files_copied} copied, "
+            f"{manifest.files_skipped} skipped, "
             f"{len(manifest.nights)} nights to {dest_root}"
         )
         if progress_callback:
+            parts = [f"{manifest.files_copied} copied"]
+            if manifest.files_skipped:
+                parts.append(f"{manifest.files_skipped} skipped")
             progress_callback(
-                f"Backed up {files_copied} files ({len(manifest.nights)} nights)"
+                f"Backed up {', '.join(parts)} ({len(manifest.nights)} nights)"
             )
 
         return BackupResult(
             backup_root=dest_root,
             manifest=manifest,
-            files_copied=files_copied,
+            files_copied=manifest.files_copied,
+            files_skipped=manifest.files_skipped,
         )
 
     def get_device_backup_root(self, device_serial: str) -> Path:
