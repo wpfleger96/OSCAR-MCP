@@ -379,7 +379,9 @@ def import_data(
             if device_serial:
                 from snore.services.backup_service import BackupService
 
-                backup_svc = BackupService(Path(backup_dir) if backup_dir else None)
+                backup_svc = BackupService(
+                    Path(backup_dir).expanduser() if backup_dir else None
+                )
                 try:
                     click.echo("\n📦 Backing up raw files...")
                     backup_result = backup_svc.backup_via_parser(
@@ -392,8 +394,8 @@ def import_data(
                         click.echo(f"  Skipped: {backup_result.skipped_reason}")
                     else:
                         click.echo(f"✓ Backed up to {backup_result.backup_root}")
-                    # Parse from the backup copy, not the live SD card
-                    parse_root = backup_result.backup_root
+                    if not backup_result.was_skipped:
+                        parse_root = backup_result.backup_root
                 except Exception as e:
                     click.echo(
                         f"❌ Backup failed: {e}\n"
@@ -3380,10 +3382,16 @@ def export_raw(
         click.echo("❌ --trim-str requires both --from and --to", err=True)
         sys.exit(1)
 
+    if trim_str and (as_zip or (output and str(output).endswith(".zip"))):
+        click.echo("❌ --trim-str is not supported with zip output", err=True)
+        sys.exit(1)
+
     if output is None:
         output = "snore_export_raw.zip" if as_zip else "snore_export_raw"
 
-    svc = ExportService(backup_root=Path(backup_dir) if backup_dir else None)
+    svc = ExportService(
+        backup_root=Path(backup_dir).expanduser() if backup_dir else None
+    )
 
     try:
         result = svc.export_raw(

@@ -15,7 +15,7 @@ import shutil
 import zipfile
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -256,9 +256,7 @@ class ExportService:
                 night = (
                     s["start_time"].date()
                     if s["start_time"].hour >= 12
-                    else (
-                        s["start_time"] - __import__("datetime").timedelta(days=1)
-                    ).date()
+                    else (s["start_time"] - timedelta(days=1)).date()
                 )
                 nights.add(night)
                 stats = s.get("statistics") or {}
@@ -429,7 +427,7 @@ class ExportService:
             night = (
                 s["start_time"].date()
                 if s["start_time"].hour >= 12
-                else (s["start_time"] - __import__("datetime").timedelta(days=1)).date()
+                else (s["start_time"] - timedelta(days=1)).date()
             )
             nights.add(night)
 

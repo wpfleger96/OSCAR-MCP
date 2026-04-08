@@ -265,12 +265,10 @@ class TestResmedBackupRawData:
         dest = tmp_path / "backup"
 
         parser.backup_raw_data(fake_sd, dest)
-        m1_bytes = (dest / "STR.edf").stat().st_mtime
 
-        # Second backup should skip (files match)
         manifest2 = parser.backup_raw_data(fake_sd, dest)
 
-        assert (dest / "STR.edf").stat().st_mtime != m1_bytes or True  # file exists
+        assert (dest / "STR.edf").exists()
         assert manifest2.source_root == dest
 
     def test_str_versioning(self, fake_sd: Path, tmp_path: Path) -> None:
