@@ -345,6 +345,9 @@ def abbreviate_event_type(event_type: str) -> str:
 # Database stored in user's home directory
 DEFAULT_DATABASE_PATH = str(Path.home() / ".snore" / "snore.db")
 
+# Raw file backup directory
+DEFAULT_RAW_BACKUP_DIR = Path.home() / ".snore" / "raw"
+
 # Logging configuration
 DEFAULT_LOG_DIR = Path.home() / ".snore" / "logs"
 DEFAULT_LOG_FILE = "snore.log"

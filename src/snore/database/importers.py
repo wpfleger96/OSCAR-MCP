@@ -81,7 +81,7 @@ class SessionImporter:
             )
             count = result.rowcount if hasattr(result, "rowcount") else 0
             if count > 0:
-                logger.info(f"Cleaned {count} orphaned records from {table}")
+                logger.debug(f"Cleaned {count} orphaned records from {table}")
                 total_cleaned += count
 
         if total_cleaned > 0:
@@ -146,7 +146,7 @@ class SessionImporter:
             return False, None
 
         if existing and force:
-            logger.info(f"Force re-importing session {session_data.device_session_id}")
+            logger.debug(f"Force re-importing session {session_data.device_session_id}")
             db.delete(existing)
             db.flush()
 
@@ -192,7 +192,7 @@ class SessionImporter:
         if session_data.settings:
             self._import_settings(db, new_session.id, session_data)
 
-        logger.info(
+        logger.debug(
             f"Imported session {session_data.device_session_id} from {session_data.start_time}"
         )
         return True, day_id
@@ -247,7 +247,7 @@ class SessionImporter:
             batch = sessions[i : i + batch_size]
             batch_day_ids = set()
 
-            logger.info(
+            logger.debug(
                 f"Importing batch {batch_num}/{total_batches} ({len(batch)} sessions)"
             )
 

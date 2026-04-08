@@ -8,15 +8,24 @@ Key Principle: Any new device parser just needs to inherit from DeviceParser
 and implement these methods - the rest of the system automatically works.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from snore.parsers.types import ParserMetadata
 from snore.parsers.unified import DeviceInfo, UnifiedSession
 
-__all__ = ["DeviceParser", "ParserDetectionResult", "ParserMetadata"]
+__all__ = [
+    "DeviceParser",
+    "ParserDetectionResult",
+    "ParserMetadata",
+    "RawFileManifest",
+]
 
 
 class ParserDetectionResult:
@@ -35,6 +44,40 @@ class ParserDetectionResult:
         self.device_info = device_info
         self.message = message
         self.metadata = metadata or {}
+
+
+@dataclass
+class RawFileManifest:
+    """Generic manifest of raw files grouped by night date.
+
+    Used by BackupService and ExportService to copy files without
+    knowing manufacturer-specific file layouts.
+    """
+
+    device_files: list[Path] = field(default_factory=list)
+    """Device-level files (e.g., settings summary, identification). Copied once."""
+
+    nights: dict[date, list[Path]] = field(default_factory=dict)
+    """Per-night session files keyed by night date."""
+
+    source_root: Path = field(default_factory=lambda: Path("."))
+    """Root path that all file paths are relative children of.
+    Export uses file.relative_to(source_root) for destination path construction."""
+
+    @property
+    def total_files(self) -> int:
+        """Total number of files across device files and all nights."""
+        return len(self.device_files) + sum(
+            len(files) for files in self.nights.values()
+        )
+
+    @property
+    def total_bytes(self) -> int:
+        """Total size of all files in bytes."""
+        total = sum(f.stat().st_size for f in self.device_files if f.exists())
+        for files in self.nights.values():
+            total += sum(f.stat().st_size for f in files if f.exists())
+        return total
 
 
 class DeviceParser(ABC):
@@ -214,6 +257,70 @@ class DeviceParser(ABC):
             "warnings": [],
             "confidence": result.confidence,
         }
+
+    # ------------------------------------------------------------------
+    # Raw file backup / export (optional — override in subclasses)
+    # ------------------------------------------------------------------
+
+    @property
+    def supports_raw_backup(self) -> bool:
+        """Whether this parser supports raw file backup and export.
+
+        Parsers that read from already-backed-up data (e.g., OSCAR binary
+        cache) should leave this as False.
+        """
+        return False
+
+    def backup_raw_data(
+        self,
+        source_root: Path,
+        dest_root: Path,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> RawFileManifest:
+        """Copy raw data files from source to dest, preserving layout.
+
+        Skips files that already exist at dest with matching size and mtime.
+        Returns a RawFileManifest describing what was backed up.
+
+        The parser knows its own file structure and versioning rules (e.g.,
+        STR.edf historical snapshots for ResMed). The service layer calls
+        this method generically without knowing file layout details.
+
+        MUST be stateless — use only the passed path arguments, never
+        instance state from detect() (which may be stale or from a
+        different path).
+
+        Args:
+            source_root: Path to raw data (e.g., SD card root).
+            dest_root: Backup destination (e.g., ~/.snore/raw/<serial>/).
+            progress_callback: Optional callback for progress messages.
+
+        Raises:
+            NotImplementedError: If this parser does not support raw backup.
+        """
+        raise NotImplementedError(
+            f"Parser '{self.parser_id}' does not support raw file backup"
+        )
+
+    def get_raw_file_manifest(
+        self,
+        root: Path,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> RawFileManifest:
+        """Return manifest of raw files at root, optionally filtered by date.
+
+        Used by ExportService to enumerate files for export without knowing
+        the manufacturer-specific file layout.
+
+        MUST be stateless — same requirements as backup_raw_data().
+
+        Raises:
+            NotImplementedError: If this parser does not support raw file manifest.
+        """
+        raise NotImplementedError(
+            f"Parser '{self.parser_id}' does not support raw file manifest"
+        )
 
     @property
     def metadata(self) -> ParserMetadata:

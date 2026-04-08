@@ -84,6 +84,11 @@ def upgrade() -> None:
         sa.Column("leak_median", sa.Float(), nullable=True),
         sa.Column("leak_mean", sa.Float(), nullable=True),
         sa.Column("leak_95th", sa.Float(), nullable=True),
+        sa.Column("epap_min", sa.Float(), nullable=True),
+        sa.Column("epap_max", sa.Float(), nullable=True),
+        sa.Column("epap_median", sa.Float(), nullable=True),
+        sa.Column("epap_mean", sa.Float(), nullable=True),
+        sa.Column("epap_95th", sa.Float(), nullable=True),
         sa.Column("spo2_min", sa.Float(), nullable=True),
         sa.Column("spo2_max", sa.Float(), nullable=True),
         sa.Column("spo2_mean", sa.Float(), nullable=True),
@@ -114,6 +119,7 @@ def upgrade() -> None:
         sa.Column("has_waveform_data", sa.Boolean(), nullable=True),
         sa.Column("has_event_data", sa.Boolean(), nullable=True),
         sa.Column("has_statistics", sa.Boolean(), nullable=True),
+        sa.Column("enabled", sa.Boolean(), nullable=True, server_default="1"),
         sa.CheckConstraint(
             "duration_seconds IS NULL OR duration_seconds >= 0", name="chk_duration"
         ),

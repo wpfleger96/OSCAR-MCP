@@ -18,7 +18,7 @@ import logging
 import os
 import re
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -32,6 +32,7 @@ from snore.parsers.base import (
     ParserDetectionResult,
     ParserError,
     ParserMetadata,
+    RawFileManifest,
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
 from snore.parsers.formats.edf import EDFReader
@@ -434,7 +435,7 @@ class ResmedEDFParser(DeviceParser):
         night_groups = self._group_session_files(datalog_dir)
 
         total_segments = sum(len(segments) for segments in night_groups.values())
-        logger.info(
+        logger.debug(
             f"Found {len(night_groups)} nights with {total_segments} total segments "
             f"(avg {total_segments / len(night_groups):.1f} segments per night)"
         )
@@ -495,7 +496,7 @@ class ResmedEDFParser(DeviceParser):
                     logger.warning(f"Could not parse night date {night_date}: {e}")
 
             if limit is not None and sessions_yielded >= limit:
-                logger.info(f"Reached session limit of {limit}, stopping")
+                logger.debug(f"Reached session limit of {limit}, stopping")
                 break
 
             try:
@@ -577,7 +578,7 @@ class ResmedEDFParser(DeviceParser):
         if limit is not None and len(filtered_items) > limit:
             filtered_items = filtered_items[:limit]
 
-        logger.info(
+        logger.debug(
             f"Parsing {len(filtered_items)} nights in parallel with {os.cpu_count()} workers"
         )
 
@@ -605,7 +606,7 @@ class ResmedEDFParser(DeviceParser):
                 night_date = futures[future]
 
                 if limit is not None and sessions_yielded >= limit:
-                    logger.info(
+                    logger.debug(
                         f"Reached session limit of {limit}, cancelling remaining"
                     )
                     for remaining_future in futures:
@@ -640,108 +641,227 @@ class ResmedEDFParser(DeviceParser):
                     logger.error(f"Failed to parse night {night_date}: {e}")
                     continue
 
+    # ------------------------------------------------------------------
+    # Raw file backup / export
+    # ------------------------------------------------------------------
+
+    @property
+    def supports_raw_backup(self) -> bool:
+        return True
+
+    def backup_raw_data(
+        self,
+        source_root: Path,
+        dest_root: Path,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> RawFileManifest:
+        """Copy ResMed raw files from SD card to backup directory.
+
+        Handles STR.edf versioning (moves old copy to STR_Backup/) and
+        copies DATALOG EDF files preserving directory structure. Skips
+        files that already exist at dest with matching size and mtime.
+        """
+        from snore.parsers.resmed_file_index import (
+            flatten_night_files,
+            group_session_files,
+        )
+
+        dest_root.mkdir(parents=True, exist_ok=True)
+
+        device_files_copied: list[Path] = []
+
+        # STR.edf versioning (matching OSCAR's backupSTRfiles pattern)
+        src_str = source_root / "STR.edf"
+        dest_str = dest_root / "STR.edf"
+        if src_str.exists():
+            if dest_str.exists():
+                str_backup_dir = dest_root / "STR_Backup"
+                str_backup_dir.mkdir(exist_ok=True)
+                snapshot_name = self._str_snapshot_name(dest_str)
+                snapshot_path = str_backup_dir / snapshot_name
+                if not snapshot_path.exists():
+                    self._safe_copy(dest_str, snapshot_path)
+                    logger.debug(f"Archived STR.edf → STR_Backup/{snapshot_name}")
+            self._safe_copy(src_str, dest_str)
+            device_files_copied.append(dest_str)
+
+        # Identification files (overwrite each import)
+        for ident_name in ("Identification.json", "Identification.tgt"):
+            src_ident = source_root / ident_name
+            if src_ident.exists():
+                dest_ident = dest_root / ident_name
+                self._safe_copy(src_ident, dest_ident)
+                device_files_copied.append(dest_ident)
+
+        if device_files_copied:
+            names = ", ".join(f.name for f in device_files_copied)
+            if progress_callback:
+                progress_callback(f"Copied device files ({names})")
+
+        # DATALOG EDF files
+        datalog_src = source_root / "DATALOG"
+        nights_copied: dict[date, list[Path]] = {}
+        total_files_copied = 0
+        total_files_skipped = 0
+
+        if datalog_src.is_dir():
+            grouped = group_session_files(datalog_src)
+            flat = flatten_night_files(grouped)
+            total_nights = len(flat)
+
+            if progress_callback:
+                progress_callback(f"Copying {total_nights} nights of DATALOG files...")
+
+            for night_str, src_files in sorted(flat.items()):
+                night_date = datetime.strptime(night_str, "%Y%m%d").date()
+                copied_files: list[Path] = []
+
+                for src_file in src_files:
+                    rel = src_file.relative_to(source_root)
+                    dest_file = dest_root / rel
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+
+                    if dest_file.exists() and self._files_match(src_file, dest_file):
+                        copied_files.append(dest_file)
+                        total_files_skipped += 1
+                        continue
+
+                    self._safe_copy(src_file, dest_file)
+                    copied_files.append(dest_file)
+                    total_files_copied += 1
+
+                if copied_files:
+                    nights_copied[night_date] = copied_files
+
+            logger.debug(
+                f"DATALOG backup: {total_files_copied} copied, "
+                f"{total_files_skipped} skipped across {len(nights_copied)} nights"
+            )
+
+        return RawFileManifest(
+            device_files=device_files_copied,
+            nights=nights_copied,
+            source_root=dest_root,
+        )
+
+    def get_raw_file_manifest(
+        self,
+        root: Path,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> RawFileManifest:
+        """Return manifest of ResMed raw files, optionally filtered by date."""
+        from snore.parsers.resmed_file_index import (
+            flatten_night_files,
+            group_session_files,
+        )
+
+        device_files: list[Path] = []
+        for name in ("STR.edf", "Identification.json", "Identification.tgt"):
+            p = root / name
+            if p.exists():
+                device_files.append(p)
+
+        nights: dict[date, list[Path]] = {}
+        datalog = root / "DATALOG"
+        if datalog.is_dir():
+            grouped = group_session_files(datalog)
+            flat = flatten_night_files(grouped)
+
+            for night_str, files in sorted(flat.items()):
+                night_date = datetime.strptime(night_str, "%Y%m%d").date()
+
+                if date_from and night_date < date_from:
+                    continue
+                if date_to and night_date > date_to:
+                    continue
+
+                nights[night_date] = files
+
+        return RawFileManifest(
+            device_files=device_files,
+            nights=nights,
+            source_root=root,
+        )
+
+    @staticmethod
+    def _str_snapshot_name(str_path: Path) -> str:
+        """Derive STR_Backup snapshot filename from the EDF header start date."""
+        try:
+            with open(str_path, "rb") as f:
+                header = f.read(256)
+            if len(header) < 184:
+                return "STR-unknown.edf"
+            date_str = header[168:176].decode("ascii", errors="ignore").strip()
+            time_str = header[176:184].decode("ascii", errors="ignore").strip()
+            day = int(date_str[0:2])
+            month = int(date_str[3:5])
+            year = int(date_str[6:8])
+            year = year + 2000 if year < 85 else year + 1900
+            hour = int(time_str[0:2])
+            minute = int(time_str[3:5])
+            second = int(time_str[6:8])
+            return f"STR-{year:04d}{month:02d}{day:02d}-{hour:02d}{minute:02d}{second:02d}.edf"
+        except Exception:
+            logger.warning(
+                f"Could not read EDF header from {str_path} for snapshot naming"
+            )
+            return "STR-unknown.edf"
+
+    @staticmethod
+    def _safe_copy(src: Path, dest: Path) -> None:
+        """Copy file content and attempt to preserve timestamps.
+
+        Falls back gracefully when full metadata copy fails, which happens
+        on macOS when copying from FAT32 SD cards (chflags not supported).
+        """
+        import shutil
+
+        shutil.copyfile(src, dest)
+        try:
+            shutil.copystat(src, dest)
+        except PermissionError:
+            # copystat's chflags call fails on macOS FAT32 → APFS copies.
+            # Preserve mtime/atime manually instead.
+            st = src.stat()
+            os.utime(dest, (st.st_atime, st.st_mtime))
+
+    @staticmethod
+    def _files_match(src: Path, dest: Path) -> bool:
+        """Check if two files match by size and modification time."""
+        try:
+            src_stat = src.stat()
+            dest_stat = dest.stat()
+            return (
+                src_stat.st_size == dest_stat.st_size
+                and abs(src_stat.st_mtime - dest_stat.st_mtime) < 2.0
+            )
+        except OSError:
+            return False
+
+    # ------------------------------------------------------------------
+    # Delegated utilities (from resmed_file_index)
+    # ------------------------------------------------------------------
+
     def _get_night_date(self, timestamp: datetime) -> str:
-        """
-        Get the "night date" for a session using OSCAR's noon cutoff rule.
+        """Delegate to resmed_file_index.get_night_date()."""
+        from snore.parsers.resmed_file_index import get_night_date
 
-        Sessions starting before noon belong to the previous day's night.
-        This matches ResMed's commercial software and OSCAR's behavior.
-
-        Args:
-            timestamp: Session start time
-
-        Returns:
-            Night date as YYYYMMDD string
-        """
-        if timestamp.hour < 12:
-            night_date = (timestamp - timedelta(days=1)).date()
-        else:
-            night_date = timestamp.date()
-
-        return night_date.strftime("%Y%m%d")
+        return get_night_date(timestamp)
 
     def _scan_edf_files(self, datalog_dir: Path) -> list[Path]:
-        """
-        Scan for EDF files using os.scandir (faster than rglob).
+        """Delegate to resmed_file_index.scan_edf_files()."""
+        from snore.parsers.resmed_file_index import scan_edf_files
 
-        Pre-filters by filename pattern during scan.
-
-        Args:
-            datalog_dir: Directory to scan
-
-        Returns:
-            List of EDF file paths
-        """
-        edf_files = []
-
-        def scan_dir(path: Path) -> None:
-            """Recursively scan directory for EDF files."""
-            try:
-                with os.scandir(path) as entries:
-                    for entry in entries:
-                        if entry.is_file() and entry.name.endswith(".edf"):
-                            match = re.match(r"\d{8}_\d{6}_[A-Z0-9]+\.edf", entry.name)
-                            if match:
-                                edf_files.append(Path(entry.path))
-                        elif entry.is_dir():
-                            scan_dir(Path(entry.path))
-            except PermissionError:
-                logger.warning(f"Permission denied accessing directory: {path}")
-
-        scan_dir(datalog_dir)
-        return edf_files
+        return scan_edf_files(datalog_dir)
 
     def _group_session_files(
         self, datalog_dir: Path
     ) -> dict[str, dict[str, dict[str, Path]]]:
-        """
-        Group EDF files by night date (noon-to-noon periods).
+        """Delegate to resmed_file_index.group_session_files()."""
+        from snore.parsers.resmed_file_index import group_session_files
 
-        Multiple sessions within the same night (mask removals/bathroom breaks)
-        are grouped together to match OSCAR's behavior.
-
-        Args:
-            datalog_dir: Directory containing DATALOG files
-
-        Returns:
-            Dict mapping night_date to dict of session_ids to file types
-            Example: {
-                "20240621": {  # Night of June 21
-                    "20240621_013454": {
-                        "BRP": Path("20240621_013454_BRP.edf"),
-                        "PLD": Path("20240621_013454_PLD.edf"),
-                        ...
-                    },
-                    "20240621_053022": {  # Another segment same night
-                        "BRP": Path("20240621_053022_BRP.edf"),
-                        ...
-                    }
-                }
-            }
-        """
-        groups: dict[str, dict[str, dict[str, Path]]] = {}
-
-        for edf_file in self._scan_edf_files(datalog_dir):
-            filename = edf_file.name
-
-            match = re.match(r"(\d{8}_\d{6})_([A-Z0-9]+)\.edf", filename)
-            if not match:
-                continue
-
-            session_id = match.group(1)
-            file_type = match.group(2)
-
-            timestamp = datetime.strptime(session_id, "%Y%m%d_%H%M%S")
-            night_date = self._get_night_date(timestamp)
-
-            if night_date not in groups:
-                groups[night_date] = {}
-            if session_id not in groups[night_date]:
-                groups[night_date][session_id] = {}
-
-            groups[night_date][session_id][file_type] = edf_file
-
-        return groups
+        return group_session_files(datalog_dir)
 
     def _parse_night_session(
         self,
@@ -772,7 +892,7 @@ class ResmedEDFParser(DeviceParser):
         """
         sorted_segments = sorted(segments.items(), key=lambda x: x[0])
 
-        logger.info(
+        logger.debug(
             f"Parsing night {night_date} with {len(sorted_segments)} segment(s): "
             f"{[seg_id for seg_id, _ in sorted_segments]}"
         )
@@ -815,13 +935,13 @@ class ResmedEDFParser(DeviceParser):
         if len(segment_sessions) == 1:
             session = segment_sessions[0]
             if eve_files:
-                logger.info(
+                logger.debug(
                     f"Parsing {len(eve_files)} EVE file(s) for night {night_date}"
                 )
                 self._parse_eve_files_for_night(eve_files, session)
             return session
 
-        logger.info(f"Merging {len(segment_sessions)} segments for night {night_date}")
+        logger.debug(f"Merging {len(segment_sessions)} segments for night {night_date}")
 
         merged_session = segment_sessions[0]
 
@@ -894,13 +1014,13 @@ class ResmedEDFParser(DeviceParser):
             f"Night composed of {len(segment_sessions)} segment(s) - mask removed during sleep",
         )
 
-        logger.info(
+        logger.debug(
             f"Merged night {night_date}: {len(segment_sessions)} segments, "
             f"total duration {(merged_session.end_time - merged_session.start_time).total_seconds() / 3600:.2f}h"
         )
 
         if eve_files:
-            logger.info(f"Parsing {len(eve_files)} EVE file(s) for night {night_date}")
+            logger.debug(f"Parsing {len(eve_files)} EVE file(s) for night {night_date}")
             self._parse_eve_files_for_night(eve_files, merged_session)
 
         return merged_session
@@ -1011,7 +1131,7 @@ class ResmedEDFParser(DeviceParser):
             file_size = file_path.stat().st_size
 
             if record_count == 0:
-                logger.info(
+                logger.debug(
                     f"SA2 file {file_path.name} has 0 data records (device on but not used, size={file_size} bytes)"
                 )
                 session.data_quality_notes.append(
@@ -1110,7 +1230,7 @@ class ResmedEDFParser(DeviceParser):
                 session.has_statistics = True
 
                 if not has_valid_data:
-                    logger.info("No oximeter connected - SA2 file has no valid data")
+                    logger.debug("No oximeter connected - SA2 file has no valid data")
 
         except Exception as e:
             logger.warning(f"Failed to parse SA2 statistics: {e}")
@@ -1127,7 +1247,7 @@ class ResmedEDFParser(DeviceParser):
             file_size = file_path.stat().st_size
 
             if record_count == 0:
-                logger.info(
+                logger.debug(
                     f"BRP file {file_path.name} has 0 data records (device on but not used, size={file_size} bytes)"
                 )
                 session.data_quality_notes.append(
@@ -1211,7 +1331,7 @@ class ResmedEDFParser(DeviceParser):
             file_size = file_path.stat().st_size
 
             if record_count == 0:
-                logger.info(
+                logger.debug(
                     f"PLD file {file_path.name} has 0 data records (device on but not used, size={file_size} bytes)"
                 )
                 session.data_quality_notes.append(
@@ -1339,7 +1459,7 @@ class ResmedEDFParser(DeviceParser):
         is_discontinuous = is_discontinuous_edf(file_path)
 
         if is_discontinuous:
-            logger.info(
+            logger.debug(
                 f"EVE file {file_path.name} is discontinuous (EDF+D format) - "
                 f"using MNE library to read annotations"
             )
@@ -1396,12 +1516,12 @@ class ResmedEDFParser(DeviceParser):
                 event_count += 1
 
             if is_discontinuous and event_count > 0:
-                logger.info(
+                logger.debug(
                     f"Successfully parsed {event_count} events from discontinuous EVE file "
                     f"(mask removal periods detected)"
                 )
             else:
-                logger.info(f"Parsed {event_count} events from {file_path.name}")
+                logger.debug(f"Parsed {event_count} events from {file_path.name}")
 
             if filtered_count > 0:
                 logger.debug(f"Filtered out {filtered_count} non-event annotations")
@@ -1507,14 +1627,14 @@ class ResmedEDFParser(DeviceParser):
                 continue
 
         if total_events_added > 0:
-            logger.info(
+            logger.debug(
                 f"Added {total_events_added} events to session from {len(eve_files)} EVE file(s) "
                 f"({total_events_filtered} events filtered out by timestamp)"
             )
         elif total_events_found == 0:
             logger.debug(f"No events found in {len(eve_files)} EVE file(s)")
         else:
-            logger.info(
+            logger.debug(
                 f"No events within session time range (found {total_events_found} total events, "
                 f"all filtered out)"
             )
@@ -1611,7 +1731,7 @@ class ResmedEDFParser(DeviceParser):
                                 data[record_idx]
                             )
 
-                logger.info(
+                logger.debug(
                     f"Preloaded STR.edf settings for {len(all_settings)} days "
                     f"({start_date} to {start_date + timedelta(days=num_records - 1)})"
                 )
@@ -1670,7 +1790,7 @@ class ResmedEDFParser(DeviceParser):
                             )
 
                 if all_summaries:
-                    logger.info(
+                    logger.debug(
                         f"Preloaded STR.edf summaries for {len(all_summaries)} days "
                         f"({start_date} to {start_date + timedelta(days=num_records - 1)})"
                     )

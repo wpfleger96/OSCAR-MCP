@@ -74,7 +74,7 @@ class EDFReader:
 
         try:
             self._edf_file = pyedflib.EdfReader(str(self.file_path))
-            logger.info(f"Opened EDF file: {self.file_path.name}")
+            logger.debug(f"Opened EDF file: {self.file_path.name}")
         except Exception as e:
             error_msg = str(e).lower()
 
@@ -177,7 +177,7 @@ class EDFReader:
 
             self._signals[label] = signal_info
 
-        logger.info(f"Found {len(self._signals)} signals in {self.file_path.name}")
+        logger.debug(f"Found {len(self._signals)} signals in {self.file_path.name}")
         return self._signals
 
     def list_signal_labels(self) -> list[str]:
@@ -313,7 +313,7 @@ class EDFReader:
                     )
                     self._annotations.append(annotation)
 
-                logger.info(
+                logger.debug(
                     f"Read {len(self._annotations)} annotations from {self.file_path.name}"
                 )
             else:
@@ -582,7 +582,7 @@ def parse_edf_annotations_raw(file_path: Path) -> list[EDFAnnotation]:
                 record_annos = _parse_annotation_bytes(anno_bytes)
                 annotations.extend(record_annos)
 
-        logger.info(
+        logger.debug(
             f"Parsed {len(annotations)} annotations from {file_path.name} using direct parsing"
         )
         return annotations
@@ -723,7 +723,7 @@ def read_annotations_from_discontinuous(file_path: Path) -> list[EDFAnnotation]:
                 )
                 annotations.append(annotation)
 
-            logger.info(
+            logger.debug(
                 f"Read {len(annotations)} annotations from discontinuous file using MNE"
             )
             return annotations
@@ -771,7 +771,7 @@ class EDFDiscontinuousReader:
 
         try:
             self._annotations = parse_edf_annotations_raw(self.file_path)
-            logger.info(f"Opened discontinuous EDF file: {self.file_path.name}")
+            logger.debug(f"Opened discontinuous EDF file: {self.file_path.name}")
         except Exception as e:
             raise ValueError(f"Failed to open discontinuous EDF+ file: {e}") from e
 

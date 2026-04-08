@@ -204,6 +204,16 @@ def upgrade(check: bool, force: bool) -> None:
     is_flag=True,
     help="Import all detected data sources without prompting",
 )
+@click.option(
+    "--no-backup",
+    is_flag=True,
+    help="Skip raw file backup (not recommended — SD card will be needed again)",
+)
+@click.option(
+    "--backup-dir",
+    type=click.Path(),
+    help="Raw backup directory (default: ~/.snore/raw/)",
+)
 def import_data(
     path: str,
     force: bool,
@@ -216,6 +226,8 @@ def import_data(
     no_parallel: bool,
     batch_size: int,
     select_all: bool,
+    no_backup: bool,
+    backup_dir: str | None,
 ) -> int:
     """Import CPAP data from device SD card or directory."""
     from snore.database.importers import SessionImporter
@@ -361,12 +373,52 @@ def import_data(
             if date_to:
                 click.echo(f"  • To: {date_to:%Y-%m-%d}")
 
+        root_path = source.get("root_path")
+        parse_root = Path(str(root_path)) if root_path else data_path
+
+        # Backup raw files before parsing (matching OSCAR's behavior)
+        if not no_backup and not dry_run and parser.supports_raw_backup:
+            device_serial = str(source.get("device_serial", ""))
+            if device_serial:
+                from snore.services.backup_service import BackupService
+
+                backup_svc = BackupService(Path(backup_dir) if backup_dir else None)
+                try:
+                    click.echo("\n📦 Backing up raw files...")
+                    backup_result = backup_svc.backup_via_parser(
+                        parser,
+                        parse_root,
+                        device_serial,
+                        progress_callback=lambda msg: click.echo(f"  {msg}"),
+                    )
+                    if backup_result.was_skipped:
+                        click.echo(f"  Skipped: {backup_result.skipped_reason}")
+                    else:
+                        click.echo(f"✓ Backed up to {backup_result.backup_root}")
+                    # Parse from the backup copy, not the live SD card
+                    parse_root = backup_result.backup_root
+                except Exception as e:
+                    click.echo(
+                        f"❌ Backup failed: {e}\n"
+                        "  Import aborted. Use --no-backup to skip backup.",
+                        err=True,
+                    )
+                    if logging.getLogger().level == logging.DEBUG:
+                        raise
+                    if len(selected_sources) > 1:
+                        continue
+                    return 1
+            else:
+                click.echo(
+                    "⚠️  No device serial found — skipping backup",
+                    err=True,
+                )
+
         click.echo("\n📋 Parsing sessions...")
         try:
-            root_path = source.get("root_path")
             sessions = list(
                 parser.parse_sessions(
-                    Path(str(root_path)) if root_path else data_path,
+                    parse_root,
                     date_from=date_from_str,
                     date_to=date_to_str,
                     limit=limit,
@@ -3490,6 +3542,228 @@ def rx_compare(db: str | None, min_days: int) -> None:
                 f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({len(worst.days)} days)"
             )
             click.echo(f"  Settings: {worst.settings}")
+
+
+# ============================================================================
+# Export commands
+# ============================================================================
+
+
+@cli.group()
+def export() -> None:
+    """Export CPAP data in various formats."""
+    pass
+
+
+@export.command("raw")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    help="Destination directory or .zip file (default: ./snore_export_raw)",
+)
+@click.option(
+    "--from",
+    "date_from",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Export sessions from this date (YYYY-MM-DD)",
+)
+@click.option(
+    "--to",
+    "date_to",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Export sessions up to this date (YYYY-MM-DD)",
+)
+@click.option("--device", "-d", help="Device serial number")
+@click.option("--zip", "as_zip", is_flag=True, help="Force zip output")
+@click.option("--dry-run", is_flag=True, help="Show what would be exported")
+@click.option("--backup-dir", type=click.Path(), help="Raw backup directory")
+def export_raw(
+    output: str | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    device: str | None,
+    as_zip: bool,
+    dry_run: bool,
+    backup_dir: str | None,
+) -> None:
+    """Export raw SD card files for import into OSCAR.
+
+    Reconstructs an OSCAR-compatible directory structure from backed-up
+    raw files. Requires raw backup to have been performed during import.
+
+    Examples:
+        snore export raw --from 2025-08-01 --to 2025-08-14
+        snore export raw -o ~/Desktop/export.zip --zip
+    """
+    from snore.services.export_service import ExportService
+
+    if output is None:
+        output = "snore_export_raw.zip" if as_zip else "snore_export_raw"
+
+    svc = ExportService(backup_root=Path(backup_dir) if backup_dir else None)
+
+    try:
+        result = svc.export_raw(
+            output=Path(output),
+            date_from=date_from.date() if date_from else None,
+            date_to=date_to.date() if date_to else None,
+            device_serial=device,
+            as_zip=as_zip,
+            dry_run=dry_run,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
+
+    if dry_run:
+        click.echo("🔍 DRY RUN — no files written\n")
+
+    click.echo(f"Nights: {result.nights_exported}")
+    click.echo(f"Files:  {result.files_written}")
+    if result.total_bytes:
+        mb = result.total_bytes / (1024 * 1024)
+        click.echo(f"Size:   {mb:.1f} MB")
+    click.echo(f"Output: {result.output_path}")
+
+    for w in result.warnings:
+        click.echo(f"⚠️  {w}", err=True)
+
+
+@export.command("csv")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    help="Destination directory for CSV files (default: ./snore_export_csv)",
+)
+@click.option(
+    "--from",
+    "date_from",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Export sessions from this date (YYYY-MM-DD)",
+)
+@click.option(
+    "--to",
+    "date_to",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Export sessions up to this date (YYYY-MM-DD)",
+)
+@click.option("--device", "-d", help="Device serial number")
+@click.option(
+    "--include-waveforms",
+    is_flag=True,
+    help="Include per-session waveform CSV files (large!)",
+)
+@click.option("--db", type=click.Path(), help="Database path")
+def export_csv(
+    output: str | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    device: str | None,
+    include_waveforms: bool,
+    db: str | None,
+) -> None:
+    """Export parsed data as CSV files (sessions, events, settings).
+
+    Creates sessions.csv, events.csv, and settings.csv in the output directory.
+    Optionally includes per-session waveform files with --include-waveforms.
+    """
+    from snore.database.session import init_database, session_scope
+    from snore.services.export_service import ExportService
+
+    if output is None:
+        output = "snore_export_csv"
+
+    init_database(db)
+
+    with session_scope() as db_session:
+        svc = ExportService()
+        try:
+            result = svc.export_csv(
+                db_session=db_session,
+                output=Path(output),
+                date_from=date_from.date() if date_from else None,
+                date_to=date_to.date() if date_to else None,
+                device_serial=device,
+                include_waveforms=include_waveforms,
+            )
+        except Exception as e:
+            click.echo(f"❌ {e}", err=True)
+            sys.exit(1)
+
+    click.echo(f"Nights: {result.nights_exported}")
+    click.echo(f"Files:  {result.files_written}")
+    click.echo(f"Output: {result.output_path}")
+
+    for w in result.warnings:
+        click.echo(f"⚠️  {w}", err=True)
+
+
+@export.command("json")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    help="Output JSON file path (default: ./snore_export.json)",
+)
+@click.option(
+    "--from",
+    "date_from",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Export sessions from this date (YYYY-MM-DD)",
+)
+@click.option(
+    "--to",
+    "date_to",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Export sessions up to this date (YYYY-MM-DD)",
+)
+@click.option("--device", "-d", help="Device serial number")
+@click.option("--db", type=click.Path(), help="Database path")
+def export_json(
+    output: str | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    device: str | None,
+    db: str | None,
+) -> None:
+    """Export parsed data as a JSON document.
+
+    Creates a single JSON file with sessions, events, statistics, and settings.
+    """
+    from snore.database.session import init_database, session_scope
+    from snore.services.export_service import ExportService
+
+    if output is None:
+        output = "snore_export.json"
+
+    init_database(db)
+
+    with session_scope() as db_session:
+        svc = ExportService()
+        try:
+            result = svc.export_json(
+                db_session=db_session,
+                output=Path(output),
+                date_from=date_from.date() if date_from else None,
+                date_to=date_to.date() if date_to else None,
+                device_serial=device,
+            )
+        except Exception as e:
+            click.echo(f"❌ {e}", err=True)
+            sys.exit(1)
+
+    click.echo(f"Nights: {result.nights_exported}")
+    click.echo(f"Output: {result.output_path}")
+
+    for w in result.warnings:
+        click.echo(f"⚠️  {w}", err=True)
+
+
+# ============================================================================
+# API Server
+# ============================================================================
 
 
 @cli.command()
