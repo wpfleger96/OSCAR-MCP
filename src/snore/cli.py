@@ -7,7 +7,7 @@ Provides commands for importing CPAP data, querying sessions, and database manag
 import logging
 import sys
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
 from pathlib import Path
@@ -20,10 +20,7 @@ if TYPE_CHECKING:
 
 import click
 
-from snore.constants import (
-    DEFAULT_LIST_SESSIONS_LIMIT,
-    abbreviate_event_type,
-)
+from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
 from snore.logging_config import setup_logging
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
@@ -2597,231 +2594,6 @@ def validate(
 
 
 @cli.group()
-def event() -> None:
-    """Event data export commands."""
-    pass
-
-
-@event.command("export")
-@click.option(
-    "--session-id",
-    type=int,
-    help="Session ID to export events from",
-)
-@click.option(
-    "--date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Export events from session on this date (YYYY-MM-DD)",
-)
-@click.option(
-    "--output",
-    "-o",
-    required=True,
-    type=click.Path(),
-    help="Output CSV file path",
-)
-@click.option("--db", type=click.Path(exists=True), help="Database path")
-@click.option(
-    "--mode",
-    "-m",
-    default="aasm",
-    type=str,
-    help="Detection mode to export (default: aasm)",
-)
-def export_events(
-    session_id: int | None,
-    date: datetime | None,
-    output: str,
-    db: str | None,
-    mode: str,
-) -> None:
-    """
-    Export event data to CSV for comparison with OSCAR.
-
-    Exports both machine-detected and programmatic events with timestamps,
-    types, durations, and match status.
-    """
-    import csv
-
-    from pathlib import Path
-
-    from snore.analysis.service import AnalysisService
-    from snore.database import models
-    from snore.database.session import init_database, session_scope
-
-    if not session_id and not date:
-        click.echo("Error: Must specify either --session-id or --date", err=True)
-        sys.exit(1)
-
-    if session_id and date:
-        click.echo(
-            "Error: Cannot specify both --session-id and --date. Choose one.",
-            err=True,
-        )
-        sys.exit(1)
-
-    if db:
-        init_database(str(Path(db)))
-    else:
-        init_database()
-
-    with session_scope() as db_session:
-        try:
-            if date:
-                sessions = (
-                    db_session.query(models.Session)
-                    .filter(
-                        models.Session.start_time >= date,
-                        models.Session.start_time < date + timedelta(days=1),
-                    )
-                    .all()
-                )
-
-                if not sessions:
-                    click.echo(f"Error: No session found on {date.date()}", err=True)
-                    sys.exit(1)
-
-                if len(sessions) > 1:
-                    click.echo(
-                        f"Warning: Multiple sessions found on {date.date()}, using first one"
-                    )
-
-                session_id = sessions[0].id
-
-            assert session_id is not None, "session_id must be set"
-
-            analysis_service = AnalysisService(db_session)
-            result = analysis_service.get_analysis_result(session_id)
-
-            if not result:
-                click.echo(f"Running analysis for session {session_id}...")
-                result = analysis_service.analyze_session(session_id, modes=[mode])
-
-            if mode not in result.mode_results:
-                click.echo(
-                    f"Error: Mode {mode} not found in analysis results", err=True
-                )
-                sys.exit(1)
-
-            mode_result = result.mode_results[mode]
-            machine_events = result.machine_events
-
-            from snore.database import models
-
-            session = db_session.get(models.Session, session_id)
-            if not session:
-                click.echo(f"Error: Session {session_id} not found", err=True)
-                sys.exit(1)
-
-            export_events_list = []
-
-            for event in machine_events:
-                time_offset = event.start_time
-                absolute_time = session.start_time + timedelta(seconds=time_offset)
-                export_events_list.append(
-                    {
-                        "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "time_into_session": format_time_offset(time_offset),
-                        "event_type": abbreviate_event_type(event.event_type),
-                        "duration_sec": f"{event.duration:.1f}",
-                        "source": "machine",
-                        "matched": "?",
-                    }
-                )
-
-            for apnea in mode_result.apneas:
-                time_offset = apnea.start_time
-                absolute_time = session.start_time + timedelta(seconds=time_offset)
-                export_events_list.append(
-                    {
-                        "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "time_into_session": format_time_offset(time_offset),
-                        "event_type": apnea.event_type,
-                        "duration_sec": f"{apnea.duration:.1f}",
-                        "source": "programmatic",
-                        "matched": "?",
-                    }
-                )
-
-            for hypopnea in mode_result.hypopneas:
-                time_offset = hypopnea.start_time
-                absolute_time = session.start_time + timedelta(seconds=time_offset)
-                export_events_list.append(
-                    {
-                        "timestamp": absolute_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "time_into_session": format_time_offset(time_offset),
-                        "event_type": "H",
-                        "duration_sec": f"{hypopnea.duration:.1f}",
-                        "source": "programmatic",
-                        "matched": "?",
-                    }
-                )
-
-            export_events_list.sort(key=lambda x: x["time_into_session"])
-
-            from snore.services.event_service import EventService
-
-            machine_times = [
-                parse_time_offset(e["time_into_session"])
-                for e in export_events_list
-                if e["source"] == "machine"
-            ]
-            prog_times = [
-                parse_time_offset(e["time_into_session"])
-                for e in export_events_list
-                if e["source"] == "programmatic"
-            ]
-
-            event_service = EventService()
-            machine_matched, prog_matched = event_service.classify_matches(
-                machine_times, prog_times
-            )
-
-            machine_match_map = dict(
-                zip(sorted(machine_times), machine_matched, strict=True)
-            )
-            prog_match_map = dict(zip(sorted(prog_times), prog_matched, strict=True))
-
-            for event_dict in export_events_list:
-                time_offset = parse_time_offset(event_dict["time_into_session"])
-                if event_dict["source"] == "machine":
-                    is_matched = machine_match_map[time_offset]
-                else:
-                    is_matched = prog_match_map[time_offset]
-                event_dict["matched"] = "yes" if is_matched else "no"
-
-            output_path = Path(output)
-            with open(output_path, "w", newline="") as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=[
-                        "timestamp",
-                        "time_into_session",
-                        "event_type",
-                        "duration_sec",
-                        "source",
-                        "matched",
-                    ],
-                )
-                writer.writeheader()
-                writer.writerows(export_events_list)
-
-            click.echo(f"Exported {len(export_events_list)} events to {output_path}")
-            click.echo(f"  Machine events: {len(machine_events)}")
-            click.echo(
-                f"  Programmatic events: {len(mode_result.apneas) + len(mode_result.hypopneas)}"
-            )
-
-        except Exception as e:
-            click.echo(f"Export error: {e}", err=True)
-            if "--verbose" in sys.argv or "-v" in sys.argv:
-                import traceback
-
-                traceback.print_exc()
-            sys.exit(1)
-
-
-@cli.group()
 def waveform() -> None:
     """Waveform inspection and visualization commands."""
     pass
@@ -3577,6 +3349,11 @@ def export() -> None:
 @click.option("--device", "-d", help="Device serial number")
 @click.option("--zip", "as_zip", is_flag=True, help="Force zip output")
 @click.option("--dry-run", is_flag=True, help="Show what would be exported")
+@click.option(
+    "--trim-str",
+    is_flag=True,
+    help="Trim STR.edf to only include the exported date range",
+)
 @click.option("--backup-dir", type=click.Path(), help="Raw backup directory")
 def export_raw(
     output: str | None,
@@ -3585,6 +3362,7 @@ def export_raw(
     device: str | None,
     as_zip: bool,
     dry_run: bool,
+    trim_str: bool,
     backup_dir: str | None,
 ) -> None:
     """Export raw SD card files for import into OSCAR.
@@ -3597,6 +3375,10 @@ def export_raw(
         snore export raw -o ~/Desktop/export.zip --zip
     """
     from snore.services.export_service import ExportService
+
+    if trim_str and not (date_from and date_to):
+        click.echo("❌ --trim-str requires both --from and --to", err=True)
+        sys.exit(1)
 
     if output is None:
         output = "snore_export_raw.zip" if as_zip else "snore_export_raw"
@@ -3611,6 +3393,7 @@ def export_raw(
             device_serial=device,
             as_zip=as_zip,
             dry_run=dry_run,
+            trim_str=trim_str,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         click.echo(f"❌ {e}", err=True)

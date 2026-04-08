@@ -42,7 +42,7 @@ class ParserRegistry:
         self._parsers: list[DeviceParser] = []
         self._parsers_by_id: dict[str, DeviceParser] = {}
         self._parsers_by_manufacturer: dict[str, list[DeviceParser]] = {}
-        logger.info("Parser registry initialized")
+        logger.debug("Parser registry initialized")
 
     def register(self, parser: DeviceParser) -> None:
         """
@@ -74,7 +74,7 @@ class ParserRegistry:
             self._parsers_by_manufacturer[manufacturer] = []
         self._parsers_by_manufacturer[manufacturer].append(parser)
 
-        logger.info(f"Registered parser: {parser}")
+        logger.debug(f"Registered parser: {parser}")
 
     def list_parsers(self) -> list[DeviceParser]:
         """
@@ -148,7 +148,7 @@ class ParserRegistry:
                 result = parser.detect(path)
 
                 if result.detected:
-                    logger.info(
+                    logger.debug(
                         f"Parser {parser.parser_id} detected data with confidence {result.confidence}"
                     )
 
@@ -167,7 +167,7 @@ class ParserRegistry:
 
         if best_match:
             parser, result = best_match
-            logger.info(
+            logger.debug(
                 f"Selected parser: {parser.parser_id} (confidence: {result.confidence})"
             )
             return parser
@@ -224,7 +224,7 @@ class ParserRegistry:
                 result = parser.detect(path)
 
                 if result.detected:
-                    logger.info(
+                    logger.debug(
                         f"Parser {parser.parser_id} detected data with confidence {result.confidence}"
                     )
                     matches.append((parser, result))
@@ -236,7 +236,7 @@ class ParserRegistry:
         matches.sort(key=lambda x: x[1].confidence, reverse=True)
 
         if matches:
-            logger.info(f"Found {len(matches)} parser(s) for path: {path}")
+            logger.debug(f"Found {len(matches)} parser(s) for path: {path}")
         else:
             logger.warning(f"No parsers detected for path: {path}")
 

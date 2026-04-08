@@ -808,6 +808,104 @@ class ResmedEDFParser(DeviceParser):
             )
             return "STR-unknown.edf"
 
+    def trim_device_summary(
+        self,
+        output_root: Path,
+        date_from: date,
+        date_to: date,
+    ) -> None:
+        """Trim STR.edf in the output directory to the given date range."""
+        str_path = output_root / "STR.edf"
+        if not str_path.exists():
+            return
+        self._slice_str_edf(str_path, str_path, date_from, date_to)
+
+    @staticmethod
+    def _slice_str_edf(src: Path, dest: Path, date_from: date, date_to: date) -> None:
+        """Slice an STR.edf file to only include records for a date range.
+
+        Pure binary manipulation — reads the EDF header to determine record
+        layout, computes which records fall within the date range, and writes
+        a new file with updated header fields and only the selected records.
+        """
+        from datetime import timedelta as td
+
+        with open(src, "rb") as f:
+            global_header = bytearray(f.read(256))
+
+        if len(global_header) < 256:
+            logger.warning(f"STR.edf too small to slice: {src}")
+            return
+
+        date_str = global_header[168:176].decode("ascii", errors="ignore").strip()
+        day = int(date_str[0:2])
+        month = int(date_str[3:5])
+        year = int(date_str[6:8])
+        year = year + 2000 if year < 85 else year + 1900
+        str_start_date = date(year, month, day)
+
+        num_records = int(
+            global_header[236:244].decode("ascii", errors="ignore").strip()
+        )
+        num_signals = int(
+            global_header[252:256].decode("ascii", errors="ignore").strip()
+        )
+
+        if num_records <= 0 or num_signals <= 0:
+            return
+
+        signal_header_size = num_signals * 256
+        with open(src, "rb") as f:
+            f.seek(256)
+            signal_headers = f.read(signal_header_size)
+
+        # samples_per_record sits at offset num_signals * 216 within signal headers
+        samples_per_record = []
+        spr_offset = num_signals * 216
+        for i in range(num_signals):
+            spr_bytes = signal_headers[spr_offset + i * 8 : spr_offset + (i + 1) * 8]
+            samples_per_record.append(
+                int(spr_bytes.decode("ascii", errors="ignore").strip())
+            )
+
+        record_size = sum(s * 2 for s in samples_per_record)
+
+        from_record = max(0, (date_from - str_start_date).days)
+        to_record = min(num_records - 1, (date_to - str_start_date).days)
+
+        if from_record > to_record:
+            slice_count = 0
+        else:
+            slice_count = to_record - from_record + 1
+
+        new_header = bytearray(global_header)
+
+        new_start = str_start_date + td(days=from_record)
+        year_2d = new_start.year % 100
+        new_date_str = f"{new_start.day:02d}.{new_start.month:02d}.{year_2d:02d}"
+        new_header[168:176] = f"{new_date_str:<8}".encode("ascii")  # start date
+        new_header[236:244] = f"{slice_count:<8}".encode("ascii")  # num records
+
+        data_offset = 256 + signal_header_size + from_record * record_size
+        data_length = slice_count * record_size
+
+        if data_length > 0:
+            with open(src, "rb") as f:
+                f.seek(data_offset)
+                data_records = f.read(data_length)
+        else:
+            data_records = b""
+
+        with open(dest, "wb") as f:
+            f.write(bytes(new_header))
+            f.write(signal_headers)
+            f.write(data_records)
+
+        logger.debug(
+            f"Sliced STR.edf: {num_records} records → {slice_count} records "
+            f"({new_start} to {str_start_date + td(days=to_record) if slice_count > 0 else 'empty'})"
+        )
+
     @staticmethod
     def _safe_copy(src: Path, dest: Path) -> None:
         """Copy file content and attempt to preserve timestamps.

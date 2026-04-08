@@ -60,6 +60,7 @@ class ExportService:
         device_serial: str | None = None,
         as_zip: bool = False,
         dry_run: bool = False,
+        trim_str: bool = False,
     ) -> ExportResult:
         """Export raw backup files as an OSCAR-compatible directory.
 
@@ -94,14 +95,26 @@ class ExportService:
             return self._dry_run_raw(manifest, output, date_from, date_to)
 
         warnings: list[str] = []
-        if (date_from or date_to) and manifest.device_files:
+        if (date_from or date_to) and manifest.device_files and not trim_str:
             warnings.append(
-                "Device-level files may contain data outside the exported date range."
+                "Device-level files may contain data outside the exported date range. "
+                "Use --trim-str to trim STR.edf to the date range."
             )
 
         if as_zip or str(output).endswith(".zip"):
-            return self._export_raw_zip(manifest, output, warnings)
-        return self._export_raw_dir(manifest, output, warnings)
+            result = self._export_raw_zip(manifest, output, warnings)
+        else:
+            result = self._export_raw_dir(manifest, output, warnings)
+
+        if (
+            trim_str
+            and date_from
+            and date_to
+            and not (as_zip or str(output).endswith(".zip"))
+        ):
+            parser.trim_device_summary(output, date_from, date_to)
+
+        return result
 
     def _dry_run_raw(
         self,
@@ -574,11 +587,9 @@ class ExportService:
         results = []
         for row in rows:
             r = dict(row._mapping)
-            # Parse datetime strings back to datetime objects
             for dt_field in ("start_time", "end_time"):
                 if isinstance(r[dt_field], str):
                     r[dt_field] = datetime.fromisoformat(r[dt_field])
-            # Bundle statistics into a sub-dict
             stat_keys = [
                 "ahi",
                 "oai",

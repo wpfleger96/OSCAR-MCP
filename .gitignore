@@ -209,3 +209,6 @@ __marimo__/
 .claude/settings.local.json
 
 node_modules/
+snore_export_raw/
+snore_export_csv/
+snore_export.json

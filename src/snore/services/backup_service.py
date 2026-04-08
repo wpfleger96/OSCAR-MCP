@@ -87,8 +87,6 @@ class BackupService:
             if source_root.resolve().is_relative_to(self.backup_root.resolve()):
                 reason = "Source is already within the backup directory"
                 logger.debug(f"Skipping backup: {reason}")
-                if progress_callback:
-                    progress_callback(f"Backup skipped: {reason}")
                 return BackupResult(
                     backup_root=dest_root,
                     skipped_reason=reason,

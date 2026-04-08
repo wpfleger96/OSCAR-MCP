@@ -370,3 +370,140 @@ class TestExportJson:
         with open(out) as f:
             doc = json.load(f)
         assert doc["session_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# STR.edf slicing
+# ---------------------------------------------------------------------------
+
+
+def _make_synthetic_str_edf(
+    path: Path,
+    start_date: str = "01.01.25",
+    num_records: int = 30,
+    num_signals: int = 2,
+) -> None:
+    """Create a minimal valid STR.edf for slicing tests.
+
+    Each signal has 1 sample per record (int16), so record_size = num_signals * 2.
+    Total file = 256 (header) + num_signals*256 (signal headers) + num_records * record_size.
+    """
+    header = bytearray(256)
+    header[0:8] = b"0       "
+    header[168:176] = f"{start_date:<8}".encode("ascii")
+    header[176:184] = b"12.00.00"
+    header_size = 256 + num_signals * 256
+    header[184:192] = f"{header_size:<8}".encode("ascii")
+    header[236:244] = f"{num_records:<8}".encode("ascii")
+    header[244:252] = b"86400   "
+    header[252:256] = f"{num_signals:<4}".encode("ascii")
+
+    sig_headers = bytearray(num_signals * 256)
+    # samples_per_record at offset num_signals * 216 within signal headers
+    spr_offset = num_signals * 216
+    for i in range(num_signals):
+        sig_headers[spr_offset + i * 8 : spr_offset + (i + 1) * 8] = b"1       "
+    # signal labels (16 bytes each, at the start)
+    for i in range(num_signals):
+        label = f"Signal{i:<10}".encode("ascii")[:16]
+        sig_headers[i * 16 : (i + 1) * 16] = label
+
+    record_size = num_signals * 2
+    data = bytearray(num_records * record_size)
+    for rec in range(num_records):
+        for sig in range(num_signals):
+            offset = rec * record_size + sig * 2
+            data[offset : offset + 2] = (rec + sig).to_bytes(2, "little", signed=True)
+
+    with open(path, "wb") as f:
+        f.write(bytes(header))
+        f.write(bytes(sig_headers))
+        f.write(bytes(data))
+
+
+class TestSliceStrEdf:
+    def test_full_range_preserves_file(self, tmp_path: Path) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        src = tmp_path / "STR.edf"
+        _make_synthetic_str_edf(src, "01.01.25", num_records=30, num_signals=2)
+        original_size = src.stat().st_size
+
+        dest = tmp_path / "out.edf"
+        ResmedEDFParser._slice_str_edf(src, dest, date(2025, 1, 1), date(2025, 1, 30))
+
+        assert dest.stat().st_size == original_size
+
+    def test_subset_reduces_size(self, tmp_path: Path) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        src = tmp_path / "STR.edf"
+        _make_synthetic_str_edf(src, "01.01.25", num_records=30, num_signals=2)
+
+        dest = tmp_path / "out.edf"
+        ResmedEDFParser._slice_str_edf(src, dest, date(2025, 1, 10), date(2025, 1, 19))
+
+        # 10 records, record_size=4, header=256+512=768
+        expected = 768 + 10 * 4
+        assert dest.stat().st_size == expected
+
+        header = dest.read_bytes()[:256]
+        num_records = int(header[236:244].decode("ascii").strip())
+        assert num_records == 10
+        date_str = header[168:176].decode("ascii").strip()
+        assert date_str == "10.01.25"
+
+    def test_clamp_before_start(self, tmp_path: Path) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        src = tmp_path / "STR.edf"
+        _make_synthetic_str_edf(src, "01.01.25", num_records=30, num_signals=2)
+
+        dest = tmp_path / "out.edf"
+        ResmedEDFParser._slice_str_edf(src, dest, date(2024, 12, 1), date(2025, 1, 10))
+
+        header = dest.read_bytes()[:256]
+        num_records = int(header[236:244].decode("ascii").strip())
+        assert num_records == 10
+        assert header[168:176].decode("ascii").strip() == "01.01.25"
+
+    def test_clamp_after_end(self, tmp_path: Path) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        src = tmp_path / "STR.edf"
+        _make_synthetic_str_edf(src, "01.01.25", num_records=30, num_signals=2)
+
+        dest = tmp_path / "out.edf"
+        ResmedEDFParser._slice_str_edf(src, dest, date(2025, 1, 20), date(2025, 12, 31))
+
+        header = dest.read_bytes()[:256]
+        num_records = int(header[236:244].decode("ascii").strip())
+        assert num_records == 11  # records 19..29 inclusive
+
+    def test_no_overlap_writes_empty(self, tmp_path: Path) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        src = tmp_path / "STR.edf"
+        _make_synthetic_str_edf(src, "01.01.25", num_records=30, num_signals=2)
+
+        dest = tmp_path / "out.edf"
+        ResmedEDFParser._slice_str_edf(src, dest, date(2026, 1, 1), date(2026, 12, 31))
+
+        header = dest.read_bytes()[:256]
+        num_records = int(header[236:244].decode("ascii").strip())
+        assert num_records == 0
+        # File should be header + signal headers only, no data
+        assert dest.stat().st_size == 768
+
+    def test_in_place_rewrite(self, tmp_path: Path) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        f = tmp_path / "STR.edf"
+        _make_synthetic_str_edf(f, "01.01.25", num_records=30, num_signals=2)
+        original_size = f.stat().st_size
+
+        ResmedEDFParser._slice_str_edf(f, f, date(2025, 1, 5), date(2025, 1, 14))
+
+        assert f.stat().st_size < original_size
+        header = f.read_bytes()[:256]
+        assert int(header[236:244].decode("ascii").strip()) == 10

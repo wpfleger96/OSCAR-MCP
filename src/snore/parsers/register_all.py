@@ -27,7 +27,7 @@ def register_all_parsers() -> None:
         from snore.parsers.resmed_edf import ResmedEDFParser
 
         parser_registry.register(ResmedEDFParser())
-        logger.info("Registered ResMed EDF+ parser")
+        logger.debug("Registered ResMed EDF+ parser")
     except ImportError as e:
         logger.warning(f"ResMed EDF+ parser not available: {e}")
     except Exception as e:
@@ -37,11 +37,13 @@ def register_all_parsers() -> None:
         from snore.parsers.oscar_device import OscarDeviceParser
 
         parser_registry.register(OscarDeviceParser())
-        logger.info("Registered OSCAR binary parser")
+        logger.debug("Registered OSCAR binary parser")
     except ImportError as e:
         logger.warning(f"OSCAR binary parser not available: {e}")
     except Exception as e:
         logger.error(f"Failed to register OSCAR binary parser: {e}", exc_info=True)
 
     registered_count = len(parser_registry.list_parsers())
-    logger.info(f"Parser registration complete: {registered_count} parser(s) available")
+    logger.debug(
+        f"Parser registration complete: {registered_count} parser(s) available"
+    )

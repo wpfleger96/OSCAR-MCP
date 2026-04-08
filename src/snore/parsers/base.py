@@ -322,6 +322,22 @@ class DeviceParser(ABC):
             f"Parser '{self.parser_id}' does not support raw file manifest"
         )
 
+    def trim_device_summary(
+        self,
+        output_root: Path,
+        date_from: date,
+        date_to: date,
+    ) -> None:
+        """Trim device-level summary files to the given date range.
+
+        Called after files are copied to the export output directory.
+        Parsers that have a trimmable summary file (e.g., ResMed's STR.edf)
+        override this to rewrite the file in-place.
+
+        Default: no-op.
+        """
+        return  # noqa: B027
+
     @property
     def metadata(self) -> ParserMetadata:
         """Get parser metadata."""
