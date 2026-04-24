@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@primevue/themes": "^4.0.0",
-    "axios": "^1.7.0",
+    "axios": "^1.15.0",
     "primeicons": "^7.0.0",
     "primevue": "^4.0.0",
     "uplot": "^1.6.0",
