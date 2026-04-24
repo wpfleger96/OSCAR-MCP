@@ -97,7 +97,7 @@ disable_error_code = ["var-annotated", "type-arg", "union-attr", "assignment", "
 dev = [
     "mypy>=1.18.2",
     "pytest-xdist>=3.8.0",
-    "scipy-stubs>=1.16.3.0",
+    "scipy-stubs>=1.17.1.4",
 ]
 
 [[tool.uv.index]]
