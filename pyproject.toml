@@ -20,7 +20,7 @@ dependencies = [
     "numpy>=1.24.0",
     "mne>=1.6.0",
     "pytest>=9.0.3",
-    "pytest-cov>=7.0.0",
+    "pytest-cov>=7.1.0",
     "pathspec>=0.12.1",
     "pytokens>=0.2.0",
     "ruff>=0.14.2",
@@ -40,7 +40,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.3",
-    "pytest-cov>=4.1.0",
+    "pytest-cov>=7.1.0",
     "black>=26.3.1",
     "ruff>=0.3.0",
     "mypy>=1.18.2",
