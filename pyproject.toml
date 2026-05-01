@@ -33,7 +33,7 @@ dependencies = [
     "plotext>=5.3.2",
     "pint>=0.25.3",
     "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
+    "uvicorn[standard]>=0.46.0",
     "httpx>=0.28.1",
 ]
 
