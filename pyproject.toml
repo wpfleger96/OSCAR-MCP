@@ -9,7 +9,7 @@ authors = [
     { name = "SNORE Contributors" }
 ]
 dependencies = [
-    "pydantic>=2.11.4",
+    "pydantic>=2.13.4",
     "sqlalchemy>=2.0.0",
     "alembic>=1.18.4",
     "click>=8.1.0",
