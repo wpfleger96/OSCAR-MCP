@@ -20,7 +20,7 @@
     "primevue": "^4.0.0",
     "uplot": "^1.6.0",
     "vue": "^3.4.0",
-    "vue-router": "^4.3.0"
+    "vue-router": "^5.0.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
