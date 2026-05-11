@@ -268,7 +268,7 @@ Key fixtures: `db_session`, `test_device`, `test_session_factory`, `recorded_ses
 
 ## Common Gotchas
 
-1. **OSCAR day-splitting logic:** Sessions before noon belong to previous day (e.g., 01:50 AM Dec 8 = Dec 7's sleep). Use `Day.date` for display/queries, not `session.start_time.date()`. See `day_manager.py:34-36` and `cli.py:1740-1743` (analysis show command uses day_date with fallback)
+1. **OSCAR day-splitting logic:** Sessions before noon belong to previous day (e.g., 01:50 AM Dec 8 = Dec 7's sleep). Use `Day.date` for display/queries, not `session.start_time.date()`. See `DayManager.get_day_for_session()` in `src/snore/database/day_manager.py` and the `session.day.date` fallback in `src/snore/services/analysis_facade.py`
 2. **Refresh after relationship changes:** `db_session.refresh(session)` after adding statistics
 3. **Integration test isolation:** Use `reset_database_state()` autouse fixture pattern
 4. **WAL cleanup:** Temp databases need `-wal` and `-shm` file cleanup
