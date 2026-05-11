@@ -12,7 +12,7 @@ Complete project overview showing implemented features and future development pl
 - **CLI-first:** Scriptable, automatable, fast iteration on algorithms
 - **ResMed-focused:** Direct import from ResMed devices (other manufacturers via OSCAR export)
 - **Programmatic analysis:** Configurable detection modes (AASM, AASM Relaxed, ResMed)
-- **Future web UI:** Visualization layer consuming CLI/API
+- **Web UI:** Visualization layer consuming API backend
 
 **Language:** Python 3.13+
 **Database:** SQLite with Alembic migrations
@@ -36,6 +36,7 @@ Complete project overview showing implemented features and future development pl
 - [x] Session segment merging (handles mask removal/replacement)
 - [x] Discontinuous EDF (EDF+D) support
 - [x] OSCAR binary parser (full support - all OSCAR-cached devices)
+- [x] STR.edf slicing — trims the all-time settings file during raw export to the requested date range
 - [x] Date range filtering (--from/--to)
 - [x] Import sort modes (date-asc, date-desc, filesystem)
 
@@ -55,7 +56,7 @@ Complete project overview showing implemented features and future development pl
 - [x] **Hypopnea detection modes:**
   - AASM_3PCT (30% flow + 3% SpO2)
   - AASM_4PCT (30% flow + 4% SpO2, CMS/Medicare)
-  - FLOW_ONLY (40% flow reduction only)
+  - FLOW_ONLY (flow reduction only, no SpO2; threshold config-controlled — 20% in ResMed mode)
 - [x] **Flow limitation** 7-class severity classification
 - [x] **CSR/periodic breathing** programmatic detection
 - [x] **SpO2 drop detection** (3%/4% modes)
@@ -66,12 +67,9 @@ Complete project overview showing implemented features and future development pl
 - [x] `snore session list/show/delete` - Session management
 - [x] `snore analysis run/list/show/delete` - Programmatic analysis
 - [x] `snore waveform show/compare` - Waveform visualization
-- [x] `snore event export` - Export events to CSV
 - [x] `snore db init/stats/vacuum/drop` - Database management
 - [x] `snore stats` - Therapy statistics summary (single period)
 - [x] `snore validate` - Batch validation across sessions
-- [x] `snore profile create/list/show/delete/set-default` - Profile management (optional)
-- [x] `snore config show` - Show configuration
 - [x] `snore logs show/clear/path` - Log management
 - [x] `snore completions install/uninstall/bash/zsh` - Shell completion
 - [x] `snore setup` - Global installation via uv tool
@@ -86,7 +84,7 @@ Complete project overview showing implemented features and future development pl
 - [x] **CSV export from visualization** - Data export from rendered views
 
 ### Database Schema
-- [x] Tables: profiles, devices, days, sessions, waveforms, events, statistics, settings
+- [x] Tables: profiles, devices, days, sessions, waveforms, events, statistics, settings, analysis_results, detected_patterns
 - [x] Day-level aggregation with pre-calculated statistics
 - [x] Analysis results storage (programmatic_result_json)
 - [x] Settings tracking per session
@@ -104,6 +102,14 @@ Complete project overview showing implemented features and future development pl
 - [x] **76 new integration tests** - Total test count: 573 (up from 497)
 - [x] **OpenAPI docs** - Auto-generated at `/docs`; 204 responses documented via `responses=` param
 - [x] **LTTB downsampling** - 720k-point waveforms served in <100ms via `max_points` query param
+
+### Phase 2.1b: Backup & Export System (2026-04-07)
+- [x] **Raw file backup on import** — Copies SD card files to `~/.snore/raw/` before parsing
+- [x] **`snore export raw`** — Export raw files for date range
+- [x] **`snore export csv`** — CSV export of session/event data
+- [x] **`snore export json`** — JSON export of analysis results
+- [x] **BackupService and ExportService** — Service layer modules for backup and export
+- [x] **Import flags** — `--no-backup`, `--backup-dir` options for import command
 
 ### Phase 2.0b: Service Layer Extraction (2026-02-14)
 - [x] **8 services extracted from CLI** - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling (1,741 lines moved)
@@ -164,43 +170,15 @@ Complete project overview showing implemented features and future development pl
 
 ### Phase 2: Web UI
 
-**Sub-phase 2.0a: Dead Code Cleanup & Model Consolidation** ✅ COMPLETE (2026-02-12)
-- [x] Deleted 7 dead modules (~1000+ lines of unused code)
-- [x] Model layer consolidated following "types live with the code that owns them" principle
-- [x] Eliminated `models/` package entirely
-- [x] Pydantic type ownership model: parsers/unified.py (parser types), analysis/**/types.py (domain types), services/schemas.py (service responses)
-
-**Sub-phase 2.0b: Service Layer Extraction** ✅ COMPLETE (2026-02-14)
-- [x] Extracted 8 services from CLI monolith (1,741 lines of business logic)
-  - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling
-- [x] CLI reduced from 3,797 to 3,524 lines (-7.2%)
-- [x] 93 new unit tests added (497 total tests, up from 404)
-- [x] SQL parameterization, Pydantic V2 migration, transaction boundary documentation
-- [x] Comprehensive CLI smoke test passed (57/57 commands, zero errors)
-- [x] Services are API-ready with typed Pydantic returns and constructor injection
-
-**Sub-phase 2.1: FastAPI Backend** ✅ COMPLETE (2026-02-17)
-- [x] REST API with 8 routers and 24 endpoints (`snore serve`)
-  - Sessions (list, detail, enable/disable, delete, delete-preview)
-  - Waveforms (list types, get data with LTTB downsampling)
-  - Events (list, match machine vs programmatic)
-  - Analysis (list status, get result, run, delete, delete-preview)
-  - Stats (summary, periods, trends, records)
-  - Devices (list)
-  - Days (list, detail)
-  - RX (history, current, compare)
-- [x] New services: `RxService`, `DayService` (thin Pydantic bridges over `RxTracker` and Day ORM)
-- [x] Caller-controlled transactions (`get_db()` dependency handles commit/rollback)
-- [x] `NotFoundError` domain exception in `snore.exceptions` (replaces `ValueError` catch-all)
-- [x] Auth/rate-limit middleware stubs designed for production swap-in
-- [x] CORS configured for Vue dev server (`localhost:5173`)
-- [x] OpenAPI auto-generated docs at `/docs`
-- [x] 573 tests total (76 new API integration tests)
-
-**Sub-phase 2.2-2.4: Vue Frontend** 🚧 NEXT
+**Sub-phase 2.2-2.4: Vue Frontend** 🚧 IN PROGRESS
+- [x] Project scaffolding (Vue 3 + TypeScript + PrimeVue + Vite)
+- [x] API client layer (8 modules matching backend routers)
+- [x] 7 views: Dashboard, Session List, Session Detail, Stats, Analysis, Event Explorer, RX History
+- [x] 10+ components: Sidebar, StatCard, TrendChart, CalendarHeatmap, WaveformChart, etc.
+- [x] Waveform rendering with uPlot
 - [ ] Interactive waveform viewer with zoom/pan
-- [ ] Dashboard with summary cards and trend charts
-- [ ] Event explorer and analysis comparison tools
+- [ ] Event explorer comparison tools
+- [ ] Mobile-responsive layout
 
 ---
 
@@ -342,9 +320,9 @@ _(Phase 2: Web UI moved to "In Progress" section above)_
 - **Fast iteration** - No UI dependencies for algorithm development
 - **Testing** - Easy to test CLI commands vs GUI interactions
 - **Power users** - Direct access to all functionality
-- **Future web UI** - Can consume same analysis engine
+- **Web UI** - Visualization layer consuming API backend
 
-**When web UI arrives:** CLI remains as automation/scripting interface.
+CLI remains as automation/scripting interface alongside the web UI.
 
 ---
 

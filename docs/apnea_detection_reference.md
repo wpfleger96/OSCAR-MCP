@@ -287,28 +287,58 @@ def merge_adjacent_events(events, max_gap=3.0):
     return merged
 ```
 
-## 4. Common Implementation Pitfalls
+## 4. SNORE Detection Mode Configurations
 
-### 4.1 Threshold Confusion
+SNORE implements three detection modes that map to the clinical standards described in sections 1-3. Each mode adjusts thresholds and baseline calculation to target different scoring philosophies.
+
+### 4.1 AASM Mode
+
+Follows the AASM Scoring Manual v2.6 definitions from section 1.1:
+- Apnea threshold: ≥90% flow reduction
+- Hypopnea threshold: ≥30% flow reduction
+- Baseline: 2-minute (120s) rolling time window
+- Hypopnea requires SpO2 desaturation (3% or 4%) per configured hypopnea mode
+
+### 4.2 AASM Relaxed Mode (Breath Baseline)
+
+Uses AASM thresholds but replaces the time-based baseline with a **breath-based baseline**. Instead of a fixed 120-second window, the baseline is calculated from a rolling window of the last 30 breaths. This adapts more quickly to breathing pattern changes during a session (e.g., position shifts, leak events) without requiring a fixed time interval.
+
+### 4.3 ResMed Mode
+
+Approximates ResMed device logic using divergent thresholds from AASM standards (`RESMED_CONFIG` in `src/snore/analysis/modes/config.py`):
+- Apnea threshold: ≥50% flow reduction (vs AASM's 90%) — uses "gap + low-flow" detection
+- Hypopnea threshold: ≥20% flow reduction (vs AASM's 30%)
+- Baseline: 2-minute (120s) rolling time window, same as AASM
+- Flow-only hypopnea mode: no SpO2 required
+
+These relaxed thresholds reflect the approach ResMed devices use internally, making programmatic results more comparable to machine-reported events.
+
+### 4.4 PulseChangeDetector
+
+Detects abrupt pulse rate changes. Algorithm: identifies changes of ≥5 BPM within 8-second sliding windows across the pulse waveform. Outputs `pulse_change_count` (total changes per session) and `pulse_change_index` (changes per hour). Integrated into the analysis pipeline in `src/snore/analysis/shared/pulse_detector.py`. Mirrors the OSCAR `calcPulseChange()` algorithm (see `oscar-reference.md`).
+
+## 5. Common Implementation Pitfalls
+
+### 5.1 Threshold Confusion
 - **ERROR**: Using 70% or 80% threshold for apnea (too lenient)
 - **CORRECT**: Use 90% reduction for apnea, 30% for hypopnea minimum
 
-### 4.2 Baseline Errors
+### 5.2 Baseline Errors
 - **ERROR**: Including apnea periods in baseline calculation
 - **ERROR**: Using instantaneous flow instead of breath amplitude
 - **ERROR**: Fixed baseline for entire night
 
-### 4.3 Signal Processing Issues
+### 5.3 Signal Processing Issues
 - **ERROR**: Not filtering cardiac oscillations (1-2 Hz)
 - **ERROR**: Using raw flow without leak compensation
 - **ERROR**: Incorrect sampling rate assumptions
 
-### 4.4 Event Validation
+### 5.4 Event Validation
 - **ERROR**: Accepting events <10 seconds
 - **ERROR**: Not checking the 90% amplitude rule
 - **ERROR**: Over-merging distinct events
 
-## 5. Implementation Checklist
+## 6. Implementation Checklist
 
 ### Required Components
 - [ ] Breath segmentation using zero-crossing detection
@@ -330,9 +360,9 @@ def merge_adjacent_events(events, max_gap=3.0):
 - [ ] Arousal detection from flow patterns
 - [ ] Flow limitation shape analysis for RERA
 
-## 6. Validation Methods
+## 7. Validation Methods
 
-### 6.1 Compare with Machine Flags
+### 7.1 Compare with Machine Flags
 ```python
 def validate_detection(detected_events, machine_events, tolerance=5.0):
     """
@@ -374,50 +404,50 @@ def validate_detection(detected_events, machine_events, tolerance=5.0):
     }
 ```
 
-### 6.2 Visual Validation
+### 7.2 Visual Validation
 - Plot detected events over flow waveform
 - Compare with machine event markers
 - Verify baseline calculation is reasonable
 - Check that flow reduction percentages are correct
 
-## 7. Advanced Techniques
+## 8. Advanced Techniques
 
-### 7.1 Machine Learning Enhancements
+### 8.1 Machine Learning Enhancements
 - Train classifier on validated event/non-event segments
 - Use features: flow stats, frequency content, shape metrics
 - Ensemble with rule-based detection for robustness
 
-### 7.2 Flow Limitation Detection
+### 8.2 Flow Limitation Detection
 - Analyze inspiratory flow shape (flattening index)
 - Calculate ratio of mid-inspiratory to peak flow
 - Detect "chair-shaped" inspiratory curves
 
-### 7.3 Adaptive Thresholds
+### 8.3 Adaptive Thresholds
 - Adjust thresholds based on device type
 - Account for altitude effects on flow
 - Personalize based on patient baseline patterns
 
-## 8. Testing Recommendations
+## 9. Testing Recommendations
 
-### 8.1 Test Dataset Requirements
+### 9.1 Test Dataset Requirements
 - Sessions with known machine-detected events
 - Mix of OA, CA, and hypopnea events
 - Various severity levels (mild to severe)
 - Different CPAP devices if possible
 
-### 8.2 Performance Targets
+### 9.2 Performance Targets
 - Sensitivity (recall): >85% for apneas, >70% for hypopneas [6][10]
 - Precision: >80% for apneas, >60% for hypopneas [6][10]
 - F1 Score: >0.80 for apneas, >0.65 for hypopneas [6][10]
 
-### 8.3 Edge Cases to Test
+### 9.3 Edge Cases to Test
 - Events at session start/end
 - Back-to-back events
 - Very long events (>60 seconds)
 - Periodic breathing patterns
 - High leak periods
 
-## 9. References
+## 10. References
 
 ### Clinical Guidelines
 
@@ -480,7 +510,7 @@ URL: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6615031/
 
 [16] Apnea Board Wiki Community. OSCAR - The Guide. *Apnea Board Educational Materials*. 2023. Local: `docs/references/OSCAR_The_Guide_Apnea_Board_Wiki.pdf`
 
-## 10. Conclusion
+## 11. Conclusion
 
 Successful apnea detection from CPAP data requires:
 1. Correct threshold values (90% for apnea, not 70%)

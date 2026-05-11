@@ -10,17 +10,29 @@ Technical documentation for the SNORE system architecture, components, and desig
 
 ```
 ┌─────────────────────────────────────────────┐
+│        Vue 3 Frontend (ui/)                │
+│  Dashboard, Session Explorer, Waveforms     │
+│  PrimeVue components + uPlot charts         │
+├─────────────────────────────────────────────┤
+│        FastAPI REST API (api/)              │
+│  8 routers, 24 endpoints, LTTB             │
+│  OpenAPI docs at /docs                      │
+├─────────────────────────────────────────────┤
+│        Service Layer (services/)            │
+│  12 services: business logic between        │
+│  CLI/API and database                       │
+├─────────────────────────────────────────────┤
 │        Analysis Layer (Parser Agnostic)     │
-│  get_sessions(), analyze_therapy(), etc.    │
-│         Zero knowledge of formats           │
+│  Breath segmentation, event detection,      │
+│  flow limitation, pulse change detection    │
 ├─────────────────────────────────────────────┤
 │         SQLite Database ✅                  │
 │  Universal schema, direct BLOB storage      │
-│  Auto-creates at ~/.snore/snore.db │
+│  Alembic migrations, 10 tables              │
 ├─────────────────────────────────────────────┤
 │         CLI Import Tool ✅                  │
-│  snore import (auto-detection)          │
-│  Progress bars, duplicate prevention        │
+│  snore import (auto-detection)              │
+│  Raw backup, parallel parsing               │
 ├─────────────────────────────────────────────┤
 │         Unified Data Model                  │
 │  UnifiedSession, WaveformData, etc.         │
@@ -53,7 +65,7 @@ Technical documentation for the SNORE system architecture, components, and desig
 
 ### Unified Data Model
 
-**File:** `src/snore/models/unified.py`
+**File:** `src/snore/parsers/unified.py`
 
 All parsers convert to these universal Pydantic structures:
 
@@ -173,18 +185,24 @@ The analysis system performs programmatic respiratory event detection on importe
 **Architecture:**
 ```
 analysis/
-├── service.py          # Orchestration (BreathSegmenter → FeatureExtractor → Classifier → Detector)
-├── types.py            # AnalysisResult, AnalysisEvent (Pydantic models)
+├── service.py          # Orchestration
+├── types.py            # AnalysisResult, AnalysisEvent
+├── calculations.py     # Metric calculations
+├── rx_tracker.py       # Prescription change tracking
+├── utils.py            # Analysis utilities
+├── data/
+│   └── waveform_loader.py  # Database waveform loading
 ├── shared/             # Core algorithms
-│   ├── breath_segmenter.py      # Breath segmentation from flow data
-│   ├── feature_extractors.py   # Waveform feature extraction
-│   ├── flow_limitation.py       # Flow limitation classification
-│   ├── pattern_detector.py     # Complex pattern detection (CSR, periodic breathing)
-│   └── types.py                 # BreathMetrics, ApneaEvent, HypopneaEvent (Pydantic)
-└── modes/              # Detection modes
-    ├── config.py       # AASM_CONFIG, AASM_RELAXED_CONFIG
-    ├── detector.py     # EventDetector (configurable)
-    └── types.py        # ModeResult, DetectionModeConfig (Pydantic)
+│   ├── breath_segmenter.py
+│   ├── feature_extractors.py
+│   ├── flow_limitation.py
+│   ├── pattern_detector.py
+│   ├── pulse_detector.py       # Pulse change detection (NEW)
+│   └── types.py
+└── modes/
+    ├── config.py       # AASM_CONFIG, AASM_RELAXED_CONFIG, RESMED_CONFIG
+    ├── detector.py
+    └── types.py
 ```
 
 ### Detection Modes
@@ -213,10 +231,10 @@ analysis/
    - Better for matching machine-detected events
 
 3. **ResMed Mode**
-   - Approximates ResMed machine detection logic
-   - Breath-based baseline (40 breaths)
-   - 85% validation threshold
-   - Flow-only hypopnea detection (40% reduction, no SpO2 required)
+   - Approximates ResMed machine detection logic (gap + low-flow approach)
+   - Time-based baseline (120 seconds, 2 minutes)
+   - 50% apnea threshold (vs 90% AASM) — detects flow gaps, not near-complete cessation
+   - Flow-only hypopnea detection (20% reduction, no SpO2 required)
    - RERA detection enabled
    - Designed to match ResMed AirSense/AirCurve event counts
 
@@ -242,7 +260,7 @@ DetectionModeConfig(
 **Hypopnea Detection Modes:**
 - `AASM_3PCT` - 30% flow + 3% SpO2 drop (AASM recommended)
 - `AASM_4PCT` - 30% flow + 4% SpO2 drop (CMS/Medicare)
-- `FLOW_ONLY` - 40% flow reduction (ResMed-style, no SpO2)
+- `FLOW_ONLY` - Flow reduction, no SpO2 required (threshold config-controlled; 20% in ResMed mode)
 - `DISABLED` - Skip hypopnea detection
 
 ### Analysis Pipeline
@@ -262,6 +280,10 @@ DetectionModeConfig(
 5. ComplexPatternDetector
    → Detects CSR (Cheyne-Stokes Respiration)
    → Detects periodic breathing
+   ↓
+5.5. PulseChangeDetector
+   → Detects pulse rate changes ≥5 BPM within 8-second sliding windows
+   → Outputs pulse_change_count and pulse_change_index (per hour)
    ↓
 6. EventDetector.detect_events() (per mode)
    → Detects apneas (obstructive, central, mixed, unspecified) with confidence levels
@@ -290,20 +312,96 @@ DetectionModeConfig(
 
 ---
 
+## REST API
+
+### Overview
+
+FastAPI application serving the same data as the CLI through HTTP endpoints. Launched via `snore serve`.
+
+**Application:** `src/snore/api/app.py`
+
+**Routers (8):**
+| Router | Prefix | Endpoints |
+|--------|--------|-----------|
+| sessions | `/sessions` | List, detail, enable/disable, delete |
+| waveforms | `/waveforms` | List types, get data (LTTB downsampling) |
+| events | `/events` | List, match machine vs programmatic |
+| analysis | `/analysis` | List status, get result, run, delete |
+| stats | `/stats` | Summary, periods, trends, records |
+| devices | `/devices` | List |
+| days | `/days` | List, detail |
+| rx | `/rx` | History, current, compare |
+
+**Key patterns:**
+- Dependency injection: `db: Session = Depends(get_db)` for database sessions
+- Caller-controlled transactions: `get_db()` handles commit/rollback
+- Domain exceptions: `NotFoundError` → 404, genuine `ValueError` → 500
+- LTTB downsampling: 720k-point waveforms served in <100ms via `max_points` param
+- CORS: Configured for Vue dev server (`localhost:5173`)
+- OpenAPI: Auto-generated docs at `/docs`
+- Auth/rate-limit middleware (`api/middleware.py`): no-op stubs — designed for production swap-in
+
+---
+
+## Service Layer
+
+12 service modules in `src/snore/services/` form the business logic layer between CLI/API and database:
+
+| Service | Responsibility |
+|---------|---------------|
+| AnalysisFacade | Analysis orchestration and result retrieval |
+| BackupService | Raw SD card file backup to `~/.snore/raw/` |
+| DatabaseService | Database operations (stats, vacuum, init) |
+| DayService | Day aggregation and lookup |
+| DeviceService | Device management |
+| EventService | Event queries and matching |
+| ExportService | Data export (CSV, JSON) |
+| lttb (module) | Largest-Triangle-Three-Buckets downsampling via `lttb_downsample()` |
+| RxService | Prescription/therapy settings tracking |
+| SessionService | Session CRUD and filtering |
+| StatsService | Statistics calculations and summaries |
+| WaveformService | Waveform data access and formatting |
+
+**Pattern:** Constructor injection with SQLAlchemy session, typed Pydantic returns via `services/schemas.py`.
+
+---
+
 ## Database Schema
 
 ### Tables
 
+**profiles**
+```sql
+id, username (UNIQUE), first_name, last_name, date_of_birth, height_cm,
+settings (JSON), created_at, updated_at
+```
+
 **devices**
 ```sql
-id, manufacturer, model, serial_number, firmware_version, metadata_json
-UNIQUE(manufacturer, serial_number)
+id, manufacturer, model, serial_number, firmware_version,
+hardware_version, product_code, first_seen, last_import
+UNIQUE(serial_number)
+```
+
+**days**
+```sql
+id, device_id (FK devices), date,
+session_count, total_therapy_hours,
+obstructive_apneas, central_apneas, hypopneas, reras,
+ahi, oai, cai, hi,
+pressure_min/max/median/mean/95th, epap_min/max/median/mean/95th,
+leak_min/max/median/mean/95th, spo2_min/max/mean,
+created_at, updated_at
+UNIQUE(device_id, date)
 ```
 
 **sessions**
 ```sql
-id, device_id, device_session_id, start_time, end_time, duration_seconds,
-therapy_mode, source_format, data_quality_notes
+id, device_id (FK devices), day_id (FK days),
+device_session_id, start_time, end_time, duration_seconds,
+therapy_mode, import_date, import_source, parser_version,
+data_quality_notes (JSON),
+has_waveform_data, has_event_data, has_statistics, enabled
 UNIQUE(device_id, device_session_id)
 ```
 
@@ -319,26 +417,38 @@ UNIQUE(session_id, waveform_type)
 
 **events**
 ```sql
-id, session_id, event_type, start_time, duration_seconds, annotation
+id, session_id (FK sessions), event_type, start_time, duration_seconds,
+spo2_drop, peak_flow_limitation
 ```
 
 **statistics**
 ```sql
-id, session_id, [45+ metric columns]
+session_id (PK, FK sessions), [45+ metric columns]
 AHI, OAI, CAI, HI, REI, pressure stats, leak stats, SpO2 stats, etc.
 ```
 
 **settings**
 ```sql
-id, session_id, setting_key, setting_value
+id, session_id (FK sessions), key, value
+UNIQUE(session_id, key)
 ```
 Key-value pairs for extensibility across device types
 
-**analyses**
+**analysis_results**
 ```sql
-id, session_id, mode_name, analysis_timestamp, result_json
+id, session_id (FK sessions),
+timestamp_start, timestamp_end,
+programmatic_result_json (JSON), processing_time_ms,
+engine_versions_json (JSON), created_at
 ```
 Stores programmatic analysis results (detection mode, events, AHI/RDI, metadata)
+
+**detected_patterns**
+```sql
+id, analysis_result_id (FK analysis_results),
+pattern_id, start_time, duration, confidence,
+detected_by, metrics_json (JSON), notes
+```
 
 ---
 
@@ -378,6 +488,17 @@ UnifiedSession objects
 [Same pipeline as ResMed]
 ```
 
+### API Data Flow
+```
+SQLite Database
+    ↓
+Service Layer (services/)
+    ↓
+FastAPI Routers (api/routers/)
+    ↓
+JSON Response → Vue Frontend (ui/)
+```
+
 ---
 
 ## File Locations
@@ -390,17 +511,13 @@ UnifiedSession objects
 
 ## Dependencies
 
-**Core:**
-- Python 3.13+
-- pyedflib (EDF file reading)
-- numpy (efficient array operations)
-- click (CLI)
-- pydantic (data validation)
+**Core:** Python 3.13+, pydantic, sqlalchemy, alembic, click, numpy, pyedflib, scipy, mne, python-dateutil, pytz, requests
 
-**Development:**
-- pytest (testing)
-- pytest-cov (coverage)
-- ruff (linting)
+**API:** fastapi, uvicorn, httpx
+
+**CLI:** rich, plotext, pint, jinja2, packaging
+
+**Development:** pytest, pytest-cov, ruff, mypy
 
 **All managed via** `pyproject.toml` with uv
 
@@ -418,4 +535,3 @@ UnifiedSession objects
 - Import via OSCAR desktop app → Binary cache files (.000/.001)
 - OSCAR binary parser fully implemented
 - 100% device coverage (all 18 OSCAR-supported manufacturers)
-

@@ -169,7 +169,7 @@ Version 18 summary files contain pre-calculated statistics per channel:
 | `parsers/compression.py` | qCompress/qUncompress, CRC16, delta encoding |
 | `parsers/oscar_summary.py` | .000 summary file parser |
 | `parsers/oscar_events.py` | .001 events file parser |
-| `constants.py:616` | `OSCAR_MAGIC_NUMBER = 0xC73216AB` |
+| `constants.py:285` | `OSCAR_MAGIC_NUMBER = 0xC73216AB` |
 
 ---
 

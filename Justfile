@@ -59,9 +59,6 @@ ci: sync type-check lint-check format-check ui-type-check ui-lint-check ui-forma
 test:
     uv run pytest
 
-# Generate CLI documentation
-docs:
-    uv run python scripts/generate_cli_docs.py
 
 # Start the REST API server in development mode
 dev-api:
