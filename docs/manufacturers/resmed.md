@@ -37,7 +37,9 @@ Backup/
 
 ### PLD - Pressure & Leak
 - **Signals**:
-  - Mask Pressure ("Press.2s", "MaskPress.2s")
+  - Therapy Pressure ("Press.2s")
+  - Mask Pressure ("MaskPress.2s")
+  - EPAP ("EPRPress.2s", "Exp Pres" on older models)
   - Leak Rate ("Leak.2s")
 - **Units**: cmH2O (pressure), L/min (leak)
 - **Typical Rate**: 0.5 Hz (2-second intervals, noted by ".2s" suffix)
@@ -131,7 +133,7 @@ Used in EVE files for event markers:
 ResMed identified by:
 1. `STR.edf` file exists in backup root
 2. `DATALOG/` directory present
-3. (Optional) `Identification.json` contains ResMed model
+3. (Optional) `Identification.json` or `Identification.tgt` contains ResMed model
 
 ## Supported Models
 

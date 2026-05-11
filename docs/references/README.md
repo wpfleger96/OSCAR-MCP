@@ -30,7 +30,6 @@ Comprehensive collection of research papers, clinical guidelines, and technical 
 These documents are cited throughout SNORE's technical documentation using numbered citations:
 
 - `apnea_detection_reference.md` - Algorithm implementation guide
-- `resmed.md` - Device-specific documentation
 
 ## Citation Format
 

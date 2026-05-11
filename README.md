@@ -15,11 +15,18 @@ SNORE analyzes CPAP therapy data, generates reports, and provides insights about
 ### Features
 
 - **Direct ResMed Import**: Import ResMed AirSense/AirCurve data directly from SD card
+- **OSCAR Parser Support**: Import data from all OSCAR-cached manufacturers
 - **Universal Database**: SQLite storage for CPAP data
 - **Auto-Detection**: Automatically detects ResMed device type
 - **CLI Tool**: Import, query, delete, and manage CPAP data from command line
 - **Comprehensive Parsing**: Waveforms, events, statistics, and device metadata
-**Supported Devices:** ResMed AirSense 10/11, AirCurve 10/11, S9 series
+- **Waveform Visualization**: Terminal charts with plotext
+- **Prescription/Therapy Tracking**: View and compare therapy settings over time
+- **Data Export**: Raw backup, CSV, and JSON export formats
+- **REST API**: FastAPI server launched via `snore serve`
+- **Batch Validation**: Compare programmatic vs machine event detection
+
+**Supported Devices:** ResMed AirSense 10/11, AirCurve 10/11, S9 series, and all OSCAR-cached manufacturers
 
 ## Installation
 
@@ -27,7 +34,7 @@ SNORE analyzes CPAP therapy data, generates reports, and provides insights about
 
 - Python 3.13 or later
 - UV package manager
-- OSCAR desktop application with existing data
+- ResMed SD card OR OSCAR desktop application (for non-ResMed devices)
 
 ### Global Installation
 
@@ -53,13 +60,13 @@ uv run snore setup --github
 git clone git@github.com:wpfleger96/SNORE.git
 cd SNORE
 
-# Install in editable mode
-uv pip install -e .
+# Install dependencies (never use editable install — see AGENTS.md gotcha #8)
+uv sync
 ```
 
 ## Quick Start
 
-### 1. Import ResMed CPAP Data
+### 1. Import CPAP Data
 
 For **ResMed AirSense/AirCurve users**, import directly from your SD card:
 
@@ -74,12 +81,22 @@ uv run snore import /path/to/ResMed/Backup/
 uv run snore import ~/Downloads/OSCAR/Profiles/<Profile>/ResMed_*/Backup/
 
 # Advanced import options
+# --limit N               Import only first N sessions
+# --sort-by date-desc     Newest first (date-asc, date-desc, filesystem)
+# --from / --to           Filter by date range
+# --dry-run               Preview without importing
+# --force                 Re-import existing sessions
+# --no-parallel           Disable parallel parsing (for debugging)
+# --batch-size N          Sessions per transaction (default: 50)
+# --no-backup             Skip raw file backup
+# --backup-dir PATH       Raw backup directory (default: ~/.snore/raw/)
+# --all                   Import all detected sources without prompting
 uv run snore import /path/to/data/ \
-  --limit 10 \                    # Import only first 10 sessions
-  --sort-by date-desc \           # Newest first
-  --from 2024-01-01 \        # Filter by date range
+  --limit 10 \
+  --sort-by date-desc \
+  --from 2024-01-01 \
   --to 2024-12-31 \
-  --dry-run                       # Preview without importing
+  --dry-run
 ```
 
 The import will:
@@ -105,6 +122,17 @@ uv run snore db stats
 
 # Show session details with therapy settings
 uv run snore session show 123 --settings
+
+# Visualize waveform data
+uv run snore waveform list --date 2024-12-05
+uv run snore waveform show --date 2024-12-05 --time 01:30:00
+uv run snore waveform show --date 2024-12-05 --time 01:30:00 --type flow,pressure
+uv run snore waveform compare --session-id 123 --mode aasm
+
+# View prescription/therapy settings
+uv run snore rx history
+uv run snore rx current
+uv run snore rx compare
 ```
 
 ### 3. Analyze CPAP Sessions
@@ -127,8 +155,19 @@ uv run snore analysis run --date 2024-12-05 --mode aasm_relaxed
 # Run all available modes
 uv run snore analysis run --date 2024-12-05 --all-modes
 
+# Analysis run options
+uv run snore analysis run --date 2024-12-05 --no-store       # Don't save to DB
+uv run snore analysis run --date 2024-12-05 --debug-events   # Detailed machine vs programmatic comparison
+uv run snore analysis run --date 2024-12-05 --plain          # Plain output without colors
+
 # List analyzed sessions
 uv run snore analysis list
+
+# Show stored analysis results
+uv run snore analysis show --session-id 123
+
+# Delete analysis results
+uv run snore analysis delete --session-id 123
 ```
 
 **Available Detection Modes:**
@@ -157,31 +196,102 @@ uv run snore session delete --device 22231974465 --dry-run
 uv run snore session delete --session-id "1,2,3"
 
 # Delete all sessions (with confirmation)
-uv run snore session delete --all
+uv run snore session delete --all                        # DESTRUCTIVE: deletes all session data
 
 # Force delete without confirmation prompt
 uv run snore session delete --session-id "5" --force
 
+# Enable/disable sessions (exclude from statistics)
+uv run snore session enable 123
+uv run snore session disable 123
+
 # Database maintenance after large deletions
 uv run snore db vacuum
+
+# Initialize database
+uv run snore db init
 ```
 
+### 5. Statistics
 
+```bash
+# Show therapy statistics
+uv run snore stats                    # Summary statistics
+uv run snore stats --period week      # Weekly breakdown
+uv run snore stats --period month     # Monthly breakdown
+uv run snore stats --trend            # Trend analysis with charts
+uv run snore stats --records          # Top 5 best/worst days
+uv run snore stats --days 30          # Last 30 days only
+```
+
+### 6. Export Data
+
+```bash
+# Export data
+uv run snore export raw --from 2024-01-01 --to 2024-12-31  # Raw file backup
+uv run snore export csv --from 2024-01-01                   # CSV export
+uv run snore export json --from 2024-01-01 --to 2024-12-31 # JSON export
+```
+
+### 7. Validate
+
+```bash
+# Batch validation (compare programmatic vs machine detection)
+uv run snore validate --from 2024-01-01 --to 2024-12-31
+```
+
+### 8. REST API
+
+```bash
+# Start the REST API server
+uv run snore serve                                    # Default: localhost:8000
+uv run snore serve --host 0.0.0.0 --port 5000 --reload  # binds to all interfaces — auth not yet implemented
+# API docs available at http://localhost:8000/docs
+```
+
+### 9. Shell Completions
+
+```bash
+uv run snore completions install    # Auto-detect and install shell completions
+uv run snore completions bash       # Show bash completion script
+uv run snore completions zsh        # Show zsh completion script
+```
 
 ## Development
 
 ```bash
+# Install dependencies
+just sync
+
 # Quick quality check (no tests)
 just
 
 # Run all tests
 just test
 
+# Full quality check (Python + UI, no tests)
+just check
+
 # Full quality check + tests
 just check-all
 
-# Pre-commit checks (type-check, lint, format)
+# Pre-commit checks (type-check, lint, format — Python + UI)
 just pre-commit
+
+# CI workflow (type-check, lint, format, test)
+just ci
+
+# Start REST API dev server (with reload)
+just dev-api
+
+# Start Vue UI dev server
+just dev-ui
+
+# Install UI npm dependencies
+just ui-install
+
+# Build UI for production
+just ui-build
 
 # Generate CLI documentation
 just docs
