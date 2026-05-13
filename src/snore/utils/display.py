@@ -1,6 +1,10 @@
 """Rich-based display formatting for CLI output."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import click
 
 from rich import box
 from rich.console import Console
@@ -10,6 +14,11 @@ from rich.text import Text
 
 from snore.analysis.types import AnalysisEvent
 from snore.constants import FLOW_LIMITATION_CLASSES
+from snore.waveform import format_time_offset
+
+if TYPE_CHECKING:
+    from snore.analysis.service import AnalysisResult
+    from snore.services.schemas import SessionDetail
 
 console = Console()
 
@@ -397,3 +406,292 @@ def _get_severity_color(severity: str) -> str:
         return "orange"
     else:
         return "red"
+
+
+def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
+    """Print a full session detail view to stdout using click.echo."""
+    import pint
+
+    click.echo(f"\nSession ID: {detail.id}")
+    click.echo(f"  Device Session ID: {detail.device_session_id}")
+
+    if detail.device_manufacturer and detail.device_model:
+        click.echo(
+            f"  Device: {detail.device_manufacturer} {detail.device_model} (SN: {detail.device_serial})"
+        )
+
+    click.echo(f"  Start: {detail.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    click.echo(f"  End: {detail.end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    click.echo(f"  Duration: {detail.duration_hours:.2f}h ({detail.duration_seconds}s)")
+
+    if detail.therapy_mode:
+        click.echo(f"  Therapy Mode: {detail.therapy_mode}")
+
+    click.echo("\n  Data:")
+    click.echo(f"    Events: {detail.event_count}")
+    click.echo(f"    Waveforms: {detail.waveform_count}")
+    if detail.waveform_types:
+        click.echo(f"    Available types: {', '.join(sorted(detail.waveform_types))}")
+    click.echo(f"    Has Statistics: {detail.has_statistics}")
+    click.echo(f"    Has Event Data: {detail.has_event_data}")
+
+    stats = detail.statistics
+    if stats:
+        click.echo("\n  Statistics:")
+
+        if stats.usage_hours is not None:
+            click.echo(f"    Usage: {stats.usage_hours:.1f}h")
+
+        has_event_indices = any(
+            [
+                stats.ahi is not None,
+                stats.rei is not None,
+                stats.oai is not None,
+                stats.cai is not None,
+                stats.hi is not None,
+            ]
+        )
+        if has_event_indices:
+            click.echo("\n    Event Indices:")
+            if stats.ahi is not None:
+                click.echo(f"      AHI: {stats.ahi:.1f}")
+            if stats.rei is not None:
+                click.echo(f"      REI: {stats.rei:.1f}")
+            if stats.oai is not None:
+                click.echo(f"      OAI: {stats.oai:.1f}")
+            if stats.cai is not None:
+                click.echo(f"      CAI: {stats.cai:.1f}")
+            if stats.hi is not None:
+                click.echo(f"      HI: {stats.hi:.1f}")
+
+        has_event_counts = any(
+            [
+                (stats.obstructive_apneas or 0) > 0,
+                (stats.central_apneas or 0) > 0,
+                (stats.mixed_apneas or 0) > 0,
+                (stats.hypopneas or 0) > 0,
+                (stats.reras or 0) > 0,
+                (stats.flow_limitations or 0) > 0,
+            ]
+        )
+        if has_event_counts:
+            click.echo("\n    Event Counts:")
+            if stats.obstructive_apneas and stats.obstructive_apneas > 0:
+                click.echo(f"      Obstructive Apneas: {stats.obstructive_apneas}")
+            if stats.central_apneas and stats.central_apneas > 0:
+                click.echo(f"      Central Apneas: {stats.central_apneas}")
+            if stats.mixed_apneas and stats.mixed_apneas > 0:
+                click.echo(f"      Mixed Apneas: {stats.mixed_apneas}")
+            if stats.hypopneas and stats.hypopneas > 0:
+                click.echo(f"      Hypopneas: {stats.hypopneas}")
+            if stats.reras and stats.reras > 0:
+                click.echo(f"      RERAs: {stats.reras}")
+            if stats.flow_limitations and stats.flow_limitations > 0:
+                click.echo(f"      Flow Limitations: {stats.flow_limitations}")
+
+        has_pressure = any(
+            [
+                stats.pressure_mean is not None,
+                stats.pressure_min is not None,
+                stats.pressure_max is not None,
+                stats.pressure_95th is not None,
+            ]
+        )
+        if has_pressure:
+            click.echo("\n    Pressure:")
+            if stats.pressure_mean is not None:
+                click.echo(f"      Mean: {stats.pressure_mean:.1f} cmH₂O")
+            if stats.pressure_min is not None and stats.pressure_max is not None:
+                click.echo(
+                    f"      Range: {stats.pressure_min:.1f} - {stats.pressure_max:.1f} cmH₂O"
+                )
+            if stats.pressure_95th is not None:
+                click.echo(f"      95th percentile: {stats.pressure_95th:.1f} cmH₂O")
+
+        has_epap = any(
+            [
+                stats.epap_mean is not None,
+                stats.epap_min is not None,
+                stats.epap_max is not None,
+                stats.epap_95th is not None,
+            ]
+        )
+        if has_epap:
+            click.echo("\n    EPAP:")
+            if stats.epap_mean is not None:
+                click.echo(f"      Mean: {stats.epap_mean:.1f} cmH₂O")
+            if stats.epap_min is not None and stats.epap_max is not None:
+                click.echo(
+                    f"      Range: {stats.epap_min:.1f} - {stats.epap_max:.1f} cmH₂O"
+                )
+            if stats.epap_95th is not None:
+                click.echo(f"      95th percentile: {stats.epap_95th:.1f} cmH₂O")
+
+        has_leak = any(
+            [
+                stats.leak_mean is not None,
+                stats.leak_percentile_70 is not None,
+                stats.leak_95th is not None,
+            ]
+        )
+        if has_leak:
+            click.echo("\n    Leak:")
+            if stats.leak_mean is not None:
+                click.echo(f"      Mean: {stats.leak_mean:.1f} L/min")
+            if stats.leak_percentile_70 is not None:
+                click.echo(
+                    f"      70th percentile: {stats.leak_percentile_70:.1f} L/min"
+                )
+            if stats.leak_95th is not None:
+                click.echo(f"      95th percentile: {stats.leak_95th:.1f} L/min")
+
+        has_spo2 = any(
+            [
+                stats.spo2_mean is not None,
+                stats.spo2_min is not None,
+                stats.spo2_time_below_90 is not None,
+            ]
+        )
+        if has_spo2:
+            click.echo("\n    SpO₂:")
+            if stats.spo2_mean is not None:
+                click.echo(f"      Mean: {stats.spo2_mean:.1f}%")
+            if stats.spo2_min is not None:
+                click.echo(f"      Minimum: {stats.spo2_min:.0f}%")
+            if stats.spo2_time_below_90 is not None:
+                minutes_below_90 = stats.spo2_time_below_90 / 60
+                click.echo(f"      Time below 90%: {minutes_below_90:.1f} minutes")
+
+        has_pulse = any(
+            [
+                stats.pulse_mean is not None,
+                stats.pulse_min is not None,
+                stats.pulse_max is not None,
+            ]
+        )
+        if has_pulse:
+            click.echo("\n    Pulse:")
+            if stats.pulse_mean is not None:
+                click.echo(f"      Mean: {stats.pulse_mean:.1f} BPM")
+            if stats.pulse_min is not None and stats.pulse_max is not None:
+                click.echo(
+                    f"      Range: {stats.pulse_min:.0f} - {stats.pulse_max:.0f} BPM"
+                )
+
+        has_respiratory = any(
+            [
+                stats.respiratory_rate_mean is not None,
+                stats.tidal_volume_mean is not None,
+                stats.minute_ventilation_mean is not None,
+            ]
+        )
+        if has_respiratory:
+            click.echo("\n    Respiratory:")
+            if stats.respiratory_rate_mean is not None:
+                click.echo(
+                    f"      Mean Respiratory Rate: {stats.respiratory_rate_mean:.1f} breaths/min"
+                )
+            if stats.tidal_volume_mean is not None:
+                click.echo(f"      Mean Tidal Volume: {stats.tidal_volume_mean:.0f} mL")
+            if stats.minute_ventilation_mean is not None:
+                click.echo(
+                    f"      Mean Minute Ventilation: {stats.minute_ventilation_mean:.1f} L/min"
+                )
+
+    if detail.settings:
+        click.echo("\n  Settings:")
+        ureg = pint.get_application_registry()  # type: ignore[no-untyped-call]
+        for s in detail.settings:
+            if s.key == "tube_temp" and s.value:
+                try:
+                    temp_c = ureg.Quantity(float(s.value), ureg.degC)
+                    temp_f = temp_c.to(ureg.degF)
+                    click.echo(f"    {s.key}: {temp_f.magnitude:.1f}°F")
+                except (ValueError, TypeError):
+                    click.echo(f"    {s.key}: {s.value}")
+            else:
+                click.echo(f"    {s.key}: {s.value}")
+    elif show_settings:
+        click.echo("\n  Settings: None recorded")
+
+    click.echo()
+
+
+def display_analysis_result(
+    result: AnalysisResult, plain: bool, session_date: str
+) -> None:
+    """
+    Display a full analysis result using Rich formatting.
+
+    Args:
+        result: Analysis result to display
+        plain: If True, disable colors and formatting
+        session_date: Session date string for the header
+    """
+    from snore.cli.groups.analysis import _get_validation_metrics
+
+    con = create_console(plain)
+    con.print("✓ Analysis complete\n")
+
+    header = create_header_panel(session_date, result.session_duration_hours, plain)
+    con.print(header)
+    con.print()
+
+    machine_events = result.machine_events
+    if machine_events:
+        machine_table = create_machine_events_table(
+            machine_events, result.session_duration_hours, plain
+        )
+        con.print(machine_table)
+        con.print()
+
+    if result.mode_results:
+        mode_table = create_mode_comparison_table(result.mode_results, plain)
+        con.print(mode_table)
+        con.print()
+
+    if machine_events and result.mode_results:
+        con.print(
+            "[bold]VALIDATION vs MACHINE EVENTS[/bold]"
+            if not plain
+            else "VALIDATION vs MACHINE EVENTS"
+        )
+        con.print()
+
+        for mode_name, mode_result in result.mode_results.items():
+            validation = _get_validation_metrics(mode_result, machine_events, mode_name)
+
+            val_table = create_validation_table(
+                mode_name,
+                validation["apnea_validation"],
+                validation["hypopnea_validation"],
+                machine_events,
+                plain,
+            )
+            con.print(val_table)
+
+            if validation["false_negatives"]:
+                fn_text = format_event_list(
+                    validation["false_negatives"],
+                    "  Missed events",
+                    format_time_offset,
+                )
+                con.print(fn_text)
+
+            if validation["false_positives"]:
+                fp_text = format_event_list(
+                    validation["false_positives"],
+                    "  Extra events",
+                    format_time_offset,
+                )
+                con.print(fp_text)
+
+            con.print()
+
+    if result.flow_analysis:
+        flow_panel, flow_table = create_flow_limitation_panel(
+            result.flow_analysis, plain
+        )
+        con.print(flow_panel)
+        con.print(flow_table)
+        con.print()
