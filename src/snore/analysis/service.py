@@ -120,7 +120,6 @@ class AnalysisService:
         session_id: int,
         modes: list[str] | None = None,
         store_results: bool = True,
-        debug: bool = False,
     ) -> AnalysisResult:
         """
         Analyze session with specified detection mode(s).
@@ -129,7 +128,6 @@ class AnalysisService:
             session_id: Database session ID
             modes: Detection modes to run (None = default mode)
             store_results: Whether to persist results
-            debug: Enable debug output
 
         Returns:
             AnalysisResult with results from all modes
@@ -307,38 +305,6 @@ class AnalysisService:
             self._store_result(result, processing_time_ms)
 
         return result
-
-    def analyze_sessions(
-        self,
-        session_ids: list[int],
-        modes: list[str] | None = None,
-        store_results: bool = True,
-    ) -> list[AnalysisResult]:
-        """
-        Run analysis on multiple sessions.
-
-        Args:
-            session_ids: List of session IDs to analyze
-            modes: Detection modes to run (None = default mode)
-            store_results: Whether to store results in database
-
-        Returns:
-            List of analysis results (may have fewer entries if some sessions fail)
-        """
-        results = []
-        for session_id in session_ids:
-            try:
-                result = self.analyze_session(
-                    session_id,
-                    modes=modes,
-                    store_results=store_results,
-                )
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Failed to analyze session {session_id}: {e}")
-                continue
-
-        return results
 
     def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """

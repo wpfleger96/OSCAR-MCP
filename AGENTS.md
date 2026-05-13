@@ -14,7 +14,6 @@ just ci             # CI workflow (same as check + test)
 just pre-commit     # Pre-commit: sync, type-check, lint, format (Python + UI)
 just lint           # Ruff lint with auto-fix
 just format         # Ruff format
-just docs           # Generate CLI documentation
 just sync           # Install dependencies (uv sync)
 just dev-api        # Start REST API dev server (with reload)
 just dev-ui         # Start Vue UI dev server

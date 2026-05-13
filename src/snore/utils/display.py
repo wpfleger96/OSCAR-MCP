@@ -110,7 +110,7 @@ def create_machine_events_table(
 
     machine_ahi_count = oa_count + ca_count + caa_count + ma_count + h_count
     machine_ahi = machine_ahi_count / session_duration_hours
-    machine_rdi = machine_ahi
+    machine_rdi = machine_ahi  # RDI == AHI for CPAP data — RERAs require EEG (in-lab polysomnography only)
 
     table = Table(
         title="[bold]MACHINE-DETECTED EVENTS (CPAP)[/bold]"

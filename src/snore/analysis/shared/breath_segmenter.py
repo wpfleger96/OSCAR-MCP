@@ -10,12 +10,12 @@ import logging
 
 import numpy as np
 
-from snore.analysis.shared.types import BreathMetrics, BreathPhases
+from snore.analysis.shared.types import BreathMetrics
 from snore.constants import BreathSegmentationConstants
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["BreathSegmenter", "BreathMetrics", "BreathPhases"]
+__all__ = ["BreathSegmenter", "BreathMetrics"]
 
 
 class BreathSegmenter:
@@ -260,38 +260,6 @@ class BreathSegmenter:
 
         return boundaries
 
-    def classify_breath_phase(
-        self, timestamps: np.ndarray, flow_values: np.ndarray
-    ) -> BreathPhases:
-        """
-        Separate breath into inspiration and expiration phases.
-
-        Args:
-            timestamps: 1D array of timestamps for this breath
-            flow_values: 1D array of flow values for this breath
-
-        Returns:
-            BreathPhases object with separated inspiration/expiration data
-
-        Example:
-            >>> phases = segmenter.classify_breath_phase(t, flow)
-            >>> print(f"Inspiration: {len(phases.inspiration_indices)} samples")
-        """
-        inspiration_mask = flow_values > 0
-        inspiration_indices = np.where(inspiration_mask)[0]
-        inspiration_values = flow_values[inspiration_mask]
-
-        expiration_mask = flow_values < 0
-        expiration_indices = np.where(expiration_mask)[0]
-        expiration_values = flow_values[expiration_mask]
-
-        return BreathPhases(
-            inspiration_indices=inspiration_indices,
-            expiration_indices=expiration_indices,
-            inspiration_values=inspiration_values,
-            expiration_values=expiration_values,
-        )
-
     def calculate_breath_metrics(
         self,
         breath_number: int,
@@ -324,33 +292,39 @@ class BreathSegmenter:
         end_time = timestamps[-1]
         duration = end_time - start_time
 
-        phases = self.classify_breath_phase(timestamps, flow_values)
+        inspiration_mask = flow_values > 0
+        inspiration_indices = np.where(inspiration_mask)[0]
+        inspiration_values = flow_values[inspiration_mask]
 
-        has_inspiration = len(phases.inspiration_indices) > 0
-        has_expiration = len(phases.expiration_indices) > 0
+        expiration_mask = flow_values < 0
+        expiration_indices = np.where(expiration_mask)[0]
+        expiration_values = flow_values[expiration_mask]
+
+        has_inspiration = len(inspiration_indices) > 0
+        has_expiration = len(expiration_indices) > 0
         is_complete = has_inspiration and has_expiration
 
         if has_inspiration and has_expiration:
-            insp_time = len(phases.inspiration_indices) / sample_rate
-            exp_time = len(phases.expiration_indices) / sample_rate
-            peak_insp_flow = np.max(phases.inspiration_values)
-            peak_exp_flow = np.abs(np.min(phases.expiration_values))
+            insp_time = len(inspiration_indices) / sample_rate
+            exp_time = len(expiration_indices) / sample_rate
+            peak_insp_flow = np.max(inspiration_values)
+            peak_exp_flow = np.abs(np.min(expiration_values))
 
             # Middle time: transition from inspiration to expiration
             # This is where the last inspiration sample ends
-            last_insp_idx = phases.inspiration_indices[-1]
+            last_insp_idx = inspiration_indices[-1]
             middle_time = timestamps[last_insp_idx]
         elif has_inspiration:
-            insp_time = len(phases.inspiration_indices) / sample_rate
+            insp_time = len(inspiration_indices) / sample_rate
             exp_time = 0.0
-            peak_insp_flow = np.max(phases.inspiration_values)
+            peak_insp_flow = np.max(inspiration_values)
             peak_exp_flow = 0.0
             middle_time = timestamps[-1]  # No expiration, so middle is at end
         elif has_expiration:
             insp_time = 0.0
-            exp_time = len(phases.expiration_indices) / sample_rate
+            exp_time = len(expiration_indices) / sample_rate
             peak_insp_flow = 0.0
-            peak_exp_flow = np.abs(np.min(phases.expiration_values))
+            peak_exp_flow = np.abs(np.min(expiration_values))
             middle_time = timestamps[0]  # No inspiration, so middle is at start
         else:
             insp_time = 0.0
@@ -369,7 +343,7 @@ class BreathSegmenter:
         # Calculate tidal volume (integrate flow over inspiration)
         # Flow is in L/min, need to convert to L/s then integrate
         if has_inspiration:
-            flow_L_per_s = phases.inspiration_values / 60.0
+            flow_L_per_s = inspiration_values / 60.0
             time_steps = 1.0 / sample_rate
             tidal_volume_L = np.trapezoid(flow_L_per_s, dx=time_steps)
             tidal_volume = float(tidal_volume_L * 1000.0)

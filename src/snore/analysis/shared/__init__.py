@@ -7,7 +7,6 @@ detection algorithms for CPAP data analysis.
 
 from snore.analysis.shared.breath_segmenter import (
     BreathMetrics,
-    BreathPhases,
     BreathSegmenter,
 )
 from snore.analysis.shared.feature_extractors import (
@@ -20,7 +19,6 @@ from snore.analysis.shared.feature_extractors import (
 
 __all__ = [
     "BreathSegmenter",
-    "BreathPhases",
     "BreathMetrics",
     "WaveformFeatureExtractor",
     "ShapeFeatures",

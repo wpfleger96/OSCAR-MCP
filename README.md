@@ -292,9 +292,6 @@ just ui-install
 
 # Build UI for production
 just ui-build
-
-# Generate CLI documentation
-just docs
 ```
 
 ## Clinical Disclaimer
