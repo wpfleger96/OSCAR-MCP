@@ -20,16 +20,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line("markers", "parser: Tests for device parsers")
     config.addinivalue_line(
-        "markers", "business_logic: Tests for core business logic and algorithms"
-    )
-    config.addinivalue_line(
         "markers", "integration: Integration tests combining multiple components"
     )
     config.addinivalue_line(
         "markers", "integration_pipeline: Full end-to-end pipeline integration tests"
-    )
-    config.addinivalue_line(
-        "markers", "integration_metrics: Breath metrics calculation and validation"
     )
     config.addinivalue_line(
         "markers", "integration_features: Feature extraction integration tests"
@@ -136,27 +130,6 @@ def initialized_db(temp_db):
         yield session
 
     cleanup_database()
-
-
-@pytest.fixture
-def test_profile_factory(db_session):
-    """Factory for creating test profiles with auto-generated unique usernames."""
-    import uuid
-
-    from snore.database.models import Profile
-
-    def _create_profile(username=None, day_split_time="12:00:00", **kwargs):
-        if username is None:
-            username = f"test_user_{uuid.uuid4().hex[:8]}"
-
-        profile = Profile(
-            username=username, settings={"day_split_time": day_split_time}, **kwargs
-        )
-        db_session.add(profile)
-        db_session.flush()
-        return profile
-
-    return _create_profile
 
 
 @pytest.fixture

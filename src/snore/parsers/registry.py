@@ -89,18 +89,6 @@ class ParserRegistry:
         """
         return self._parsers.copy()
 
-    def list_manufacturers(self) -> list[str]:
-        """
-        Get list of all supported manufacturers.
-
-        Returns:
-            List of manufacturer names
-
-        Example:
-            manufacturers = registry.list_manufacturers()
-        """
-        return list(set(p.manufacturer for p in self._parsers))
-
     def detect_parser(
         self, path: Path, manufacturer_hint: str | None = None
     ) -> DeviceParser | None:

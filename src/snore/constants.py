@@ -9,14 +9,12 @@ from typing import Literal, TypedDict
 
 # CPAP Pressure Channels
 CPAP_PRESSURE = 0x1000
-CPAP_IPAP = 0x1001
 CPAP_EPAP = 0x1002
 
 # CPAP Event Flags
 CPAP_OBSTRUCTIVE = 0x1100
 CPAP_HYPOPNEA = 0x1101
 CPAP_CLEAR_AIRWAY = 0x1102
-CPAP_APNEA = 0x1103  # Generic apnea
 CPAP_RERA = 0x1104  # Respiratory effort related arousal
 CPAP_FLOW_LIMIT = 0x1106
 CPAP_CSR = 0x1107  # Cheyne-Stokes Respiration
@@ -29,10 +27,6 @@ CPAP_LEAK = 0x1202
 CPAP_RESPRATE = 0x1203
 CPAP_TIDAL_VOLUME = 0x1204
 CPAP_MINUTE_VENT = 0x1205
-
-# CPAP Statistics
-CPAP_AHI = 0x1300
-CPAP_RDI = 0x1301  # Respiratory disturbance index
 
 # CPAP Settings
 CPAP_MODE = 0x1400

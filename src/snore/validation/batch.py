@@ -60,13 +60,13 @@ class BatchValidator:
         )
 
         if self.profile:
-            day_ids_query = (
-                self.db_session.query(models.Day.id)
-                .join(models.Profile)
-                .filter(models.Profile.username == self.profile)
+            device_ids_query = (
+                self.db_session.query(models.Device.id)
+                .join(models.Day, models.Day.device_id == models.Device.id)
+                .filter(models.Device.serial_number == self.profile)
             )
-            day_ids = [day_id for (day_id,) in day_ids_query.all()]
-            query = query.filter(models.Session.day_id.in_(day_ids))
+            device_ids = [device_id for (device_id,) in device_ids_query.all()]
+            query = query.filter(models.Session.device_id.in_(device_ids))
 
         sessions = query.order_by(models.Session.start_time).all()
 

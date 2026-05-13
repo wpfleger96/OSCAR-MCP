@@ -9,25 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from snore.constants import ApneaEventType
 
 
-class BreathPhases(BaseModel):
-    """
-    Inspiration and expiration phases of a single breath.
-
-    Attributes:
-        inspiration_indices: Indices where flow > 0 (breathing in)
-        expiration_indices: Indices where flow < 0 (breathing out)
-        inspiration_values: Flow values during inspiration
-        expiration_values: Flow values during expiration
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    inspiration_indices: np.ndarray
-    expiration_indices: np.ndarray
-    inspiration_values: np.ndarray
-    expiration_values: np.ndarray
-
-
 class BreathMetrics(BaseModel):
     """
     Comprehensive metrics for a single breath.

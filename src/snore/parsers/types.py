@@ -82,17 +82,6 @@ class EventList(BaseModel):
         """
         return [v * self.gain + self.offset for v in self.data]
 
-    def get_actual_values2(self) -> list[float]:
-        """
-        Convert stored int16 values to actual float values for secondary field.
-
-        Returns:
-            List of actual data values for second field
-        """
-        if not self.has_second_field:
-            return []
-        return [v * self.gain + self.offset for v in self.data2]
-
     def get_timestamps(self) -> list[int]:
         """
         Get actual timestamps for each data point.
@@ -213,6 +202,3 @@ class SessionSummary(BaseModel):
     lower_threshold: dict[int, float] = Field(
         default_factory=dict, description="Lower threshold values"
     )
-
-    summary_only: bool = Field(default=False, description="Summary-only flag")
-    no_settings: bool = Field(default=False, description="No settings flag")

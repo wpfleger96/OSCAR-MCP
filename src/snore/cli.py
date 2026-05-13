@@ -1961,7 +1961,6 @@ def _analyze_single_session(
             session_id=session_id,
             modes=modes,
             store_results=not no_store,
-            debug=debug_events,
         )
         _display_analysis_result(result, plain, session_date_str)
 
@@ -2023,7 +2022,6 @@ def _analyze_batch(
                     session_id=db_session.id,
                     modes=modes,
                     store_results=not no_store,
-                    debug=debug_events,
                 )
                 successful += 1
             except Exception as e:

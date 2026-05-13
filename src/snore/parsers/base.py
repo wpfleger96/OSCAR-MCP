@@ -235,35 +235,6 @@ class DeviceParser(ABC):
                 return session
         return None
 
-    def validate_data(self, path: Path) -> dict[str, Any]:
-        """
-        Validate the data at the given path.
-
-        Default implementation just checks if detection succeeds.
-        Subclasses can override for deeper validation.
-
-        Args:
-            path: Path to validate
-
-        Returns:
-            Dictionary with validation results:
-            {
-                'valid': bool,
-                'errors': List[str],
-                'warnings': List[str],
-                'file_count': int,
-                'date_range': tuple,
-                etc.
-            }
-        """
-        result = self.detect(path)
-        return {
-            "valid": result.detected,
-            "errors": [] if result.detected else [result.message],
-            "warnings": [],
-            "confidence": result.confidence,
-        }
-
     # ------------------------------------------------------------------
     # Raw file backup / export (optional — override in subclasses)
     # ------------------------------------------------------------------

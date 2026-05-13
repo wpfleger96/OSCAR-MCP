@@ -101,9 +101,6 @@ class OscarSummaryParser:
                 summary.time_below_threshold = reader.read_qhash_uint32_uint64()
                 summary.lower_threshold = reader.read_qhash_uint32_float()
 
-                summary.summary_only = reader.read_bool()
-                summary.no_settings = reader.read_bool()
-
             else:
                 raise OscarSummaryParseError(
                     f"Unsupported summary version: {summary.version}"
