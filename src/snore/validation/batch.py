@@ -31,7 +31,7 @@ class BatchValidator:
 
         Args:
             db_session: Database session
-            profile: Profile name to filter sessions (optional)
+            profile: Device serial number to filter sessions via Device → Day join (optional)
         """
         self.db_session = db_session
         self.profile = profile
