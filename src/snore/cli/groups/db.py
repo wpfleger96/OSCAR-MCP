@@ -20,10 +20,10 @@ def db() -> None:
 
 
 @db.command()
-@click.option("--db", type=click.Path(), help="Database path")
+@db_option
 def init(db: str | None) -> None:
     """Initialize database (creates tables if needed)."""
-    db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
+    db_path = Path(db).expanduser() if db else Path(DEFAULT_DATABASE_PATH)
     db_existed = db_path.exists()
 
     init_database(str(db_path))
@@ -110,11 +110,11 @@ def vacuum(db: str | None) -> None:
 
 
 @db.command()
-@click.option("--db", type=click.Path(), help="Database path")
+@db_option
 @click.option("--force", is_flag=True, help="Skip confirmation prompt")
 def drop(db: str | None, force: bool) -> None:
     """Drop database (permanently delete all CPAP data)."""
-    db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
+    db_path = Path(db).expanduser() if db else Path(DEFAULT_DATABASE_PATH)
 
     if not db_path.exists():
         click.echo(f"Database does not exist at {db_path}")

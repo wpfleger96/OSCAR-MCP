@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from datetime import datetime
 from pathlib import Path
 
@@ -43,6 +45,9 @@ def validate(
 
     if date_from > date_to:
         raise click.ClickException("--from date must be before or equal to --to date")
+
+    if db and not Path(db).expanduser().exists():
+        raise click.ClickException(f"Database not found: {db}")
 
     init_db(db)
 
@@ -135,10 +140,9 @@ def validate(
         except click.ClickException:
             raise
         except Exception as e:
-            import sys
             import traceback
 
             click.echo(f"Validation error: {e}", err=True)
-            if "--verbose" in sys.argv or "-v" in sys.argv:
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
                 traceback.print_exc()
             raise click.ClickException(str(e)) from e

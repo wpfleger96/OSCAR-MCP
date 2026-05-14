@@ -17,10 +17,9 @@ from snore.constants import FLOW_LIMITATION_CLASSES
 from snore.waveform import format_time_offset
 
 if TYPE_CHECKING:
+    from snore.analysis.modes.types import ModeResult
     from snore.analysis.service import AnalysisResult
     from snore.services.schemas import SessionDetail
-
-console = Console()
 
 
 def create_console(plain: bool = False) -> Console:
@@ -617,6 +616,67 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
     click.echo()
 
 
+def _get_validation_metrics(
+    mode_result: ModeResult,
+    machine_events: list[AnalysisEvent],
+    mode: str,
+) -> dict[str, Any]:
+    from snore.analysis.modes import AVAILABLE_CONFIGS
+    from snore.analysis.modes.config import AASM_CONFIG
+    from snore.analysis.modes.detector import EventDetector
+    from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
+    from snore.analysis.utils import convert_machine_events
+
+    machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
+
+    config = AVAILABLE_CONFIGS.get(mode, AASM_CONFIG)
+    detector = EventDetector(config)
+    validation = detector.validate_against_machine_events(
+        mode_result.apneas,
+        mode_result.hypopneas,
+        machine_apneas,
+        machine_hypopneas,
+    )
+
+    false_negatives: list[AnalysisEvent] = []
+
+    for machine_event in machine_events:
+        is_matched = False
+        machine_relative_time = machine_event.start_time
+        all_programmatic = list(mode_result.apneas) + list(mode_result.hypopneas)
+
+        for prog_event in all_programmatic:
+            time_diff = abs(prog_event.start_time - machine_relative_time)
+            if time_diff <= 5.0:
+                is_matched = True
+                break
+
+        if not is_matched:
+            false_negatives.append(machine_event)
+
+    false_positives: list[ApneaEvent | HypopneaEvent] = []
+
+    for prog_event in list(mode_result.apneas) + list(mode_result.hypopneas):
+        is_matched = False
+
+        for machine_event in machine_events:
+            machine_relative_time = machine_event.start_time
+            time_diff = abs(prog_event.start_time - machine_relative_time)
+            if time_diff <= 5.0:
+                is_matched = True
+                break
+
+        if not is_matched:
+            false_positives.append(prog_event)
+
+    return {
+        "apnea_validation": validation["apnea_validation"],
+        "hypopnea_validation": validation["hypopnea_validation"],
+        "false_negatives": false_negatives,
+        "false_positives": false_positives,
+    }
+
+
 def display_analysis_result(
     result: AnalysisResult, plain: bool, session_date: str
 ) -> None:
@@ -628,7 +688,6 @@ def display_analysis_result(
         plain: If True, disable colors and formatting
         session_date: Session date string for the header
     """
-    from snore.cli.groups.analysis import _get_validation_metrics
 
     con = create_console(plain)
     con.print("✓ Analysis complete\n")

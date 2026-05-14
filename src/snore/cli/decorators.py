@@ -12,7 +12,7 @@ def init_db(db: str | None) -> None:
     """Initialize the database, resolving the path if provided."""
     from snore.database.session import init_database
 
-    init_database(str(Path(db)) if db else None)
+    init_database(str(Path(db).expanduser()) if db else None)
 
 
 def db_option(f: Any) -> Any:

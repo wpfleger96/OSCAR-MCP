@@ -6,12 +6,11 @@ from typing import Literal, cast
 
 import click
 
-from snore.cli.decorators import date_range_options, db_option, init_db
+from snore.cli.decorators import db_option, init_db
 
 
 @click.command()
 @db_option
-@date_range_options
 @click.option("--days", type=int, help="Limit to last N days")
 @click.option(
     "--period",
@@ -24,8 +23,6 @@ from snore.cli.decorators import date_range_options, db_option, init_db
 )
 def stats(
     db: str | None,
-    date_from: None,
-    date_to: None,
     days: int | None,
     period: str | None,
     trend: bool,

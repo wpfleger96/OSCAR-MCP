@@ -5,17 +5,13 @@ from __future__ import annotations
 import logging
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import click
 
 from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
 from snore.utils.display import display_analysis_result
-
-if TYPE_CHECKING:
-    from snore.analysis.modes.types import ModeResult
-    from snore.analysis.types import AnalysisEvent
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +32,6 @@ def analysis() -> None:
 @date_range_options
 @db_option
 @click.option("--no-store", is_flag=True, help="Don't store results in database")
-@click.option(
-    "--debug-events",
-    is_flag=True,
-    help="Print detailed comparison of machine vs programmatic event detection",
-)
 @click.option(
     "--mode",
     "-m",
@@ -65,7 +56,6 @@ def run(
     date_to: datetime | None,
     db: str | None,
     no_store: bool,
-    debug_events: bool,
     mode: tuple[str, ...],
     all_modes: bool,
     plain: bool,
@@ -98,11 +88,9 @@ def run(
         if single_count > 0:
             _analyze_single_session(
                 session,
-                None,
                 session_id,
                 date,
                 no_store,
-                debug_events,
                 mode,
                 all_modes,
                 plain,
@@ -110,12 +98,10 @@ def run(
         else:
             _analyze_batch(
                 session,
-                None,
                 date_from,
                 date_to,
                 date_from is None and date_to is None,
                 no_store,
-                debug_events,
                 mode,
                 all_modes,
                 plain,
@@ -369,74 +355,11 @@ def analysis_delete(
         return 0
 
 
-def _get_validation_metrics(
-    mode_result: ModeResult,
-    machine_events: list[AnalysisEvent],
-    mode: str,
-) -> dict[str, Any]:
-    from snore.analysis.modes import AVAILABLE_CONFIGS
-    from snore.analysis.modes.config import AASM_CONFIG
-    from snore.analysis.modes.detector import EventDetector
-    from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
-    from snore.analysis.utils import convert_machine_events
-
-    machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
-
-    config = AVAILABLE_CONFIGS.get(mode, AASM_CONFIG)
-    detector = EventDetector(config)
-    validation = detector.validate_against_machine_events(
-        mode_result.apneas,
-        mode_result.hypopneas,
-        machine_apneas,
-        machine_hypopneas,
-    )
-
-    false_negatives: list[AnalysisEvent] = []
-
-    for machine_event in machine_events:
-        is_matched = False
-        machine_relative_time = machine_event.start_time
-        all_programmatic = list(mode_result.apneas) + list(mode_result.hypopneas)
-
-        for prog_event in all_programmatic:
-            time_diff = abs(prog_event.start_time - machine_relative_time)
-            if time_diff <= 5.0:
-                is_matched = True
-                break
-
-        if not is_matched:
-            false_negatives.append(machine_event)
-
-    false_positives: list[ApneaEvent | HypopneaEvent] = []
-
-    for prog_event in list(mode_result.apneas) + list(mode_result.hypopneas):
-        is_matched = False
-
-        for machine_event in machine_events:
-            machine_relative_time = machine_event.start_time
-            time_diff = abs(prog_event.start_time - machine_relative_time)
-            if time_diff <= 5.0:
-                is_matched = True
-                break
-
-        if not is_matched:
-            false_positives.append(prog_event)
-
-    return {
-        "apnea_validation": validation["apnea_validation"],
-        "hypopnea_validation": validation["hypopnea_validation"],
-        "false_negatives": false_negatives,
-        "false_positives": false_positives,
-    }
-
-
 def _analyze_single_session(
     session: Any,
-    prof: Any,
     session_id: int | None,
     date: datetime | None,
     no_store: bool,
-    debug_events: bool,
     mode: tuple[str, ...],
     all_modes: bool,
     plain: bool,
@@ -493,12 +416,10 @@ def _analyze_single_session(
 
 def _analyze_batch(
     session: Any,
-    prof: Any,
     start: datetime | None,
     end: datetime | None,
     analyze_all: bool,
     no_store: bool,
-    debug_events: bool,
     mode: tuple[str, ...],
     all_modes: bool,
     plain: bool,

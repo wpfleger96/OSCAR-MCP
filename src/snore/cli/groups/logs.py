@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import subprocess
 
+from collections import deque
 from pathlib import Path
 
 import click
@@ -56,10 +57,7 @@ def logs_show(lines: int, follow: bool) -> None:
     else:
         try:
             with open(log_path, encoding="utf-8") as f:
-                all_lines = f.readlines()
-                display_lines = (
-                    all_lines[-lines:] if len(all_lines) > lines else all_lines
-                )
+                display_lines = deque(f, maxlen=lines)
                 for line in display_lines:
                     click.echo(line.rstrip())
         except Exception as e:

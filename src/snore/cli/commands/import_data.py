@@ -80,11 +80,13 @@ def import_data(
     results = parser_registry.detect_all_parsers(data_path)
 
     if not results:
-        click.echo("❌ Error: No compatible parser found for this data", err=True)
-        click.echo("\nSupported devices:")
-        for p in parser_registry.list_parsers():
-            click.echo(f"  - {p.manufacturer}: {p.parser_id}")
-        raise SystemExit(1)
+        supported = "\n".join(
+            f"  - {p.manufacturer}: {p.parser_id}"
+            for p in parser_registry.list_parsers()
+        )
+        raise click.ClickException(
+            f"No compatible parser found for this data\n\nSupported devices:\n{supported}"
+        )
 
     expanded_sources = []
     for parser, detection in results:
@@ -157,11 +159,13 @@ def import_data(
                         if 0 <= i < len(expanded_sources)
                     ]
                     if not selected_sources:
-                        click.echo("❌ Invalid selection: no valid indices", err=True)
-                        raise SystemExit(1)
+                        raise click.ClickException(
+                            "Invalid selection: no valid indices"
+                        )
                 except (ValueError, IndexError):
-                    click.echo(f"❌ Invalid selection: {selection}", err=True)
-                    raise SystemExit(1) from None
+                    raise click.ClickException(
+                        f"Invalid selection: {selection}"
+                    ) from None
     else:
         selected_sources = expanded_sources
 
@@ -239,16 +243,14 @@ def import_data(
                     if not backup_result.was_skipped:
                         parse_root = backup_result.backup_root
                 except Exception as e:
-                    click.echo(
-                        f"❌ Backup failed: {e}\n"
-                        "  Import aborted. Use --no-backup to skip backup.",
-                        err=True,
-                    )
                     if logging.getLogger().level == logging.DEBUG:
                         raise
                     if len(selected_sources) > 1:
+                        click.echo(f"⚠️  Backup failed for {source_desc}: {e}", err=True)
                         continue
-                    raise SystemExit(1) from None
+                    raise click.ClickException(
+                        f"Backup failed: {e}\nImport aborted. Use --no-backup to skip backup."
+                    ) from e
             else:
                 click.echo(
                     "⚠️  No device serial found — skipping backup",
@@ -268,12 +270,14 @@ def import_data(
                 )
             )
         except Exception as e:
-            click.echo(f"❌ Error parsing sessions: {e}", err=True)
             if logging.getLogger().level == logging.DEBUG:
                 raise
             if len(selected_sources) > 1:
+                click.echo(
+                    f"⚠️  Error parsing sessions for {source_desc}: {e}", err=True
+                )
                 continue
-            raise SystemExit(1) from None
+            raise click.ClickException(f"Error parsing sessions: {e}") from e
 
         if not sessions:
             click.echo("⚠️  No sessions found")
@@ -387,4 +391,4 @@ def import_data(
     click.echo(f"{'=' * 60}")
 
     if total_failed > 0:
-        raise SystemExit(1)
+        raise click.ClickException(f"{total_failed} session(s) failed to import")

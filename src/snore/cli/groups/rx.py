@@ -7,11 +7,13 @@ import click
 from snore.cli.decorators import db_option, init_db
 
 
-def _format_pressure(settings: dict[str, str]) -> str:
+def _format_pressure(settings: dict[str, str], *, short: bool = False) -> str:
     if "pressure_min" in settings and "pressure_max" in settings:
-        return f"{settings['pressure_min']}-{settings['pressure_max']} cmH2O"
+        p = f"{settings['pressure_min']}-{settings['pressure_max']}"
+        return p if short else f"{p} cmH2O"
     if "pressure_fixed" in settings:
-        return f"{settings['pressure_fixed']} cmH2O (Fixed)"
+        p = settings["pressure_fixed"]
+        return f"{p} (F)" if short else f"{p} cmH2O (Fixed)"
     return "?"
 
 
@@ -212,12 +214,7 @@ def rx_compare(db: str | None, min_days: int) -> None:
             mode = period.settings.get("mode", "?")[:7]
             epr = f"{period.settings.get('epr_level', '?')} {period.settings.get('epr_mode', '?')[:2]}"
 
-            if "pressure_min" in period.settings and "pressure_max" in period.settings:
-                pressure_str = f"{period.settings['pressure_min']}-{period.settings['pressure_max']}"
-            elif "pressure_fixed" in period.settings:
-                pressure_str = f"{period.settings['pressure_fixed']} (F)"
-            else:
-                pressure_str = "?"
+            pressure_str = _format_pressure(period.settings, short=True)
 
             ahi_str = f"{period.avg_ahi:.1f}" if period.avg_ahi is not None else "N/A"
             leak_str = (
