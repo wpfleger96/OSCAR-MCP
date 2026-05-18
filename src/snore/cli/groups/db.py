@@ -12,6 +12,7 @@ from snore.cli.display import (
     console,
     print_footer,
     print_header,
+    print_kv,
     print_subsection,
     print_success,
     print_warning,
@@ -65,28 +66,31 @@ def db_stats(db: str | None) -> None:
         stats = service.get_stats(str(db_path))
 
         print_header("Database Statistics", ICON_STATS)
-        console.print(f"Database: {stats.db_path}")
-        console.print(f"Size: {stats.size_mb:.1f} MB")
+        print_kv("Database", str(stats.db_path), indent=0)
+        print_kv("Size", f"{stats.size_mb:.1f} MB", indent=0)
 
         print_subsection("Row Counts")
-        console.print(f"  Profiles: {stats.profile_count}")
-        console.print(f"  Devices: {stats.device_count}")
-        console.print(f"  Sessions: {stats.session_count}")
-        console.print(f"  Days: {stats.day_count}")
-        console.print(f"  Events: {stats.event_count}")
-        console.print(f"  Waveforms: {stats.waveform_count}")
-        console.print(f"  Analysis Results: {stats.analysis_count}")
-        console.print(f"  Detected Patterns: {stats.pattern_count}")
+        print_kv("Profiles", str(stats.profile_count))
+        print_kv("Devices", str(stats.device_count))
+        print_kv("Sessions", str(stats.session_count))
+        print_kv("Days", str(stats.day_count))
+        print_kv("Events", str(stats.event_count))
+        print_kv("Waveforms", str(stats.waveform_count))
+        print_kv("Analysis Results", str(stats.analysis_count))
+        print_kv("Detected Patterns", str(stats.pattern_count))
 
         print_subsection("Data Coverage")
-        console.print(
-            f"  Sessions with waveforms: {stats.sessions_with_waveforms}/{stats.session_count} ({stats.waveform_coverage_pct:.1f}%)"
+        print_kv(
+            "Sessions with waveforms",
+            f"{stats.sessions_with_waveforms}/{stats.session_count} ({stats.waveform_coverage_pct:.1f}%)",
         )
-        console.print(
-            f"  Sessions with events: {stats.sessions_with_events}/{stats.session_count} ({stats.event_coverage_pct:.1f}%)"
+        print_kv(
+            "Sessions with events",
+            f"{stats.sessions_with_events}/{stats.session_count} ({stats.event_coverage_pct:.1f}%)",
         )
-        console.print(
-            f"  Sessions analyzed: {stats.analysis_count}/{stats.session_count} ({stats.analysis_coverage_pct:.1f}%)"
+        print_kv(
+            "Sessions analyzed",
+            f"{stats.analysis_count}/{stats.session_count} ({stats.analysis_coverage_pct:.1f}%)",
         )
 
         if stats.first_session and stats.last_session:

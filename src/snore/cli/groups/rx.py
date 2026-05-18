@@ -5,7 +5,13 @@ from __future__ import annotations
 import click
 
 from snore.cli.decorators import db_option, init_db
-from snore.cli.display import console, print_footer, print_header
+from snore.cli.display import (
+    console,
+    print_footer,
+    print_header,
+    print_kv,
+    print_subsection,
+)
 
 
 def _format_pressure(settings: dict[str, str], *, short: bool = False) -> str:
@@ -129,24 +135,24 @@ def rx_current(db: str | None) -> None:
         epr_mode = current.settings.get("epr_mode", "?")
         pressure_str = _format_pressure(current.settings)
 
-        console.print(f"\nMode: {mode}")
-        console.print(f"Pressure: {pressure_str}")
-        console.print(f"EPR: {epr_level} {epr_mode}")
+        print_kv("Mode", str(mode), indent=0)
+        print_kv("Pressure", str(pressure_str), indent=0)
+        print_kv("EPR", f"{epr_level} {epr_mode}", indent=0)
 
-        console.print("\nOutcomes:")
+        print_subsection("Outcomes")
         if current.avg_ahi is not None:
-            console.print(f"  Avg AHI: {current.avg_ahi:.1f}")
+            print_kv("Avg AHI", f"{current.avg_ahi:.1f}")
         else:
-            console.print("  Avg AHI: N/A")
+            print_kv("Avg AHI", "N/A")
 
         if current.median_ahi is not None:
-            console.print(f"  Median AHI: {current.median_ahi:.1f}")
+            print_kv("Median AHI", f"{current.median_ahi:.1f}")
 
         if current.avg_hours is not None:
-            console.print(f"  Avg Hours: {current.avg_hours:.1f}")
+            print_kv("Avg Hours", f"{current.avg_hours:.1f}")
 
         if current.avg_leak is not None:
-            console.print(f"  Avg Leak: {current.avg_leak:.1f}")
+            print_kv("Avg Leak", f"{current.avg_leak:.1f}")
 
         print_footer(wide=True)
 

@@ -82,8 +82,8 @@ def print_kv(key: str, value: str, *, indent: int = 1) -> None:
     console.print(f"{_indent_prefix(indent)}[dim]{escape(key)}:[/dim] {escape(value)}")
 
 
-def print_dry_run_header() -> None:
-    console.print(f"\n{ICON_DRY_RUN} DRY RUN MODE - No data will be imported\n")
+def print_dry_run_header(action: str = "imported") -> None:
+    console.print(f"\n{ICON_DRY_RUN} DRY RUN MODE - No data will be {action}\n")
 
 
 def print_dry_run_complete(action_verb: str = "run") -> None:

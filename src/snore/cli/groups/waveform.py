@@ -9,6 +9,8 @@ from typing import Any
 
 import click
 
+from rich.markup import escape
+
 from snore.cli.decorators import db_option, init_db
 from snore.cli.display import console, print_warning
 from snore.waveform import format_time_offset
@@ -439,7 +441,9 @@ def compare_events(
             for event in false_negatives:
                 time_str = format_time_offset(event.start_time)
                 event_type = getattr(event, "event_type", "H")
-                console.print(f"  {event_type} at {time_str} ({event.duration:.1f}s)")
+                console.print(
+                    f"  {escape(str(event_type))} at {time_str} ({event.duration:.1f}s)"
+                )
                 console.print(
                     f"    → View: snore waveform show --session-id {session_id} --time {time_str}"
                 )
@@ -459,7 +463,7 @@ def compare_events(
                 conf = getattr(event, "confidence", 0)
                 flow_red = getattr(event, "flow_reduction", 0)
                 console.print(
-                    f"  {event_type} at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
+                    f"  {escape(str(event_type))} at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
                 )
                 console.print(
                     f"    → View: snore waveform show --session-id {session_id} --time {time_str}"

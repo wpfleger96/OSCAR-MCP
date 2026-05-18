@@ -67,6 +67,7 @@ def validate(
                 mode=mode,
             )
 
+            print_footer()
             print_header("VALIDATION REPORT")
             console.print(
                 f"Date Range: {report.date_range_start} to {report.date_range_end}"

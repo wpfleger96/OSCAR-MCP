@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import plotext as plt
 
+from rich.markup import escape
+
 from snore.cli.display import console
 
 if TYPE_CHECKING:
@@ -149,7 +151,7 @@ class WaveformRenderer:
                     time_str = format_time_offset(event.start_time)
                     event_type = getattr(event, "event_type", "Unknown")
                     console.print(
-                        f"  Machine:      {event_type} at {time_str} ({event.duration:.1f}s)"
+                        f"  Machine:      {escape(str(event_type))} at {time_str} ({event.duration:.1f}s)"
                     )
             else:
                 console.print("  Machine:      (none)")
@@ -166,11 +168,11 @@ class WaveformRenderer:
                     flow_red = getattr(event, "flow_reduction", None)
                     if flow_red is not None:
                         console.print(
-                            f"  Programmatic: {event_type} at {time_str} ({event.duration:.1f}s, {flow_red * 100:.0f}% flow reduction)"
+                            f"  Programmatic: {escape(str(event_type))} at {time_str} ({event.duration:.1f}s, {flow_red * 100:.0f}% flow reduction)"
                         )
                     else:
                         console.print(
-                            f"  Programmatic: {event_type} at {time_str} ({event.duration:.1f}s)"
+                            f"  Programmatic: {escape(str(event_type))} at {time_str} ({event.duration:.1f}s)"
                         )
             else:
                 console.print("  Programmatic: (none)")

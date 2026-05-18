@@ -88,7 +88,7 @@ def create_machine_events_table(
 
     machine_ahi_count = oa_count + ca_count + caa_count + ma_count + h_count
     machine_ahi = machine_ahi_count / session_duration_hours
-    machine_rdi = machine_ahi
+    machine_rdi = machine_ahi  # RDI == AHI for CPAP data — RERAs require EEG
 
     table = Table(
         title="[bold]MACHINE-DETECTED EVENTS (CPAP)[/bold]"
@@ -339,11 +339,11 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
     import pint
 
     console.print(f"\nSession ID: {detail.id}")
-    console.print(f"  Device Session ID: {detail.device_session_id}")
+    console.print(f"  Device Session ID: {escape(str(detail.device_session_id))}")
 
     if detail.device_manufacturer and detail.device_model:
         console.print(
-            f"  Device: {detail.device_manufacturer} {detail.device_model} (SN: {detail.device_serial})"
+            f"  Device: {escape(str(detail.device_manufacturer))} {escape(str(detail.device_model))} (SN: {escape(str(detail.device_serial))})"
         )
 
     console.print(f"  Start: {detail.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -353,14 +353,14 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
     )
 
     if detail.therapy_mode:
-        console.print(f"  Therapy Mode: {detail.therapy_mode}")
+        console.print(f"  Therapy Mode: {escape(detail.therapy_mode)}")
 
     console.print("\n  Data:")
     console.print(f"    Events: {detail.event_count}")
     console.print(f"    Waveforms: {detail.waveform_count}")
     if detail.waveform_types:
         console.print(
-            f"    Available types: {', '.join(sorted(detail.waveform_types))}"
+            f"    Available types: {', '.join(escape(t) for t in sorted(detail.waveform_types))}"
         )
     console.print(f"    Has Statistics: {detail.has_statistics}")
     console.print(f"    Has Event Data: {detail.has_event_data}")
@@ -613,7 +613,7 @@ def _get_validation_metrics(
 def display_analysis_result(
     result: AnalysisResult, plain: bool, session_date: str
 ) -> None:
-    con = create_console(plain)
+    con = create_console(plain) if plain else console
     con.print("✓ Analysis complete\n")
 
     header = create_header_panel(session_date, result.session_duration_hours, plain)

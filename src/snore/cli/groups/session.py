@@ -6,11 +6,14 @@ from datetime import datetime
 
 import click
 
+from rich.markup import escape
+
 from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
 from snore.cli.display import (
-    ICON_DRY_RUN,
     ICON_STATS,
     console,
+    print_dry_run_complete,
+    print_dry_run_header,
     print_footer,
     print_header,
     print_raw,
@@ -183,7 +186,7 @@ def session_delete(
 
         print_footer(wide=True)
         if dry_run:
-            console.print(f"{ICON_DRY_RUN} DRY RUN MODE - No data will be deleted")
+            print_dry_run_header("deleted")
         else:
             print_warning("Sessions to be DELETED")
         print_footer(wide=True)
@@ -195,14 +198,14 @@ def session_delete(
         print_separator(wide=True)
 
         for sess in preview.sessions:
-            device_name = f"{sess.manufacturer} {sess.model}"
+            device_name = f"{escape(sess.manufacturer)} {escape(sess.model)}"
 
             console.print(
                 f"{sess.id:<5} "
                 f"{sess.start_time:%Y-%m-%d}   {sess.start_time:%H:%M:%S}  "
                 f"{sess.duration_hours:>6.1f}h    "
                 f"{device_name:<30} "
-                f"{sess.serial_number:<15}"
+                f"{escape(sess.serial_number):<15}"
             )
 
         print_header("Deletion Summary", ICON_STATS, wide=True)
@@ -214,7 +217,7 @@ def session_delete(
         console.print()
 
         if dry_run:
-            print_success("Dry run complete. Use without --dry-run to delete.")
+            print_dry_run_complete("delete")
             return
 
         if not force:

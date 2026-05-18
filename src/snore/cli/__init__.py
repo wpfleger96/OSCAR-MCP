@@ -50,7 +50,7 @@ def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def cli(verbose: bool) -> None:
     """SNORE: CPAP Data Management Tool"""
-    setup_logging(verbose=verbose, console_format="%(levelname)s: %(message)s")
+    setup_logging(verbose=verbose, show_time=False)
 
 
 def _register_commands() -> None:

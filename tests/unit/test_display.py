@@ -50,18 +50,22 @@ class TestConsoleRouting:
     def test_print_success_routes_to_stdout(self, capture_stdout):
         print_success("done")
         assert "done" in capture_stdout.getvalue()
+        assert "✓" in capture_stdout.getvalue()
 
     def test_print_warning_routes_to_stderr(self, capture_stderr):
         print_warning("watch out")
         assert "watch out" in capture_stderr.getvalue()
+        assert "⚠" in capture_stderr.getvalue()
 
     def test_print_error_routes_to_stderr(self, capture_stderr):
         print_error("broke")
         assert "broke" in capture_stderr.getvalue()
+        assert "✗" in capture_stderr.getvalue()
 
     def test_print_skip_routes_to_stdout(self, capture_stdout):
         print_skip("skipped it")
         assert "skipped it" in capture_stdout.getvalue()
+        assert "⊙" in capture_stdout.getvalue()
 
     def test_print_info_routes_to_stdout(self, capture_stdout):
         print_info("just info")

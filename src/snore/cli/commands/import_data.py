@@ -9,6 +9,8 @@ from pathlib import Path
 
 import click
 
+from rich.markup import escape
+
 from snore.cli.decorators import date_range_options, db_option, init_db
 from snore.cli.display import (
     ICON_BACKUP,
@@ -152,10 +154,12 @@ def import_data(
             parser_obj = source.get("parser")
             parser_name = parser_obj.manufacturer if parser_obj else "unknown"  # type: ignore[union-attr]
 
-            console.print(f"  {i}. {parser_name} - {profile} ({structure})")
+            console.print(
+                f"  {i}. {escape(str(parser_name))} - {escape(str(profile))} ({escape(structure)})"
+            )
             root = source.get("root_path")
             if root:
-                console.print(f"     Path: {root}")
+                console.print(f"     Path: {escape(str(root))}")
 
         if select_all:
             selected_sources = expanded_sources
@@ -207,16 +211,19 @@ def import_data(
         )
 
         if len(selected_sources) > 1:
-            print_header(f"Processing: {source_desc}")
+            print_header(f"Processing: {escape(str(source_desc))}")
 
-        print_success(f"Detected: {parser.manufacturer} ({parser.parser_id})")
+        print_success(
+            f"Detected: {escape(str(parser.manufacturer))} ({escape(str(parser.parser_id))})"
+        )
         structure_val = source.get("structure_type")
         print_info(
-            f"Structure: {str(structure_val or 'unknown').replace('_', ' ')}", indent=1
+            f"Structure: {escape(str(structure_val or 'unknown').replace('_', ' '))}",
+            indent=1,
         )
         root_val = source.get("root_path")
         if root_val:
-            print_info(f"Data root: {root_val}", indent=1)
+            print_info(f"Data root: {escape(str(root_val))}", indent=1)
 
         date_from_str = date_from.strftime("%Y-%m-%d") if date_from else None
         date_to_str = date_to.strftime("%Y-%m-%d") if date_to else None
@@ -271,7 +278,7 @@ def import_data(
             else:
                 print_warning("No device serial found — skipping backup")
 
-        console.print(f"\n{ICON_FILTERS} Parsing sessions...")
+        console.print(f"\n{ICON_SCAN} Parsing sessions...")
         try:
             sessions = list(
                 parser.parse_sessions(

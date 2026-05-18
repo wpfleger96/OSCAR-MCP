@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import date_range_options, db_option, init_db
-from snore.cli.display import ICON_DRY_RUN, console, print_warning
+from snore.cli.display import console, print_dry_run_header, print_warning
 from snore.services.export_service import ExportService
 
 
@@ -83,7 +83,7 @@ def export_raw(
         raise click.ClickException(str(e)) from e
 
     if dry_run:
-        console.print(f"{ICON_DRY_RUN} DRY RUN — no files written\n")
+        print_dry_run_header("written")
 
     console.print(f"Nights: {result.nights_exported}")
     console.print(f"Files:  {result.files_written}")

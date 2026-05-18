@@ -9,12 +9,15 @@ from typing import Any
 
 import click
 
+from rich.markup import escape
+
 from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
 from snore.cli.display import (
-    ICON_DRY_RUN,
     ICON_STATS,
     console,
     err_console,
+    print_dry_run_complete,
+    print_dry_run_header,
     print_footer,
     print_header,
     print_kv,
@@ -117,7 +120,6 @@ def run(
                 no_store,
                 mode,
                 all_modes,
-                plain,
             )
 
     return None
@@ -291,7 +293,7 @@ def analysis_delete(
 
         print_footer(wide=True)
         if dry_run:
-            console.print(f"{ICON_DRY_RUN} DRY RUN MODE - No data will be deleted")
+            print_dry_run_header("deleted")
         else:
             print_warning("Analysis Results to be DELETED")
         print_footer(wide=True)
@@ -306,7 +308,9 @@ def analysis_delete(
             start = detail.start_time
             if isinstance(start, str):
                 start = datetime.fromisoformat(start)
-            device_name = f"{detail.manufacturer} {detail.model}"
+            device_name = (
+                f"{escape(str(detail.manufacturer))} {escape(str(detail.model))}"
+            )
 
             console.print(
                 f"{detail.id:<8} "
@@ -344,7 +348,7 @@ def analysis_delete(
         console.print()
 
         if dry_run:
-            print_success("Dry run complete. Use without --dry-run to delete.")
+            print_dry_run_complete("delete")
             return 0
 
         if not force:
@@ -437,7 +441,6 @@ def _analyze_batch(
     no_store: bool,
     mode: tuple[str, ...],
     all_modes: bool,
-    plain: bool,
 ) -> None:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -505,7 +508,9 @@ def _analyze_batch(
                     successful += 1
                 except Exception as e:
                     errors.append((sid, str(e)))
-                    logger.debug(f"Failed to analyze session {sid}: {e}")
+                    logger.warning(
+                        f"Failed to analyze session {sid}: {e}", exc_info=True
+                    )
                 progress.update(task, advance=1)
 
     print_success("Analysis complete")

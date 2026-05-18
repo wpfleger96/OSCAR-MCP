@@ -104,7 +104,7 @@ def _build_logging_config(
 def setup_logging(
     *,
     verbose: bool = False,
-    console_format: str | None = None,
+    show_time: bool = True,
 ) -> None:
     """
     Configure logging for SNORE application.
@@ -115,7 +115,7 @@ def setup_logging(
 
     Args:
         verbose: If True, set console to DEBUG level
-        console_format: Override console format string. If None, uses full format.
+        show_time: If True, show timestamps in console log output
     """
     global _logging_configured
 
@@ -132,7 +132,7 @@ def setup_logging(
 
         console_handler = RichHandler(
             console=err_console,
-            show_time=console_format is None,
+            show_time=show_time,
             show_path=False,
             markup=False,
             rich_tracebacks=True,
@@ -143,7 +143,9 @@ def setup_logging(
         sys.stderr.write(f"WARNING: Failed to configure logging: {e}\n")
         logging.basicConfig(
             level=logging.DEBUG if verbose else logging.INFO,
-            format=console_format or "%(levelname)s: %(message)s",
+            format="%(asctime)s - %(levelname)s: %(message)s"
+            if show_time
+            else "%(levelname)s: %(message)s",
         )
 
     _logging_configured = True
