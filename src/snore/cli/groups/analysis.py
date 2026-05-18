@@ -9,9 +9,25 @@ from typing import Any
 
 import click
 
+from rich.markup import escape
+
 from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
+from snore.cli.display import (
+    ICON_STATS,
+    console,
+    err_console,
+    print_dry_run_complete,
+    print_dry_run_header,
+    print_footer,
+    print_header,
+    print_kv,
+    print_separator,
+    print_success,
+    print_tip,
+    print_warning,
+)
+from snore.cli.display.analysis import display_analysis_result
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
-from snore.utils.display import display_analysis_result
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +120,6 @@ def run(
                 no_store,
                 mode,
                 all_modes,
-                plain,
             )
 
     return None
@@ -204,7 +219,7 @@ def show(
         if result is None:
             raise click.ClickException(f"No analysis found for session {session_id}")
 
-        click.echo(f"Displaying stored analysis for session {session_id}...\n")
+        console.print(f"Displaying stored analysis for session {session_id}...\n")
         display_analysis_result(result, plain, session_date_str)
 
 
@@ -271,41 +286,44 @@ def analysis_delete(
             raise click.ClickException(str(e)) from e
 
         if preview.sessions_with_analysis == 0:
-            click.echo(
-                "⚠️  No sessions with analysis results found matching the specified criteria"
+            print_warning(
+                "No sessions with analysis results found matching the specified criteria"
             )
             return 0
 
-        click.echo(f"\n{'=' * 80}")
+        print_footer(wide=True)
         if dry_run:
-            click.echo("🔍 DRY RUN MODE - No data will be deleted")
+            print_dry_run_header("deleted")
         else:
-            click.echo("⚠️  Analysis Results to be DELETED")
-        click.echo(f"{'=' * 80}\n")
+            print_warning("Analysis Results to be DELETED")
+        print_footer(wide=True)
+        console.print()
 
-        click.echo(
+        console.print(
             f"{'Sess ID':<8} {'Date':<12} {'Time':<8} {'Versions':<10} {'Device':<25}"
         )
-        click.echo("-" * 80)
+        print_separator(wide=True)
 
         for detail in preview.session_details:
             start = detail.start_time
             if isinstance(start, str):
                 start = datetime.fromisoformat(start)
-            device_name = f"{detail.manufacturer} {detail.model}"
+            device_name = (
+                f"{escape(str(detail.manufacturer))} {escape(str(detail.model))}"
+            )
 
-            click.echo(
+            console.print(
                 f"{detail.id:<8} "
                 f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
                 f"{detail.version_count:<10} "
                 f"{device_name:<25}"
             )
 
-        click.echo("\n" + "=" * 80)
-        click.echo("📊 Deletion Summary")
-        click.echo("=" * 80)
-        click.echo(f"Sessions with analysis:          {preview.sessions_with_analysis}")
-        click.echo(
+        print_header("Deletion Summary", ICON_STATS, wide=True)
+        console.print(
+            f"Sessions with analysis:          {preview.sessions_with_analysis}"
+        )
+        console.print(
             f"Total analysis records:          {preview.total_analysis_records}"
             + (
                 " (all versions)"
@@ -314,7 +332,7 @@ def analysis_delete(
                 else ""
             )
         )
-        click.echo(
+        console.print(
             f"Analysis records to delete:      {preview.records_to_delete}"
             + (
                 " (latest only)"
@@ -323,34 +341,35 @@ def analysis_delete(
                 else ""
             )
         )
-        click.echo(
+        console.print(
             f"Detected patterns to delete:     {preview.patterns_count} (cascade delete)"
         )
-        click.echo("=" * 80 + "\n")
+        print_footer(wide=True)
+        console.print()
 
         if dry_run:
-            click.echo("✓ Dry run complete. Use without --dry-run to delete.")
+            print_dry_run_complete("delete")
             return 0
 
         if not force:
-            click.echo(
-                "⚠️  WARNING: This will delete analysis results but keep the sessions!"
+            print_warning(
+                "WARNING: This will delete analysis results but keep the sessions!"
             )
             if not click.confirm(
                 "Are you sure you want to delete these analysis results?"
             ):
-                click.echo("Deletion cancelled")
+                console.print("Deletion cancelled")
                 return 0
 
         session_ids_to_delete = [d.id for d in preview.session_details]
         deleted_count = facade.delete_analysis(session_ids_to_delete, all_versions)
 
-        click.echo(
-            f"\n✓ Successfully deleted {deleted_count} analysis record(s) for {preview.sessions_with_analysis} session(s)"
+        print_success(
+            f"Successfully deleted {deleted_count} analysis record(s) for {preview.sessions_with_analysis} session(s)"
         )
 
         if deleted_count > 10:
-            click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
+            print_tip("Run 'snore db vacuum' to reclaim disk space")
 
         return 0
 
@@ -388,7 +407,7 @@ def _analyze_single_session(
         )
         session_date_str = day_date.isoformat()
 
-    click.echo(f"\nAnalyzing session {session_date_str} (ID: {session_id})...")
+    console.print(f"\nAnalyzing session {session_date_str} (ID: {session_id})...")
 
     analysis_service = AnalysisService(session)
 
@@ -409,7 +428,7 @@ def _analyze_single_session(
         display_analysis_result(result, plain, session_date_str)
 
     except Exception as e:
-        click.echo(f"\nAnalysis failed: {e}", err=True)
+        err_console.print(f"\nAnalysis failed: {e}")
         logger.error("Analysis error", exc_info=True)
         raise click.Abort() from e
 
@@ -422,11 +441,15 @@ def _analyze_batch(
     no_store: bool,
     mode: tuple[str, ...],
     all_modes: bool,
-    plain: bool,
 ) -> None:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+
     from snore.analysis.modes import AVAILABLE_CONFIGS
     from snore.analysis.service import AnalysisService
     from snore.database import models
+    from snore.database.session import session_scope
 
     query = session.query(models.Session).join(models.Day)
 
@@ -436,10 +459,10 @@ def _analyze_batch(
         if end:
             query = query.filter(models.Day.date <= end.date())
 
-    sessions = query.order_by(models.Day.date).all()
+    session_ids = [s.id for s in query.order_by(models.Day.date).all()]
 
-    if not sessions:
-        click.echo("No sessions found for the specified criteria")
+    if not session_ids:
+        console.print("No sessions found for the specified criteria")
         return
 
     modes = None
@@ -448,30 +471,54 @@ def _analyze_batch(
     elif mode:
         modes = list(mode)
 
-    click.echo(f"\nAnalyzing {len(sessions)} sessions...")
+    console.print(f"\nAnalyzing {len(session_ids)} sessions...")
     modes_display = modes if modes else ["aasm"]
-    click.echo(f"  Modes: {', '.join(modes_display)}")
+    console.print(f"  Modes: {', '.join(modes_display)}")
 
-    analysis_service = AnalysisService(session)
+    errors: list[tuple[int, str]] = []
     successful = 0
-    failed = 0
 
-    with click.progressbar(sessions, label="Analyzing") as bar:
-        for db_session in bar:
-            try:
-                analysis_service.analyze_session(
-                    session_id=db_session.id,
-                    modes=modes,
-                    store_results=not no_store,
-                )
-                successful += 1
-            except Exception as e:
-                failed += 1
-                logger.debug(f"Failed to analyze session {db_session.id}: {e}")
+    def analyze_one(sid: int) -> int:
+        with session_scope() as thread_session:
+            svc = AnalysisService(thread_session)
+            svc.analyze_session(
+                session_id=sid,
+                modes=modes,
+                store_results=not no_store,
+            )
+        return sid
 
-    click.echo("\n✓ Analysis complete")
-    click.echo(f"  Successful: {successful}")
-    click.echo(f"  Failed: {failed}")
+    max_workers = min(4, len(session_ids))
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Analyzing", total=len(session_ids))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}
+
+            for future in as_completed(futures):
+                sid = futures[future]
+                try:
+                    future.result()
+                    successful += 1
+                except Exception as e:
+                    errors.append((sid, str(e)))
+                    logger.warning(
+                        f"Failed to analyze session {sid}: {e}", exc_info=True
+                    )
+                progress.update(task, advance=1)
+
+    print_success("Analysis complete")
+    print_kv("Successful", str(successful))
+    print_kv("Failed", str(len(errors)))
+    if errors:
+        for sid, msg in errors:
+            print_warning(f"Session {sid}: {msg}", indent=1)
 
 
 def _list_sessions(
@@ -490,23 +537,23 @@ def _list_sessions(
     )
 
     if not results:
-        click.echo("No sessions found")
+        console.print("No sessions found")
         return
 
-    click.echo(
+    console.print(
         f"{'Date':<12} {'ID':<6} {'Duration':<10} {'Analyzed':<10} {'Analysis ID':<12}"
     )
-    click.echo("-" * 60)
+    print_separator()
 
     for item in results:
         duration = f"{item.duration_hours:.1f}h" if item.duration_hours else "N/A"
         analyzed_str = "✓" if item.has_analysis else "✗"
         analysis_id_str = str(item.analysis_id) if item.analysis_id else "-"
 
-        click.echo(
+        console.print(
             f"{item.session_date!s:<12} {item.session_id:<6} {duration:<10} "
             f"{analyzed_str:<10} {analysis_id_str:<12}"
         )
 
     if analyzed_only and len(results) > 0:
-        click.echo(f"\nShowing {len(results)} analyzed session(s)")
+        console.print(f"\nShowing {len(results)} analyzed session(s)")

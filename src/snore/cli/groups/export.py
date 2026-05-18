@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import date_range_options, db_option, init_db
+from snore.cli.display import console, print_dry_run_header, print_warning
 from snore.services.export_service import ExportService
 
 
@@ -82,17 +83,17 @@ def export_raw(
         raise click.ClickException(str(e)) from e
 
     if dry_run:
-        click.echo("🔍 DRY RUN — no files written\n")
+        print_dry_run_header("written")
 
-    click.echo(f"Nights: {result.nights_exported}")
-    click.echo(f"Files:  {result.files_written}")
+    console.print(f"Nights: {result.nights_exported}")
+    console.print(f"Files:  {result.files_written}")
     if result.total_bytes:
         mb = result.total_bytes / (1024 * 1024)
-        click.echo(f"Size:   {mb:.1f} MB")
-    click.echo(f"Output: {result.output_path}")
+        console.print(f"Size:   {mb:.1f} MB")
+    console.print(f"Output: {result.output_path}")
 
     for w in result.warnings:
-        click.echo(f"⚠️  {w}", err=True)
+        print_warning(w)
 
 
 @export.command("csv")
@@ -144,12 +145,12 @@ def export_csv(
         except Exception as e:
             raise click.ClickException(str(e)) from e
 
-    click.echo(f"Nights: {result.nights_exported}")
-    click.echo(f"Files:  {result.files_written}")
-    click.echo(f"Output: {result.output_path}")
+    console.print(f"Nights: {result.nights_exported}")
+    console.print(f"Files:  {result.files_written}")
+    console.print(f"Output: {result.output_path}")
 
     for w in result.warnings:
-        click.echo(f"⚠️  {w}", err=True)
+        print_warning(w)
 
 
 @export.command("json")
@@ -193,8 +194,8 @@ def export_json(
         except Exception as e:
             raise click.ClickException(str(e)) from e
 
-    click.echo(f"Nights: {result.nights_exported}")
-    click.echo(f"Output: {result.output_path}")
+    console.print(f"Nights: {result.nights_exported}")
+    console.print(f"Output: {result.output_path}")
 
     for w in result.warnings:
-        click.echo(f"⚠️  {w}", err=True)
+        print_warning(w)

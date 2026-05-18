@@ -9,7 +9,26 @@ from pathlib import Path
 
 import click
 
+from rich.markup import escape
+
 from snore.cli.decorators import date_range_options, db_option, init_db
+from snore.cli.display import (
+    ICON_BACKUP,
+    ICON_FILTERS,
+    ICON_IMPORT,
+    ICON_SCAN,
+    ICON_STATS,
+    console,
+    print_dry_run_complete,
+    print_dry_run_header,
+    print_error,
+    print_footer,
+    print_header,
+    print_info,
+    print_skip,
+    print_success,
+    print_warning,
+)
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
 from snore.parsers.register_all import register_all_parsers
@@ -76,7 +95,7 @@ def import_data(
 
     register_all_parsers()
 
-    click.echo(f"📂 Scanning {data_path}...")
+    console.print(f"{ICON_SCAN} Scanning {data_path}...")
     results = parser_registry.detect_all_parsers(data_path)
 
     if not results:
@@ -127,7 +146,7 @@ def import_data(
 
     selected_sources = []
     if len(expanded_sources) > 1:
-        click.echo(f"\nFound {len(expanded_sources)} data sources:\n")
+        console.print(f"\nFound {len(expanded_sources)} data sources:\n")
         for i, source in enumerate(expanded_sources, 1):
             profile = source.get("profile_name") or "unknown"
             structure_type = source.get("structure_type")
@@ -135,10 +154,12 @@ def import_data(
             parser_obj = source.get("parser")
             parser_name = parser_obj.manufacturer if parser_obj else "unknown"  # type: ignore[union-attr]
 
-            click.echo(f"  {i}. {parser_name} - {profile} ({structure})")
+            console.print(
+                f"  {i}. {escape(str(parser_name))} - {escape(str(profile))} ({escape(structure)})"
+            )
             root = source.get("root_path")
             if root:
-                click.echo(f"     Path: {root}")
+                console.print(f"     Path: {escape(str(root))}")
 
         if select_all:
             selected_sources = expanded_sources
@@ -174,7 +195,7 @@ def import_data(
     with session_scope() as session:
         orphaned_count = SessionImporter.cleanup_orphaned_records(session)
         if orphaned_count > 0:
-            click.echo(f"⚠️  Cleaned up {orphaned_count} orphaned records from database")
+            print_warning(f"Cleaned up {orphaned_count} orphaned records from database")
 
     total_imported = 0
     total_skipped = 0
@@ -190,31 +211,34 @@ def import_data(
         )
 
         if len(selected_sources) > 1:
-            click.echo(f"\n{'=' * 60}")
-            click.echo(f"Processing: {source_desc}")
-            click.echo(f"{'=' * 60}")
+            print_header(f"Processing: {escape(str(source_desc))}")
 
-        click.echo(f"✓ Detected: {parser.manufacturer} ({parser.parser_id})")
+        print_success(
+            f"Detected: {escape(str(parser.manufacturer))} ({escape(str(parser.parser_id))})"
+        )
         structure_val = source.get("structure_type")
-        click.echo(f"  Structure: {str(structure_val or 'unknown').replace('_', ' ')}")
+        print_info(
+            f"Structure: {escape(str(structure_val or 'unknown').replace('_', ' '))}",
+            indent=1,
+        )
         root_val = source.get("root_path")
         if root_val:
-            click.echo(f"  Data root: {root_val}")
+            print_info(f"Data root: {escape(str(root_val))}", indent=1)
 
         date_from_str = date_from.strftime("%Y-%m-%d") if date_from else None
         date_to_str = date_to.strftime("%Y-%m-%d") if date_to else None
 
         if limit or date_from or date_to or sort_by != "filesystem":
-            click.echo("\n📋 Import filters:")
+            console.print(f"\n{ICON_FILTERS} Import filters:")
             if limit:
-                click.echo(f"  • Limit: {limit} sessions")
+                print_info(f"• Limit: {limit} sessions", indent=1)
             if sort_by != "filesystem":
                 order_desc = "oldest first" if sort_by == "date-asc" else "newest first"
-                click.echo(f"  • Sort: {order_desc}")
+                print_info(f"• Sort: {order_desc}", indent=1)
             if date_from:
-                click.echo(f"  • From: {date_from:%Y-%m-%d}")
+                print_info(f"• From: {date_from:%Y-%m-%d}", indent=1)
             if date_to:
-                click.echo(f"  • To: {date_to:%Y-%m-%d}")
+                print_info(f"• To: {date_to:%Y-%m-%d}", indent=1)
 
         root_path = source.get("root_path")
         parse_root = Path(str(root_path)) if root_path else data_path
@@ -229,35 +253,32 @@ def import_data(
                     Path(backup_dir).expanduser() if backup_dir else None
                 )
                 try:
-                    click.echo("\n📦 Backing up raw files...")
+                    console.print(f"\n{ICON_BACKUP} Backing up raw files...")
                     backup_result = backup_svc.backup_via_parser(
                         parser,
                         parse_root,
                         device_serial,
-                        progress_callback=lambda msg: click.echo(f"  {msg}"),
+                        progress_callback=lambda msg: print_info(msg, indent=1),
                     )
                     if backup_result.was_skipped:
-                        click.echo(f"  Skipped: {backup_result.skipped_reason}")
+                        print_info(f"Skipped: {backup_result.skipped_reason}", indent=1)
                     else:
-                        click.echo(f"✓ Backed up to {backup_result.backup_root}")
+                        print_success(f"Backed up to {backup_result.backup_root}")
                     if not backup_result.was_skipped:
                         parse_root = backup_result.backup_root
                 except Exception as e:
                     if logging.getLogger().level == logging.DEBUG:
                         raise
                     if len(selected_sources) > 1:
-                        click.echo(f"⚠️  Backup failed for {source_desc}: {e}", err=True)
+                        print_warning(f"Backup failed for {source_desc}: {e}")
                         continue
                     raise click.ClickException(
                         f"Backup failed: {e}\nImport aborted. Use --no-backup to skip backup."
                     ) from e
             else:
-                click.echo(
-                    "⚠️  No device serial found — skipping backup",
-                    err=True,
-                )
+                print_warning("No device serial found — skipping backup")
 
-        click.echo("\n📋 Parsing sessions...")
+        console.print(f"\n{ICON_SCAN} Parsing sessions...")
         try:
             sessions = list(
                 parser.parse_sessions(
@@ -273,26 +294,24 @@ def import_data(
             if logging.getLogger().level == logging.DEBUG:
                 raise
             if len(selected_sources) > 1:
-                click.echo(
-                    f"⚠️  Error parsing sessions for {source_desc}: {e}", err=True
-                )
+                print_warning(f"Error parsing sessions for {source_desc}: {e}")
                 continue
             raise click.ClickException(f"Error parsing sessions: {e}") from e
 
         if not sessions:
-            click.echo("⚠️  No sessions found")
+            print_warning("No sessions found")
             if len(selected_sources) > 1:
                 continue
             return
 
-        click.echo(f"✓ Found {len(sessions)} sessions")
+        print_success(f"Found {len(sessions)} sessions")
 
         if dry_run:
-            click.echo("\n🔍 DRY RUN MODE - No data will be imported\n")
-            click.echo(
+            print_dry_run_header()
+            console.print(
                 f"{'Date':<12} {'Time':<8} {'Duration':<10} {'AHI':<6} {'Events':<8}"
             )
-            click.echo("=" * 60)
+            print_footer()
 
             total_duration = 0.0
             total_events = 0
@@ -320,33 +339,34 @@ def import_data(
                     if unified_session.statistics.ahi is not None:
                         ahi_str = f"{unified_session.statistics.ahi:.1f}"
 
-                click.echo(
+                console.print(
                     f"{unified_session.start_time:%Y-%m-%d}   {unified_session.start_time:%H:%M:%S}  "
                     f"{duration_hours:>6.1f}h    "
                     f"{ahi_str:>5}  "
                     f"{num_events:>6}"
                 )
 
-            click.echo("=" * 60)
-            click.echo("\n📊 Summary:")
-            click.echo(f"  • Total sessions: {len(sessions)}")
-            click.echo(f"  • Total duration: {total_duration:.1f} hours")
-            click.echo(f"  • Total events: {total_events}")
+            print_footer()
+            print_header("Summary", ICON_STATS)
+            print_info(f"• Total sessions: {len(sessions)}", indent=1)
+            print_info(f"• Total duration: {total_duration:.1f} hours", indent=1)
+            print_info(f"• Total events: {total_events}", indent=1)
             if sessions:
                 first_date = min(s.start_time for s in sessions)
                 last_date = max(s.start_time for s in sessions)
-                click.echo(
-                    f"  • Date range: {first_date:%Y-%m-%d} to {last_date:%Y-%m-%d}"
+                print_info(
+                    f"• Date range: {first_date:%Y-%m-%d} to {last_date:%Y-%m-%d}",
+                    indent=1,
                 )
             if len(selected_sources) == 1:
-                click.echo("\n✓ Dry run complete. Use without --dry-run to import.")
+                print_dry_run_complete("import")
             continue
 
         importer = SessionImporter()
 
         total_batches = (len(sessions) + batch_size - 1) // batch_size
-        click.echo(
-            f"📥 Importing {len(sessions)} sessions in {total_batches} batch(es)..."
+        console.print(
+            f"{ICON_IMPORT} Importing {len(sessions)} sessions in {total_batches} batch(es)..."
         )
 
         imported, skipped, failed = importer.import_sessions_batch(
@@ -358,37 +378,31 @@ def import_data(
         total_failed += failed
 
         if len(selected_sources) > 1:
-            click.echo(f"\n{'=' * 60}")
-            click.echo(f"📊 Summary for {source_desc}")
-            click.echo(f"{'=' * 60}")
-            click.echo(f"✓ Imported: {imported} sessions")
+            print_header(f"Summary for {source_desc}", ICON_STATS)
+            print_success(f"Imported: {imported} sessions")
             if skipped > 0:
-                click.echo(f"⊝ Skipped:  {skipped} sessions")
+                print_skip(f"Skipped:  {skipped} sessions")
             if failed > 0:
-                click.echo(f"❌ Failed:   {failed} sessions")
+                print_error(f"Failed:   {failed} sessions")
 
     if dry_run and len(selected_sources) > 1:
-        click.echo(f"\n{'=' * 60}")
-        click.echo("📊 Overall Dry Run Summary")
-        click.echo(f"{'=' * 60}")
-        click.echo(f"✓ Total data sources: {len(selected_sources)}")
-        click.echo("\n✓ Dry run complete. Use without --dry-run to import.")
+        print_header("Overall Dry Run Summary", ICON_STATS)
+        print_success(f"Total data sources: {len(selected_sources)}")
+        print_dry_run_complete("import")
         return
     elif dry_run:
         return
 
-    click.echo(f"\n{'=' * 60}")
-    click.echo("📊 Overall Import Summary")
-    click.echo(f"{'=' * 60}")
-    click.echo(f"✓ Imported: {total_imported} sessions")
+    print_header("Overall Import Summary", ICON_STATS)
+    print_success(f"Imported: {total_imported} sessions")
     if total_skipped > 0:
-        click.echo(
-            f"⊝ Skipped:  {total_skipped} sessions (already exist, use --force to re-import)"
+        print_skip(
+            f"Skipped:  {total_skipped} sessions (already exist, use --force to re-import)"
         )
     if total_failed > 0:
-        click.echo(f"❌ Failed:   {total_failed} sessions")
+        print_error(f"Failed:   {total_failed} sessions")
 
-    click.echo(f"{'=' * 60}")
+    print_footer()
 
     if total_failed > 0:
         raise click.ClickException(f"{total_failed} session(s) failed to import")

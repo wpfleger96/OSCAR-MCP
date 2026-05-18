@@ -1,18 +1,18 @@
-"""Rich-based display formatting for CLI output."""
+"""Rich-based display formatting for analysis output."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import click
-
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
 from snore.analysis.types import AnalysisEvent
+from snore.cli.display import console
 from snore.constants import FLOW_LIMITATION_CLASSES
 from snore.waveform import format_time_offset
 
@@ -23,15 +23,6 @@ if TYPE_CHECKING:
 
 
 def create_console(plain: bool = False) -> Console:
-    """
-    Create a Console instance with appropriate settings.
-
-    Args:
-        plain: If True, disable colors and formatting
-
-    Returns:
-        Configured Console instance
-    """
     if plain:
         return Console(
             force_terminal=False,
@@ -43,7 +34,6 @@ def create_console(plain: bool = False) -> Console:
 
 
 def _get_box_style(plain: bool = False) -> box.Box:
-    """Get the appropriate box style for tables/panels."""
     if plain:
         return box.ASCII
     return box.ROUNDED
@@ -52,16 +42,6 @@ def _get_box_style(plain: bool = False) -> box.Box:
 def create_header_panel(
     session_date: str, duration: float, plain: bool = False
 ) -> Panel:
-    """
-    Create the analysis header panel.
-
-    Args:
-        session_date: Session date string
-        duration: Session duration in hours
-
-    Returns:
-        Rich Panel with header information
-    """
     content = Text()
     content.append(f"Session: {session_date}                  ", style="bold")
     content.append(f"Duration: {duration:.1f} hours\n", style="bold")
@@ -86,16 +66,6 @@ def create_machine_events_table(
     session_duration_hours: float,
     plain: bool = False,
 ) -> Table:
-    """
-    Create table for machine-detected events.
-
-    Args:
-        machine_events: List of machine-detected events
-        session_duration_hours: Session duration in hours
-
-    Returns:
-        Rich Table with machine event statistics
-    """
     from snore.constants import (
         EVENT_TYPE_CENTRAL_APNEA,
         EVENT_TYPE_CLEAR_AIRWAY,
@@ -118,7 +88,7 @@ def create_machine_events_table(
 
     machine_ahi_count = oa_count + ca_count + caa_count + ma_count + h_count
     machine_ahi = machine_ahi_count / session_duration_hours
-    machine_rdi = machine_ahi  # RDI == AHI for CPAP data — RERAs require EEG (in-lab polysomnography only)
+    machine_rdi = machine_ahi  # RDI == AHI for CPAP data — RERAs require EEG
 
     table = Table(
         title="[bold]MACHINE-DETECTED EVENTS (CPAP)[/bold]"
@@ -155,15 +125,6 @@ def create_machine_events_table(
 def create_mode_comparison_table(
     mode_results: dict[str, Any], plain: bool = False
 ) -> Table:
-    """
-    Create comparison table across detection modes.
-
-    Args:
-        mode_results: Dictionary of mode results
-
-    Returns:
-        Rich Table comparing metrics across modes
-    """
     table = Table(
         title="[bold]MODE COMPARISON[/bold]" if not plain else "MODE COMPARISON",
         show_header=True,
@@ -222,18 +183,6 @@ def create_validation_table(
     machine_events: list[AnalysisEvent],
     plain: bool = False,
 ) -> Table:
-    """
-    Create validation metrics table for a mode.
-
-    Args:
-        mode_name: Detection mode name
-        apnea_val: Apnea validation results
-        hypopnea_val: Hypopnea validation results
-        machine_events: Machine-detected events
-
-    Returns:
-        Rich Table with validation metrics
-    """
     table = Table(
         title=f"[bold]Validation: {mode_name}[/bold]"
         if not plain
@@ -283,17 +232,6 @@ def format_event_list(
     label: str,
     format_time_fn: Any,
 ) -> Text:
-    """
-    Format event list for display.
-
-    Args:
-        events: List of events
-        label: Label for the list (e.g., "Missed events")
-        format_time_fn: Function to format time offsets
-
-    Returns:
-        Rich Text with formatted event list
-    """
     from snore.analysis.types import AnalysisEvent
     from snore.constants import abbreviate_event_type
 
@@ -323,15 +261,6 @@ def format_event_list(
 def create_flow_limitation_panel(
     flow_analysis: dict[str, Any], plain: bool = False
 ) -> tuple[Panel, Table]:
-    """
-    Create flow limitation analysis panel with embedded table.
-
-    Args:
-        flow_analysis: Flow limitation analysis data
-
-    Returns:
-        Tuple of (Panel with summary, Table with class distribution)
-    """
     fli = flow_analysis["flow_limitation_index"]
     total_breaths = flow_analysis["total_breaths"]
 
@@ -384,7 +313,6 @@ def create_flow_limitation_panel(
 
 
 def _get_ahi_color(ahi: float) -> str:
-    """Get color for AHI value based on severity."""
     if ahi < 5:
         return "green"
     elif ahi < 15:
@@ -396,7 +324,6 @@ def _get_ahi_color(ahi: float) -> str:
 
 
 def _get_severity_color(severity: str) -> str:
-    """Get color for severity level."""
     if "normal" in severity:
         return "green"
     elif "mild" in severity:
@@ -408,38 +335,42 @@ def _get_severity_color(severity: str) -> str:
 
 
 def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
-    """Print a full session detail view to stdout using click.echo."""
+    """Print a full session detail view to stdout."""
     import pint
 
-    click.echo(f"\nSession ID: {detail.id}")
-    click.echo(f"  Device Session ID: {detail.device_session_id}")
+    console.print(f"\nSession ID: {detail.id}")
+    console.print(f"  Device Session ID: {escape(str(detail.device_session_id))}")
 
     if detail.device_manufacturer and detail.device_model:
-        click.echo(
-            f"  Device: {detail.device_manufacturer} {detail.device_model} (SN: {detail.device_serial})"
+        console.print(
+            f"  Device: {escape(str(detail.device_manufacturer))} {escape(str(detail.device_model))} (SN: {escape(str(detail.device_serial))})"
         )
 
-    click.echo(f"  Start: {detail.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    click.echo(f"  End: {detail.end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    click.echo(f"  Duration: {detail.duration_hours:.2f}h ({detail.duration_seconds}s)")
+    console.print(f"  Start: {detail.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    console.print(f"  End: {detail.end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    console.print(
+        f"  Duration: {detail.duration_hours:.2f}h ({detail.duration_seconds}s)"
+    )
 
     if detail.therapy_mode:
-        click.echo(f"  Therapy Mode: {detail.therapy_mode}")
+        console.print(f"  Therapy Mode: {escape(detail.therapy_mode)}")
 
-    click.echo("\n  Data:")
-    click.echo(f"    Events: {detail.event_count}")
-    click.echo(f"    Waveforms: {detail.waveform_count}")
+    console.print("\n  Data:")
+    console.print(f"    Events: {detail.event_count}")
+    console.print(f"    Waveforms: {detail.waveform_count}")
     if detail.waveform_types:
-        click.echo(f"    Available types: {', '.join(sorted(detail.waveform_types))}")
-    click.echo(f"    Has Statistics: {detail.has_statistics}")
-    click.echo(f"    Has Event Data: {detail.has_event_data}")
+        console.print(
+            f"    Available types: {', '.join(escape(t) for t in sorted(detail.waveform_types))}"
+        )
+    console.print(f"    Has Statistics: {detail.has_statistics}")
+    console.print(f"    Has Event Data: {detail.has_event_data}")
 
     stats = detail.statistics
     if stats:
-        click.echo("\n  Statistics:")
+        console.print("\n  Statistics:")
 
         if stats.usage_hours is not None:
-            click.echo(f"    Usage: {stats.usage_hours:.1f}h")
+            console.print(f"    Usage: {stats.usage_hours:.1f}h")
 
         has_event_indices = any(
             [
@@ -451,17 +382,17 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_event_indices:
-            click.echo("\n    Event Indices:")
+            console.print("\n    Event Indices:")
             if stats.ahi is not None:
-                click.echo(f"      AHI: {stats.ahi:.1f}")
+                console.print(f"      AHI: {stats.ahi:.1f}")
             if stats.rei is not None:
-                click.echo(f"      REI: {stats.rei:.1f}")
+                console.print(f"      REI: {stats.rei:.1f}")
             if stats.oai is not None:
-                click.echo(f"      OAI: {stats.oai:.1f}")
+                console.print(f"      OAI: {stats.oai:.1f}")
             if stats.cai is not None:
-                click.echo(f"      CAI: {stats.cai:.1f}")
+                console.print(f"      CAI: {stats.cai:.1f}")
             if stats.hi is not None:
-                click.echo(f"      HI: {stats.hi:.1f}")
+                console.print(f"      HI: {stats.hi:.1f}")
 
         has_event_counts = any(
             [
@@ -474,19 +405,19 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_event_counts:
-            click.echo("\n    Event Counts:")
+            console.print("\n    Event Counts:")
             if stats.obstructive_apneas and stats.obstructive_apneas > 0:
-                click.echo(f"      Obstructive Apneas: {stats.obstructive_apneas}")
+                console.print(f"      Obstructive Apneas: {stats.obstructive_apneas}")
             if stats.central_apneas and stats.central_apneas > 0:
-                click.echo(f"      Central Apneas: {stats.central_apneas}")
+                console.print(f"      Central Apneas: {stats.central_apneas}")
             if stats.mixed_apneas and stats.mixed_apneas > 0:
-                click.echo(f"      Mixed Apneas: {stats.mixed_apneas}")
+                console.print(f"      Mixed Apneas: {stats.mixed_apneas}")
             if stats.hypopneas and stats.hypopneas > 0:
-                click.echo(f"      Hypopneas: {stats.hypopneas}")
+                console.print(f"      Hypopneas: {stats.hypopneas}")
             if stats.reras and stats.reras > 0:
-                click.echo(f"      RERAs: {stats.reras}")
+                console.print(f"      RERAs: {stats.reras}")
             if stats.flow_limitations and stats.flow_limitations > 0:
-                click.echo(f"      Flow Limitations: {stats.flow_limitations}")
+                console.print(f"      Flow Limitations: {stats.flow_limitations}")
 
         has_pressure = any(
             [
@@ -497,15 +428,15 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_pressure:
-            click.echo("\n    Pressure:")
+            console.print("\n    Pressure:")
             if stats.pressure_mean is not None:
-                click.echo(f"      Mean: {stats.pressure_mean:.1f} cmH₂O")
+                console.print(f"      Mean: {stats.pressure_mean:.1f} cmH₂O")
             if stats.pressure_min is not None and stats.pressure_max is not None:
-                click.echo(
+                console.print(
                     f"      Range: {stats.pressure_min:.1f} - {stats.pressure_max:.1f} cmH₂O"
                 )
             if stats.pressure_95th is not None:
-                click.echo(f"      95th percentile: {stats.pressure_95th:.1f} cmH₂O")
+                console.print(f"      95th percentile: {stats.pressure_95th:.1f} cmH₂O")
 
         has_epap = any(
             [
@@ -516,15 +447,15 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_epap:
-            click.echo("\n    EPAP:")
+            console.print("\n    EPAP:")
             if stats.epap_mean is not None:
-                click.echo(f"      Mean: {stats.epap_mean:.1f} cmH₂O")
+                console.print(f"      Mean: {stats.epap_mean:.1f} cmH₂O")
             if stats.epap_min is not None and stats.epap_max is not None:
-                click.echo(
+                console.print(
                     f"      Range: {stats.epap_min:.1f} - {stats.epap_max:.1f} cmH₂O"
                 )
             if stats.epap_95th is not None:
-                click.echo(f"      95th percentile: {stats.epap_95th:.1f} cmH₂O")
+                console.print(f"      95th percentile: {stats.epap_95th:.1f} cmH₂O")
 
         has_leak = any(
             [
@@ -534,15 +465,15 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_leak:
-            click.echo("\n    Leak:")
+            console.print("\n    Leak:")
             if stats.leak_mean is not None:
-                click.echo(f"      Mean: {stats.leak_mean:.1f} L/min")
+                console.print(f"      Mean: {stats.leak_mean:.1f} L/min")
             if stats.leak_percentile_70 is not None:
-                click.echo(
+                console.print(
                     f"      70th percentile: {stats.leak_percentile_70:.1f} L/min"
                 )
             if stats.leak_95th is not None:
-                click.echo(f"      95th percentile: {stats.leak_95th:.1f} L/min")
+                console.print(f"      95th percentile: {stats.leak_95th:.1f} L/min")
 
         has_spo2 = any(
             [
@@ -552,14 +483,14 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_spo2:
-            click.echo("\n    SpO₂:")
+            console.print("\n    SpO₂:")
             if stats.spo2_mean is not None:
-                click.echo(f"      Mean: {stats.spo2_mean:.1f}%")
+                console.print(f"      Mean: {stats.spo2_mean:.1f}%")
             if stats.spo2_min is not None:
-                click.echo(f"      Minimum: {stats.spo2_min:.0f}%")
+                console.print(f"      Minimum: {stats.spo2_min:.0f}%")
             if stats.spo2_time_below_90 is not None:
                 minutes_below_90 = stats.spo2_time_below_90 / 60
-                click.echo(f"      Time below 90%: {minutes_below_90:.1f} minutes")
+                console.print(f"      Time below 90%: {minutes_below_90:.1f} minutes")
 
         has_pulse = any(
             [
@@ -569,11 +500,11 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_pulse:
-            click.echo("\n    Pulse:")
+            console.print("\n    Pulse:")
             if stats.pulse_mean is not None:
-                click.echo(f"      Mean: {stats.pulse_mean:.1f} BPM")
+                console.print(f"      Mean: {stats.pulse_mean:.1f} BPM")
             if stats.pulse_min is not None and stats.pulse_max is not None:
-                click.echo(
+                console.print(
                     f"      Range: {stats.pulse_min:.0f} - {stats.pulse_max:.0f} BPM"
                 )
 
@@ -585,35 +516,37 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             ]
         )
         if has_respiratory:
-            click.echo("\n    Respiratory:")
+            console.print("\n    Respiratory:")
             if stats.respiratory_rate_mean is not None:
-                click.echo(
+                console.print(
                     f"      Mean Respiratory Rate: {stats.respiratory_rate_mean:.1f} breaths/min"
                 )
             if stats.tidal_volume_mean is not None:
-                click.echo(f"      Mean Tidal Volume: {stats.tidal_volume_mean:.0f} mL")
+                console.print(
+                    f"      Mean Tidal Volume: {stats.tidal_volume_mean:.0f} mL"
+                )
             if stats.minute_ventilation_mean is not None:
-                click.echo(
+                console.print(
                     f"      Mean Minute Ventilation: {stats.minute_ventilation_mean:.1f} L/min"
                 )
 
     if detail.settings:
-        click.echo("\n  Settings:")
+        console.print("\n  Settings:")
         ureg = pint.get_application_registry()  # type: ignore[no-untyped-call]
         for s in detail.settings:
             if s.key == "tube_temp" and s.value:
                 try:
                     temp_c = ureg.Quantity(float(s.value), ureg.degC)
                     temp_f = temp_c.to(ureg.degF)
-                    click.echo(f"    {s.key}: {temp_f.magnitude:.1f}°F")
+                    console.print(f"    {escape(s.key)}: {temp_f.magnitude:.1f}°F")
                 except (ValueError, TypeError):
-                    click.echo(f"    {s.key}: {s.value}")
+                    console.print(f"    {escape(s.key)}: {escape(str(s.value))}")
             else:
-                click.echo(f"    {s.key}: {s.value}")
+                console.print(f"    {escape(str(s.key))}: {escape(str(s.value))}")
     elif show_settings:
-        click.echo("\n  Settings: None recorded")
+        console.print("\n  Settings: None recorded")
 
-    click.echo()
+    console.print()
 
 
 def _get_validation_metrics(
@@ -680,16 +613,7 @@ def _get_validation_metrics(
 def display_analysis_result(
     result: AnalysisResult, plain: bool, session_date: str
 ) -> None:
-    """
-    Display a full analysis result using Rich formatting.
-
-    Args:
-        result: Analysis result to display
-        plain: If True, disable colors and formatting
-        session_date: Session date string for the header
-    """
-
-    con = create_console(plain)
+    con = create_console(plain) if plain else console
     con.print("✓ Analysis complete\n")
 
     header = create_header_panel(session_date, result.session_duration_hours, plain)

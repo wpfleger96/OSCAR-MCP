@@ -7,6 +7,7 @@ from importlib.metadata import version as get_version
 
 import click
 
+from snore.cli.display import console
 from snore.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,17 @@ except PackageNotFoundError:
 def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -> None:
     if not value or ctx.resilient_parsing:
         return
-    click.echo(f"snore, version {__version__}")
+    console.print(f"snore, version {__version__}")
 
     try:
         from snore.bootstrap import check_tool_updates
 
         update_info = check_tool_updates(timeout=3)
         if update_info and update_info.has_update:
-            click.echo(
+            console.print(
                 f"\nUpdate available: {update_info.current_version} → {update_info.latest_version}"
             )
-            click.echo("Run 'snore upgrade' to install")
+            console.print("Run 'snore upgrade' to install")
     except Exception as e:
         logger.debug(f"Failed to check for updates: {e}")
 
@@ -49,7 +50,7 @@ def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def cli(verbose: bool) -> None:
     """SNORE: CPAP Data Management Tool"""
-    setup_logging(verbose=verbose, console_format="%(levelname)s: %(message)s")
+    setup_logging(verbose=verbose, show_time=False)
 
 
 def _register_commands() -> None:

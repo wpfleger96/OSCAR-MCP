@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from snore.cli.display import console, print_raw, print_success
 from snore.completions import (
     detect_shell,
     find_config_file,
@@ -26,9 +27,9 @@ def completions_bash() -> None:
     """Output bash completion script for manual installation."""
     try:
         script = generate_completion_script("bash")
-        click.echo(script)
-        click.echo("\nTo install: Add the above to your ~/.bashrc or run:")
-        click.echo("\nsnore completions install")
+        print_raw(script)
+        console.print("\nTo install: Add the above to your ~/.bashrc or run:")
+        console.print("\nsnore completions install")
     except Exception as e:
         raise click.ClickException(f"Error generating completion script: {e}") from e
 
@@ -38,9 +39,9 @@ def completions_zsh() -> None:
     """Output zsh completion script for manual installation."""
     try:
         script = generate_completion_script("zsh")
-        click.echo(script)
-        click.echo("\nTo install: Add the above to your ~/.zshrc or run:")
-        click.echo("\nsnore completions install")
+        print_raw(script)
+        console.print("\nTo install: Add the above to your ~/.zshrc or run:")
+        console.print("\nsnore completions install")
     except Exception as e:
         raise click.ClickException(f"Error generating completion script: {e}") from e
 
@@ -59,12 +60,12 @@ def completions_install(shell: str | None) -> None:
             raise click.ClickException(
                 "Could not detect shell. Please specify with --shell"
             )
-        click.echo(f"Detected shell: {shell}")
+        console.print(f"Detected shell: {shell}")
 
     success, message = install_completion(shell, dry_run=False)
 
     if success:
-        click.echo(f"✓ {message}")
+        print_success(message)
     else:
         raise click.ClickException(message)
 
@@ -91,6 +92,6 @@ def completions_uninstall(shell: str | None) -> None:
     success, message = uninstall_completion(config_path)
 
     if success:
-        click.echo(f"✓ {message}")
+        print_success(message)
     else:
         raise click.ClickException(message)

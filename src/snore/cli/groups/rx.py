@@ -5,6 +5,13 @@ from __future__ import annotations
 import click
 
 from snore.cli.decorators import db_option, init_db
+from snore.cli.display import (
+    console,
+    print_footer,
+    print_header,
+    print_kv,
+    print_subsection,
+)
 
 
 def _format_pressure(settings: dict[str, str], *, short: bool = False) -> str:
@@ -45,13 +52,12 @@ def rx_history(db: str | None) -> None:
         periods = tracker.compute_periods(db_session)
 
         if not periods:
-            click.echo("No RX periods found")
+            console.print("No RX periods found")
             return
 
         stats_periods = tracker.compute_period_stats(periods)
 
-        click.echo("RX Settings History")
-        click.echo("=" * 80)
+        print_header("RX Settings History", wide=True)
 
         for i, period in enumerate(stats_periods, 1):
             days_count = len(period.days)
@@ -61,7 +67,7 @@ def rx_history(db: str | None) -> None:
                 else "present"
             )
 
-            click.echo(
+            console.print(
                 f"\nPeriod {i}: {period.start_date.strftime('%Y-%m-%d')} to {end_str} ({days_count} days)"
             )
 
@@ -70,24 +76,24 @@ def rx_history(db: str | None) -> None:
             epr_mode = period.settings.get("epr_mode", "?")
             pressure_str = _format_pressure(period.settings)
 
-            click.echo(
+            console.print(
                 f"  Mode: {mode} | Pressure: {pressure_str} | EPR: {epr_level} {epr_mode}"
             )
 
-            if period.avg_ahi is not None:
-                click.echo(f"  Avg AHI: {period.avg_ahi:.1f}", nl=False)
-            else:
-                click.echo("  Avg AHI: N/A", nl=False)
-
+            ahi_str = (
+                f"  Avg AHI: {period.avg_ahi:.1f}"
+                if period.avg_ahi is not None
+                else "  Avg AHI: N/A"
+            )
+            parts = [ahi_str]
             if period.avg_hours is not None:
-                click.echo(f" | Avg Hours: {period.avg_hours:.1f}", nl=False)
-
+                parts.append(f"Avg Hours: {period.avg_hours:.1f}")
             if period.avg_leak is not None:
-                click.echo(f" | Avg Leak: {period.avg_leak:.1f}")
-            else:
-                click.echo()
+                parts.append(f"Avg Leak: {period.avg_leak:.1f}")
+            console.print(" | ".join(parts))
 
-        click.echo("\n" + "=" * 80)
+        console.print()
+        print_footer(wide=True)
 
 
 @rx.command("current")
@@ -111,7 +117,7 @@ def rx_current(db: str | None) -> None:
         periods = tracker.compute_periods(db_session)
 
         if not periods:
-            click.echo("No RX periods found")
+            console.print("No RX periods found")
             return
 
         stats_periods = tracker.compute_period_stats(periods)
@@ -119,9 +125,8 @@ def rx_current(db: str | None) -> None:
 
         days_count = len(current.days)
 
-        click.echo("Current RX Settings")
-        click.echo("=" * 80)
-        click.echo(
+        print_header("Current RX Settings", wide=True)
+        console.print(
             f"Period: {current.start_date.strftime('%Y-%m-%d')} to present ({days_count} days)"
         )
 
@@ -130,26 +135,26 @@ def rx_current(db: str | None) -> None:
         epr_mode = current.settings.get("epr_mode", "?")
         pressure_str = _format_pressure(current.settings)
 
-        click.echo(f"\nMode: {mode}")
-        click.echo(f"Pressure: {pressure_str}")
-        click.echo(f"EPR: {epr_level} {epr_mode}")
+        print_kv("Mode", str(mode), indent=0)
+        print_kv("Pressure", str(pressure_str), indent=0)
+        print_kv("EPR", f"{epr_level} {epr_mode}", indent=0)
 
-        click.echo("\nOutcomes:")
+        print_subsection("Outcomes")
         if current.avg_ahi is not None:
-            click.echo(f"  Avg AHI: {current.avg_ahi:.1f}")
+            print_kv("Avg AHI", f"{current.avg_ahi:.1f}")
         else:
-            click.echo("  Avg AHI: N/A")
+            print_kv("Avg AHI", "N/A")
 
         if current.median_ahi is not None:
-            click.echo(f"  Median AHI: {current.median_ahi:.1f}")
+            print_kv("Median AHI", f"{current.median_ahi:.1f}")
 
         if current.avg_hours is not None:
-            click.echo(f"  Avg Hours: {current.avg_hours:.1f}")
+            print_kv("Avg Hours", f"{current.avg_hours:.1f}")
 
         if current.avg_leak is not None:
-            click.echo(f"  Avg Leak: {current.avg_leak:.1f}")
+            print_kv("Avg Leak", f"{current.avg_leak:.1f}")
 
-        click.echo("=" * 80)
+        print_footer(wide=True)
 
 
 @rx.command("compare")
@@ -181,25 +186,24 @@ def rx_compare(db: str | None, min_days: int) -> None:
         periods = tracker.compute_periods(db_session)
 
         if not periods:
-            click.echo("No RX periods found")
+            console.print("No RX periods found")
             return
 
         stats_periods = tracker.compute_period_stats(periods)
 
         if len(stats_periods) < 2:
-            click.echo(
+            console.print(
                 "At least 2 periods are needed for comparison. Use 'snore rx history' to view the single period."
             )
             return
 
         best, worst = tracker.best_worst(stats_periods, min_days=min_days)
 
-        click.echo("RX Period Comparison")
-        click.echo("=" * 80)
-        click.echo(
+        print_header("RX Period Comparison", wide=True)
+        console.print(
             f"{'Dates':<25} {'Days':<6} {'Avg AHI':<10} {'Avg Leak':<10} {'Mode':<8} {'Pressure':<15} {'EPR':<10}"
         )
-        click.echo("=" * 80)
+        print_footer(wide=True)
 
         for idx, period in enumerate(stats_periods):
             days_count = len(period.days)
@@ -227,22 +231,22 @@ def rx_compare(db: str | None, min_days: int) -> None:
             elif worst and period is worst:
                 marker = "  <- Worst"
 
-            click.echo(
+            console.print(
                 f"{date_range:<25} {days_count:<6} {ahi_str:<10} {leak_str:<10} {mode:<8} {pressure_str:<15} {epr:<10}{marker}"
             )
 
-        click.echo("=" * 80)
+        print_footer(wide=True)
 
         if best:
-            click.echo(f"\nBest Period (Avg AHI: {best.avg_ahi:.1f}):")
-            click.echo(
+            console.print(f"\nBest Period (Avg AHI: {best.avg_ahi:.1f}):")
+            console.print(
                 f"  {best.start_date.strftime('%Y-%m-%d')} to {best.end_date.strftime('%Y-%m-%d')} ({len(best.days)} days)"
             )
-            click.echo(f"  Settings: {best.settings}")
+            console.print(f"  Settings: {best.settings}")
 
         if worst:
-            click.echo(f"\nWorst Period (Avg AHI: {worst.avg_ahi:.1f}):")
-            click.echo(
+            console.print(f"\nWorst Period (Avg AHI: {worst.avg_ahi:.1f}):")
+            console.print(
                 f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({len(worst.days)} days)"
             )
-            click.echo(f"  Settings: {worst.settings}")
+            console.print(f"  Settings: {worst.settings}")

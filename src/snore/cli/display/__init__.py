@@ -1,0 +1,90 @@
+"""Centralized CLI display helpers — the single source of truth for all terminal output."""
+
+from __future__ import annotations
+
+from rich.console import Console
+from rich.markup import escape
+
+console = Console()
+err_console = Console(stderr=True)
+
+SEP_WIDE = 80
+SEP_NARROW = 60
+
+ICON_CHECK = "[green]✓[/green]"
+ICON_WARN = "[yellow]⚠[/yellow]"
+ICON_ERROR = "[red]✗[/red]"
+ICON_SKIP = "[dim]⊙[/dim]"
+ICON_DRY_RUN = "\U0001f50d"
+ICON_SCAN = "\U0001f4c2"
+ICON_STATS = "\U0001f4ca"
+ICON_IMPORT = "\U0001f4e5"
+ICON_BACKUP = "\U0001f4e6"
+ICON_FILTERS = "\U0001f4cb"
+ICON_TIP = "[yellow]\U0001f4a1[/yellow]"
+ICON_CHART = "\U0001f4c8"
+
+
+def _indent_prefix(indent: int) -> str:
+    return "  " * indent
+
+
+def print_success(message: str, *, indent: int = 0) -> None:
+    console.print(f"{_indent_prefix(indent)}{ICON_CHECK} {message}")
+
+
+def print_warning(message: str, *, indent: int = 0) -> None:
+    err_console.print(f"{_indent_prefix(indent)}{ICON_WARN} {message}")
+
+
+def print_error(message: str, *, indent: int = 0) -> None:
+    err_console.print(f"{_indent_prefix(indent)}{ICON_ERROR} {message}")
+
+
+def print_skip(message: str, *, indent: int = 0) -> None:
+    console.print(f"{_indent_prefix(indent)}{ICON_SKIP} {message}")
+
+
+def print_info(message: str, *, indent: int = 0) -> None:
+    console.print(f"{_indent_prefix(indent)}{message}")
+
+
+def print_tip(message: str) -> None:
+    console.print(f"{ICON_TIP} Tip: {message}")
+
+
+def print_raw(message: str, *, indent: int = 0) -> None:
+    console.print(f"{_indent_prefix(indent)}{message}", markup=False, highlight=False)
+
+
+def print_header(title: str, icon: str = "", *, wide: bool = False) -> None:
+    width = SEP_WIDE if wide else SEP_NARROW
+    prefix = f"{icon} " if icon else ""
+    console.print(f"\n{prefix}{title}")
+    console.print("=" * width)
+
+
+def print_footer(*, wide: bool = False) -> None:
+    width = SEP_WIDE if wide else SEP_NARROW
+    console.print("=" * width)
+
+
+def print_separator(*, wide: bool = False) -> None:
+    width = SEP_WIDE if wide else SEP_NARROW
+    console.print("-" * width)
+
+
+def print_subsection(title: str) -> None:
+    console.print(f"\n{title}")
+
+
+def print_kv(key: str, value: str, *, indent: int = 1) -> None:
+    console.print(f"{_indent_prefix(indent)}[dim]{escape(key)}:[/dim] {escape(value)}")
+
+
+def print_dry_run_header(action: str = "imported") -> None:
+    console.print(f"\n{ICON_DRY_RUN} DRY RUN MODE - No data will be {action}\n")
+
+
+def print_dry_run_complete(action_verb: str = "run") -> None:
+    print_success(f"Dry run complete. Use without --dry-run to {action_verb}.")

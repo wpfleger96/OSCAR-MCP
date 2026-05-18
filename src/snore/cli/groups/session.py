@@ -6,7 +6,22 @@ from datetime import datetime
 
 import click
 
+from rich.markup import escape
+
 from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
+from snore.cli.display import (
+    ICON_STATS,
+    console,
+    print_dry_run_complete,
+    print_dry_run_header,
+    print_footer,
+    print_header,
+    print_raw,
+    print_separator,
+    print_success,
+    print_tip,
+    print_warning,
+)
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
 
 
@@ -60,20 +75,20 @@ def session_list(
         )
 
         if not result.sessions:
-            click.echo("No sessions found")
+            console.print("No sessions found")
             return
 
-        click.echo(
+        console.print(
             f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<30} {'Serial':<15} {'AHI':<8}"
         )
-        click.echo("-" * 80)
+        print_separator(wide=True)
 
         for sess in result.sessions:
             device_name = f"{sess.manufacturer} {sess.model}"
             ahi_str = f"{sess.ahi:.1f}" if sess.ahi is not None else "N/A"
             status_marker = "" if sess.enabled else "[disabled]"
 
-            click.echo(
+            print_raw(
                 f"{sess.id:<5} "
                 f"{sess.start_time:%Y-%m-%d}   {sess.start_time:%H:%M:%S}  "
                 f"{sess.duration_hours:>6.1f}h    "
@@ -83,14 +98,12 @@ def session_list(
             )
 
         if result.total_count > 0 and limit > 0 and result.total_count > limit:
-            click.echo(
+            console.print(
                 f"\nShowing {len(result.sessions)} of {result.total_count} sessions"
             )
-            click.echo(
-                f"Tip: Use '--limit {result.total_count}' or '--limit 0' to show all"
-            )
+            print_tip(f"Use '--limit {result.total_count}' or '--limit 0' to show all")
         else:
-            click.echo(f"\nShowing all {len(result.sessions)} sessions")
+            console.print(f"\nShowing all {len(result.sessions)} sessions")
 
 
 @session.command("show")
@@ -99,9 +112,9 @@ def session_list(
 @db_option
 def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
     """Show details for a specific session."""
+    from snore.cli.display.analysis import display_session_detail
     from snore.database.session import session_scope
     from snore.services.session_service import SessionService
-    from snore.utils.display import display_session_detail
 
     init_db(db)
 
@@ -168,60 +181,60 @@ def session_delete(
             raise click.ClickException(str(e)) from e
 
         if not preview.sessions:
-            click.echo("⚠️  No sessions found matching the specified criteria")
+            print_warning("No sessions found matching the specified criteria")
             return
 
-        click.echo(f"\n{'=' * 80}")
+        print_footer(wide=True)
         if dry_run:
-            click.echo("🔍 DRY RUN MODE - No data will be deleted")
+            print_dry_run_header("deleted")
         else:
-            click.echo("⚠️  Sessions to be DELETED")
-        click.echo(f"{'=' * 80}\n")
+            print_warning("Sessions to be DELETED")
+        print_footer(wide=True)
+        console.print()
 
-        click.echo(
+        console.print(
             f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<30} {'Serial':<15}"
         )
-        click.echo("-" * 80)
+        print_separator(wide=True)
 
         for sess in preview.sessions:
-            device_name = f"{sess.manufacturer} {sess.model}"
+            device_name = f"{escape(sess.manufacturer)} {escape(sess.model)}"
 
-            click.echo(
+            console.print(
                 f"{sess.id:<5} "
                 f"{sess.start_time:%Y-%m-%d}   {sess.start_time:%H:%M:%S}  "
                 f"{sess.duration_hours:>6.1f}h    "
                 f"{device_name:<30} "
-                f"{sess.serial_number:<15}"
+                f"{escape(sess.serial_number):<15}"
             )
 
-        click.echo("\n" + "=" * 80)
-        click.echo("📊 Deletion Summary")
-        click.echo("=" * 80)
-        click.echo(f"Sessions:    {len(preview.sessions)}")
-        click.echo(f"Events:      {preview.event_count}")
-        click.echo(f"Waveforms:   {preview.waveform_count}")
-        click.echo(f"Statistics:  {preview.stats_count}")
-        click.echo("=" * 80 + "\n")
+        print_header("Deletion Summary", ICON_STATS, wide=True)
+        console.print(f"Sessions:    {len(preview.sessions)}")
+        console.print(f"Events:      {preview.event_count}")
+        console.print(f"Waveforms:   {preview.waveform_count}")
+        console.print(f"Statistics:  {preview.stats_count}")
+        print_footer(wide=True)
+        console.print()
 
         if dry_run:
-            click.echo("✓ Dry run complete. Use without --dry-run to delete.")
+            print_dry_run_complete("delete")
             return
 
         if not force:
-            click.echo("⚠️  WARNING: This action cannot be undone!")
+            print_warning("WARNING: This action cannot be undone!")
             if not click.confirm("Are you sure you want to delete these sessions?"):
-                click.echo("Deletion cancelled")
+                console.print("Deletion cancelled")
                 return
 
         session_ids_to_delete = [s.id for s in preview.sessions]
         deleted_count = service.delete_sessions(session_ids_to_delete)
 
-        click.echo(
-            f"\n✓ Successfully deleted {deleted_count} session(s) and related data"
+        print_success(
+            f"Successfully deleted {deleted_count} session(s) and related data"
         )
 
         if deleted_count > 10:
-            click.echo("\n💡 Tip: Run 'snore db vacuum' to reclaim disk space")
+            print_tip("Run 'snore db vacuum' to reclaim disk space")
 
 
 def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
@@ -238,13 +251,15 @@ def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
             detail = service.get_session_detail(session_id)
             if detail.enabled == enabled:
                 status = "enabled" if enabled else "disabled"
-                click.echo(f"Session {session_id} is already {status}")
+                console.print(f"Session {session_id} is already {status}")
                 return
 
             service.set_session_enabled(session_id, enabled)
 
             status = "enabled" if enabled else "disabled"
-            click.echo(f"Session {session_id} {status} and day statistics recalculated")
+            console.print(
+                f"Session {session_id} {status} and day statistics recalculated"
+            )
         except ValueError as e:
             raise click.ClickException(str(e)) from e
 
