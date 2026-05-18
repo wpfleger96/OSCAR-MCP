@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import plotext as plt
 
+from snore.cli.display import console
+
 if TYPE_CHECKING:
     from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
     from snore.analysis.types import AnalysisEvent
@@ -98,7 +100,7 @@ class WaveformRenderer:
             This method prints directly to stdout and returns None.
         """
         if len(timestamps) < 2 or len(values) < 2 or timestamps[-1] == timestamps[0]:
-            print("No data in window")
+            console.print("No data in window")
             return
 
         label = WAVEFORM_LABELS.get(waveform_type, waveform_type.capitalize())
@@ -114,8 +116,8 @@ class WaveformRenderer:
             title = f"{label} Waveform"
 
         sample_rate = len(timestamps) / (timestamps[-1] - timestamps[0])
-        print(f"Sample rate: {sample_rate:.0f}Hz | Samples: {len(timestamps)}")
-        print()
+        console.print(f"Sample rate: {sample_rate:.0f}Hz | Samples: {len(timestamps)}")
+        console.print()
 
         plt.clear_figure()
         plt.theme("clear")
@@ -139,18 +141,18 @@ class WaveformRenderer:
         plt.show()
 
         if self.show_events:
-            print()
-            print("Events in window:")
+            console.print()
+            console.print("Events in window:")
 
             if machine_events and len(machine_events) > 0:
                 for event in machine_events:
                     time_str = format_time_offset(event.start_time)
                     event_type = getattr(event, "event_type", "Unknown")
-                    print(
+                    console.print(
                         f"  Machine:      {event_type} at {time_str} ({event.duration:.1f}s)"
                     )
             else:
-                print("  Machine:      (none)")
+                console.print("  Machine:      (none)")
 
             if programmatic_events and len(programmatic_events) > 0:
                 for event in programmatic_events:
@@ -163,15 +165,15 @@ class WaveformRenderer:
 
                     flow_red = getattr(event, "flow_reduction", None)
                     if flow_red is not None:
-                        print(
+                        console.print(
                             f"  Programmatic: {event_type} at {time_str} ({event.duration:.1f}s, {flow_red * 100:.0f}% flow reduction)"
                         )
                     else:
-                        print(
+                        console.print(
                             f"  Programmatic: {event_type} at {time_str} ({event.duration:.1f}s)"
                         )
             else:
-                print("  Programmatic: (none)")
+                console.print("  Programmatic: (none)")
 
     def render_multi(
         self,
@@ -192,11 +194,11 @@ class WaveformRenderer:
             Maximum 4 waveforms supported.
         """
         if not waveform_data:
-            print("No waveform data provided")
+            console.print("No waveform data provided")
             return
 
         if len(waveform_data) > 4:
-            print("Warning: Maximum 4 waveforms supported, using first 4")
+            console.print("Warning: Maximum 4 waveforms supported, using first 4")
             waveform_data = waveform_data[:4]
 
         num_plots = len(waveform_data)
@@ -254,5 +256,5 @@ class WaveformRenderer:
                 sample_rates.append(f"{label}: {rate:.0f}Hz")
 
         if sample_rates:
-            print()
-            print("Sample rates: " + " | ".join(sample_rates))
+            console.print()
+            console.print("Sample rates: " + " | ".join(sample_rates))

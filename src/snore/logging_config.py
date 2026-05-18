@@ -51,14 +51,16 @@ def _get_user_logging_config() -> dict[str, Any]:
 
 def _build_logging_config(
     verbose: bool = False,
-    console_format: str | None = None,
 ) -> dict[str, Any]:
     """
     Build the dictConfig configuration dictionary.
 
+    The console handler is attached programmatically after dictConfig
+    because RichHandler requires a Console instance that cannot be
+    expressed as a dictConfig class string.
+
     Args:
         verbose: If True, set console to DEBUG level
-        console_format: Override console format string
 
     Returns:
         Dictionary suitable for logging.config.dictConfig()
@@ -71,28 +73,16 @@ def _build_logging_config(
 
     log_file = get_log_path()
 
-    console_fmt = (
-        console_format or "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-
     config: dict[str, Any] = {
         "version": 1,
         "disable_existing_loggers": False,
         "formatters": {
-            "console": {"format": console_fmt},
             "file": {"format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"},
         },
-        "handlers": {
-            "console": {
-                "class": "logging.StreamHandler",
-                "level": "DEBUG" if verbose else "INFO",
-                "formatter": "console",
-                "stream": "ext://sys.stderr",
-            },
-        },
+        "handlers": {},
         "root": {
             "level": "DEBUG",
-            "handlers": ["console"],
+            "handlers": [],
         },
     }
 
@@ -119,8 +109,9 @@ def setup_logging(
     """
     Configure logging for SNORE application.
 
-    Uses dictConfig for robust configuration that properly handles
-    loggers created before this function is called.
+    Uses dictConfig for file handler and programmatic RichHandler for
+    console output so log messages are synchronized with Rich's live
+    display system (prevents terminal corruption during progress bars).
 
     Args:
         verbose: If True, set console to DEBUG level
@@ -132,8 +123,22 @@ def setup_logging(
         return
 
     try:
-        config = _build_logging_config(verbose=verbose, console_format=console_format)
+        from rich.logging import RichHandler
+
+        from snore.cli.display import err_console
+
+        config = _build_logging_config(verbose=verbose)
         logging.config.dictConfig(config)
+
+        console_handler = RichHandler(
+            console=err_console,
+            show_time=console_format is None,
+            show_path=False,
+            markup=False,
+            rich_tracebacks=True,
+        )
+        console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+        logging.getLogger().addHandler(console_handler)
     except Exception as e:
         sys.stderr.write(f"WARNING: Failed to configure logging: {e}\n")
         logging.basicConfig(

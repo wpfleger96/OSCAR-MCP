@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import date_range_options_required, db_option, init_db
+from snore.cli.display import console, err_console, print_footer, print_header
 
 
 @click.command()
@@ -55,10 +56,10 @@ def validate(
         try:
             validator = BatchValidator(db_session, None)
 
-            click.echo(
+            console.print(
                 f"Running validation from {date_from.date()} to {date_to.date()}..."
             )
-            click.echo(f"Mode: {mode}\n")
+            console.print(f"Mode: {mode}\n")
 
             report = validator.validate_date_range(
                 date_from.strftime("%Y-%m-%d"),
@@ -66,26 +67,26 @@ def validate(
                 mode=mode,
             )
 
-            click.echo("=" * 60)
-            click.echo("VALIDATION REPORT")
-            click.echo("=" * 60)
-            click.echo(
+            print_header("VALIDATION REPORT")
+            console.print(
                 f"Date Range: {report.date_range_start} to {report.date_range_end}"
             )
-            click.echo(f"Sessions Analyzed: {report.aggregate.total_sessions}")
-            click.echo(f"Total Machine Events: {report.aggregate.total_machine_events}")
-            click.echo(
+            console.print(f"Sessions Analyzed: {report.aggregate.total_sessions}")
+            console.print(
+                f"Total Machine Events: {report.aggregate.total_machine_events}"
+            )
+            console.print(
                 f"Total Programmatic Events: {report.aggregate.total_programmatic_events}"
             )
 
-            click.echo("\nAggregate Metrics:")
-            click.echo(
+            console.print("\nAggregate Metrics:")
+            console.print(
                 f"  Apneas:     "
                 f"Avg Sens: {report.aggregate.avg_apnea_sensitivity * 100:.0f}%  "
                 f"Avg Prec: {report.aggregate.avg_apnea_precision * 100:.0f}%  "
                 f"Avg F1: {report.aggregate.avg_apnea_f1:.2f}"
             )
-            click.echo(
+            console.print(
                 f"  Hypopneas:  "
                 f"Avg Sens: {report.aggregate.avg_hypopnea_sensitivity * 100:.0f}%  "
                 f"Avg Prec: {report.aggregate.avg_hypopnea_precision * 100:.0f}%  "
@@ -93,26 +94,26 @@ def validate(
             )
 
             if report.aggregate.low_sensitivity_sessions:
-                click.echo(
+                console.print(
                     f"\nSessions with Low Sensitivity (<60%): "
                     f"{len(report.aggregate.low_sensitivity_sessions)}"
                 )
-                click.echo(
+                console.print(
                     f"  Session IDs: {report.aggregate.low_sensitivity_sessions[:10]}"
                 )
                 if len(report.aggregate.low_sensitivity_sessions) > 10:
-                    click.echo(
+                    console.print(
                         f"  ... and {len(report.aggregate.low_sensitivity_sessions) - 10} more"
                     )
 
-            click.echo("\nPer-Session Results:")
-            click.echo(
+            console.print("\nPer-Session Results:")
+            console.print(
                 f"{'Date':<12} {'ID':<6} {'Machine':<8} {'Prog':<8} {'Apnea Sens':<11} {'Hypopnea Sens':<13}"
             )
-            click.echo("=" * 60)
+            print_footer()
 
             for session in report.sessions[:10]:
-                click.echo(
+                console.print(
                     f"{session.date:<12} "
                     f"{session.session_id:<6} "
                     f"{session.machine_event_count:<8} "
@@ -122,16 +123,16 @@ def validate(
                 )
 
             if len(report.sessions) > 10:
-                click.echo(f"... and {len(report.sessions) - 10} more sessions")
+                console.print(f"... and {len(report.sessions) - 10} more sessions")
 
             if export:
                 export_path = Path(export)
                 if export_path.suffix == ".json":
                     export_report_json(report, export_path)
-                    click.echo(f"\nReport exported to {export_path}")
+                    console.print(f"\nReport exported to {export_path}")
                 elif export_path.suffix == ".csv":
                     export_report_csv(report, export_path)
-                    click.echo(f"\nReport exported to {export_path}")
+                    console.print(f"\nReport exported to {export_path}")
                 else:
                     raise click.ClickException(
                         f"Unknown export format '{export_path.suffix}'. Use .json or .csv"
@@ -142,7 +143,7 @@ def validate(
         except Exception as e:
             import traceback
 
-            click.echo(f"Validation error: {e}", err=True)
+            err_console.print(f"Validation error: {e}")
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 traceback.print_exc()
             raise click.ClickException(str(e)) from e

@@ -7,6 +7,15 @@ from typing import Literal, cast
 import click
 
 from snore.cli.decorators import db_option, init_db
+from snore.cli.display import (
+    ICON_CHART,
+    console,
+    print_footer,
+    print_header,
+    print_kv,
+    print_separator,
+    print_subsection,
+)
 
 
 @click.command()
@@ -43,88 +52,90 @@ def stats(
         summary = service.get_summary(days)
 
         if not summary:
-            click.echo("\n📈 Therapy Statistics")
-            click.echo(f"{'=' * 60}")
-            click.echo("\nNo therapy data found.")
-            click.echo(f"{'=' * 60}\n")
+            print_header("Therapy Statistics", ICON_CHART)
+            console.print("\nNo therapy data found.")
+            print_footer()
+            console.print()
             return
 
-        click.echo("\n📈 Therapy Statistics")
-        click.echo(f"{'=' * 60}")
+        print_header("Therapy Statistics", ICON_CHART)
 
-        click.echo("\nDate Range")
-        click.echo(f"  First session: {summary.first_date}")
-        click.echo(f"  Last session: {summary.last_date}")
-        click.echo(f"  Days since last use: {summary.days_since_last}")
+        print_subsection("Date Range")
+        print_kv("First session", str(summary.first_date))
+        print_kv("Last session", str(summary.last_date))
+        print_kv("Days since last use", str(summary.days_since_last))
 
-        click.echo("\nUsage")
-        click.echo(f"  Total therapy hours: {summary.total_hours:,.1f} hrs")
-        click.echo(f"  Average per night: {summary.avg_hours:.1f} hrs")
-        click.echo(f"  Days with data: {summary.days_with_data}")
+        print_subsection("Usage")
+        print_kv("Total therapy hours", f"{summary.total_hours:,.1f} hrs")
+        print_kv("Average per night", f"{summary.avg_hours:.1f} hrs")
+        print_kv("Days with data", str(summary.days_with_data))
 
-        click.echo("\nClinical")
+        print_subsection("Clinical")
         if summary.avg_ahi is not None:
-            click.echo(f"  Average AHI: {summary.avg_ahi:.1f}")
+            print_kv("Average AHI", f"{summary.avg_ahi:.1f}")
         else:
-            click.echo("  Average AHI: N/A")
-        click.echo(f"  Effectiveness: {summary.effectiveness}")
+            print_kv("Average AHI", "N/A")
+        print_kv("Effectiveness", str(summary.effectiveness))
 
         if summary.avg_rei is not None:
-            click.echo(f"  Average REI: {summary.avg_rei:.1f}")
+            print_kv("Average REI", f"{summary.avg_rei:.1f}")
 
         if summary.avg_pressure is not None:
-            click.echo("\nPressure")
-            click.echo(f"  Average: {summary.avg_pressure:.1f} cmH₂O")
+            print_subsection("Pressure")
+            print_kv("Average", f"{summary.avg_pressure:.1f} cmH₂O")
             if summary.min_pressure is not None and summary.max_pressure is not None:
-                click.echo(
-                    f"  Range: {summary.min_pressure:.1f} - {summary.max_pressure:.1f} cmH₂O"
+                print_kv(
+                    "Range",
+                    f"{summary.min_pressure:.1f} - {summary.max_pressure:.1f} cmH₂O",
                 )
 
         if summary.avg_epap is not None:
-            click.echo("\nEPAP")
-            click.echo(f"  Average: {summary.avg_epap:.1f} cmH₂O")
+            print_subsection("EPAP")
+            print_kv("Average", f"{summary.avg_epap:.1f} cmH₂O")
 
         if summary.avg_leak is not None:
-            click.echo("\nLeak")
-            click.echo(f"  Average: {summary.avg_leak:.1f} L/min")
+            print_subsection("Leak")
+            print_kv("Average", f"{summary.avg_leak:.1f} L/min")
             leak_assessment = "well controlled" if summary.avg_leak < 24 else "elevated"
-            click.echo(f"  Assessment: {leak_assessment}")
+            print_kv("Assessment", leak_assessment)
 
         if summary.avg_spo2 is not None:
-            click.echo("\nSpO₂")
-            click.echo(f"  Average: {summary.avg_spo2:.1f}%")
+            print_subsection("SpO₂")
+            print_kv("Average", f"{summary.avg_spo2:.1f}%")
             if summary.min_spo2 is not None:
-                click.echo(f"  Minimum recorded: {summary.min_spo2:.0f}%")
+                print_kv("Minimum recorded", f"{summary.min_spo2:.0f}%")
 
         if summary.total_spo2_time_below_90 > 0:
             minutes_below_90 = summary.total_spo2_time_below_90 / 60
-            click.echo(f"  Time below 90%: {minutes_below_90:.1f} minutes")
+            print_kv("Time below 90%", f"{minutes_below_90:.1f} minutes")
 
         if summary.avg_pulse is not None:
-            click.echo("\nPulse")
-            click.echo(f"  Average: {summary.avg_pulse:.1f} BPM")
+            print_subsection("Pulse")
+            print_kv("Average", f"{summary.avg_pulse:.1f} BPM")
 
         if (
             summary.avg_respiratory_rate is not None
             or summary.avg_tidal_volume is not None
             or summary.avg_minute_ventilation is not None
         ):
-            click.echo("\nRespiratory")
+            print_subsection("Respiratory")
             if summary.avg_respiratory_rate is not None:
-                click.echo(
-                    f"  Respiratory Rate: {summary.avg_respiratory_rate:.1f} breaths/min"
+                print_kv(
+                    "Respiratory Rate",
+                    f"{summary.avg_respiratory_rate:.1f} breaths/min",
                 )
             if summary.avg_tidal_volume is not None:
-                click.echo(f"  Tidal Volume: {summary.avg_tidal_volume:.0f} mL")
+                print_kv("Tidal Volume", f"{summary.avg_tidal_volume:.0f} mL")
             if summary.avg_minute_ventilation is not None:
-                click.echo(
-                    f"  Minute Ventilation: {summary.avg_minute_ventilation:.1f} L/min"
+                print_kv(
+                    "Minute Ventilation",
+                    f"{summary.avg_minute_ventilation:.1f} L/min",
                 )
 
         if summary.event_counts:
-            click.echo("\nEvents")
+            print_subsection("Events")
             for ec in summary.event_counts:
-                click.echo(f"  {ec.event_type}: {ec.count:,} ({ec.percentage:.1f}%)")
+                print_kv(ec.event_type, f"{ec.count:,} ({ec.percentage:.1f}%)")
 
         if period:
             period_literal = cast(Literal["week", "month", "6month", "year"], period)
@@ -140,13 +151,12 @@ def stats(
                     "year": "Yearly",
                 }
 
-                click.echo(f"\n\nTherapy Statistics ({period_names[period]})")
-                click.echo(f"{'=' * 80}")
+                print_header(f"Therapy Statistics ({period_names[period]})", wide=True)
 
-                click.echo(
+                console.print(
                     f"{'Period':<20} {'Days':<6} {'Avg Hours':<11} {'Avg AHI':<9} {'Med AHI':<9}"
                 )
-                click.echo("-" * 80)
+                print_separator(wide=True)
 
                 for period_stat in period_stats:  # type: PeriodStatistics
                     if period == "week":
@@ -179,11 +189,11 @@ def stats(
                         else "N/A"
                     )
 
-                    click.echo(
+                    console.print(
                         f"{period_label:<20} {days_str:<6} {hours_str:<11} {avg_ahi_str:<9} {med_ahi_str:<9}"
                     )
 
-                click.echo("=" * 80)
+                print_footer(wide=True)
 
                 if trend:
                     import plotext as plt
@@ -209,8 +219,7 @@ def stats(
                         else:
                             direction = ""
 
-                        click.echo("\n\nAHI Trend")
-                        click.echo("=" * 80)
+                        print_header("AHI Trend", wide=True)
 
                         plt.clf()
                         plt.plot(x_indices, ahi_values, marker="braille")
@@ -220,14 +229,13 @@ def stats(
                         plt.ylabel("AHI (events/hour)")
                         plt.show()
 
-                        click.echo("=" * 80)
+                        print_footer(wide=True)
 
         if records:
             records_data = service.get_records(days, top_n=5)
 
             if records_data:
-                click.echo("\n\nRecords (Top 5)")
-                click.echo("=" * 80)
+                print_header("Records (Top 5)", wide=True)
 
                 metric_labels = {
                     "ahi": ("Best AHI", "Worst AHI"),
@@ -243,8 +251,8 @@ def stats(
                     best_records = records_data[metric]["best"]
                     worst_records = records_data[metric]["worst"]
 
-                    click.echo(f"\n{best_label:<35} {worst_label}")
-                    click.echo("-" * 80)
+                    console.print(f"\n{best_label:<35} {worst_label}")
+                    print_separator(wide=True)
 
                     max_rows = max(len(best_records), len(worst_records))
                     for i in range(max_rows):
@@ -265,8 +273,10 @@ def stats(
                             else:
                                 worst_str = f"{dt}: {val:.1f}"
 
-                        click.echo(f"{best_str:<35} {worst_str}")
+                        console.print(f"{best_str:<35} {worst_str}")
 
-                click.echo("=" * 80)
+                print_footer(wide=True)
 
-        click.echo(f"\n{'=' * 60}\n")
+        console.print()
+        print_footer()
+        console.print()

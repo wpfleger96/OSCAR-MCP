@@ -5,6 +5,7 @@ from __future__ import annotations
 import click
 
 from snore.bootstrap import check_tool_updates, get_tool_source, perform_update
+from snore.cli.display import console, print_success
 
 
 @click.command()
@@ -17,7 +18,7 @@ def upgrade(check: bool, force: bool) -> None:
         source or "", "PyPI"
     )
 
-    click.echo(f"Checking for updates from {source_name}...")
+    console.print(f"Checking for updates from {source_name}...")
 
     update_info = check_tool_updates()
 
@@ -25,28 +26,28 @@ def upgrade(check: bool, force: bool) -> None:
         raise click.ClickException("Could not check for updates")
 
     if update_info.has_update:
-        click.echo(
+        console.print(
             f"Update available: {update_info.current_version} → {update_info.latest_version}"
         )
 
         if check:
-            click.echo("\nRun 'snore upgrade' to install")
+            console.print("\nRun 'snore upgrade' to install")
             return
 
         if not force:
             if not click.confirm("Install update?", default=True):
-                click.echo("Cancelled")
+                console.print("Cancelled")
                 return
 
-        click.echo("Upgrading...")
+        console.print("Upgrading...")
         success, message, was_upgraded = perform_update(force=force)
 
         if success:
             if was_upgraded:
-                click.echo(f"✓ {message}")
+                print_success(message)
             else:
-                click.echo("✓ Already up to date")
+                print_success("Already up to date")
         else:
             raise click.ClickException(message)
     else:
-        click.echo("✓ Already up to date")
+        print_success("Already up to date")
