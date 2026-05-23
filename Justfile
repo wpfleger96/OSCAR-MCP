@@ -25,53 +25,37 @@ lint:
 format:
     uvx ruff format .
 
-# UI Code Quality - Check variants
-ui-type-check:
-    cd ui && npm run type-check
-
-ui-lint-check:
-    cd ui && npm run lint-check
-
-ui-format-check:
-    cd ui && npm run format-check
-
-# UI Code Quality - Fix variants
-ui-lint:
-    cd ui && npm run lint
-
-ui-format:
-    cd ui && npm run format
-
 # Composite quality checks
-check: sync type-check lint-check format-check ui-type-check ui-lint-check ui-format-check
+check: sync type-check lint-check format-check
     @echo "Quick quality checks passed"
 
 check-all: check test
     @echo "All quality checks and tests passed"
 
-pre-commit: sync type-check lint format ui-type-check ui-lint ui-format
+pre-commit: sync type-check lint format test
     @echo "Pre-commit checks passed"
-
-ci: sync type-check lint-check format-check ui-type-check ui-lint-check ui-format-check test
-    @echo "CI checks passed"
 
 # Testing
 test:
     uv run pytest
 
+test-unit:
+    uv run pytest -m unit
 
-# Start the REST API server in development mode
-dev-api:
-    uv run snore serve --reload
+test-integration:
+    uv run pytest -m integration
 
-# Start the Vue UI dev server
-dev-ui:
-    cd ui && npm run dev
+# Build & Package
+build: sync
+    uv build
 
-# Install UI npm dependencies
-ui-install:
-    cd ui && npm install
+clean-build:
+    rm -rf dist/ build/ src/*.egg-info
 
-# Build UI for production
-ui-build:
-    cd ui && npm run build
+rebuild: clean-build build
+
+# CI workflow (matches CI steps)
+ci: sync type-check lint-check format-check test
+    @echo "CI checks passed"
+
+import? 'local.just'
