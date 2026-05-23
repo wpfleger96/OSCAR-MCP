@@ -32,8 +32,16 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
       - name: Install dependencies
         run: just sync
+
+      - name: Install UI dependencies
+        run: just ui-install
 
       - name: Run type checks
         run: just type-check
@@ -43,6 +51,15 @@ jobs:
 
       - name: Run formatter
         run: just format-check
+
+      - name: Run UI type checks
+        run: just ui-type-check
+
+      - name: Run UI linter
+        run: just ui-lint-check
+
+      - name: Run UI formatter
+        run: just ui-format-check
 
       - name: Run tests
         run: just test
