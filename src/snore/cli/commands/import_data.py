@@ -183,7 +183,7 @@ def import_data(
                         raise click.ClickException(
                             "Invalid selection: no valid indices"
                         )
-                except (ValueError, IndexError):
+                except ValueError, IndexError:
                     raise click.ClickException(
                         f"Invalid selection: {selection}"
                     ) from None

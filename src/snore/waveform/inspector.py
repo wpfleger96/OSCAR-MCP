@@ -87,10 +87,10 @@ class WaveformInspector:
 
     def find_events_in_window(
         self,
-        events: Sequence["EventType"],
+        events: Sequence[EventType],
         start_time: float,
         end_time: float,
-    ) -> list["EventType"]:
+    ) -> list[EventType]:
         """
         Filter events to those within a time window.
 
