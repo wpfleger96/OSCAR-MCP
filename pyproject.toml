@@ -2,7 +2,7 @@
 name = "snore"
 version = "0.1.0"
 description = "CLI tool for analyzing and inspecting CPAP/APAP therapy data"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
@@ -58,7 +58,6 @@ select = ["I", "F", "UP", "B"]  # isort, pyflakes, pyupgrade, bugbear
 lines-between-types = 1
 
 [tool.mypy]
-python_version = "3.13"
 mypy_path = "src"
 namespace_packages = true
 explicit_package_bases = true
