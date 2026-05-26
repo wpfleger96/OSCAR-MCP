@@ -40,13 +40,32 @@ def upgrade(check: bool, force: bool) -> None:
                 return
 
         console.print("Upgrading...")
-        success, message, was_upgraded = perform_update(force=force)
+        success, message, was_upgraded = perform_update(
+            force=force, target_version=update_info.latest_version
+        )
 
         if success:
             if was_upgraded:
                 print_success(message)
             else:
-                print_success("Already up to date")
+                from snore.bootstrap.version import get_package_version
+
+                try:
+                    new_version = get_package_version("snore")
+                except Exception:
+                    new_version = update_info.current_version
+                if new_version == update_info.current_version:
+                    console.print(
+                        f"[yellow]⚠ Upgrade reported success but version unchanged "
+                        f"({update_info.current_version})[/yellow]"
+                    )
+                    console.print(
+                        "[dim]This may be due to a Python version mismatch. "
+                        "Check the package's requires-python and try: "
+                        "uv tool upgrade snore --python <version>[/dim]"
+                    )
+                else:
+                    print_success("Already up to date")
         else:
             raise click.ClickException(message)
     else:
