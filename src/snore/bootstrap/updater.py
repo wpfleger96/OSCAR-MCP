@@ -2,10 +2,15 @@
 
 import json
 import logging
+import os
 import subprocess
+import tomllib
 import urllib.request
 
 from dataclasses import dataclass
+from pathlib import Path
+
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 from .installer import (
     GITHUB_REPO,
@@ -146,7 +151,90 @@ def check_tool_updates(timeout: int = 10) -> UpdateInfo | None:
         return check_pypi_updates(PACKAGE_NAME, current, timeout)
 
 
-def perform_update(force: bool = False) -> tuple[bool, str, bool]:
+def _get_tool_venv_python(package_name: str) -> str | None:
+    """Read the Python version from a uv tool's virtual environment."""
+    data_home = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+    pyvenv_cfg = Path(data_home) / "uv" / "tools" / package_name / "pyvenv.cfg"
+    try:
+        for line in pyvenv_cfg.read_text().splitlines():
+            if line.startswith("version_info"):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _fetch_requires_python(
+    package_name: str,
+    version: str,
+    github_repo: str,
+    source: str,
+    timeout: int = 10,
+) -> str | None:
+    """Fetch the requires-python specifier for a specific package version."""
+    try:
+        if source == "github":
+            url = f"https://raw.githubusercontent.com/{github_repo}/v{version}/pyproject.toml"
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "snore")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                data = tomllib.loads(response.read().decode())
+            result: str | None = data.get("project", {}).get("requires-python")
+            return result
+        else:
+            url = f"https://pypi.org/pypi/{package_name}/{version}/json"
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "snore")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                data = json.loads(response.read().decode())
+            result = data.get("info", {}).get("requires_python")
+            return result
+    except Exception as e:
+        logger.debug(
+            f"Failed to fetch requires-python for {package_name}=={version}: {e}"
+        )
+        return None
+
+
+def _compute_required_python(
+    package_name: str,
+    target_version: str,
+    github_repo: str,
+    source: str,
+) -> str | None:
+    """Determine if the tool venv needs a Python upgrade for the target version.
+
+    Returns the minimum required Python major.minor (e.g. "3.14") if the
+    current venv Python is too old, None otherwise.
+    """
+    venv_python = _get_tool_venv_python(package_name)
+    if not venv_python:
+        return None
+
+    requires_python = _fetch_requires_python(
+        package_name, target_version, github_repo, source
+    )
+    if not requires_python:
+        return None
+
+    try:
+        spec = SpecifierSet(requires_python)
+    except InvalidSpecifier:
+        return None
+
+    if venv_python in spec:
+        return None
+
+    for s in spec:
+        if s.operator in (">=", "==", "~="):
+            parts = s.version.split(".")
+            return f"{parts[0]}.{parts[1]}"
+    return None
+
+
+def perform_update(
+    force: bool = False, target_version: str | None = None
+) -> tuple[bool, str, bool]:
     """Upgrade SNORE from correct source.
 
     Args:
@@ -163,6 +251,14 @@ def perform_update(force: bool = False) -> tuple[bool, str, bool]:
 
     source = get_tool_source(PACKAGE_NAME)
 
+    # Pre-check: detect if the target version needs a newer Python than the venv has.
+    # Workaround for https://github.com/astral-sh/uv/issues/18083
+    python_flag: str | None = None
+    if target_version and source is not None:
+        python_flag = _compute_required_python(
+            PACKAGE_NAME, target_version, GITHUB_REPO, source
+        )
+
     if source == "github":
         cmd = ["uv", "tool", "install", "--force", "--reinstall", GITHUB_REPO_URL]
     elif source == "local":
@@ -171,7 +267,10 @@ def perform_update(force: bool = False) -> tuple[bool, str, bool]:
         if force:
             cmd = ["uv", "tool", "install", PACKAGE_NAME, "--force"]
         else:
-            cmd = ["uv", "tool", "upgrade", PACKAGE_NAME]
+            cmd = ["uv", "tool", "upgrade", PACKAGE_NAME, "--no-cache"]
+
+    if python_flag:
+        cmd.extend(["--python", python_flag])
 
     try:
         result = subprocess.run(
