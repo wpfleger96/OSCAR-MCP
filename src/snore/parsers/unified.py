@@ -243,7 +243,7 @@ class WaveformData(BaseModel):
     mean_value: float | None = Field(default=None, description="Mean value")
 
     @model_validator(mode="after")
-    def convert_to_numpy(self) -> "WaveformData":
+    def convert_to_numpy(self) -> WaveformData:
         """Convert lists to numpy arrays for efficiency."""
         if isinstance(self.timestamps, list):
             self.timestamps = np.array(self.timestamps, dtype=np.float32)
@@ -321,7 +321,7 @@ class UnifiedSession(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_session(self) -> "UnifiedSession":
+    def validate_session(self) -> UnifiedSession:
         """Validate session data after initialization."""
         errors = []
 

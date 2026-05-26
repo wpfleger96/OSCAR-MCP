@@ -297,7 +297,7 @@ class ResmedEDFParser(DeviceParser):
                     device_serial=serial,
                     confidence=0.95,
                 )
-            except (IndexError, ValueError):
+            except IndexError, ValueError:
                 pass
 
         serial = self._extract_serial_from_identification(path)
