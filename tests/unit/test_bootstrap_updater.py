@@ -224,7 +224,7 @@ class TestPerformUpdatePythonSwitch:
         perform_update()
         assert "--python" not in captured_cmd
 
-    def test_no_cache_present_on_pypi_upgrade(self, monkeypatch):
+    def test_pypi_upgrade_uses_force_reinstall(self, monkeypatch):
         monkeypatch.setattr(
             "snore.bootstrap.updater.is_command_available", lambda cmd: True
         )
@@ -244,13 +244,15 @@ class TestPerformUpdatePythonSwitch:
             class Result:
                 returncode = 0
                 stderr = ""
-                stdout = "Nothing to upgrade"
+                stdout = "Installed snore 1.0.0"
 
             return Result()
 
         monkeypatch.setattr("snore.bootstrap.updater.subprocess.run", mock_run)
         perform_update(target_version="1.0.0")
-        assert "--no-cache" in captured_cmd
+        assert "--force" in captured_cmd
+        assert "--reinstall" in captured_cmd
+        assert "install" in captured_cmd
 
     def test_github_source_gets_python_flag(self, monkeypatch):
         monkeypatch.setattr(

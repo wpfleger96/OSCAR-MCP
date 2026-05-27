@@ -267,7 +267,7 @@ def perform_update(
         if force:
             cmd = ["uv", "tool", "install", PACKAGE_NAME, "--force"]
         else:
-            cmd = ["uv", "tool", "upgrade", PACKAGE_NAME, "--no-cache"]
+            cmd = ["uv", "tool", "install", "--force", "--reinstall", PACKAGE_NAME]
 
     if python_flag:
         cmd.extend(["--python", python_flag])
