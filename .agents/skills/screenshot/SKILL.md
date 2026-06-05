@@ -41,6 +41,24 @@ Individual steps if needed:
 - Screenshots blank/loading → increase waitForTimeout in screenshot.spec.ts
 - "force-with-lease rejected" → retry (another push happened concurrently)
 
+## Comment format
+
+The script posts a basic comment with image embeds. After posting, edit the comment
+(`gh api repos/{owner}/{repo}/issues/comments/{id} --method PATCH --field body="..."`)
+to use a numbered list with a brief description for each screenshot:
+
+```
+## Screenshots
+
+1. **Dashboard** — stat cards, AHI trend chart, usage calendar heatmap, and recent sessions
+
+![dashboard](url)
+
+2. **Sessions** — paginated table with date filters, device info, and AHI values
+
+![sessions](url)
+```
+
 ## Output
 
 Prints the number of screenshots posted and the PR comment URL.
