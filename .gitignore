@@ -209,6 +209,9 @@ __marimo__/
 .claude/settings.local.json
 
 node_modules/
+ui/screenshots/
+ui/playwright-report/
+ui/test-results/
 snore_export_raw/
 snore_export_csv/
 snore_export.json

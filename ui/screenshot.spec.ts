@@ -1,0 +1,81 @@
+import { test, type Route } from '@playwright/test'
+import {
+    summaryFixture,
+    trendsFixture,
+    daysFixture,
+    sessionsFixture,
+    devicesFixture,
+    periodsFixture,
+    recordsFixture,
+    rxHistoryFixture,
+    rxCurrentFixture,
+    rxCompareFixture,
+    sessionDetailFixture,
+} from './tests/fixtures/api-fixtures'
+
+function routeApi(route: Route) {
+    const url = route.request().url()
+
+    if (url.includes('/stats/records')) return route.fulfill({ json: recordsFixture })
+    if (url.includes('/stats/summary')) return route.fulfill({ json: summaryFixture })
+    if (url.includes('/stats/trends')) return route.fulfill({ json: trendsFixture })
+    if (url.includes('/stats/periods')) return route.fulfill({ json: periodsFixture })
+    if (url.includes('/rx/compare')) return route.fulfill({ json: rxCompareFixture })
+    if (url.includes('/rx/current')) return route.fulfill({ json: rxCurrentFixture })
+    if (url.includes('/rx/history')) return route.fulfill({ json: rxHistoryFixture })
+    if (url.includes('/devices')) return route.fulfill({ json: devicesFixture })
+    if (url.includes('/sessions/1470/events')) return route.fulfill({ json: [] })
+    if (url.includes('/sessions/1470/waveforms'))
+        return route.fulfill({
+            json: {
+                timestamps: [],
+                values: [],
+                sample_rate: 25,
+                unit: 'L/min',
+                total_samples: 0,
+                downsampled: false,
+                returned_samples: 0,
+            },
+        })
+    if (url.includes('/sessions/1470')) return route.fulfill({ json: sessionDetailFixture })
+    if (url.includes('/days')) return route.fulfill({ json: daysFixture })
+    if (url.includes('/sessions')) return route.fulfill({ json: sessionsFixture })
+
+    return route.fulfill({ json: {} })
+}
+
+test.beforeEach(async ({ page }) => {
+    await page.route('/api/v1/**', routeApi)
+})
+
+test('dashboard', async ({ page }) => {
+    await page.goto('/')
+    await page.waitForSelector('.summary-row')
+    await page.waitForTimeout(800)
+    await page.screenshot({ path: 'screenshots/dashboard.png' })
+})
+
+test('sessions', async ({ page }) => {
+    await page.goto('/sessions')
+    await page.waitForSelector('.sessions-table .p-datatable-tbody tr')
+    await page.screenshot({ path: 'screenshots/sessions.png' })
+})
+
+test('stats', async ({ page }) => {
+    await page.goto('/stats')
+    await page.waitForSelector('.records-grid')
+    await page.waitForTimeout(800)
+    await page.screenshot({ path: 'screenshots/stats.png' })
+})
+
+test('rx-history', async ({ page }) => {
+    await page.goto('/rx')
+    await page.waitForSelector('.setting-pill')
+    await page.screenshot({ path: 'screenshots/rx-history.png' })
+})
+
+test('session-detail', async ({ page }) => {
+    await page.goto('/sessions/1470')
+    await page.waitForSelector('.session-detail .stats-section')
+    await page.screenshot({ path: 'screenshots/session-detail.png' })
+})
