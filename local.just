@@ -28,3 +28,17 @@ dev-api:
 
 dev-ui:
     cd ui && npm run dev
+
+# Screenshots
+ui-playwright-install:
+    cd ui && npx playwright install chromium
+
+screenshot:
+    just ui-build
+    cd ui && npx playwright test screenshot.spec.ts
+
+screenshot-post PR_NUMBER:
+    bash scripts/post-screenshots.sh {{PR_NUMBER}}
+
+screenshot-pr PR_NUMBER: screenshot
+    just screenshot-post {{PR_NUMBER}}

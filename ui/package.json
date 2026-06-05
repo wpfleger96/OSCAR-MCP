@@ -11,7 +11,8 @@
     "lint-check": "eslint . --max-warnings 0",
     "lint": "eslint . --fix",
     "format-check": "prettier --check 'src/**/*.{ts,vue,json,css}'",
-    "format": "prettier --write 'src/**/*.{ts,vue,json,css}'"
+    "format": "prettier --write 'src/**/*.{ts,vue,json,css}'",
+    "test:screenshot": "playwright test screenshot.spec.ts"
   },
   "dependencies": {
     "@primevue/themes": "^4.0.0",
@@ -34,6 +35,7 @@
     "prettier": "^3.8.3",
     "typescript": "~6.0.3",
     "vite": "^8.0.11",
+    "@playwright/test": "^1.52.0",
     "vue-tsc": "^3.2.8"
   }
 }
