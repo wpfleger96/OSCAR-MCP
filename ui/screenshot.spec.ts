@@ -25,7 +25,18 @@ function routeApi(route: Route) {
     if (url.includes('/rx/history')) return route.fulfill({ json: rxHistoryFixture })
     if (url.includes('/devices')) return route.fulfill({ json: devicesFixture })
     if (url.includes('/sessions/1470/events')) return route.fulfill({ json: [] })
-    if (url.includes('/sessions/1470/waveforms')) return route.fulfill({ json: { timestamps: [], values: [], sample_rate: 25, unit: 'L/min', total_samples: 0, downsampled: false, returned_samples: 0 } })
+    if (url.includes('/sessions/1470/waveforms'))
+        return route.fulfill({
+            json: {
+                timestamps: [],
+                values: [],
+                sample_rate: 25,
+                unit: 'L/min',
+                total_samples: 0,
+                downsampled: false,
+                returned_samples: 0,
+            },
+        })
     if (url.includes('/sessions/1470')) return route.fulfill({ json: sessionDetailFixture })
     if (url.includes('/days')) return route.fulfill({ json: daysFixture })
     if (url.includes('/sessions')) return route.fulfill({ json: sessionsFixture })

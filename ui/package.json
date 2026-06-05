@@ -10,8 +10,8 @@
     "type-check": "vue-tsc --noEmit",
     "lint-check": "eslint . --max-warnings 0",
     "lint": "eslint . --fix",
-    "format-check": "prettier --check 'src/**/*.{ts,vue,json,css}'",
-    "format": "prettier --write 'src/**/*.{ts,vue,json,css}'",
+    "format-check": "prettier --check 'src/**/*.{ts,vue,json,css}' 'tests/**/*.ts' '*.spec.ts'",
+    "format": "prettier --write 'src/**/*.{ts,vue,json,css}' 'tests/**/*.ts' '*.spec.ts'",
     "test:screenshot": "playwright test screenshot.spec.ts"
   },
   "dependencies": {
