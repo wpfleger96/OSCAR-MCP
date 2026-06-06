@@ -215,3 +215,5 @@ ui/test-results/
 snore_export_raw/
 snore_export_csv/
 snore_export.json
+
+.claude/worktrees/
