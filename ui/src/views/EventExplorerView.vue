@@ -79,7 +79,7 @@
             <Column header="Time">
                 <template #body="{ data }: { data: EventItem }">
                     <a class="time-link" @click="jumpToWaveform(data.offset_seconds)">
-                        {{ formatTime(data.offset_seconds) }}
+                        {{ formatTimeOffset(data.offset_seconds) }}
                     </a>
                 </template>
             </Column>
@@ -102,6 +102,7 @@ import StatCard from '@/components/StatCard.vue'
 import { getSessionEvents, getEventMatch } from '@/api/events'
 import { getSession } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
 import type { EventItem, EventMatchResult } from '@/types'
 
@@ -150,13 +151,6 @@ function toggleType(type: string): void {
     if (s.has(type)) s.delete(type)
     else s.add(type)
     activeTypes.value = s
-}
-
-function formatTime(secs: number): string {
-    const h = Math.floor(secs / 3600)
-    const m = Math.floor((secs % 3600) / 60)
-    const s = Math.floor(secs % 60)
-    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
 function jumpToWaveform(offsetSec: number): void {

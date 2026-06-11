@@ -16,7 +16,7 @@
         <!-- Session header -->
         <div class="session-header">
             <div>
-                <h1>{{ formatDate(session.start_time) }}</h1>
+                <h1>{{ formatDateWithWeekday(session.start_time) }}</h1>
                 <div class="session-meta">
                     <Tag v-if="session.therapy_mode" :value="session.therapy_mode" />
                     <span>{{ session.device_manufacturer }} {{ session.device_model }}</span>
@@ -143,6 +143,7 @@ import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { useWaveformData } from '@/composables/useWaveformData'
 import { ahiClass } from '@/utils/format'
+import { formatDateWithWeekday } from '@/utils/formatting'
 import type { SessionDetail, EventItem } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
@@ -182,15 +183,6 @@ if (jumpToTime != null) {
                 )
             })
         }
-    })
-}
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-        weekday: 'short',
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
     })
 }
 

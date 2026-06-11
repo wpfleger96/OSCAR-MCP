@@ -43,7 +43,7 @@
             >
                 <Column header="Date">
                     <template #body="{ data }: { data: SessionListItem }">
-                        {{ formatDate(data.start_time) }}
+                        {{ formatDateShort(data.start_time) }}
                     </template>
                 </Column>
                 <Column header="Duration" style="width: 90px">
@@ -78,6 +78,7 @@ import { getSummary, getTrends } from '@/api/stats'
 import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { formatDateShort } from '@/utils/formatting'
 import type { SessionListItem } from '@/types'
 
 const router = useRouter()
@@ -115,15 +116,6 @@ function effectivenessSeverity(e: string): string {
         poor: 'danger',
     }
     return map[e] ?? 'secondary'
-}
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    })
 }
 
 function navigateToSession(event: { data: SessionListItem }): void {

@@ -20,8 +20,8 @@
                 <h2>Current Settings</h2>
                 <div class="current-meta">
                     <span
-                        >{{ formatDate(current.start_date) }} –
-                        {{ formatDate(current.end_date) }}</span
+                        >{{ formatDateFull(current.start_date) }} –
+                        {{ formatDateFull(current.end_date) }}</span
                     >
                     <span>{{ current.days_count }} days</span>
                     <span v-if="current.avg_ahi != null"
@@ -48,7 +48,8 @@
                 <DataTable :value="comparisonRows" striped-rows :row-class="rowClass">
                     <Column header="Period">
                         <template #body="{ data }">
-                            {{ formatDate(data.start_date) }} – {{ formatDate(data.end_date) }}
+                            {{ formatDateFull(data.start_date) }} –
+                            {{ formatDateFull(data.end_date) }}
                         </template>
                     </Column>
                     <Column header="Days" style="width: 70px">
@@ -98,6 +99,7 @@ import Column from 'primevue/column'
 import Tag from 'primevue/tag'
 import { getRxHistory, getRxCurrent, getRxCompare } from '@/api/rx'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { formatDateFull } from '@/utils/formatting'
 import type { RxPeriodResponse } from '@/types'
 
 const { data, loading, error } = useApiLoad(async () => {
@@ -131,14 +133,6 @@ function rowClass(data: ComparisonRow): string {
     if (data.isBest) return 'row-best'
     if (data.isWorst) return 'row-worst'
     return ''
-}
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-    })
 }
 
 function summarizeSettings(settings: Record<string, string>): string {

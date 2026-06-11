@@ -9,7 +9,7 @@
                 <div class="record-col">
                     <span class="col-header best-header">Best</span>
                     <div v-for="(entry, i) in metric.best" :key="'b' + i" class="record-entry">
-                        <span class="record-date">{{ formatDate(entry[0]) }}</span>
+                        <span class="record-date">{{ formatDateMonthDay(entry[0]) }}</span>
                         <span class="record-value best-value">{{
                             entry[1].toFixed(metric.decimals)
                         }}</span>
@@ -19,7 +19,7 @@
                 <div class="record-col">
                     <span class="col-header worst-header">Worst</span>
                     <div v-for="(entry, i) in metric.worst" :key="'w' + i" class="record-entry">
-                        <span class="record-date">{{ formatDate(entry[0]) }}</span>
+                        <span class="record-date">{{ formatDateMonthDay(entry[0]) }}</span>
                         <span class="record-value worst-value">{{
                             entry[1].toFixed(metric.decimals)
                         }}</span>
@@ -33,6 +33,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { formatDateMonthDay } from '@/utils/formatting'
 import type { RecordsData } from '@/types'
 
 const props = defineProps<{
@@ -58,10 +59,6 @@ const displayMetrics = computed(() => {
             worst: props.records![key]?.worst ?? [],
         }))
 })
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
 </script>
 
 <style scoped>
