@@ -10,6 +10,7 @@ import click
 from snore.cli.decorators import (
     date_range_options,
     db_option,
+    device_option,
 )
 from snore.cli.decorators import (
     db_session as open_db_session,
@@ -32,7 +33,7 @@ def export() -> None:
     help="Destination directory or .zip file (default: ./snore_export_raw)",
 )
 @date_range_options
-@click.option("--device", "-d", help="Device serial number")
+@device_option
 @click.option("--zip", "as_zip", is_flag=True, help="Force zip output")
 @click.option("--dry-run", is_flag=True, help="Show what would be exported")
 @click.option(
@@ -110,7 +111,7 @@ def export_raw(
     help="Destination directory for CSV files (default: ./snore_export_csv)",
 )
 @date_range_options
-@click.option("--device", "-d", help="Device serial number")
+@device_option
 @click.option(
     "--include-waveforms",
     is_flag=True,
@@ -163,7 +164,7 @@ def export_csv(
     help="Output JSON file path (default: ./snore_export.json)",
 )
 @date_range_options
-@click.option("--device", "-d", help="Device serial number")
+@device_option
 @db_option
 def export_json(
     output: str | None,

@@ -41,6 +41,22 @@ def db_option(f: Any) -> Any:
     )(f)
 
 
+def device_option(f: Any) -> Any:
+    """Shared --device/-d option for filtering by device serial number."""
+    return click.option("--device", "-d", help="Device serial number")(f)
+
+
+def session_id_date_options(f: Any) -> Any:
+    """Shared --session-id/--date options for selecting a session."""
+    f = click.option(
+        "--date",
+        type=click.DateTime(formats=["%Y-%m-%d"]),
+        help="Session date (YYYY-MM-DD)",
+    )(f)
+    f = click.option("--session-id", type=int, help="Session ID")(f)
+    return f
+
+
 def date_range_options(f: Any) -> Any:
     """Shared --from/--to date range options."""
     f = click.option(

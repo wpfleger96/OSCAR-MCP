@@ -11,7 +11,7 @@ import click
 
 from rich.markup import escape
 
-from snore.cli.decorators import db_option, init_db
+from snore.cli.decorators import db_option, init_db, session_id_date_options
 from snore.cli.decorators import db_session as open_db_session
 from snore.cli.display import console, print_table, print_warning
 from snore.waveform import format_time_offset
@@ -54,12 +54,7 @@ def waveform() -> None:
 
 
 @waveform.command("list")
-@click.option("--session-id", type=int, help="Session ID")
-@click.option(
-    "--date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Session date (YYYY-MM-DD)",
-)
+@session_id_date_options
 @db_option
 def list_waveforms(
     session_id: int | None,
@@ -116,12 +111,7 @@ def list_waveforms(
 
 
 @waveform.command("show")
-@click.option("--session-id", type=int, help="Session ID")
-@click.option(
-    "--date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Session date (YYYY-MM-DD)",
-)
+@session_id_date_options
 @click.option("--time", required=True, help="Time offset (HH:MM:SS)")
 @click.option(
     "--window", type=int, default=60, help="Window size in seconds (default: 60)"
@@ -333,12 +323,7 @@ def show_waveform(
 
 
 @waveform.command("compare")
-@click.option("--session-id", type=int, help="Session ID")
-@click.option(
-    "--date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Session date (YYYY-MM-DD)",
-)
+@session_id_date_options
 @click.option(
     "--mode", "-m", default="aasm", help="Detection mode to compare (default: aasm)"
 )
