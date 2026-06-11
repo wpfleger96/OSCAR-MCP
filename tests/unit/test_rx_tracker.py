@@ -1,4 +1,4 @@
-"""Unit tests for RxService."""
+"""Unit tests for RxTracker high-level period queries."""
 
 from datetime import date, datetime, timedelta
 
@@ -6,8 +6,8 @@ import pytest
 
 from sqlalchemy.orm import Session as DbSession
 
+from snore.analysis.rx_tracker import RxTracker
 from snore.database.models import Day, Device, Session, Setting
-from snore.services.rx_service import RxService
 
 
 def _create_day_with_session(
@@ -57,11 +57,11 @@ RX_SETTINGS = {
 }
 
 
-class TestRxServiceHistory:
+class TestRxTrackerHistory:
     def test_history_empty_db(self, db_session):
         """Empty database returns empty list."""
-        service = RxService(db_session)
-        result = service.get_history()
+        tracker = RxTracker()
+        result = tracker.get_history(db_session)
         assert result == []
 
     def test_history_single_period(self, db_session, test_device):
@@ -77,8 +77,8 @@ class TestRxServiceHistory:
             )
         db_session.flush()
 
-        service = RxService(db_session)
-        result = service.get_history()
+        tracker = RxTracker()
+        result = tracker.get_history(db_session)
 
         assert len(result) == 1
         assert result[0].days_count == 10
@@ -110,8 +110,8 @@ class TestRxServiceHistory:
             )
         db_session.flush()
 
-        service = RxService(db_session)
-        result = service.get_history()
+        tracker = RxTracker()
+        result = tracker.get_history(db_session)
 
         assert len(result) == 2
         assert result[0].days_count == 5
@@ -131,8 +131,8 @@ class TestRxServiceHistory:
             )
         db_session.flush()
 
-        service = RxService(db_session)
-        result = service.get_history()
+        tracker = RxTracker()
+        result = tracker.get_history(db_session)
 
         assert len(result) == 1
         assert result[0].avg_ahi == pytest.approx(4.0)
@@ -141,11 +141,11 @@ class TestRxServiceHistory:
         assert result[0].total_hours == pytest.approx(7.5 * 7)
 
 
-class TestRxServiceCurrent:
+class TestRxTrackerCurrent:
     def test_current_empty_db(self, db_session):
         """Empty database returns None."""
-        service = RxService(db_session)
-        result = service.get_current()
+        tracker = RxTracker()
+        result = tracker.get_current(db_session)
         assert result is None
 
     def test_current_returns_last_period(self, db_session, test_device):
@@ -170,19 +170,19 @@ class TestRxServiceCurrent:
             )
         db_session.flush()
 
-        service = RxService(db_session)
-        result = service.get_current()
+        tracker = RxTracker()
+        result = tracker.get_current(db_session)
 
         assert result is not None
         assert result.settings == settings_b
         assert result.end_date == base + timedelta(days=9)
 
 
-class TestRxServiceComparison:
+class TestRxTrackerComparison:
     def test_comparison_empty_db(self, db_session):
         """Empty database returns empty comparison."""
-        service = RxService(db_session)
-        result = service.get_comparison()
+        tracker = RxTracker()
+        result = tracker.get_comparison(db_session)
         assert result.periods == []
         assert result.best_index is None
         assert result.worst_index is None
@@ -200,8 +200,8 @@ class TestRxServiceComparison:
             )
         db_session.flush()
 
-        service = RxService(db_session)
-        result = service.get_comparison(min_days=7)
+        tracker = RxTracker()
+        result = tracker.get_comparison(db_session, min_days=7)
 
         assert len(result.periods) == 1
         # Period has fewer days than min_days threshold, so no best/worst
@@ -241,8 +241,8 @@ class TestRxServiceComparison:
             )
         db_session.flush()
 
-        service = RxService(db_session)
-        result = service.get_comparison(min_days=7)
+        tracker = RxTracker()
+        result = tracker.get_comparison(db_session, min_days=7)
 
         assert len(result.periods) == 3
         assert result.best_index == 1

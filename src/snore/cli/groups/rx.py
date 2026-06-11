@@ -46,19 +46,16 @@ def rx_history(db: str | None) -> None:
     from snore.analysis.rx_tracker import RxTracker
 
     with open_db_session(db) as db_session:
-        tracker = RxTracker()
-        periods = tracker.compute_periods(db_session)
+        stats_periods = RxTracker().get_history(db_session)
 
-        if not periods:
+        if not stats_periods:
             console.print("No RX periods found")
             return
-
-        stats_periods = tracker.compute_period_stats(periods)
 
         print_header("RX Settings History", wide=True)
 
         for i, period in enumerate(stats_periods, 1):
-            days_count = len(period.days)
+            days_count = period.days_count
             end_str = (
                 period.end_date.strftime("%Y-%m-%d")
                 if i < len(stats_periods)
@@ -108,17 +105,13 @@ def rx_current(db: str | None) -> None:
     from snore.analysis.rx_tracker import RxTracker
 
     with open_db_session(db) as db_session:
-        tracker = RxTracker()
-        periods = tracker.compute_periods(db_session)
+        current = RxTracker().get_current(db_session)
 
-        if not periods:
+        if current is None:
             console.print("No RX periods found")
             return
 
-        stats_periods = tracker.compute_period_stats(periods)
-        current = stats_periods[-1]
-
-        days_count = len(current.days)
+        days_count = current.days_count
 
         print_header("Current RX Settings", wide=True)
         console.print(
@@ -174,14 +167,12 @@ def rx_compare(db: str | None, min_days: int) -> None:
     from snore.analysis.rx_tracker import RxTracker
 
     with open_db_session(db) as db_session:
-        tracker = RxTracker()
-        periods = tracker.compute_periods(db_session)
+        comparison = RxTracker().get_comparison(db_session, min_days=min_days)
+        stats_periods = comparison.periods
 
-        if not periods:
+        if not stats_periods:
             console.print("No RX periods found")
             return
-
-        stats_periods = tracker.compute_period_stats(periods)
 
         if len(stats_periods) < 2:
             console.print(
@@ -189,7 +180,16 @@ def rx_compare(db: str | None, min_days: int) -> None:
             )
             return
 
-        best, worst = tracker.best_worst(stats_periods, min_days=min_days)
+        best = (
+            stats_periods[comparison.best_index]
+            if comparison.best_index is not None
+            else None
+        )
+        worst = (
+            stats_periods[comparison.worst_index]
+            if comparison.worst_index is not None
+            else None
+        )
 
         print_header("RX Period Comparison", wide=True)
         console.print(
@@ -198,7 +198,7 @@ def rx_compare(db: str | None, min_days: int) -> None:
         print_footer(wide=True)
 
         for idx, period in enumerate(stats_periods):
-            days_count = len(period.days)
+            days_count = period.days_count
             start_str = period.start_date.strftime("%Y-%m-%d")
             end_str = (
                 period.end_date.strftime("%Y-%m-%d")
@@ -218,9 +218,9 @@ def rx_compare(db: str | None, min_days: int) -> None:
             )
 
             marker = ""
-            if best and period is best:
+            if idx == comparison.best_index:
                 marker = "  <- Best"
-            elif worst and period is worst:
+            elif idx == comparison.worst_index:
                 marker = "  <- Worst"
 
             console.print(
@@ -232,13 +232,13 @@ def rx_compare(db: str | None, min_days: int) -> None:
         if best:
             console.print(f"\nBest Period (Avg AHI: {best.avg_ahi:.1f}):")
             console.print(
-                f"  {best.start_date.strftime('%Y-%m-%d')} to {best.end_date.strftime('%Y-%m-%d')} ({len(best.days)} days)"
+                f"  {best.start_date.strftime('%Y-%m-%d')} to {best.end_date.strftime('%Y-%m-%d')} ({best.days_count} days)"
             )
             console.print(f"  Settings: {best.settings}")
 
         if worst:
             console.print(f"\nWorst Period (Avg AHI: {worst.avg_ahi:.1f}):")
             console.print(
-                f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({len(worst.days)} days)"
+                f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({worst.days_count} days)"
             )
             console.print(f"  Settings: {worst.settings}")

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from snore.database.models import Day
 from snore.database.models import Session as SessionModel
+from snore.services.schemas import RxComparisonResponse, RxPeriodResponse
 
 RX_KEYS = (
     "mode",
@@ -42,7 +43,46 @@ class RxPeriodStats(RxPeriod):
 class RxTracker:
     """Track and analyze therapy prescription changes."""
 
-    def compute_periods(self, db_session: Session) -> list[RxPeriod]:
+    def get_history(self, db_session: Session) -> list[RxPeriodResponse]:
+        """Return all RX periods with stats."""
+        periods = self._compute_periods(db_session)
+        stats = self._compute_period_stats(periods)
+        return [self._to_response(p) for p in stats]
+
+    def get_current(self, db_session: Session) -> RxPeriodResponse | None:
+        """Return the current (most recent) RX period, or None if no data."""
+        history = self.get_history(db_session)
+        return history[-1] if history else None
+
+    def get_comparison(
+        self, db_session: Session, min_days: int = 7
+    ) -> RxComparisonResponse:
+        """Return all periods with best/worst indices."""
+        periods = self._compute_periods(db_session)
+        stats = self._compute_period_stats(periods)
+        best, worst = self._best_worst(stats, min_days)
+        responses = [self._to_response(p) for p in stats]
+        best_index = stats.index(best) if best is not None else None
+        worst_index = stats.index(worst) if worst is not None else None
+        return RxComparisonResponse(
+            periods=responses, best_index=best_index, worst_index=worst_index
+        )
+
+    def _to_response(self, period: RxPeriodStats) -> RxPeriodResponse:
+        """Convert RxPeriodStats dataclass to RxPeriodResponse Pydantic model."""
+        return RxPeriodResponse(
+            settings=period.settings,
+            start_date=period.start_date,
+            end_date=period.end_date,
+            days_count=len(period.days),
+            avg_ahi=period.avg_ahi,
+            median_ahi=period.median_ahi,
+            avg_hours=period.avg_hours,
+            total_hours=period.total_hours,
+            avg_leak=period.avg_leak,
+        )
+
+    def _compute_periods(self, db_session: Session) -> list[RxPeriod]:
         """
         Group consecutive days by therapy settings into RX periods.
 
@@ -110,7 +150,7 @@ class RxTracker:
 
         return periods
 
-    def compute_period_stats(self, periods: list[RxPeriod]) -> list[RxPeriodStats]:
+    def _compute_period_stats(self, periods: list[RxPeriod]) -> list[RxPeriodStats]:
         """
         Compute statistics for each RX period.
 
@@ -162,7 +202,7 @@ class RxTracker:
 
         return stats_periods
 
-    def best_worst(
+    def _best_worst(
         self, periods: list[RxPeriodStats], min_days: int = 7
     ) -> tuple[RxPeriodStats | None, RxPeriodStats | None]:
         """
