@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
+from snore.exceptions import NotFoundError
 from snore.services.schemas import EventMatchResult
 
 __all__ = ["EVENT_MATCH_TOLERANCE_SECONDS", "EventService"]
@@ -30,15 +31,18 @@ class EventService:
         self,
         session_id: int,
         event_type: str | None = None,
-    ) -> tuple[list[Any], datetime] | None:
-        """Return (events, session_start) for a session, or None if session not found.
+    ) -> tuple[list[Any], datetime]:
+        """Return (events, session_start) for a session.
 
         Args:
             session_id: Session to query events for.
             event_type: Optional filter by event type string.
 
         Returns:
-            Tuple of (list of Event ORM objects, session start datetime), or None.
+            Tuple of (list of Event ORM objects, session start datetime).
+
+        Raises:
+            NotFoundError: If the session does not exist.
         """
         from snore.database import models
 
@@ -48,7 +52,7 @@ class EventService:
             .first()
         )
         if session is None:
-            return None
+            raise NotFoundError(f"Session {session_id} not found")
 
         query = self.db_session.query(models.Event).filter(
             models.Event.session_id == session_id
@@ -58,14 +62,17 @@ class EventService:
         events = query.order_by(models.Event.start_time).all()
         return events, session.start_time
 
-    def get_machine_event_times(self, session_id: int) -> list[float] | None:
-        """Return sorted machine event timestamps for a session, or None if not found.
+    def get_machine_event_times(self, session_id: int) -> list[float]:
+        """Return sorted machine event timestamps for a session.
 
         Args:
             session_id: Session to query events for.
 
         Returns:
-            Sorted list of Unix timestamps, or None if session not found.
+            Sorted list of Unix timestamps.
+
+        Raises:
+            NotFoundError: If the session does not exist.
         """
         from snore.database import models
 
@@ -75,7 +82,7 @@ class EventService:
             .first()
         )
         if session is None:
-            return None
+            raise NotFoundError(f"Session {session_id} not found")
 
         events = (
             self.db_session.query(models.Event)

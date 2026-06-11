@@ -32,10 +32,7 @@ def list_events(
     svc: EventServiceDep,
     event_type: str | None = Query(default=None),
 ) -> list[EventItem]:
-    result = svc.list_session_events(session_id, event_type)
-    if result is None:
-        raise NotFoundError(f"Session {session_id} not found")
-    events, session_start = result
+    events, session_start = svc.list_session_events(session_id, event_type)
     return [_event_to_item(e, session_start) for e in events]
 
 
@@ -47,8 +44,6 @@ def match_events(
     mode: str = Query(default="aasm"),
 ) -> EventMatchResult:
     machine_times = svc.get_machine_event_times(session_id)
-    if machine_times is None:
-        raise NotFoundError(f"Session {session_id} not found")
 
     analysis = facade.get_analysis_result(session_id)
     if not analysis:
