@@ -1141,7 +1141,6 @@ dependencies = [
     { name = "alembic" },
     { name = "click" },
     { name = "fastapi" },
-    { name = "httpx" },
     { name = "mne" },
     { name = "numpy" },
     { name = "packaging" },
@@ -1157,6 +1156,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -1170,7 +1170,6 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.18.4" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "fastapi", specifier = ">=0.136.1" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mne", specifier = ">=1.6.0" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "packaging", specifier = ">=26.2" },
@@ -1186,6 +1185,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", specifier = ">=2.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-cov", specifier = ">=7.1.0" },

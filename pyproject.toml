@@ -23,7 +23,6 @@ dependencies = [
     "pint>=0.25.3",
     "fastapi>=0.136.1",
     "uvicorn[standard]>=0.46.0",
-    "httpx>=0.28.1",
 ]
 
 [project.scripts]
@@ -76,6 +75,7 @@ disable_error_code = ["var-annotated", "type-arg", "union-attr", "assignment", "
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "mypy>=2.0.0",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
