@@ -3,8 +3,8 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import bindparam, text
-from sqlalchemy.orm import Session
+from sqlalchemy import bindparam, func, select, text
+from sqlalchemy.orm import Query, Session
 
 from snore.database import models
 from snore.services.schemas import (
@@ -28,6 +28,53 @@ class AnalysisFacade:
         """
         self.db_session = db_session
 
+    def _status_query(
+        self,
+        start: datetime | None,
+        end: datetime | None,
+        analyzed_only: bool,
+    ) -> Query[models.Session]:
+        """Build the shared session query for list/count of analysis status."""
+        query = self.db_session.query(models.Session).join(models.Day)
+
+        if start:
+            query = query.filter(models.Day.date >= start.date())
+        if end:
+            query = query.filter(models.Day.date <= end.date())
+
+        if analyzed_only:
+            query = query.filter(
+                self.db_session.query(models.AnalysisResult)
+                .filter(models.AnalysisResult.session_id == models.Session.id)
+                .exists()
+            )
+
+        return query
+
+    def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
+        """Map each session ID to its latest AnalysisResult ID (by created_at)."""
+        if not session_ids:
+            return {}
+
+        ranked = (
+            select(
+                models.AnalysisResult.session_id,
+                models.AnalysisResult.id,
+                func.row_number()
+                .over(
+                    partition_by=models.AnalysisResult.session_id,
+                    order_by=models.AnalysisResult.created_at.desc(),
+                )
+                .label("recency_rank"),
+            )
+            .where(models.AnalysisResult.session_id.in_(session_ids))
+            .subquery()
+        )
+        rows = self.db_session.execute(
+            select(ranked.c.session_id, ranked.c.id).where(ranked.c.recency_rank == 1)
+        ).all()
+        return {session_id: analysis_id for session_id, analysis_id in rows}
+
     def list_sessions_with_status(
         self,
         start: datetime | None = None,
@@ -49,12 +96,7 @@ class AnalysisFacade:
         Returns:
             List of AnalysisListItem with has_analysis and analysis_id fields
         """
-        query = self.db_session.query(models.Session).join(models.Day)
-
-        if start:
-            query = query.filter(models.Day.date >= start.date())
-        if end:
-            query = query.filter(models.Day.date <= end.date())
+        query = self._status_query(start, end, analyzed_only)
 
         sort_clauses: dict[str, Any] = {
             "date-asc": models.Day.date.asc(),
@@ -65,13 +107,6 @@ class AnalysisFacade:
         sort_clause = sort_clauses.get(sort_by, models.Day.date.desc())
         query = query.order_by(sort_clause)
 
-        if analyzed_only:
-            query = query.filter(
-                self.db_session.query(models.AnalysisResult)
-                .filter(models.AnalysisResult.session_id == models.Session.id)
-                .exists()
-            )
-
         if offset > 0:
             query = query.offset(offset)
 
@@ -80,14 +115,11 @@ class AnalysisFacade:
 
         sessions = query.all()
 
+        latest_analysis = self._latest_analysis_ids([s.id for s in sessions])
+
         results = []
         for session in sessions:
-            analysis = (
-                self.db_session.query(models.AnalysisResult)
-                .filter_by(session_id=session.id)
-                .order_by(models.AnalysisResult.created_at.desc())
-                .first()
-            )
+            analysis_id = latest_analysis.get(session.id)
 
             session_date = (
                 session.day.date if session.day else session.start_time.date()
@@ -102,8 +134,8 @@ class AnalysisFacade:
                         if session.duration_seconds
                         else None
                     ),
-                    has_analysis=analysis is not None,
-                    analysis_id=analysis.id if analysis else None,
+                    has_analysis=analysis_id is not None,
+                    analysis_id=analysis_id,
                 )
             )
 
@@ -119,21 +151,7 @@ class AnalysisFacade:
 
         Used by the API to populate the `total` field in paginated responses.
         """
-        query = self.db_session.query(models.Session).join(models.Day)
-
-        if start:
-            query = query.filter(models.Day.date >= start.date())
-        if end:
-            query = query.filter(models.Day.date <= end.date())
-
-        if analyzed_only:
-            query = query.filter(
-                self.db_session.query(models.AnalysisResult)
-                .filter(models.AnalysisResult.session_id == models.Session.id)
-                .exists()
-            )
-
-        return query.count()
+        return self._status_query(start, end, analyzed_only).count()
 
     def get_delete_preview(
         self,
