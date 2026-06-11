@@ -216,40 +216,7 @@ class SessionService:
 
         statistics = None
         if stats_record:
-            statistics = SessionStatistics(
-                usage_hours=stats_record.usage_hours,
-                ahi=stats_record.ahi,
-                rei=stats_record.rei,
-                oai=stats_record.oai,
-                cai=stats_record.cai,
-                hi=stats_record.hi,
-                obstructive_apneas=stats_record.obstructive_apneas,
-                central_apneas=stats_record.central_apneas,
-                mixed_apneas=stats_record.mixed_apneas,
-                hypopneas=stats_record.hypopneas,
-                reras=stats_record.reras,
-                flow_limitations=stats_record.flow_limitations,
-                pressure_mean=stats_record.pressure_mean,
-                pressure_min=stats_record.pressure_min,
-                pressure_max=stats_record.pressure_max,
-                pressure_95th=stats_record.pressure_95th,
-                epap_mean=stats_record.epap_mean,
-                epap_min=stats_record.epap_min,
-                epap_max=stats_record.epap_max,
-                epap_95th=stats_record.epap_95th,
-                leak_mean=stats_record.leak_mean,
-                leak_percentile_70=stats_record.leak_percentile_70,
-                leak_95th=stats_record.leak_95th,
-                spo2_mean=stats_record.spo2_mean,
-                spo2_min=stats_record.spo2_min,
-                spo2_time_below_90=stats_record.spo2_time_below_90,
-                pulse_mean=stats_record.pulse_mean,
-                pulse_min=stats_record.pulse_min,
-                pulse_max=stats_record.pulse_max,
-                respiratory_rate_mean=stats_record.respiratory_rate_mean,
-                tidal_volume_mean=stats_record.tidal_volume_mean,
-                minute_ventilation_mean=stats_record.minute_ventilation_mean,
-            )
+            statistics = SessionStatistics.model_validate(stats_record)
 
         settings_list = None
         if include_settings:
