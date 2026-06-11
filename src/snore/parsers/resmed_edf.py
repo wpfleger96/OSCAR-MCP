@@ -386,6 +386,101 @@ class ResmedEDFParser(DeviceParser):
         """
         path = Path(path)
 
+        path, night_items = self._discover_session_files(path, sort_by)
+        night_items = self._filter_night_items(night_items, date_from, date_to)
+
+        device_info = self.get_device_info(path)
+
+        str_file = path / "STR.edf"
+        str_settings_cache = self._preload_str_settings(str_file)
+        str_summaries_cache = self._preload_str_summaries(str_file)
+
+        sessions_yielded = 0
+
+        if parallel and len(night_items) > 1:
+            if limit is not None and len(night_items) > limit:
+                night_items = night_items[:limit]
+
+            logger.debug(
+                f"Parsing {len(night_items)} nights in parallel with {os.cpu_count()} workers"
+            )
+
+            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+                futures = {
+                    executor.submit(
+                        self._parse_single_session_bundle,
+                        night_date,
+                        segments,
+                        device_info,
+                        path,
+                        str_settings_cache,
+                        str_summaries_cache,
+                        date_from,
+                        date_to,
+                    ): night_date
+                    for night_date, segments in night_items
+                }
+
+                for future in as_completed(futures):
+                    night_date = futures[future]
+
+                    if limit is not None and sessions_yielded >= limit:
+                        logger.debug(
+                            f"Reached session limit of {limit}, cancelling remaining"
+                        )
+                        for remaining_future in futures:
+                            if not remaining_future.done():
+                                remaining_future.cancel()
+                        break
+
+                    try:
+                        session = future.result()
+                    except Exception as e:
+                        logger.error(f"Failed to parse night {night_date}: {e}")
+                        continue
+
+                    if session is None:
+                        continue
+
+                    yield session
+                    sessions_yielded += 1
+        else:
+            for night_date, segments in night_items:
+                if limit is not None and sessions_yielded >= limit:
+                    logger.debug(f"Reached session limit of {limit}, stopping")
+                    break
+
+                try:
+                    session = self._parse_single_session_bundle(
+                        night_date,
+                        segments,
+                        device_info,
+                        path,
+                        str_settings_cache,
+                        str_summaries_cache,
+                        date_from,
+                        date_to,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to parse night {night_date}: {e}")
+                    continue
+
+                if session is None:
+                    continue
+
+                yield session
+                sessions_yielded += 1
+
+    def _discover_session_files(
+        self, path: Path, sort_by: str | None
+    ) -> tuple[Path, list[tuple[str, dict[str, dict[str, Path]]]]]:
+        """
+        Resolve the data root and collect session files grouped by night.
+
+        Returns:
+            (resolved_path, night_items) where night_items is a list of
+            (night_date, segments) tuples in the requested sort order
+        """
         if self._all_roots:
             matching_roots = [r for r in self._all_roots if r.path == path]
             if matching_roots:
@@ -399,8 +494,6 @@ class ResmedEDFParser(DeviceParser):
 
         if not datalog_dir.exists():
             raise ParserError("DATALOG directory not found", self)
-
-        device_info = self.get_device_info(path)
 
         night_groups = self._group_session_files(datalog_dir)
 
@@ -417,199 +510,89 @@ class ResmedEDFParser(DeviceParser):
         else:
             night_items = list(night_groups.items())
 
-        if parallel and len(night_items) > 1:
-            yield from self._parse_sessions_parallel(
-                night_items, device_info, path, date_from, date_to, limit
-            )
-        else:
-            yield from self._parse_sessions_sequential(
-                night_items, device_info, path, date_from, date_to, limit
-            )
+        return path, night_items
 
-    def _parse_sessions_sequential(
+    def _filter_night_items(
         self,
         night_items: list[tuple[str, dict[str, dict[str, Path]]]],
-        device_info: Any,
-        path: Path,
         date_from: str | None,
         date_to: str | None,
-        limit: int | None,
-    ) -> Iterator[UnifiedSession]:
-        """Parse sessions sequentially (original behavior)."""
-        sessions_yielded = 0
+    ) -> list[tuple[str, dict[str, dict[str, Path]]]]:
+        """Filter night items by date range based on their night-date IDs."""
+        if not (date_from or date_to):
+            return night_items
 
-        str_file = path / "STR.edf"
-        str_settings_cache = self._preload_str_settings(str_file)
-        str_summaries_cache = self._preload_str_summaries(str_file)
-
-        for night_date, segments in night_items:
-            if date_from or date_to:
-                try:
-                    night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
-
-                    if date_from:
-                        filter_date_from = datetime.fromisoformat(date_from).date()
-                        if night_date_obj < filter_date_from:
-                            logger.debug(
-                                f"Skipping night {night_date}: before {filter_date_from}"
-                            )
-                            continue
-
-                    if date_to:
-                        filter_date_to = datetime.fromisoformat(date_to).date()
-                        if night_date_obj > filter_date_to:
-                            logger.debug(
-                                f"Skipping night {night_date}: after {filter_date_to}"
-                            )
-                            continue
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Could not parse night date {night_date}: {e}")
-
-            if limit is not None and sessions_yielded >= limit:
-                logger.debug(f"Reached session limit of {limit}, stopping")
-                break
-
-            try:
-                session = self._parse_night_session(
-                    night_date,
-                    segments,
-                    device_info,
-                    path,
-                    str_settings_cache,
-                    str_summaries_cache,
-                )
-
-                if session is None:
-                    continue
-
-                if date_from:
-                    if (
-                        session.start_time.date()
-                        < datetime.fromisoformat(date_from).date()
-                    ):
-                        logger.warning(
-                            f"Night {night_date} has mismatched date in ID vs file contents"
-                        )
-                        continue
-                if date_to:
-                    if (
-                        session.start_time.date()
-                        > datetime.fromisoformat(date_to).date()
-                    ):
-                        logger.warning(
-                            f"Night {night_date} has mismatched date in ID vs file contents"
-                        )
-                        continue
-
-                session.finalize_statistics()
-                yield session
-                sessions_yielded += 1
-
-            except Exception as e:
-                logger.error(f"Failed to parse night {night_date}: {e}")
-                continue
-
-    def _parse_sessions_parallel(
-        self,
-        night_items: list[tuple[str, dict[str, dict[str, Path]]]],
-        device_info: Any,
-        path: Path,
-        date_from: str | None,
-        date_to: str | None,
-        limit: int | None,
-    ) -> Iterator[UnifiedSession]:
-        """Parse sessions in parallel using ThreadPoolExecutor for I/O-bound EDF reading."""
         filtered_items = []
         for night_date, segments in night_items:
-            if date_from or date_to:
-                try:
-                    night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
+            try:
+                night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
 
-                    if date_from:
-                        filter_date_from = datetime.fromisoformat(date_from).date()
-                        if night_date_obj < filter_date_from:
-                            logger.debug(
-                                f"Skipping night {night_date}: before {filter_date_from}"
-                            )
-                            continue
+                if date_from:
+                    filter_date_from = datetime.fromisoformat(date_from).date()
+                    if night_date_obj < filter_date_from:
+                        logger.debug(
+                            f"Skipping night {night_date}: before {filter_date_from}"
+                        )
+                        continue
 
-                    if date_to:
-                        filter_date_to = datetime.fromisoformat(date_to).date()
-                        if night_date_obj > filter_date_to:
-                            logger.debug(
-                                f"Skipping night {night_date}: after {filter_date_to}"
-                            )
-                            continue
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Could not parse night date {night_date}: {e}")
+                if date_to:
+                    filter_date_to = datetime.fromisoformat(date_to).date()
+                    if night_date_obj > filter_date_to:
+                        logger.debug(
+                            f"Skipping night {night_date}: after {filter_date_to}"
+                        )
+                        continue
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not parse night date {night_date}: {e}")
 
             filtered_items.append((night_date, segments))
 
-        if limit is not None and len(filtered_items) > limit:
-            filtered_items = filtered_items[:limit]
+        return filtered_items
 
-        logger.debug(
-            f"Parsing {len(filtered_items)} nights in parallel with {os.cpu_count()} workers"
+    def _parse_single_session_bundle(
+        self,
+        night_date: str,
+        segments: dict[str, dict[str, Path]],
+        device_info: DeviceInfo,
+        base_path: Path,
+        str_settings_cache: dict[date, dict[str, float]] | None,
+        str_summaries_cache: dict[date, dict[str, float]] | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """
+        Parse one night's file bundle into a finalized session.
+
+        Returns None when the night has no valid segments or its actual
+        start date falls outside the requested date range.
+        """
+        session = self._parse_night_session(
+            night_date,
+            segments,
+            device_info,
+            base_path,
+            str_settings_cache,
+            str_summaries_cache,
         )
 
-        str_file = path / "STR.edf"
-        str_settings_cache = self._preload_str_settings(str_file)
-        str_summaries_cache = self._preload_str_summaries(str_file)
+        if session is None:
+            return None
 
-        sessions_yielded = 0
+        if date_from:
+            if session.start_time.date() < datetime.fromisoformat(date_from).date():
+                logger.warning(
+                    f"Night {night_date} has mismatched date in ID vs file contents"
+                )
+                return None
+        if date_to:
+            if session.start_time.date() > datetime.fromisoformat(date_to).date():
+                logger.warning(
+                    f"Night {night_date} has mismatched date in ID vs file contents"
+                )
+                return None
 
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-            futures = {
-                executor.submit(
-                    self._parse_night_session,
-                    night_date,
-                    segments,
-                    device_info,
-                    path,
-                    str_settings_cache,
-                    str_summaries_cache,
-                ): night_date
-                for night_date, segments in filtered_items
-            }
-
-            for future in as_completed(futures):
-                night_date = futures[future]
-
-                if limit is not None and sessions_yielded >= limit:
-                    logger.debug(
-                        f"Reached session limit of {limit}, cancelling remaining"
-                    )
-                    for remaining_future in futures:
-                        if not remaining_future.done():
-                            remaining_future.cancel()
-                    break
-
-                try:
-                    session = future.result()
-
-                    if session is None:
-                        continue
-
-                    if date_from:
-                        if (
-                            session.start_time.date()
-                            < datetime.fromisoformat(date_from).date()
-                        ):
-                            continue
-                    if date_to:
-                        if (
-                            session.start_time.date()
-                            > datetime.fromisoformat(date_to).date()
-                        ):
-                            continue
-
-                    session.finalize_statistics()
-                    yield session
-                    sessions_yielded += 1
-
-                except Exception as e:
-                    logger.error(f"Failed to parse night {night_date}: {e}")
-                    continue
+        session.finalize_statistics()
+        return session
 
     # ------------------------------------------------------------------
     # Raw file backup / export
