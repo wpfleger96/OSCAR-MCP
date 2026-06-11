@@ -44,7 +44,7 @@ class DayService:
         query = query.offset(offset)
 
         rows = self.db_session.execute(query).scalars().all()
-        items = [self._to_list_item(d) for d in rows]
+        items = [DayListItem.model_validate(d) for d in rows]
         return items, total
 
     def get_day(self, day_date: date) -> DayDetail | None:
@@ -63,11 +63,7 @@ class DayService:
         ]
 
         return DayDetail(
-            date=day.date,
-            device_id=day.device_id,
-            session_count=day.session_count,
-            total_therapy_hours=day.total_therapy_hours,
-            ahi=day.ahi,
+            **DayListItem.model_validate(day).model_dump(),
             oai=day.oai,
             cai=day.cai,
             hi=day.hi,
@@ -75,13 +71,4 @@ class DayService:
             avg_leak=day.leak_median,
             avg_spo2=day.spo2_mean,
             session_ids=session_ids,
-        )
-
-    def _to_list_item(self, day: models.Day) -> DayListItem:
-        return DayListItem(
-            date=day.date,
-            device_id=day.device_id,
-            session_count=day.session_count,
-            total_therapy_hours=day.total_therapy_hours,
-            ahi=day.ahi,
         )

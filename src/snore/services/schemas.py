@@ -340,6 +340,8 @@ class DeviceInfo(BaseModel):
 class DayListItem(BaseModel):
     """Summary of a single therapy day."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     date: date
     device_id: int
     session_count: int
