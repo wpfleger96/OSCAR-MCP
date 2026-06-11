@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.orm import Session as DbSession
 
 from snore.database.models import Day, Device, Session
+from snore.exceptions import NotFoundError
 from snore.services.day_service import DayService
 
 
@@ -200,10 +201,10 @@ class TestDayServiceList:
 
 class TestDayServiceGet:
     def test_get_nonexistent(self, db_session):
-        """Returns None for a date with no Day record."""
+        """Raises NotFoundError for a date with no Day record."""
         service = DayService(db_session)
-        result = service.get_day(date(2024, 1, 1))
-        assert result is None
+        with pytest.raises(NotFoundError):
+            service.get_day(date(2024, 1, 1))
 
     def test_get_existing_day(self, db_session, test_device):
         """Returns full DayDetail with all stats fields."""

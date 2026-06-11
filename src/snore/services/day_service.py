@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from snore.database import models
+from snore.exceptions import NotFoundError
 from snore.services.schemas import DayDetail, DayListItem
 
 __all__ = ["DayService"]
@@ -47,13 +48,17 @@ class DayService:
         items = [DayListItem.model_validate(d) for d in rows]
         return items, total
 
-    def get_day(self, day_date: date) -> DayDetail | None:
-        """Return detailed day record with session IDs, or None if not found."""
+    def get_day(self, day_date: date) -> DayDetail:
+        """Return detailed day record with session IDs.
+
+        Raises:
+            NotFoundError: If no Day record exists for the date.
+        """
         stmt = select(models.Day).where(models.Day.date == day_date)
         day = self.db_session.execute(stmt).scalar_one_or_none()
 
         if day is None:
-            return None
+            raise NotFoundError(f"No data found for date {day_date}")
 
         session_ids = [
             row[0]

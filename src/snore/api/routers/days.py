@@ -4,7 +4,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
-from snore.api.errors import NotFoundError
 from snore.api.schemas import DayDetail, DayListItem, PaginatedResponse
 from snore.services import DayService
 
@@ -34,7 +33,4 @@ def list_days(
 
 @router.get("/{day_date}", response_model=DayDetail)
 def get_day(day_date: date, service: DayServiceDep) -> DayDetail:
-    result = service.get_day(day_date)
-    if result is None:
-        raise NotFoundError(f"No data found for date {day_date}")
-    return result
+    return service.get_day(day_date)
