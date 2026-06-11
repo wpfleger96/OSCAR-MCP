@@ -1,28 +1,24 @@
 """Tool installation utilities."""
 
 import os
-import shutil
-import subprocess
 import tomllib
 
 from pathlib import Path
 
-UV_NOT_FOUND_ERROR = "uv not found in PATH. Install from https://docs.astral.sh/uv/"
-PACKAGE_NAME = "snore"
-GITHUB_REPO = "wpfleger96/SNORE"
-GITHUB_REPO_URL = f"git+ssh://git@github.com/{GITHUB_REPO}.git"
+from .core import (
+    GITHUB_REPO_URL,
+    PACKAGE_NAME,
+    UV_NOT_FOUND_ERROR,
+    is_command_available,
+    run_uv_tool_command,
+)
 
-
-def is_command_available(command: str) -> bool:
-    """Check if a command is available in PATH.
-
-    Args:
-        command: Command name to check
-
-    Returns:
-        True if command is available, False otherwise
-    """
-    return shutil.which(command) is not None
+__all__ = [
+    "UV_NOT_FOUND_ERROR",
+    "get_tool_source",
+    "install_tool",
+    "is_command_available",
+]
 
 
 def install_tool(
@@ -54,27 +50,8 @@ def install_tool(
     if dry_run:
         return True, f"Would run: {' '.join(cmd)}"
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-        if result.returncode == 0:
-            return True, "Installation successful"
-
-        error_msg = result.stderr.strip()
-        if not error_msg:
-            error_msg = "Installation failed with no error message"
-
-        return False, error_msg
-
-    except subprocess.TimeoutExpired:
-        return False, "Installation timed out after 60 seconds"
-    except Exception as e:
-        return False, f"Unexpected error: {e}"
+    success, message, _ = run_uv_tool_command(cmd, "Installation")
+    return success, message
 
 
 def get_tool_source(package_name: str) -> str | None:
