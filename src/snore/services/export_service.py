@@ -212,17 +212,14 @@ class ExportService:
         output.mkdir(parents=True, exist_ok=True)
         warnings: list[str] = []
         files_written = 0
-        nights: set[date] = set()
 
-        sessions = self._query_sessions(db_session, date_from, date_to, device_serial)
+        sessions, events_by_session, settings_by_session, nights = (
+            self._build_export_sessions(db_session, date_from, date_to, device_serial)
+        )
 
         if not sessions:
             warnings.append("No sessions found for the specified filters.")
             return ExportResult(format="csv", output_path=output, warnings=warnings)
-
-        session_ids = [s["id"] for s in sessions]
-        events_by_session = self._bulk_load_events(db_session, session_ids)
-        settings_by_session = self._bulk_load_settings(db_session, session_ids)
 
         # sessions.csv
         sessions_path = output / "sessions.csv"
@@ -257,12 +254,6 @@ class ExportService:
                 ]
             )
             for s in sessions:
-                night = (
-                    s["start_time"].date()
-                    if s["start_time"].hour >= 12
-                    else (s["start_time"] - timedelta(days=1)).date()
-                )
-                nights.add(night)
                 stats = s.get("statistics") or {}
                 writer.writerow(
                     [
@@ -405,26 +396,16 @@ class ExportService:
         output.parent.mkdir(parents=True, exist_ok=True)
         warnings: list[str] = []
 
-        sessions = self._query_sessions(db_session, date_from, date_to, device_serial)
+        sessions, events_by_session, settings_by_session, nights = (
+            self._build_export_sessions(db_session, date_from, date_to, device_serial)
+        )
 
         if not sessions:
             warnings.append("No sessions found for the specified filters.")
 
-        session_ids = [s["id"] for s in sessions]
-        events_by_session = self._bulk_load_events(db_session, session_ids)
-        settings_by_session = self._bulk_load_settings(db_session, session_ids)
-
         session_list: list[dict[str, Any]] = []
-        nights: set[date] = set()
 
         for s in sessions:
-            night = (
-                s["start_time"].date()
-                if s["start_time"].hour >= 12
-                else (s["start_time"] - timedelta(days=1)).date()
-            )
-            nights.add(night)
-
             events = events_by_session.get(s["id"], [])
             settings = settings_by_session.get(s["id"], [])
 
@@ -483,6 +464,39 @@ class ExportService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _build_export_sessions(
+        self,
+        db_session: DBSession,
+        date_from: date | None,
+        date_to: date | None,
+        device_serial: str | None,
+    ) -> tuple[
+        list[dict[str, Any]],
+        dict[int, list[Any]],
+        dict[int, list[Any]],
+        set[date],
+    ]:
+        """Fetch sessions plus bulk-loaded events/settings and night aggregation.
+
+        Shared by the CSV and JSON exporters so both consume identical data.
+
+        Returns:
+            Tuple of (sessions, events_by_session, settings_by_session, nights).
+        """
+        sessions = self._query_sessions(db_session, date_from, date_to, device_serial)
+        session_ids = [s["id"] for s in sessions]
+        events_by_session = self._bulk_load_events(db_session, session_ids)
+        settings_by_session = self._bulk_load_settings(db_session, session_ids)
+
+        nights = {
+            s["start_time"].date()
+            if s["start_time"].hour >= 12
+            else (s["start_time"] - timedelta(days=1)).date()
+            for s in sessions
+        }
+
+        return sessions, events_by_session, settings_by_session, nights
 
     def _resolve_device_serial(self, device_serial: str | None) -> str:
         """Resolve device serial, failing fast on ambiguity."""
