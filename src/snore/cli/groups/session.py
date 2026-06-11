@@ -6,7 +6,14 @@ from datetime import datetime
 
 import click
 
-from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
+from snore.cli.decorators import (
+    date_range_options,
+    db_option,
+    parse_id_list,
+)
+from snore.cli.decorators import (
+    db_session as open_db_session,
+)
 from snore.cli.display import (
     ICON_STATS,
     console,
@@ -55,12 +62,9 @@ def session_list(
     db: str | None,
 ) -> None:
     """List imported sessions."""
-    from snore.database.session import session_scope
     from snore.services.session_service import SessionService
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         service = SessionService(db_session)
         result = service.list_sessions(
             device=device,
@@ -121,12 +125,9 @@ def session_list(
 def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
     """Show details for a specific session."""
     from snore.cli.display.analysis import display_session_detail
-    from snore.database.session import session_scope
     from snore.services.session_service import SessionService
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         service = SessionService(db_session)
 
         try:
@@ -165,16 +166,13 @@ def session_delete(
     db: str | None,
 ) -> None:
     """Delete sessions from the database."""
-    from snore.database.session import session_scope
     from snore.services.session_service import SessionService
-
-    init_db(db)
 
     id_list = None
     if session_ids:
         id_list = parse_id_list(session_ids)
 
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         service = SessionService(db_session)
 
         try:
@@ -253,12 +251,9 @@ def session_delete(
 
 def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
     """Enable or disable a session and recalculate day statistics."""
-    from snore.database.session import session_scope
     from snore.services.session_service import SessionService
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         service = SessionService(db_session)
 
         try:

@@ -7,7 +7,13 @@ from pathlib import Path
 
 import click
 
-from snore.cli.decorators import date_range_options, db_option, init_db
+from snore.cli.decorators import (
+    date_range_options,
+    db_option,
+)
+from snore.cli.decorators import (
+    db_session as open_db_session,
+)
 from snore.cli.display import console, print_dry_run_header, print_warning
 from snore.services.export_service import ExportService
 
@@ -124,14 +130,10 @@ def export_csv(
     Creates sessions.csv, events.csv, and settings.csv in the output directory.
     Optionally includes per-session waveform files with --include-waveforms.
     """
-    from snore.database.session import session_scope
-
     if output is None:
         output = "snore_export_csv"
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         svc = ExportService()
         try:
             result = svc.export_csv(
@@ -174,14 +176,10 @@ def export_json(
 
     Creates a single JSON file with sessions, events, statistics, and settings.
     """
-    from snore.database.session import session_scope
-
     if output is None:
         output = "snore_export.json"
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         svc = ExportService()
         try:
             result = svc.export_json(

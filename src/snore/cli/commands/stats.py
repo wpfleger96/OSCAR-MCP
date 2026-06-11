@@ -6,7 +6,7 @@ from typing import Literal, cast
 
 import click
 
-from snore.cli.decorators import db_option, init_db
+from snore.cli.decorators import db_option, db_session
 from snore.cli.display import (
     ICON_CHART,
     console,
@@ -38,16 +38,13 @@ def stats(
     records: bool,
 ) -> None:
     """Show therapy usage and clinical statistics."""
-    from snore.database.session import session_scope
     from snore.services.schemas import PeriodStatistics
     from snore.services.stats_service import StatsService
 
     if trend and not period:
         period = "week"
 
-    init_db(db)
-
-    with session_scope() as session:
+    with db_session(db) as session:
         service = StatsService(session)
         summary = service.get_summary(days)
 

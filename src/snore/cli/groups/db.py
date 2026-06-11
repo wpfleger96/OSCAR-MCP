@@ -6,7 +6,7 @@ from pathlib import Path
 
 import click
 
-from snore.cli.decorators import db_option, init_db
+from snore.cli.decorators import db_option, db_session
 from snore.cli.display import (
     ICON_STATS,
     console,
@@ -58,10 +58,9 @@ def init(db: str | None) -> None:
 @db_option
 def db_stats(db: str | None) -> None:
     """Show database statistics."""
-    init_db(db)
     db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
 
-    with session_scope() as session:
+    with db_session(db) as session:
         service = DatabaseService(session)
         stats = service.get_stats(str(db_path))
 
@@ -108,11 +107,9 @@ def vacuum(db: str | None) -> None:
     """Optimize database (reclaim space after deletions)."""
     from sqlalchemy import text
 
-    init_db(db)
-
     console.print("Vacuuming database...")
 
-    with session_scope() as session:
+    with db_session(db) as session:
         session.execute(text("VACUUM"))
         session.commit()
 

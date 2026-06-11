@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import click
 
-from snore.cli.decorators import db_option, init_db
+from snore.cli.decorators import db_option
+from snore.cli.decorators import db_session as open_db_session
 from snore.cli.display import (
     console,
     print_footer,
@@ -43,11 +44,8 @@ def rx_history(db: str | None) -> None:
         snore rx history
     """
     from snore.analysis.rx_tracker import RxTracker
-    from snore.database.session import session_scope
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         tracker = RxTracker()
         periods = tracker.compute_periods(db_session)
 
@@ -108,11 +106,8 @@ def rx_current(db: str | None) -> None:
         snore rx current
     """
     from snore.analysis.rx_tracker import RxTracker
-    from snore.database.session import session_scope
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         tracker = RxTracker()
         periods = tracker.compute_periods(db_session)
 
@@ -177,11 +172,8 @@ def rx_compare(db: str | None, min_days: int) -> None:
         snore rx compare --min-days 14
     """
     from snore.analysis.rx_tracker import RxTracker
-    from snore.database.session import session_scope
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         tracker = RxTracker()
         periods = tracker.compute_periods(db_session)
 

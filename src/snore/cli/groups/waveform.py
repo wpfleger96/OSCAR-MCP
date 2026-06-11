@@ -12,6 +12,7 @@ import click
 from rich.markup import escape
 
 from snore.cli.decorators import db_option, init_db
+from snore.cli.decorators import db_session as open_db_session
 from snore.cli.display import console, print_table, print_warning
 from snore.waveform import format_time_offset
 from snore.waveform.inspector import parse_time_offset
@@ -75,15 +76,12 @@ def list_waveforms(
         snore waveform list --session-id 37
         snore waveform list --date 2025-10-25
     """
-    from snore.database.session import session_scope
     from snore.services.waveform_service import WaveformService
 
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         resolved_id = _resolve_session_id(db_session, session_id, date)
 
         service = WaveformService(db_session)
@@ -191,6 +189,8 @@ def show_waveform(
     if len(waveform_types) > 4:
         raise click.ClickException("Maximum 4 waveform types supported")
 
+    # init_db/session_scope are used directly (not via db_session) so unit
+    # tests can patch them independently for the parallel-load path.
     init_db(db)
 
     try:
@@ -362,14 +362,11 @@ def compare_events(
     """
     from snore.analysis.service import AnalysisService
     from snore.analysis.utils import convert_machine_events
-    from snore.database.session import session_scope
 
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         session_id = _resolve_session_id(db_session, session_id, date)
 
         analysis_service = AnalysisService(db_session)

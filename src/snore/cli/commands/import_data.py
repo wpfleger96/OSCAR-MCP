@@ -11,7 +11,7 @@ import click
 
 from rich.markup import escape
 
-from snore.cli.decorators import date_range_options, db_option, init_db
+from snore.cli.decorators import date_range_options, db_option, db_session
 from snore.cli.display import (
     ICON_BACKUP,
     ICON_FILTERS,
@@ -30,7 +30,6 @@ from snore.cli.display import (
     print_warning,
 )
 from snore.database.importers import SessionImporter
-from snore.database.session import session_scope
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
 
@@ -190,9 +189,7 @@ def import_data(
     else:
         selected_sources = expanded_sources
 
-    init_db(db)
-
-    with session_scope() as session:
+    with db_session(db) as session:
         orphaned_count = SessionImporter.cleanup_orphaned_records(session)
         if orphaned_count > 0:
             print_warning(f"Cleaned up {orphaned_count} orphaned records from database")

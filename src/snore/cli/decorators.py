@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from sqlalchemy.orm import Session
 
 
 def init_db(db: str | None) -> None:
@@ -13,6 +19,16 @@ def init_db(db: str | None) -> None:
     from snore.database.session import init_database
 
     init_database(str(Path(db).expanduser()) if db else None)
+
+
+@contextmanager
+def db_session(db: str | None) -> Iterator[Session]:
+    """Initialize the database and provide a transactional session scope."""
+    from snore.database.session import session_scope
+
+    init_db(db)
+    with session_scope() as session:
+        yield session
 
 
 def db_option(f: Any) -> Any:

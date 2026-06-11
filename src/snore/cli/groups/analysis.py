@@ -9,7 +9,15 @@ from typing import Any
 
 import click
 
-from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
+from snore.cli.decorators import (
+    date_range_options,
+    db_option,
+    init_db,
+    parse_id_list,
+)
+from snore.cli.decorators import (
+    db_session as open_db_session,
+)
 from snore.cli.display import (
     ICON_STATS,
     console,
@@ -77,6 +85,8 @@ def run(
     """Run analysis on CPAP sessions."""
     from snore.database.session import session_scope
 
+    # init_db/session_scope are used directly (not via db_session) so unit
+    # tests can patch them independently for the batch path.
     init_db(db)
 
     single_session_flags = [session_id is not None, date is not None]
@@ -148,11 +158,7 @@ def list_cmd(
     db: str | None,
 ) -> None:
     """List sessions with analysis status."""
-    from snore.database.session import session_scope
-
-    init_db(db)
-
-    with session_scope() as session:
+    with open_db_session(db) as session:
         _list_sessions(session, date_from, date_to, limit, analyzed_only, sort_by)
 
 
@@ -178,9 +184,6 @@ def show(
     """Display stored analysis results."""
     from snore.analysis.service import AnalysisService
     from snore.database import models
-    from snore.database.session import session_scope
-
-    init_db(db)
 
     if session_id is None and date is None:
         raise click.ClickException("Must provide either --session-id or --date")
@@ -188,7 +191,7 @@ def show(
     if session_id is not None and date is not None:
         raise click.ClickException("--session-id and --date are mutually exclusive")
 
-    with session_scope() as session:
+    with open_db_session(db) as session:
         if date is not None:
             db_session = (
                 session.query(models.Session)
@@ -251,10 +254,7 @@ def analysis_delete(
     db: str | None,
 ) -> int | None:
     """Delete analysis results without deleting the sessions themselves."""
-    from snore.database.session import session_scope
     from snore.services.analysis_facade import AnalysisFacade
-
-    init_db(db)
 
     if not any([session_ids, date_from, date_to, delete_all]):
         raise click.ClickException(
@@ -269,7 +269,7 @@ def analysis_delete(
     if session_ids:
         id_list = parse_id_list(session_ids)
 
-    with session_scope() as session:
+    with open_db_session(db) as session:
         facade = AnalysisFacade(session)
 
         try:
