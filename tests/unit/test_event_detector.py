@@ -7,6 +7,10 @@ from snore.analysis.modes.baseline import (
     _calculate_breath_based_baseline,
     _calculate_time_based_baseline,
 )
+from snore.analysis.modes.classification import (
+    _check_desaturation,
+    _classify_apnea_type,
+)
 from snore.analysis.modes.config import AASM_CONFIG, AASM_RELAXED_CONFIG, RESMED_CONFIG
 from snore.analysis.modes.detector import EventDetector
 from snore.analysis.modes.postprocess import (
@@ -884,7 +888,7 @@ class TestClassifyApneaType:
         """High effort flow signal should be classified as OA."""
         flow_signal = np.array([5, -5, 6, -6, 5, -5, 6, -6, 5, -5])
 
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=flow_signal, sample_rate=25.0
         )
 
@@ -897,7 +901,7 @@ class TestClassifyApneaType:
             [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
         )
 
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=flow_signal, sample_rate=25.0
         )
 
@@ -910,7 +914,7 @@ class TestClassifyApneaType:
         # std ≈ 3.5, range ≈ 7, normalizes to effort ≈ 0.08-0.10
         flow_signal = np.array([3.0, -3.0, 3.5, -2.5, 3.0, -3.0, 3.5, -2.5, 3.0, -3.0])
 
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=flow_signal, sample_rate=25.0
         )
 
@@ -919,7 +923,7 @@ class TestClassifyApneaType:
 
     def test_classify_no_flow_data(self, aasm_detector):
         """No flow data should be classified as UA."""
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=None, sample_rate=25.0
         )
 
@@ -934,7 +938,7 @@ class TestCheckDesaturation:
         """SpO2 drop of 4% should be detected."""
         spo2_values = np.array([96, 95, 94, 93, 92, 91, 90])
 
-        has_desat = aasm_detector._check_desaturation(spo2_values)
+        has_desat = _check_desaturation(spo2_values)
 
         assert has_desat is True
 
@@ -942,7 +946,7 @@ class TestCheckDesaturation:
         """SpO2 drop of 2% should not be detected."""
         spo2_values = np.array([96, 95, 94, 94, 95, 96])
 
-        has_desat = aasm_detector._check_desaturation(spo2_values)
+        has_desat = _check_desaturation(spo2_values)
 
         assert has_desat is False
 
@@ -950,7 +954,7 @@ class TestCheckDesaturation:
         """Less than 2 samples should return False."""
         spo2_values = np.array([96])
 
-        has_desat = aasm_detector._check_desaturation(spo2_values)
+        has_desat = _check_desaturation(spo2_values)
 
         assert has_desat is False
 
