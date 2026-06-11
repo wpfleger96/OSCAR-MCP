@@ -26,7 +26,13 @@ from typing import Any
 
 import numpy as np
 
-from snore.constants import PARSER_MAX_SEARCH_DEPTH
+from snore.constants import (
+    PARSER_MAX_SEARCH_DEPTH,
+    UNIT_BPM,
+    UNIT_FLOW,
+    UNIT_PERCENT,
+    UNIT_PRESSURE,
+)
 from snore.parsers.base import (
     DeviceParser,
     ParserDetectionResult,
@@ -1254,7 +1260,7 @@ class ResmedEDFParser(DeviceParser):
                         edf,
                         spo2_signal,
                         WaveformType.SPO2,
-                        "%",
+                        UNIT_PERCENT,
                         valid_range=(70, 100),
                     )
                     if result is not None:
@@ -1282,7 +1288,7 @@ class ResmedEDFParser(DeviceParser):
                         edf,
                         pulse_signal,
                         WaveformType.PULSE,
-                        "bpm",
+                        UNIT_BPM,
                         valid_range=(40, 200),
                     )
                     if result is not None:
@@ -1343,7 +1349,7 @@ class ResmedEDFParser(DeviceParser):
                         edf,
                         flow_signal,
                         WaveformType.FLOW_RATE,
-                        "L/min",
+                        UNIT_FLOW,
                         convert_lps_to_lpm=True,
                     )
                     if result is None:
@@ -1402,7 +1408,7 @@ class ResmedEDFParser(DeviceParser):
         if convert_lps_to_lpm and unit == "L/s":
             data = data * 60.0
             valid_data = data
-            unit = "L/min"
+            unit = UNIT_FLOW
 
         min_value, max_value, mean_value = extract_basic_stats(valid_data)
         waveform = WaveformData(
@@ -1477,7 +1483,10 @@ class ResmedEDFParser(DeviceParser):
                 # Parse therapy pressure (device's target pressure)
                 if therapy_signal:
                     result = self._read_waveform(
-                        edf, therapy_signal, WaveformType.THERAPY_PRESSURE, "cmH2O"
+                        edf,
+                        therapy_signal,
+                        WaveformType.THERAPY_PRESSURE,
+                        UNIT_PRESSURE,
                     )
                     if result is None:
                         logger.warning(
@@ -1489,7 +1498,7 @@ class ResmedEDFParser(DeviceParser):
                 # Parse mask pressure (measured at mask)
                 if mask_signal:
                     result = self._read_waveform(
-                        edf, mask_signal, WaveformType.MASK_PRESSURE, "cmH2O"
+                        edf, mask_signal, WaveformType.MASK_PRESSURE, UNIT_PRESSURE
                     )
                     if result is None:
                         logger.warning(f"No data in mask pressure signal {mask_signal}")
@@ -1499,7 +1508,7 @@ class ResmedEDFParser(DeviceParser):
                 # Parse EPAP (therapy pressure minus EPR)
                 if epap_signal:
                     result = self._read_waveform(
-                        edf, epap_signal, WaveformType.EPAP, "cmH2O"
+                        edf, epap_signal, WaveformType.EPAP, UNIT_PRESSURE
                     )
                     if result is None:
                         logger.warning(f"No data in EPAP signal {epap_signal}")
@@ -1514,7 +1523,7 @@ class ResmedEDFParser(DeviceParser):
                         edf,
                         leak_signal,
                         WaveformType.LEAK_RATE,
-                        "L/min",
+                        UNIT_FLOW,
                         convert_lps_to_lpm=True,
                     )
                     if result is None:

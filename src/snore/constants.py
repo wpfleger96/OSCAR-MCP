@@ -40,6 +40,21 @@ OXI_PULSE = 0x2001
 
 
 # ============================================================================
+# Measurement Units
+# ============================================================================
+
+# Note: ResMed EDF parsing stores the ASCII pressure unit ("cmH2O") while
+# OSCAR data uses the Unicode subscript form ("cmH₂O"). Both spellings are
+# kept so each parser continues to store exactly what it stored before.
+UNIT_FLOW = "L/min"
+UNIT_PRESSURE = "cmH2O"
+UNIT_PRESSURE_DISPLAY = "cmH₂O"
+UNIT_PERCENT = "%"
+UNIT_BPM = "bpm"
+UNIT_ML = "mL"
+
+
+# ============================================================================
 # Analysis Algorithm Constants
 # ============================================================================
 

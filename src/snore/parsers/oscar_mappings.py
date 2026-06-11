@@ -18,6 +18,11 @@ from snore.constants import (
     CPAP_TIDAL_VOLUME,
     OXI_PULSE,
     OXI_SPO2,
+    UNIT_BPM,
+    UNIT_FLOW,
+    UNIT_ML,
+    UNIT_PERCENT,
+    UNIT_PRESSURE_DISPLAY,
 )
 from snore.parsers.unified import RespiratoryEventType, WaveformType
 
@@ -53,16 +58,16 @@ OSCAR_WAVEFORM_TYPE_MAP: dict[int, WaveformType] = {
 }
 
 OSCAR_WAVEFORM_UNITS: dict[int, str] = {
-    CPAP_FLOW_RATE: "L/min",
-    CPAP_PRESSURE: "cmH₂O",
-    CPAP_MASK_PRESSURE: "cmH₂O",
-    CPAP_EPAP: "cmH₂O",
-    CPAP_LEAK: "L/min",
-    CPAP_RESPRATE: "bpm",
-    CPAP_TIDAL_VOLUME: "mL",
-    CPAP_MINUTE_VENT: "L/min",
-    OXI_SPO2: "%",
-    OXI_PULSE: "bpm",
+    CPAP_FLOW_RATE: UNIT_FLOW,
+    CPAP_PRESSURE: UNIT_PRESSURE_DISPLAY,
+    CPAP_MASK_PRESSURE: UNIT_PRESSURE_DISPLAY,
+    CPAP_EPAP: UNIT_PRESSURE_DISPLAY,
+    CPAP_LEAK: UNIT_FLOW,
+    CPAP_RESPRATE: UNIT_BPM,
+    CPAP_TIDAL_VOLUME: UNIT_ML,
+    CPAP_MINUTE_VENT: UNIT_FLOW,
+    OXI_SPO2: UNIT_PERCENT,
+    OXI_PULSE: UNIT_BPM,
 }
 
 OSCAR_EVENT_CHANNEL_IDS: set[int] = set(OSCAR_EVENT_TYPE_MAP.keys())
