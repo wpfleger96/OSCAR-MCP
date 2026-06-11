@@ -18,12 +18,12 @@ __all__ = ["EVENT_MATCH_TOLERANCE_SECONDS", "EventService"]
 class EventService:
     """Service for event matching and comparison.
 
-    Pass db_session to use DB-backed methods (list_session_events,
-    get_machine_event_times). Omit for purely algorithmic operations
-    (match_events, classify_matches).
+    DB-backed methods (list_session_events, get_machine_event_times) require
+    an instance. The purely algorithmic operations (match_events,
+    classify_matches) are static methods.
     """
 
-    def __init__(self, db_session: Session | None = None):
+    def __init__(self, db_session: Session):
         self.db_session = db_session
 
     def list_session_events(
@@ -43,14 +43,14 @@ class EventService:
         from snore.database import models
 
         session = (
-            self.db_session.query(models.Session)  # type: ignore[union-attr]
+            self.db_session.query(models.Session)
             .filter(models.Session.id == session_id)
             .first()
         )
         if session is None:
             return None
 
-        query = self.db_session.query(models.Event).filter(  # type: ignore[union-attr]
+        query = self.db_session.query(models.Event).filter(
             models.Event.session_id == session_id
         )
         if event_type:
@@ -70,7 +70,7 @@ class EventService:
         from snore.database import models
 
         session = (
-            self.db_session.query(models.Session)  # type: ignore[union-attr]
+            self.db_session.query(models.Session)
             .filter(models.Session.id == session_id)
             .first()
         )
@@ -78,14 +78,14 @@ class EventService:
             return None
 
         events = (
-            self.db_session.query(models.Event)  # type: ignore[union-attr]
+            self.db_session.query(models.Event)
             .filter(models.Event.session_id == session_id)
             .all()
         )
         return sorted(e.start_time.timestamp() for e in events)
 
+    @staticmethod
     def match_events(
-        self,
         machine_times: list[float],
         programmatic_times: list[float],
         tolerance: float = EVENT_MATCH_TOLERANCE_SECONDS,
@@ -135,8 +135,8 @@ class EventService:
             false_negatives=false_negatives,
         )
 
+    @staticmethod
     def classify_matches(
-        self,
         machine_times: list[float],
         programmatic_times: list[float],
         tolerance: float = EVENT_MATCH_TOLERANCE_SECONDS,
