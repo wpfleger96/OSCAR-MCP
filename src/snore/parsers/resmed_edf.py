@@ -41,11 +41,11 @@ from snore.parsers.base import (
     RawFileManifest,
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
+from snore.parsers.event_labels import EVENT_TYPE_MAP, FILTERED_ANNOTATIONS
 from snore.parsers.formats.edf import EDFReader
 from snore.parsers.unified import (
     DeviceInfo,
     RespiratoryEvent,
-    RespiratoryEventType,
     TherapyMode,
     TherapySettings,
     UnifiedSession,
@@ -78,43 +78,6 @@ class ResmedEDFParser(DeviceParser):
     FILE_TYPE_SA2 = "_SA2.edf"  # Statistics
     FILE_TYPE_EVE = "_EVE.edf"  # Events
     FILE_TYPE_CSL = "_CSL.edf"  # Compliance
-
-    EVENT_TYPE_MAP = {
-        "Obstructive Apnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "ObstructiveApnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "Obstructive apnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "OA": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "Central Apnea": RespiratoryEventType.CENTRAL_APNEA,
-        "CentralApnea": RespiratoryEventType.CENTRAL_APNEA,
-        "Central apnea": RespiratoryEventType.CENTRAL_APNEA,
-        "CA": RespiratoryEventType.CENTRAL_APNEA,
-        "Clear Airway": RespiratoryEventType.CLEAR_AIRWAY,  # (same as Central Apnea in some ResMed devices)
-        "ClearAirway": RespiratoryEventType.CLEAR_AIRWAY,
-        "Apnea": RespiratoryEventType.UNCLASSIFIED_APNEA,
-        "UA": RespiratoryEventType.UNCLASSIFIED_APNEA,
-        "Hypopnea": RespiratoryEventType.HYPOPNEA,
-        "H": RespiratoryEventType.HYPOPNEA,
-        "RERA": RespiratoryEventType.RERA,  # (Respiratory Effort Related Arousal)
-        "RE": RespiratoryEventType.RERA,
-        "Arousal": RespiratoryEventType.RERA,  # OSCAR uses "Arousal" for RERA
-        "Flow Limitation": RespiratoryEventType.FLOW_LIMITATION,
-        "FlowLimitation": RespiratoryEventType.FLOW_LIMITATION,
-        "FL": RespiratoryEventType.FLOW_LIMITATION,
-        "Periodic Breathing": RespiratoryEventType.PERIODIC_BREATHING,
-        "PeriodicBreathing": RespiratoryEventType.PERIODIC_BREATHING,
-        "PB": RespiratoryEventType.PERIODIC_BREATHING,
-        "Large Leak": RespiratoryEventType.LARGE_LEAK,
-        "LargeLeak": RespiratoryEventType.LARGE_LEAK,
-        "LL": RespiratoryEventType.LARGE_LEAK,
-        "Vibratory Snore": RespiratoryEventType.VIBRATORY_SNORE,
-        "VibratorySnore": RespiratoryEventType.VIBRATORY_SNORE,
-        "VS": RespiratoryEventType.VIBRATORY_SNORE,
-    }
-
-    FILTERED_ANNOTATIONS = {
-        "Recording starts",
-        "SpO2 Desaturation",  # handled separately if needed
-    }
 
     STR_SETTINGS_MAP = {
         "Mode": "mode",
@@ -1570,18 +1533,18 @@ class ResmedEDFParser(DeviceParser):
                 annotation_text = None
 
                 for text in annotation.annotations:
-                    if text in self.FILTERED_ANNOTATIONS:
+                    if text in FILTERED_ANNOTATIONS:
                         filtered_count += 1
                         break
 
-                    if text in self.EVENT_TYPE_MAP:
-                        event_type = self.EVENT_TYPE_MAP[text]
+                    if text in EVENT_TYPE_MAP:
+                        event_type = EVENT_TYPE_MAP[text]
                         annotation_text = text
                         break
 
                 if annotation_text is None and event_type is None:
                     for text in annotation.annotations:
-                        if text not in self.FILTERED_ANNOTATIONS:
+                        if text not in FILTERED_ANNOTATIONS:
                             unknown_annotations.add(text)
                             unknown_count += 1
                     continue
@@ -1685,11 +1648,11 @@ class ResmedEDFParser(DeviceParser):
                     event_type = None
 
                     for text in annotation.annotations:
-                        if text in self.FILTERED_ANNOTATIONS:
+                        if text in FILTERED_ANNOTATIONS:
                             break
 
-                        if text in self.EVENT_TYPE_MAP:
-                            event_type = self.EVENT_TYPE_MAP[text]
+                        if text in EVENT_TYPE_MAP:
+                            event_type = EVENT_TYPE_MAP[text]
                             break
 
                     if event_type is None:
