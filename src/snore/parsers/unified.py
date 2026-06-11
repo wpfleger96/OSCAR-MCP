@@ -406,14 +406,6 @@ class UnifiedSession(BaseModel):
         self.events.append(event)
         self.has_event_data = True
 
-    def get_waveform(self, waveform_type: WaveformType) -> WaveformData | None:
-        """Get a specific waveform by type."""
-        return self.waveforms.get(waveform_type)
-
-    def has_waveform(self, waveform_type: WaveformType) -> bool:
-        """Check if session has data for a specific waveform type."""
-        return waveform_type in self.waveforms
-
     def finalize_statistics(self) -> None:
         """Calculate all statistics from parsed events and waveforms."""
         event_counts = {"OA": 0, "CA": 0, "H": 0, "RE": 0, "UA": 0}
