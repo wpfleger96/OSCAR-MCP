@@ -1,4 +1,4 @@
-"""Database service for database statistics and metadata queries."""
+"""Database service for database statistics, metadata, and device queries."""
 
 import os
 
@@ -8,13 +8,13 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from snore.database import models
-from snore.services.schemas import DatabaseStats
+from snore.services.schemas import DatabaseStats, DeviceInfo
 
 __all__ = ["DatabaseService"]
 
 
 class DatabaseService:
-    """Service for database statistics and metadata operations."""
+    """Service for database statistics, metadata, and device listing operations."""
 
     def __init__(self, db_session: Session):
         """
@@ -112,3 +112,21 @@ class DatabaseService:
             first_session=first_session,
             last_session=last_session,
         )
+
+    def list_devices(self) -> list[DeviceInfo]:
+        """List all devices ordered by manufacturer."""
+        devices = (
+            self.db_session.query(models.Device)
+            .order_by(models.Device.manufacturer, models.Device.model)
+            .all()
+        )
+
+        return [
+            DeviceInfo(
+                id=d.id,
+                manufacturer=d.manufacturer,
+                model=d.model,
+                serial_number=d.serial_number,
+            )
+            for d in devices
+        ]
