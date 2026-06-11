@@ -45,6 +45,7 @@ from snore.parsers.unified import (
     UnifiedSession,
     WaveformData,
     WaveformType,
+    extract_basic_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -1403,15 +1404,16 @@ class ResmedEDFParser(DeviceParser):
             valid_data = data
             unit = "L/min"
 
+        min_value, max_value, mean_value = extract_basic_stats(valid_data)
         waveform = WaveformData(
             waveform_type=waveform_type,
             sample_rate=edf.get_sample_rate(signal),
             unit=unit,
             timestamps=edf.get_timestamps(signal, data),
             values=data,
-            min_value=float(np.min(valid_data)),
-            max_value=float(np.max(valid_data)),
-            mean_value=float(np.mean(valid_data)),
+            min_value=min_value,
+            max_value=max_value,
+            mean_value=mean_value,
         )
         return waveform, valid_data
 

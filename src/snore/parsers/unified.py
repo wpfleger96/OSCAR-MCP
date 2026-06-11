@@ -18,6 +18,11 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+def extract_basic_stats(values: np.ndarray) -> tuple[float, float, float]:
+    """Compute (min, max, mean) summary statistics for a waveform array."""
+    return float(np.min(values)), float(np.max(values)), float(np.mean(values))
+
+
 class RespiratoryEventType(Enum):
     """Universal respiratory event types across all devices."""
 
