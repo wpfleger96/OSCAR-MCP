@@ -10,15 +10,7 @@ from sqlalchemy import text
 
 from snore.database import models
 from snore.database.importers import SessionImporter
-from snore.database.session import cleanup_database, init_database, session_scope
-
-
-@pytest.fixture(autouse=True)
-def reset_database_state():
-    """Reset global database state before and after each test to ensure isolation."""
-    cleanup_database()
-    yield
-    cleanup_database()
+from snore.database.session import init_database, session_scope
 
 
 class TestImportPipeline:

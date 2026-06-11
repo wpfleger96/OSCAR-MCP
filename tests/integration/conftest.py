@@ -1,8 +1,11 @@
 import pytest
 
+from snore.database.session import cleanup_database
 
-def pytest_collection_modifyitems(items):
-    """Apply integration marker to all tests in this directory."""
-    for item in items:
-        if "/integration/" in str(item.fspath):
-            item.add_marker(pytest.mark.integration)
+
+@pytest.fixture(autouse=True)
+def reset_database_state():
+    """Reset global database state before and after each test."""
+    cleanup_database()
+    yield
+    cleanup_database()
