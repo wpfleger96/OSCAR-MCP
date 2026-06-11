@@ -1249,37 +1249,23 @@ class ResmedEDFParser(DeviceParser):
 
                 spo2_signal = self._find_signal(edf, ["SpO2"])
                 if spo2_signal:
-                    data, info = edf.read_signal(spo2_signal)
+                    result = self._read_waveform(
+                        edf,
+                        spo2_signal,
+                        WaveformType.SPO2,
+                        "%",
+                        valid_range=(70, 100),
+                    )
+                    if result is not None:
+                        waveform, valid_data = result
 
-                    valid_mask = (data >= 70) & (data <= 100)
-                    valid_data = data[valid_mask]
-
-                    if len(valid_data) > 0:
-                        timestamps_seconds = edf.get_timestamps(spo2_signal, data)
-
-                        spo2_min = float(np.min(valid_data))
-                        spo2_max = float(np.max(valid_data))
-                        spo2_mean = float(np.mean(valid_data))
-
-                        below_90 = np.sum(valid_data < 90)
-                        time_below_90_seconds = int(below_90)
-
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.SPO2,
-                            sample_rate=edf.get_sample_rate(spo2_signal),
-                            unit=info.physical_dimension or "%",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=spo2_min,
-                            max_value=spo2_max,
-                            mean_value=spo2_mean,
-                        )
+                        time_below_90_seconds = int(np.sum(valid_data < 90))
 
                         session.add_waveform(waveform)
 
-                        session.statistics.spo2_min = spo2_min
-                        session.statistics.spo2_max = spo2_max
-                        session.statistics.spo2_mean = spo2_mean
+                        session.statistics.spo2_min = waveform.min_value
+                        session.statistics.spo2_max = waveform.max_value
+                        session.statistics.spo2_mean = waveform.mean_value
                         session.statistics.spo2_time_below_90 = time_below_90_seconds
 
                         has_valid_data = True
@@ -1291,34 +1277,21 @@ class ResmedEDFParser(DeviceParser):
 
                 pulse_signal = self._find_signal(edf, ["Pulse"])
                 if pulse_signal:
-                    data, info = edf.read_signal(pulse_signal)
-
-                    valid_mask = (data >= 40) & (data <= 200)
-                    valid_data = data[valid_mask]
-
-                    if len(valid_data) > 0:
-                        timestamps_seconds = edf.get_timestamps(pulse_signal, data)
-
-                        pulse_min = float(np.min(valid_data))
-                        pulse_max = float(np.max(valid_data))
-                        pulse_mean = float(np.mean(valid_data))
-
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.PULSE,
-                            sample_rate=edf.get_sample_rate(pulse_signal),
-                            unit=info.physical_dimension or "bpm",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=pulse_min,
-                            max_value=pulse_max,
-                            mean_value=pulse_mean,
-                        )
+                    result = self._read_waveform(
+                        edf,
+                        pulse_signal,
+                        WaveformType.PULSE,
+                        "bpm",
+                        valid_range=(40, 200),
+                    )
+                    if result is not None:
+                        waveform, valid_data = result
 
                         session.add_waveform(waveform)
 
-                        session.statistics.pulse_min = pulse_min
-                        session.statistics.pulse_max = pulse_max
-                        session.statistics.pulse_mean = pulse_mean
+                        session.statistics.pulse_min = waveform.min_value
+                        session.statistics.pulse_max = waveform.max_value
+                        session.statistics.pulse_mean = waveform.mean_value
 
                         has_valid_data = True
                         logger.debug(
@@ -1365,30 +1338,18 @@ class ResmedEDFParser(DeviceParser):
                 flow_signal = self._find_signal(edf, ["Flow"])
 
                 if flow_signal:
-                    data, info = edf.read_signal(flow_signal)
-                    timestamps_seconds = edf.get_timestamps(flow_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf,
+                        flow_signal,
+                        WaveformType.FLOW_RATE,
+                        "L/min",
+                        convert_lps_to_lpm=True,
+                    )
+                    if result is None:
                         logger.warning(f"No data in flow signal {flow_signal}")
                         return
 
-                    unit = info.physical_dimension or "L/min"
-
-                    if unit == "L/s":
-                        data = data * 60.0
-                        unit = "L/min"
-
-                    waveform = WaveformData(
-                        waveform_type=WaveformType.FLOW_RATE,
-                        sample_rate=edf.get_sample_rate(flow_signal),
-                        unit=unit,
-                        timestamps=timestamps_seconds,
-                        values=data,
-                        min_value=float(np.min(data)),
-                        max_value=float(np.max(data)),
-                        mean_value=float(np.mean(data)),
-                    )
-
+                    waveform, data = result
                     session.add_waveform(waveform)
                     logger.debug(
                         f"Parsed {len(data)} flow samples from {file_path.name}"
@@ -1397,6 +1358,62 @@ class ResmedEDFParser(DeviceParser):
         except Exception as e:
             logger.warning(f"Failed to parse breathing waveforms: {e}")
             session.data_quality_notes.append(f"BRP parsing failed: {e}")
+
+    def _read_waveform(
+        self,
+        edf: EDFReader,
+        signal: str,
+        waveform_type: WaveformType,
+        default_unit: str,
+        *,
+        valid_range: tuple[float, float] | None = None,
+        convert_lps_to_lpm: bool = False,
+    ) -> tuple[WaveformData, np.ndarray] | None:
+        """
+        Read an EDF signal and build a WaveformData with min/max/mean stats.
+
+        Args:
+            edf: Open EDF reader
+            signal: Signal label to read
+            waveform_type: Waveform type for the resulting WaveformData
+            default_unit: Unit to use when the EDF physical dimension is empty
+            valid_range: Optional (low, high) inclusive range; stats are
+                computed over the valid subset while the full array is stored
+            convert_lps_to_lpm: Convert L/s data to L/min when applicable
+
+        Returns:
+            (waveform, valid_data) tuple, or None if the signal has no
+            (valid) data. valid_data is the subset used for stats.
+        """
+        data, info = edf.read_signal(signal)
+
+        if valid_range is not None:
+            low, high = valid_range
+            valid_data = data[(data >= low) & (data <= high)]
+            if len(valid_data) == 0:
+                return None
+        else:
+            if len(data) == 0:
+                return None
+            valid_data = data
+
+        unit = info.physical_dimension or default_unit
+        if convert_lps_to_lpm and unit == "L/s":
+            data = data * 60.0
+            valid_data = data
+            unit = "L/min"
+
+        waveform = WaveformData(
+            waveform_type=waveform_type,
+            sample_rate=edf.get_sample_rate(signal),
+            unit=unit,
+            timestamps=edf.get_timestamps(signal, data),
+            values=data,
+            min_value=float(np.min(valid_data)),
+            max_value=float(np.max(valid_data)),
+            mean_value=float(np.mean(valid_data)),
+        )
+        return waveform, valid_data
 
     def _find_signal(self, edf: Any, patterns: list[str]) -> str | None:
         """Find signal name matching any of the patterns."""
@@ -1457,94 +1474,51 @@ class ResmedEDFParser(DeviceParser):
 
                 # Parse therapy pressure (device's target pressure)
                 if therapy_signal:
-                    data, info = edf.read_signal(therapy_signal)
-                    timestamps_seconds = edf.get_timestamps(therapy_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf, therapy_signal, WaveformType.THERAPY_PRESSURE, "cmH2O"
+                    )
+                    if result is None:
                         logger.warning(
                             f"No data in therapy pressure signal {therapy_signal}"
                         )
                     else:
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.THERAPY_PRESSURE,
-                            sample_rate=edf.get_sample_rate(therapy_signal),
-                            unit=info.physical_dimension or "cmH2O",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 # Parse mask pressure (measured at mask)
                 if mask_signal:
-                    data, info = edf.read_signal(mask_signal)
-                    timestamps_seconds = edf.get_timestamps(mask_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf, mask_signal, WaveformType.MASK_PRESSURE, "cmH2O"
+                    )
+                    if result is None:
                         logger.warning(f"No data in mask pressure signal {mask_signal}")
                     else:
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.MASK_PRESSURE,
-                            sample_rate=edf.get_sample_rate(mask_signal),
-                            unit=info.physical_dimension or "cmH2O",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 # Parse EPAP (therapy pressure minus EPR)
                 if epap_signal:
-                    data, info = edf.read_signal(epap_signal)
-                    timestamps_seconds = edf.get_timestamps(epap_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf, epap_signal, WaveformType.EPAP, "cmH2O"
+                    )
+                    if result is None:
                         logger.warning(f"No data in EPAP signal {epap_signal}")
                     else:
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.EPAP,
-                            sample_rate=edf.get_sample_rate(epap_signal),
-                            unit=info.physical_dimension or "cmH2O",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 # ResMed uses names like "Leak.2s", "LeakRate"
                 leak_signal = self._find_signal(edf, ["Leak"])
 
                 if leak_signal:
-                    data, info = edf.read_signal(leak_signal)
-                    timestamps_seconds = edf.get_timestamps(leak_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf,
+                        leak_signal,
+                        WaveformType.LEAK_RATE,
+                        "L/min",
+                        convert_lps_to_lpm=True,
+                    )
+                    if result is None:
                         logger.warning(f"No data in leak signal {leak_signal}")
                     else:
-                        unit = info.physical_dimension or "L/min"
-
-                        if unit == "L/s":
-                            data = data * 60.0
-                            unit = "L/min"
-
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.LEAK_RATE,
-                            sample_rate=edf.get_sample_rate(leak_signal),
-                            unit=unit,
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 logger.debug(f"Parsed pressure/leak from {file_path.name}")
 
