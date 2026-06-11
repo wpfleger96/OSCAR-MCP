@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  checks:
+  backend:
     runs-on: ubuntu-latest
 
     steps:
@@ -37,18 +37,8 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "lts/*"
-          cache: "npm"
-          cache-dependency-path: ui/package-lock.json
-
       - name: Install dependencies
         run: just sync
-
-      - name: Install UI dependencies
-        run: just ui-install
 
       - name: Run type checks
         run: just type-check
@@ -59,6 +49,29 @@ jobs:
       - name: Run formatter
         run: just format-check
 
+      - name: Run tests
+        run: just test
+
+  ui:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI dependencies
+        run: just ui-install
+
       - name: Run UI type checks
         run: just ui-type-check
 
@@ -67,9 +80,6 @@ jobs:
 
       - name: Run UI formatter
         run: just ui-format-check
-
-      - name: Run tests
-        run: just test
 
   e2e:
     runs-on: ubuntu-latest
