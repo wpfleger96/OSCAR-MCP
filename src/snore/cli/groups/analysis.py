@@ -9,8 +9,6 @@ from typing import Any
 
 import click
 
-from rich.markup import escape
-
 from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
 from snore.cli.display import (
     ICON_STATS,
@@ -21,8 +19,8 @@ from snore.cli.display import (
     print_footer,
     print_header,
     print_kv,
-    print_separator,
     print_success,
+    print_table,
     print_tip,
     print_warning,
 )
@@ -299,25 +297,31 @@ def analysis_delete(
         print_footer(wide=True)
         console.print()
 
-        console.print(
-            f"{'Sess ID':<8} {'Date':<12} {'Time':<8} {'Versions':<10} {'Device':<25}"
-        )
-        print_separator(wide=True)
-
+        rows = []
         for detail in preview.session_details:
             start = detail.start_time
             if isinstance(start, str):
                 start = datetime.fromisoformat(start)
-            device_name = (
-                f"{escape(str(detail.manufacturer))} {escape(str(detail.model))}"
+            rows.append(
+                (
+                    str(detail.id),
+                    f"{start:%Y-%m-%d}",
+                    f"{start:%H:%M:%S}",
+                    str(detail.version_count),
+                    f"{detail.manufacturer} {detail.model}",
+                )
             )
 
-            console.print(
-                f"{detail.id:<8} "
-                f"{start:%Y-%m-%d}   {start:%H:%M:%S}  "
-                f"{detail.version_count:<10} "
-                f"{device_name:<25}"
-            )
+        print_table(
+            [
+                ("Sess ID", 8),
+                ("Date", 12),
+                ("Time", 8),
+                ("Versions", 10),
+                ("Device", 25),
+            ],
+            rows,
+        )
 
         print_header("Deletion Summary", ICON_STATS, wide=True)
         console.print(
@@ -540,20 +544,26 @@ def _list_sessions(
         console.print("No sessions found")
         return
 
-    console.print(
-        f"{'Date':<12} {'ID':<6} {'Duration':<10} {'Analyzed':<10} {'Analysis ID':<12}"
+    print_table(
+        [
+            ("Date", 12),
+            ("ID", 6),
+            ("Duration", 10),
+            ("Analyzed", 10),
+            ("Analysis ID", 12),
+        ],
+        (
+            (
+                str(item.session_date),
+                str(item.session_id),
+                f"{item.duration_hours:.1f}h" if item.duration_hours else "N/A",
+                "✓" if item.has_analysis else "✗",
+                str(item.analysis_id) if item.analysis_id else "-",
+            )
+            for item in results
+        ),
+        wide=False,
     )
-    print_separator()
-
-    for item in results:
-        duration = f"{item.duration_hours:.1f}h" if item.duration_hours else "N/A"
-        analyzed_str = "✓" if item.has_analysis else "✗"
-        analysis_id_str = str(item.analysis_id) if item.analysis_id else "-"
-
-        console.print(
-            f"{item.session_date!s:<12} {item.session_id:<6} {duration:<10} "
-            f"{analyzed_str:<10} {analysis_id_str:<12}"
-        )
 
     if analyzed_only and len(results) > 0:
         console.print(f"\nShowing {len(results)} analyzed session(s)")

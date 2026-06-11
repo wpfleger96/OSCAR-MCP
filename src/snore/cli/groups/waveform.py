@@ -12,7 +12,7 @@ import click
 from rich.markup import escape
 
 from snore.cli.decorators import db_option, init_db
-from snore.cli.display import console, print_warning
+from snore.cli.display import console, print_table, print_warning
 from snore.waveform import format_time_offset
 from snore.waveform.inspector import parse_time_offset
 
@@ -94,21 +94,27 @@ def list_waveforms(
             return
 
         console.print(f"Available waveforms for session {resolved_id}:")
-        console.print(
-            f"  {'TYPE':<12} {'RATE':<12} {'SAMPLES':<10} {'UNIT':<10} {'DURATION'}"
+        print_table(
+            [
+                ("TYPE", 12),
+                ("RATE", 12),
+                ("SAMPLES", 10),
+                ("UNIT", 10),
+                ("DURATION", 0),
+            ],
+            (
+                (
+                    wf.waveform_type,
+                    f"{wf.sample_rate:.1f}Hz",
+                    str(wf.sample_count),
+                    wf.unit or "?",
+                    f"{wf.duration_hours:.1f}h",
+                )
+                for wf in waveforms
+            ),
+            header_separator=False,
+            indent=1,
         )
-
-        for wf in waveforms:
-            unit = wf.unit or "?"
-            rate_str = f"{wf.sample_rate:.1f}Hz"
-
-            console.print(
-                f"  {wf.waveform_type:<12} "
-                f"{rate_str:<12} "
-                f"{wf.sample_count:<10} "
-                f"{unit:<10} "
-                f"{wf.duration_hours:.1f}h"
-            )
 
 
 @waveform.command("show")

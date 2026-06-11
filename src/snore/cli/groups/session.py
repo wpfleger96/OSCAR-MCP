@@ -6,8 +6,6 @@ from datetime import datetime
 
 import click
 
-from rich.markup import escape
-
 from snore.cli.decorators import date_range_options, db_option, init_db, parse_id_list
 from snore.cli.display import (
     ICON_STATS,
@@ -16,9 +14,8 @@ from snore.cli.display import (
     print_dry_run_header,
     print_footer,
     print_header,
-    print_raw,
-    print_separator,
     print_success,
+    print_table,
     print_tip,
     print_warning,
 )
@@ -78,24 +75,35 @@ def session_list(
             console.print("No sessions found")
             return
 
-        console.print(
-            f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<30} {'Serial':<15} {'AHI':<8}"
-        )
-        print_separator(wide=True)
-
+        rows = []
         for sess in result.sessions:
             device_name = f"{sess.manufacturer} {sess.model}"
             ahi_str = f"{sess.ahi:.1f}" if sess.ahi is not None else "N/A"
             status_marker = "" if sess.enabled else "[disabled]"
-
-            print_raw(
-                f"{sess.id:<5} "
-                f"{sess.start_time:%Y-%m-%d}   {sess.start_time:%H:%M:%S}  "
-                f"{sess.duration_hours:>6.1f}h    "
-                f"{device_name:<30} "
-                f"{sess.serial_number:<15} "
-                f"{ahi_str:<8} {status_marker}"
+            rows.append(
+                (
+                    str(sess.id),
+                    f"{sess.start_time:%Y-%m-%d}",
+                    f"{sess.start_time:%H:%M:%S}",
+                    f"{sess.duration_hours:>6.1f}h",
+                    device_name,
+                    sess.serial_number,
+                    f"{ahi_str:<8} {status_marker}",
+                )
             )
+
+        print_table(
+            [
+                ("ID", 5),
+                ("Date", 12),
+                ("Time", 8),
+                ("Duration", 10),
+                ("Device", 30),
+                ("Serial", 15),
+                ("AHI", 8),
+            ],
+            rows,
+        )
 
         if result.total_count > 0 and limit > 0 and result.total_count > limit:
             console.print(
@@ -192,21 +200,27 @@ def session_delete(
         print_footer(wide=True)
         console.print()
 
-        console.print(
-            f"{'ID':<5} {'Date':<12} {'Time':<8} {'Duration':<10} {'Device':<30} {'Serial':<15}"
+        print_table(
+            [
+                ("ID", 5),
+                ("Date", 12),
+                ("Time", 8),
+                ("Duration", 10),
+                ("Device", 30),
+                ("Serial", 15),
+            ],
+            (
+                (
+                    str(sess.id),
+                    f"{sess.start_time:%Y-%m-%d}",
+                    f"{sess.start_time:%H:%M:%S}",
+                    f"{sess.duration_hours:>6.1f}h",
+                    f"{sess.manufacturer} {sess.model}",
+                    sess.serial_number,
+                )
+                for sess in preview.sessions
+            ),
         )
-        print_separator(wide=True)
-
-        for sess in preview.sessions:
-            device_name = f"{escape(sess.manufacturer)} {escape(sess.model)}"
-
-            console.print(
-                f"{sess.id:<5} "
-                f"{sess.start_time:%Y-%m-%d}   {sess.start_time:%H:%M:%S}  "
-                f"{sess.duration_hours:>6.1f}h    "
-                f"{device_name:<30} "
-                f"{escape(sess.serial_number):<15}"
-            )
 
         print_header("Deletion Summary", ICON_STATS, wide=True)
         console.print(f"Sessions:    {len(preview.sessions)}")

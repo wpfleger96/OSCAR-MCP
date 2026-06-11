@@ -13,8 +13,8 @@ from snore.cli.display import (
     print_footer,
     print_header,
     print_kv,
-    print_separator,
     print_subsection,
+    print_table,
 )
 
 
@@ -153,11 +153,7 @@ def stats(
 
                 print_header(f"Therapy Statistics ({period_names[period]})", wide=True)
 
-                console.print(
-                    f"{'Period':<20} {'Days':<6} {'Avg Hours':<11} {'Avg AHI':<9} {'Med AHI':<9}"
-                )
-                print_separator(wide=True)
-
+                period_rows = []
                 for period_stat in period_stats:  # type: PeriodStatistics
                     if period == "week":
                         period_label = f"{period_stat.period_start.strftime('%Y-W%U')}"
@@ -189,9 +185,20 @@ def stats(
                         else "N/A"
                     )
 
-                    console.print(
-                        f"{period_label:<20} {days_str:<6} {hours_str:<11} {avg_ahi_str:<9} {med_ahi_str:<9}"
+                    period_rows.append(
+                        (period_label, days_str, hours_str, avg_ahi_str, med_ahi_str)
                     )
+
+                print_table(
+                    [
+                        ("Period", 20),
+                        ("Days", 6),
+                        ("Avg Hours", 11),
+                        ("Avg AHI", 9),
+                        ("Med AHI", 9),
+                    ],
+                    period_rows,
+                )
 
                 print_footer(wide=True)
 
@@ -251,9 +258,7 @@ def stats(
                     best_records = records_data[metric]["best"]
                     worst_records = records_data[metric]["worst"]
 
-                    console.print(f"\n{best_label:<35} {worst_label}")
-                    print_separator(wide=True)
-
+                    record_rows = []
                     max_rows = max(len(best_records), len(worst_records))
                     for i in range(max_rows):
                         best_str = ""
@@ -273,7 +278,10 @@ def stats(
                             else:
                                 worst_str = f"{dt}: {val:.1f}"
 
-                        console.print(f"{best_str:<35} {worst_str}")
+                        record_rows.append((best_str, worst_str))
+
+                    console.print()
+                    print_table([(best_label, 35), (worst_label, 0)], record_rows)
 
                 print_footer(wide=True)
 
