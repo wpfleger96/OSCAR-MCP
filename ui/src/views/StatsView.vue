@@ -33,13 +33,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import SelectButton from 'primevue/selectbutton'
 import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import RecordsPanel from '@/components/RecordsPanel.vue'
 import { getPeriods, getTrends, getRecords } from '@/api/stats'
-import type { PeriodStatistics, TrendData, RecordsData } from '@/types'
+import { useApiLoad } from '@/composables/useApiLoad'
+import type { PeriodStatistics } from '@/types'
 
 const periodOptions = [
     { label: 'Week', value: 'week' },
@@ -49,11 +50,25 @@ const periodOptions = [
 ]
 
 const periodType = ref('month')
-const periods = ref<PeriodStatistics[]>([])
-const trends = ref<TrendData | null>(null)
-const records = ref<RecordsData | null>(null)
-const periodsLoading = ref(true)
-const recordsLoading = ref(true)
+
+const {
+    data: periodData,
+    loading: periodsLoading,
+    reload: reloadPeriods,
+} = useApiLoad(async () => {
+    const [periods, trends] = await Promise.all([
+        getPeriods(periodType.value),
+        getTrends(periodType.value),
+    ])
+    return { periods, trends }
+})
+
+const { data: records, loading: recordsLoading } = useApiLoad(() => getRecords())
+
+const periods = computed<PeriodStatistics[]>(() => periodData.value?.periods ?? [])
+const trends = computed(() => periodData.value?.trends ?? null)
+
+watch(periodType, () => void reloadPeriods())
 
 const trendLabels = computed(() => trends.value?.ahi.map((t) => t[0]) ?? [])
 const trendDatasets = computed(() => {
@@ -65,33 +80,6 @@ const trendDatasets = computed(() => {
         { label: 'Leak (L/min)', values: trends.value.leak.map((t) => t[1]), color: '#dc2626' },
     ]
 })
-
-async function loadPeriodData(): Promise<void> {
-    periodsLoading.value = true
-    try {
-        const [p, t] = await Promise.all([
-            getPeriods(periodType.value),
-            getTrends(periodType.value),
-        ])
-        periods.value = p
-        trends.value = t
-    } finally {
-        periodsLoading.value = false
-    }
-}
-
-watch(periodType, () => void loadPeriodData())
-
-async function loadRecordsData(): Promise<void> {
-    recordsLoading.value = true
-    try {
-        records.value = await getRecords()
-    } finally {
-        recordsLoading.value = false
-    }
-}
-
-onMounted(() => void Promise.all([loadPeriodData(), loadRecordsData()]))
 </script>
 
 <style scoped>

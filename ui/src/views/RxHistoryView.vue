@@ -92,18 +92,26 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Tag from 'primevue/tag'
 import { getRxHistory, getRxCurrent, getRxCompare } from '@/api/rx'
-import type { RxPeriodResponse, RxComparisonResponse } from '@/types'
+import { useApiLoad } from '@/composables/useApiLoad'
+import type { RxPeriodResponse } from '@/types'
 
-const loading = ref(true)
-const error = ref<string | null>(null)
-const history = ref<RxPeriodResponse[]>([])
-const current = ref<RxPeriodResponse | null>(null)
-const comparison = ref<RxComparisonResponse | null>(null)
+const { data, loading, error } = useApiLoad(async () => {
+    const [history, current, comparison] = await Promise.all([
+        getRxHistory(),
+        getRxCurrent(),
+        getRxCompare(),
+    ])
+    return { history, current, comparison }
+}, 'Failed to load RX data')
+
+const history = computed(() => data.value?.history ?? [])
+const current = computed(() => data.value?.current ?? null)
+const comparison = computed(() => data.value?.comparison ?? null)
 
 interface ComparisonRow extends RxPeriodResponse {
     isBest: boolean
@@ -147,19 +155,6 @@ function summarizeSettings(settings: Record<string, string>): string {
     }
     return parts.join(', ')
 }
-
-onMounted(async () => {
-    try {
-        const [h, c, comp] = await Promise.all([getRxHistory(), getRxCurrent(), getRxCompare()])
-        history.value = h
-        current.value = c
-        comparison.value = comp
-    } catch (err: unknown) {
-        error.value = err instanceof Error ? err.message : 'Failed to load RX data'
-    } finally {
-        loading.value = false
-    }
-})
 </script>
 
 <style scoped>

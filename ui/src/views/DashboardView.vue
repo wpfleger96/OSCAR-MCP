@@ -66,7 +66,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
@@ -77,14 +77,26 @@ import CalendarHeatmap from '@/components/CalendarHeatmap.vue'
 import { getSummary, getTrends } from '@/api/stats'
 import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
-import type { TherapySummary, TrendData, DayListItem, SessionListItem } from '@/types'
+import { useApiLoad } from '@/composables/useApiLoad'
+import type { SessionListItem } from '@/types'
 
 const router = useRouter()
-const loading = ref(true)
-const summary = ref<TherapySummary | null>(null)
-const trends = ref<TrendData | null>(null)
-const days = ref<DayListItem[]>([])
-const recentSessions = ref<SessionListItem[]>([])
+
+// Dashboard gracefully shows empty sections on error, so `error` is unused.
+const { data, loading } = useApiLoad(async () => {
+    const [summary, trends, daysResult, sessionsResult] = await Promise.all([
+        getSummary(),
+        getTrends('week'),
+        getDays({ limit: 365 }),
+        getSessions({ limit: 5, sort_by: 'date-desc' }),
+    ])
+    return { summary, trends, days: daysResult.items, recentSessions: sessionsResult.items }
+})
+
+const summary = computed(() => data.value?.summary ?? null)
+const trends = computed(() => data.value?.trends ?? null)
+const days = computed(() => data.value?.days ?? [])
+const recentSessions = computed(() => data.value?.recentSessions ?? [])
 
 const trendLabels = computed(() => trends.value?.ahi.map((t) => t[0]) ?? [])
 const trendDatasets = computed(() => {
@@ -121,25 +133,6 @@ function navigateToSession(event: { data: SessionListItem }): void {
 function onDayClick(date: string): void {
     void router.push({ name: 'sessions', query: { from: date, to: date } })
 }
-
-onMounted(async () => {
-    try {
-        const [summaryResult, trendsResult, daysResult, sessionsResult] = await Promise.all([
-            getSummary(),
-            getTrends('week'),
-            getDays({ limit: 365 }),
-            getSessions({ limit: 5, sort_by: 'date-desc' }),
-        ])
-        summary.value = summaryResult
-        trends.value = trendsResult
-        days.value = daysResult.items
-        recentSessions.value = sessionsResult.items
-    } catch {
-        // Dashboard gracefully shows empty sections on error
-    } finally {
-        loading.value = false
-    }
-})
 </script>
 
 <style scoped>
