@@ -26,6 +26,7 @@ class WaveformService:
             db_session: SQLAlchemy database session
         """
         self.db_session = db_session
+        self._loader = WaveformLoader(db_session)
 
     def list_waveforms(self, session_id: int) -> list[WaveformInfo]:
         """
@@ -87,9 +88,8 @@ class WaveformService:
         Raises:
             ValueError: If waveform not found
         """
-        loader = WaveformLoader(self.db_session)
         try:
-            timestamps, values, metadata = loader.load_waveform(
+            timestamps, values, metadata = self._loader.load_waveform(
                 session_id=session_id,
                 waveform_type=waveform_type,
                 apply_filter=False,
