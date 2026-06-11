@@ -182,43 +182,34 @@ class AnalysisFacade:
                 "session_ids, from_date, to_date, or delete_all"
             )
 
-        query = """
-            SELECT DISTINCT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                devices.manufacturer,
-                devices.model
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            JOIN analysis_results ON sessions.id = analysis_results.session_id
-            WHERE 1=1
-        """
-        params: dict[str, Any] = {}
+        query = (
+            select(
+                models.Session.id,
+                models.Session.device_session_id,
+                models.Session.start_time,
+                models.Device.manufacturer,
+                models.Device.model,
+            )
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .join(
+                models.AnalysisResult,
+                models.Session.id == models.AnalysisResult.session_id,
+            )
+            .distinct()
+        )
 
         if session_ids:
-            query += " AND sessions.id IN :session_ids"
-            params["session_ids"] = session_ids
+            query = query.where(models.Session.id.in_(session_ids))
 
         if from_date:
-            query += " AND sessions.start_time >= :from_date"
-            params["from_date"] = from_date
+            query = query.where(models.Session.start_time >= from_date)
 
         if to_date:
-            query += " AND sessions.start_time <= :to_date"
-            params["to_date"] = to_date
+            query = query.where(models.Session.start_time <= to_date)
 
-        query += " ORDER BY sessions.start_time DESC"
+        query = query.order_by(models.Session.start_time.desc())
 
-        if session_ids:
-            result = self.db_session.execute(
-                text(query).bindparams(bindparam("session_ids", expanding=True)),
-                params,
-            )
-        else:
-            result = self.db_session.execute(text(query), params)
-
-        sessions_with_analysis = result.fetchall()
+        sessions_with_analysis = self.db_session.execute(query).fetchall()
 
         if not sessions_with_analysis:
             return AnalysisDeletePreview(
@@ -232,15 +223,9 @@ class AnalysisFacade:
         session_ids_list = [s.id for s in sessions_with_analysis]
 
         analysis_counts = self.db_session.execute(
-            text(
-                """
-                SELECT session_id, COUNT(*) as count
-                FROM analysis_results
-                WHERE session_id IN :session_ids
-                GROUP BY session_id
-            """
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_list},
+            select(models.AnalysisResult.session_id, func.count())
+            .where(models.AnalysisResult.session_id.in_(session_ids_list))
+            .group_by(models.AnalysisResult.session_id)
         ).fetchall()
 
         analysis_count_dict = {row[0]: int(row[1]) for row in analysis_counts}
@@ -251,26 +236,21 @@ class AnalysisFacade:
         )
 
         patterns_count = self.db_session.execute(
-            text(
-                """
-                SELECT COUNT(*) as count
-                FROM detected_patterns
-                WHERE analysis_result_id IN (
-                    SELECT id FROM analysis_results WHERE session_id IN :session_ids
+            select(func.count())
+            .select_from(models.DetectedPattern)
+            .where(
+                models.DetectedPattern.analysis_result_id.in_(
+                    select(models.AnalysisResult.id).where(
+                        models.AnalysisResult.session_id.in_(session_ids_list)
+                    )
                 )
-            """
-            ).bindparams(bindparam("session_ids", expanding=True)),
-            {"session_ids": session_ids_list},
+            )
         ).scalar()
 
         session_details = [
             AnalysisSessionDetail(
                 id=s.id,
-                start_time=(
-                    datetime.fromisoformat(s.start_time)
-                    if isinstance(s.start_time, str)
-                    else s.start_time
-                ),
+                start_time=s.start_time,
                 manufacturer=s.manufacturer,
                 model=s.model,
                 version_count=analysis_count_dict.get(s.id, 0),
