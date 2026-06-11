@@ -3,6 +3,10 @@
 import numpy as np
 import pytest
 
+from snore.analysis.modes.baseline import (
+    _calculate_breath_based_baseline,
+    _calculate_time_based_baseline,
+)
 from snore.analysis.modes.config import AASM_CONFIG, AASM_RELAXED_CONFIG, RESMED_CONFIG
 from snore.analysis.modes.detector import EventDetector, _calculate_event_overlap
 from snore.analysis.modes.types import HypopneaMode
@@ -1161,7 +1165,7 @@ class TestCalculateTimeBasedBaseline:
                 )
             )
 
-        baseline = aasm_detector._calculate_time_based_baseline(breaths, 35)
+        baseline = _calculate_time_based_baseline(aasm_detector.config, breaths, 35)
 
         assert baseline >= 10.0
 
@@ -1191,7 +1195,7 @@ class TestCalculateTimeBasedBaseline:
             )
             breaths.append(breath)
 
-        baseline = aasm_detector._calculate_time_based_baseline(breaths, 35)
+        baseline = _calculate_time_based_baseline(aasm_detector.config, breaths, 35)
 
         assert baseline >= 10.0
 
@@ -1221,7 +1225,7 @@ class TestCalculateTimeBasedBaseline:
                 )
             )
 
-        baseline = aasm_detector._calculate_time_based_baseline(breaths, 35)
+        baseline = _calculate_time_based_baseline(aasm_detector.config, breaths, 35)
 
         assert baseline == 10.0
 
@@ -1255,7 +1259,9 @@ class TestCalculateBreathBasedBaseline:
                 )
             )
 
-        baseline = aasm_relaxed_detector._calculate_breath_based_baseline(breaths, 45)
+        baseline = _calculate_breath_based_baseline(
+            aasm_relaxed_detector.config, breaths, 45
+        )
 
         assert baseline >= 10.0
 
@@ -1285,7 +1291,9 @@ class TestCalculateBreathBasedBaseline:
             )
             breaths.append(breath)
 
-        baseline = aasm_relaxed_detector._calculate_breath_based_baseline(breaths, 45)
+        baseline = _calculate_breath_based_baseline(
+            aasm_relaxed_detector.config, breaths, 45
+        )
 
         assert baseline >= 10.0
 
