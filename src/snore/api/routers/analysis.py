@@ -1,10 +1,8 @@
-from datetime import datetime, time
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
 
-from snore.api.deps import DateRangeParams, PaginationParams, get_db
+from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
 from snore.api.schemas import (
     AnalysisDeleteRequest,
@@ -16,24 +14,23 @@ from snore.services.schemas import AnalysisDeletePreview, AnalysisListItem
 
 router = APIRouter()
 
+AnalysisFacadeDep = Annotated[AnalysisFacade, Depends(service_dep(AnalysisFacade))]
+
 
 @router.get("/analysis/sessions", response_model=PaginatedResponse[AnalysisListItem])
 def list_analysis_sessions(
-    db: Session = Depends(get_db),
+    facade: AnalysisFacadeDep,
     pagination: PaginationParams = Depends(),
     dates: DateRangeParams = Depends(),
     analyzed_only: bool = Query(default=False),
     sort_by: str = Query(default="date-desc"),
 ) -> PaginatedResponse[AnalysisListItem]:
-    facade = AnalysisFacade(db)
-    start_dt = datetime.combine(dates.from_date, time.min) if dates.from_date else None
-    end_dt = datetime.combine(dates.to_date, time.max) if dates.to_date else None
     total = facade.count_sessions_with_status(
-        start=start_dt, end=end_dt, analyzed_only=analyzed_only
+        start=dates.start_datetime, end=dates.end_datetime, analyzed_only=analyzed_only
     )
     items = facade.list_sessions_with_status(
-        start=start_dt,
-        end=end_dt,
+        start=dates.start_datetime,
+        end=dates.end_datetime,
         limit=pagination.limit,
         offset=pagination.offset,
         analyzed_only=analyzed_only,
@@ -45,8 +42,7 @@ def list_analysis_sessions(
 
 
 @router.get("/sessions/{session_id}/analysis")
-def get_analysis(session_id: int, db: Session = Depends(get_db)) -> Any:
-    facade = AnalysisFacade(db)
+def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> Any:
     result = facade.get_analysis_result(session_id)
     if result is None:
         raise NotFoundError(f"No analysis found for session {session_id}")
@@ -57,9 +53,8 @@ def get_analysis(session_id: int, db: Session = Depends(get_db)) -> Any:
 def run_analysis(
     session_id: int,
     body: AnalysisRunRequest,
-    db: Session = Depends(get_db),
+    facade: AnalysisFacadeDep,
 ) -> Any:
-    facade = AnalysisFacade(db)
     return facade.run_analysis(
         session_id, modes=body.modes, store_results=body.store_results
     )
@@ -67,9 +62,8 @@ def run_analysis(
 
 @router.delete("/analysis")
 def delete_analysis(
-    body: AnalysisDeleteRequest, db: Session = Depends(get_db)
+    body: AnalysisDeleteRequest, facade: AnalysisFacadeDep
 ) -> dict[str, int]:
-    facade = AnalysisFacade(db)
     deleted_count = facade.delete_analysis(
         body.session_ids, all_versions=body.all_versions
     )
@@ -78,9 +72,9 @@ def delete_analysis(
 
 @router.get("/analysis/delete-preview", response_model=AnalysisDeletePreview)
 def get_analysis_delete_preview(
+    facade: AnalysisFacadeDep,
     session_ids: list[int] = Query(default=[]),
     all_versions: bool = Query(default=False),
-    db: Session = Depends(get_db),
 ) -> AnalysisDeletePreview:
     if not session_ids:
         return AnalysisDeletePreview(
@@ -89,5 +83,4 @@ def get_analysis_delete_preview(
             records_to_delete=0,
             patterns_count=0,
         )
-    facade = AnalysisFacade(db)
     return facade.get_delete_preview(session_ids, all_versions=all_versions)

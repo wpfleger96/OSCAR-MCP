@@ -1,8 +1,8 @@
-from collections.abc import Generator
-from datetime import date
+from collections.abc import Callable, Generator
+from datetime import date, datetime, time
 from typing import Annotated
 
-from fastapi import Query
+from fastapi import Depends, Query
 from sqlalchemy.orm import Session
 
 from snore.database.session import get_session
@@ -19,6 +19,15 @@ def get_db() -> Generator[Session]:
         raise
     finally:
         session.close()
+
+
+def service_dep[T](cls: Callable[[Session], T]) -> Callable[..., T]:
+    """Return a FastAPI dependency that constructs ``cls(db)``."""
+
+    def _dep(db: Annotated[Session, Depends(get_db)]) -> T:
+        return cls(db)
+
+    return _dep
 
 
 class PaginationParams:
@@ -39,3 +48,13 @@ class DateRangeParams:
     ):
         self.from_date = from_date
         self.to_date = to_date
+
+    @property
+    def start_datetime(self) -> datetime | None:
+        """from_date as an inclusive datetime lower bound (midnight)."""
+        return datetime.combine(self.from_date, time.min) if self.from_date else None
+
+    @property
+    def end_datetime(self) -> datetime | None:
+        """to_date as an inclusive datetime upper bound (end of day)."""
+        return datetime.combine(self.to_date, time.max) if self.to_date else None
