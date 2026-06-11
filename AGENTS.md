@@ -52,8 +52,8 @@ uv run snore logs show/clear/path              # Log management
 
 ```
 src/snore/
-├── cli.py              # CLI commands (Click)
-├── constants.py        # Channel IDs, mappings, flow limitation classes
+├── cli/                # CLI commands (Click): groups/, commands/, display/, decorators.py
+├── constants.py        # Channel IDs, mappings, flow limitation classes, unit constants
 ├── completions.py      # Shell completion generation and installation
 ├── exceptions.py       # Domain exceptions (NotFoundError)
 ├── logging_config.py   # Logging configuration with rotation
@@ -75,7 +75,10 @@ src/snore/
 │   │   └── types.py                # BreathMetrics, ApneaEvent, etc.
 │   └── modes/          # Detection modes
 │       ├── config.py   # AASM_CONFIG, AASM_RELAXED_CONFIG, RESMED_CONFIG
-│       ├── detector.py # EventDetector (configurable)
+│       ├── detector.py # EventDetector (detection core)
+│       ├── baseline.py # Baseline flow computation
+│       ├── postprocess.py # Validate/dedupe/merge + event matching (tolerance)
+│       ├── classification.py # Apnea-type classification + confidence
 │       └── types.py    # ModeResult, DetectionModeConfig
 ├── api/                # FastAPI REST API
 │   ├── app.py          # FastAPI application factory
@@ -87,6 +90,7 @@ src/snore/
 │       ├── analysis.py, days.py, devices.py, events.py
 │       ├── rx.py, sessions.py, stats.py, waveforms.py
 ├── bootstrap/          # Installation and updates
+│   ├── core.py         # Shared constants + uv subprocess runner
 │   ├── installer.py    # Global uv tool installation
 │   ├── updater.py      # Version upgrade logic
 │   └── version.py      # Version management
@@ -104,6 +108,7 @@ src/snore/
 │   ├── register_all.py # register_all_parsers() — call at startup
 │   ├── resmed_edf.py   # ResMed EDF+ parser
 │   ├── unified.py      # UnifiedSession, WaveformData, RespiratoryEvent
+│   ├── event_labels.py # Annotation label → RespiratoryEventType mapping
 │   ├── compression.py  # Data compression utilities
 │   ├── discovery.py    # Data source discovery
 │   ├── oscar_mappings.py # OSCAR channel mappings
@@ -116,18 +121,14 @@ src/snore/
 │   ├── schemas.py      # Service response schemas (Pydantic)
 │   ├── analysis_facade.py   # Analysis orchestration
 │   ├── backup_service.py    # Raw file backup
-│   ├── database_service.py  # Database operations
+│   ├── database_service.py  # DB stats + device listing (system/metadata)
 │   ├── day_service.py       # Day aggregation
-│   ├── device_service.py    # Device management
-│   ├── event_service.py     # Event queries
+│   ├── event_service.py     # Event queries + matching
 │   ├── export_service.py    # Data export (CSV, JSON)
 │   ├── lttb.py              # LTTB downsampling algorithm
-│   ├── rx_service.py        # Prescription tracking
 │   ├── session_service.py   # Session management
 │   ├── stats_service.py     # Statistics calculations
-│   └── waveform_service.py  # Waveform data access
-├── utils/
-│   └── display.py      # CLI display helpers
+│   └── waveform_service.py  # Waveform data access (single entry point)
 ├── validation/         # Data validation
 │   ├── batch.py        # BatchValidator
 │   └── report.py       # ValidationReport
@@ -136,12 +137,13 @@ src/snore/
     └── renderer.py     # ASCII/plotext terminal rendering
 ui/                     # Vue 3 + TypeScript + PrimeVue frontend
 ├── src/
-│   ├── api/            # API client (8 modules matching routers)
+│   ├── api/            # API client (createApiEndpoint wrappers, 8 modules)
 │   ├── components/     # Reusable UI components (10+)
-│   ├── composables/    # Vue composition functions
+│   ├── composables/    # useApiLoad and other composition functions
+│   ├── utils/          # formatting.ts (shared date/time formatters)
 │   ├── views/          # Page views (7 views)
 │   ├── router/         # Vue Router configuration
-│   └── types/          # TypeScript type definitions
+│   └── types/          # index.ts re-exports generated.ts (OpenAPI codegen)
 docs/
 ├── apnea_detection_reference.md  # Algorithm guide with Vancouver-style citations
 ├── manufacturers/resmed.md        # ResMed-specific documentation
@@ -204,6 +206,11 @@ parser_registry.register(MyParser)
 with session_scope() as session:
     # Auto-commit on success, rollback on exception
 ```
+In CLI commands, use the combined helper from `cli/decorators.py` instead of
+calling `init_db()` + `session_scope()` manually:
+```python
+with db_session(db) as session: ...
+```
 
 **Service Layer Pattern:**
 Services sit between CLI/API and database. Constructor injection with SQLAlchemy session, typed Pydantic returns:
@@ -212,15 +219,47 @@ class StatsService:
     def __init__(self, db_session: Session): ...
     def get_summary(self, days: int | None) -> StatsSummary: ...
 ```
+- Queries use the SQLAlchemy ORM (no raw/f-string SQL).
+- Missing resources raise `NotFoundError` (`snore/exceptions.py`); the API maps it
+  to 404 via the registered handler — routers should NOT re-check for `None`.
+
+**Crossing schema boundaries:** the unified parser models, services schemas, and ORM
+models align by field name — do NOT write field-by-field mappings:
+```python
+models.Statistics(session_id=sid, **stats.model_dump())      # Pydantic → ORM
+SessionStatistics.model_validate(orm_row)                     # ORM → Pydantic (from_attributes)
+```
+`tests/unit/test_schema_alignment.py` enforces the alignment; if you add a field,
+add it to both sides.
 
 **API Router Pattern:**
-FastAPI routers use dependency injection for database sessions:
+FastAPI routers get services via the `service_dep` factory and dates via
+`DateRangeParams` (`api/deps.py`):
 ```python
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+SessionServiceDep = Annotated[SessionService, Depends(service_dep(SessionService))]
 
 @router.get("/")
-def list_sessions(db: Session = Depends(get_db)) -> list[SessionResponse]: ...
+def list_sessions(svc: SessionServiceDep, dates: DateRangeParams = Depends()) -> ...:
+    svc.list_sessions(from_date=dates.start_datetime, ...)
 ```
+
+**CLI display:** use the helpers in `cli/display/` (`print_table`, `print_header`,
+`print_kv`, ...) instead of hand-rolled f-string alignment. Repeated Click options
+get composite decorators in `cli/decorators.py` (e.g. `device_option`).
+
+**Parser helpers:** ResMed EDF signal reading goes through
+`ResmedEDFParser._read_waveform` (valid-range masking, unit conversion, stats);
+basic min/max/mean via `extract_basic_stats`; unit strings come from the `UNIT_*`
+constants in `constants.py`; annotation labels map via `parsers/event_labels.py`.
+
+**Event matching tolerance** is single-sourced:
+`EVENT_MATCH_TOLERANCE_SECONDS` in `analysis/modes/postprocess.py`. Never hardcode 5.0.
+
+**UI:** API types are generated — run `just ui-generate-types` after changing API
+schemas (`ui/src/types/generated.ts`; `types/index.ts` re-exports them). New API
+wrappers use `createApiEndpoint` in `ui/src/api/client.ts`; plain view loaders use
+the `useApiLoad` composable; date/time formatting comes from `ui/src/utils/formatting.ts`.
 
 **Analysis Architecture:** Direct orchestration in `service.py`:
 - BreathSegmenter → feature extraction → FlowLimitationClassifier → ComplexPatternDetector → PulseChangeDetector → EventDetector
@@ -288,18 +327,19 @@ Key fixtures: `db_session`, `test_device`, `test_session_factory`, `recorded_ses
 
 | Task | Files |
 |------|-------|
-| Add CLI command | `src/snore/cli.py` |
+| Add CLI command | `src/snore/cli/groups/` (subcommand group) or `cli/commands/` (standalone); helpers in `cli/decorators.py`, `cli/display/` |
 | Add device parser | `src/snore/parsers/base.py`, `src/snore/parsers/register_all.py`, create new parser file |
 | Add analysis algorithm | `src/snore/analysis/shared/` (breath/feature algorithms) or `modes/` (event detection) |
 | Add detection mode | `src/snore/analysis/modes/config.py` (add `DetectionModeConfig`), update `detector.py` |
-| Modify event detection | `src/snore/analysis/modes/detector.py` (apnea/hypopnea/RERA detection logic) |
+| Modify event detection | `src/snore/analysis/modes/detector.py` (detection core); `baseline.py`/`postprocess.py`/`classification.py` (supporting algorithms) |
 | Add event type | `src/snore/analysis/shared/types.py` (event models), update `detector.py`, add to `EventTimeline` |
 | Tune detection thresholds | `src/snore/analysis/modes/config.py` (DetectionModeConfig fields), validate with `validate_against_machine_events()` |
-| Modify data models | `src/snore/parsers/unified.py` (data), `database/models.py` (ORM), use Pydantic |
+| Modify data models | `src/snore/parsers/unified.py` (data), `database/models.py` (ORM), use Pydantic; keep `test_schema_alignment.py` passing |
 | Add waveform visualization | `src/snore/waveform/renderer.py` (ASCII/plotext), `inspector.py` (data loading) |
-| Add API endpoint | `src/snore/api/routers/`, `api/schemas.py`, `api/deps.py` |
+| Add API endpoint | `src/snore/api/routers/`, `api/schemas.py`, `api/deps.py`; then `just ui-generate-types` |
 | Add/modify service | `src/snore/services/`, `services/schemas.py` |
-| Frontend development | `ui/src/views/`, `ui/src/components/`, `ui/src/api/` |
+| Frontend development | `ui/src/views/`, `ui/src/components/`, `ui/src/api/`, `ui/src/composables/`, `ui/src/utils/` |
+| Regenerate UI API types | `just ui-generate-types` (`scripts/export_openapi.py` → `ui/src/types/generated.ts`) |
 | Export functionality | `src/snore/services/export_service.py`, `services/backup_service.py` |
 | Data validation | `src/snore/validation/batch.py`, `validation/report.py` |
 | Add test fixture | `tests/conftest.py`, `tests/helpers/` |

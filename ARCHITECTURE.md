@@ -19,7 +19,7 @@ Technical documentation for the SNORE system architecture, components, and desig
 │  OpenAPI docs at /docs                      │
 ├─────────────────────────────────────────────┤
 │        Service Layer (services/)            │
-│  12 services: business logic between        │
+│  10 services: business logic between        │
 │  CLI/API and database                       │
 ├─────────────────────────────────────────────┤
 │        Analysis Layer (Parser Agnostic)     │
@@ -351,16 +351,17 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 |---------|---------------|
 | AnalysisFacade | Analysis orchestration and result retrieval |
 | BackupService | Raw SD card file backup to `~/.snore/raw/` |
-| DatabaseService | Database operations (stats, vacuum, init) |
+| DatabaseService | Database operations (stats, vacuum, init) and device listing |
 | DayService | Day aggregation and lookup |
-| DeviceService | Device management |
 | EventService | Event queries and matching |
 | ExportService | Data export (CSV, JSON) |
 | lttb (module) | Largest-Triangle-Three-Buckets downsampling via `lttb_downsample()` |
-| RxService | Prescription/therapy settings tracking |
 | SessionService | Session CRUD and filtering |
 | StatsService | Statistics calculations and summaries |
-| WaveformService | Waveform data access and formatting |
+| WaveformService | Waveform data access and formatting (single high-level entry point) |
+
+Prescription/therapy settings tracking lives in `analysis/rx_tracker.py` (RxTracker),
+which returns the Pydantic responses from `services/schemas.py` directly.
 
 **Pattern:** Constructor injection with SQLAlchemy session, typed Pydantic returns via `services/schemas.py`.
 
