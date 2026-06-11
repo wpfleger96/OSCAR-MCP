@@ -40,8 +40,6 @@ class ParserRegistry:
     def __init__(self) -> None:
         """Initialize empty registry."""
         self._parsers: list[DeviceParser] = []
-        self._parsers_by_id: dict[str, DeviceParser] = {}
-        self._parsers_by_manufacturer: dict[str, list[DeviceParser]] = {}
         logger.debug("Parser registry initialized")
 
     def register(self, parser: DeviceParser) -> None:
@@ -59,20 +57,13 @@ class ParserRegistry:
         """
         parser_id = parser.parser_id
 
-        if parser_id in self._parsers_by_id:
-            existing = self._parsers_by_id[parser_id]
-            raise ValueError(
-                f"Parser ID '{parser_id}' already registered by {existing.__class__.__name__}"
-            )
+        for existing in self._parsers:
+            if existing.parser_id == parser_id:
+                raise ValueError(
+                    f"Parser ID '{parser_id}' already registered by {existing.__class__.__name__}"
+                )
 
         self._parsers.append(parser)
-
-        self._parsers_by_id[parser_id] = parser
-
-        manufacturer = parser.manufacturer.lower()
-        if manufacturer not in self._parsers_by_manufacturer:
-            self._parsers_by_manufacturer[manufacturer] = []
-        self._parsers_by_manufacturer[manufacturer].append(parser)
 
         logger.debug(f"Registered parser: {parser}")
 
@@ -89,9 +80,7 @@ class ParserRegistry:
         """
         return self._parsers.copy()
 
-    def detect_parser(
-        self, path: Path, manufacturer_hint: str | None = None
-    ) -> DeviceParser | None:
+    def detect_parser(self, path: Path) -> DeviceParser | None:
         """
         Auto-detect which parser can handle the data at the given path.
 
@@ -100,7 +89,6 @@ class ParserRegistry:
 
         Args:
             path: Path to data directory/file
-            manufacturer_hint: Optional manufacturer name to try first
 
         Returns:
             DeviceParser that can handle the data, or None if no match
@@ -118,20 +106,9 @@ class ParserRegistry:
             logger.warning(f"Path does not exist: {path}")
             return None
 
-        parsers_to_try = []
-
-        if manufacturer_hint:
-            hint_lower = manufacturer_hint.lower()
-            if hint_lower in self._parsers_by_manufacturer:
-                parsers_to_try.extend(self._parsers_by_manufacturer[hint_lower])
-
-        for parser in self._parsers:
-            if parser not in parsers_to_try:
-                parsers_to_try.append(parser)
-
         best_match: tuple[DeviceParser, ParserDetectionResult] | None = None
 
-        for parser in parsers_to_try:
+        for parser in self._parsers:
             try:
                 result = parser.detect(path)
 
@@ -164,7 +141,7 @@ class ParserRegistry:
         return None
 
     def detect_all_parsers(
-        self, path: Path, manufacturer_hint: str | None = None
+        self, path: Path
     ) -> list[tuple[DeviceParser, ParserDetectionResult]]:
         """
         Detect all parsers that can handle the data at the given path.
@@ -177,7 +154,6 @@ class ParserRegistry:
 
         Args:
             path: Path to data directory/file
-            manufacturer_hint: Optional manufacturer name to try first
 
         Returns:
             List of (DeviceParser, ParserDetectionResult) tuples, sorted by confidence
@@ -194,20 +170,9 @@ class ParserRegistry:
             logger.warning(f"Path does not exist: {path}")
             return []
 
-        parsers_to_try = []
-
-        if manufacturer_hint:
-            hint_lower = manufacturer_hint.lower()
-            if hint_lower in self._parsers_by_manufacturer:
-                parsers_to_try.extend(self._parsers_by_manufacturer[hint_lower])
-
-        for parser in self._parsers:
-            if parser not in parsers_to_try:
-                parsers_to_try.append(parser)
-
         matches = []
 
-        for parser in parsers_to_try:
+        for parser in self._parsers:
             try:
                 result = parser.detect(path)
 
