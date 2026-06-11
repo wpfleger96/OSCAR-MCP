@@ -2,7 +2,6 @@
 
 import logging
 
-from collections.abc import Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -17,9 +16,12 @@ from snore.analysis.modes.classification import (
 )
 from snore.analysis.modes.config import DetectionModeConfig
 from snore.analysis.modes.postprocess import (
+    EVENT_MATCH_TOLERANCE_SECONDS,
     _deduplicate_events,
     _merge_adjacent_events,
     _validate_event,
+    split_by_tolerance_match,
+    validate_event_type,
 )
 from snore.analysis.modes.types import HypopneaMode, ModeResult
 from snore.analysis.shared.types import (
@@ -868,7 +870,7 @@ class EventDetector:
         programmatic_hypopneas: list[HypopneaEvent],
         machine_apneas: list[ApneaEvent],
         machine_hypopneas: list[HypopneaEvent],
-        tolerance_seconds: float = 5.0,
+        tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
     ) -> dict[str, Any]:
         """
         Validate programmatic event detection against machine-detected events.
@@ -884,76 +886,41 @@ class EventDetector:
             tolerance_seconds: Max time difference for event matching (default 5s)
 
         Returns:
-            Dictionary with validation metrics for apneas and hypopneas
+            Dictionary with validation metrics for apneas and hypopneas, the
+            per-type matched/unmatched event lists ("apnea_matches",
+            "hypopnea_matches") and the combined cross-type
+            "false_negative_events" / "false_positive_events" lists.
         """
-        from snore.services.schemas import EventValidationResult
+        apnea_validation, apnea_matches = validate_event_type(
+            programmatic_apneas, machine_apneas, tolerance_seconds
+        )
+        hypopnea_validation, hypopnea_matches = validate_event_type(
+            programmatic_hypopneas, machine_hypopneas, tolerance_seconds
+        )
 
-        def validate_event_type(
-            programmatic: Sequence[ApneaEvent | HypopneaEvent],
-            machine: Sequence[ApneaEvent | HypopneaEvent],
-        ) -> EventValidationResult:
-            """Validate a single event type."""
-            matched = 0
-            matched_machine_indices = set()
+        all_programmatic: list[ApneaEvent | HypopneaEvent] = [
+            *programmatic_apneas,
+            *programmatic_hypopneas,
+        ]
+        all_machine: list[ApneaEvent | HypopneaEvent] = sorted(
+            [*machine_apneas, *machine_hypopneas], key=lambda e: e.start_time
+        )
 
-            for prog_event in programmatic:
-                for m_idx, mach_event in enumerate(machine):
-                    if m_idx in matched_machine_indices:
-                        continue
-
-                    time_diff = abs(prog_event.start_time - mach_event.start_time)
-                    if time_diff <= tolerance_seconds:
-                        matched += 1
-                        matched_machine_indices.add(m_idx)
-                        break
-
-            machine_count = len(machine)
-            programmatic_count = len(programmatic)
-            false_positives = programmatic_count - matched
-            false_negatives = machine_count - matched
-
-            if machine_count == 0:
-                sensitivity = 1.0
-            elif matched + false_negatives > 0:
-                sensitivity = matched / (matched + false_negatives)
-            else:
-                sensitivity = 0.0
-
-            if matched + false_positives > 0:
-                precision = matched / (matched + false_positives)
-            else:
-                precision = 0.0 if machine_count == 0 else 1.0
-
-            if precision + sensitivity > 0:
-                f1_score = 2 * (precision * sensitivity) / (precision + sensitivity)
-            else:
-                f1_score = 0.0
-
-            total_unique = machine_count + programmatic_count - matched
-            agreement_percentage = (
-                (matched / total_unique * 100) if total_unique > 0 else 100.0
-            )
-
-            return EventValidationResult(
-                machine_event_count=machine_count,
-                programmatic_event_count=programmatic_count,
-                matched_events=matched,
-                false_positives=false_positives,
-                false_negatives=false_negatives,
-                sensitivity=sensitivity,
-                precision=precision,
-                f1_score=f1_score,
-                agreement_percentage=agreement_percentage,
-            )
-
-        apnea_validation = validate_event_type(programmatic_apneas, machine_apneas)
-        hypopnea_validation = validate_event_type(
-            programmatic_hypopneas, machine_hypopneas
+        _, false_negative_events = split_by_tolerance_match(
+            all_machine, all_programmatic, tolerance_seconds
+        )
+        matched_events, false_positive_events = split_by_tolerance_match(
+            all_programmatic, all_machine, tolerance_seconds
         )
 
         return {
             "apnea_validation": apnea_validation,
             "hypopnea_validation": hypopnea_validation,
+            "apnea_matches": apnea_matches,
+            "hypopnea_matches": hypopnea_matches,
+            "matched_events": matched_events,
+            "false_negative_events": false_negative_events,
+            "false_positive_events": false_positive_events,
             "overall_agreement": {
                 "total_machine_events": len(machine_apneas) + len(machine_hypopneas),
                 "total_programmatic_events": len(programmatic_apneas)

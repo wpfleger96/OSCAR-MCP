@@ -1,15 +1,23 @@
-"""Event post-processing: validation, deduplication and merging."""
+"""Event post-processing: validation, deduplication, merging and matching."""
 
 import logging
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from snore.analysis.modes.config import DetectionModeConfig
 from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
 
+if TYPE_CHECKING:
+    from snore.services.schemas import EventValidationResult
+
 logger = logging.getLogger(__name__)
+
+# Single source of truth for machine vs programmatic event matching tolerance
+EVENT_MATCH_TOLERANCE_SECONDS = 5.0
 
 
 def _calculate_event_overlap(event1: ApneaEvent, event2: ApneaEvent) -> float:
@@ -212,3 +220,167 @@ def _merge_two_events(
 
     event_typed: ApneaEvent | HypopneaEvent = event1
     return event_typed
+
+
+@dataclass(frozen=True)
+class MatchedEvents:
+    """
+    Outcome of greedy one-to-one matching of programmatic vs machine events.
+
+    Attributes:
+        matched: (programmatic, machine) event pairs matched within tolerance
+        false_positives: Programmatic events with no matching machine event
+        false_negatives: Machine events with no matching programmatic event
+    """
+
+    matched: list[tuple[ApneaEvent | HypopneaEvent, ApneaEvent | HypopneaEvent]]
+    false_positives: list[ApneaEvent | HypopneaEvent]
+    false_negatives: list[ApneaEvent | HypopneaEvent]
+
+
+def match_events_by_start_time(
+    programmatic: Sequence[ApneaEvent | HypopneaEvent],
+    machine: Sequence[ApneaEvent | HypopneaEvent],
+    tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
+) -> MatchedEvents:
+    """
+    Greedily match programmatic events to machine events by start time.
+
+    Each machine event is matched at most once; each programmatic event
+    matches the first unmatched machine event within tolerance.
+
+    Args:
+        programmatic: Events detected by our algorithm
+        machine: Events reported by the CPAP machine
+        tolerance_seconds: Max start-time difference for a match
+
+    Returns:
+        MatchedEvents with matched pairs and unmatched events per side
+    """
+    matched: list[tuple[ApneaEvent | HypopneaEvent, ApneaEvent | HypopneaEvent]] = []
+    matched_machine_indices: set[int] = set()
+    false_positives: list[ApneaEvent | HypopneaEvent] = []
+
+    for prog_event in programmatic:
+        match_found = False
+        for m_idx, mach_event in enumerate(machine):
+            if m_idx in matched_machine_indices:
+                continue
+
+            time_diff = abs(prog_event.start_time - mach_event.start_time)
+            if time_diff <= tolerance_seconds:
+                matched.append((prog_event, mach_event))
+                matched_machine_indices.add(m_idx)
+                match_found = True
+                break
+
+        if not match_found:
+            false_positives.append(prog_event)
+
+    false_negatives: list[ApneaEvent | HypopneaEvent] = [
+        mach_event
+        for m_idx, mach_event in enumerate(machine)
+        if m_idx not in matched_machine_indices
+    ]
+
+    return MatchedEvents(
+        matched=matched,
+        false_positives=false_positives,
+        false_negatives=false_negatives,
+    )
+
+
+def split_by_tolerance_match(
+    events: Sequence[ApneaEvent | HypopneaEvent],
+    references: Sequence[ApneaEvent | HypopneaEvent],
+    tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
+) -> tuple[list[ApneaEvent | HypopneaEvent], list[ApneaEvent | HypopneaEvent]]:
+    """
+    Split events into (matched, unmatched) by start-time proximity.
+
+    An event is matched if ANY reference event starts within tolerance
+    (references may match multiple events).
+
+    Args:
+        events: Events to classify
+        references: Reference events to match against
+        tolerance_seconds: Max start-time difference for a match
+
+    Returns:
+        Tuple of (matched events, unmatched events), preserving input order
+    """
+    matched: list[ApneaEvent | HypopneaEvent] = []
+    unmatched: list[ApneaEvent | HypopneaEvent] = []
+
+    for event in events:
+        is_matched = any(
+            abs(event.start_time - ref.start_time) <= tolerance_seconds
+            for ref in references
+        )
+        if is_matched:
+            matched.append(event)
+        else:
+            unmatched.append(event)
+
+    return matched, unmatched
+
+
+def validate_event_type(
+    programmatic: Sequence[ApneaEvent | HypopneaEvent],
+    machine: Sequence[ApneaEvent | HypopneaEvent],
+    tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
+) -> tuple[EventValidationResult, MatchedEvents]:
+    """
+    Validate a single event type against machine events.
+
+    Args:
+        programmatic: Events detected by our algorithm
+        machine: Events reported by the CPAP machine
+        tolerance_seconds: Max start-time difference for a match
+
+    Returns:
+        Tuple of (validation statistics, matched/unmatched event lists)
+    """
+    from snore.services.schemas import EventValidationResult
+
+    match_result = match_events_by_start_time(programmatic, machine, tolerance_seconds)
+
+    matched = len(match_result.matched)
+    machine_count = len(machine)
+    programmatic_count = len(programmatic)
+    false_positives = programmatic_count - matched
+    false_negatives = machine_count - matched
+
+    if machine_count == 0:
+        sensitivity = 1.0
+    elif matched + false_negatives > 0:
+        sensitivity = matched / (matched + false_negatives)
+    else:
+        sensitivity = 0.0
+
+    if matched + false_positives > 0:
+        precision = matched / (matched + false_positives)
+    else:
+        precision = 0.0 if machine_count == 0 else 1.0
+
+    if precision + sensitivity > 0:
+        f1_score = 2 * (precision * sensitivity) / (precision + sensitivity)
+    else:
+        f1_score = 0.0
+
+    total_unique = machine_count + programmatic_count - matched
+    agreement_percentage = (matched / total_unique * 100) if total_unique > 0 else 100.0
+
+    validation = EventValidationResult(
+        machine_event_count=machine_count,
+        programmatic_event_count=programmatic_count,
+        matched_events=matched,
+        false_positives=false_positives,
+        false_negatives=false_negatives,
+        sensitivity=sensitivity,
+        precision=precision,
+        f1_score=f1_score,
+        agreement_percentage=agreement_percentage,
+    )
+
+    return validation, match_result

@@ -9,11 +9,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
 from snore.services.schemas import EventMatchResult
 
-__all__ = ["EventService"]
-
-EVENT_MATCH_TOLERANCE_SECONDS = 5.0
+__all__ = ["EVENT_MATCH_TOLERANCE_SECONDS", "EventService"]
 
 
 class EventService:

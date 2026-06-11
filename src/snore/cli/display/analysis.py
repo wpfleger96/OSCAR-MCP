@@ -557,7 +557,6 @@ def _get_validation_metrics(
     from snore.analysis.modes import AVAILABLE_CONFIGS
     from snore.analysis.modes.config import AASM_CONFIG
     from snore.analysis.modes.detector import EventDetector
-    from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
     from snore.analysis.utils import convert_machine_events
 
     machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
@@ -571,42 +570,11 @@ def _get_validation_metrics(
         machine_hypopneas,
     )
 
-    false_negatives: list[AnalysisEvent] = []
-
-    for machine_event in machine_events:
-        is_matched = False
-        machine_relative_time = machine_event.start_time
-        all_programmatic = list(mode_result.apneas) + list(mode_result.hypopneas)
-
-        for prog_event in all_programmatic:
-            time_diff = abs(prog_event.start_time - machine_relative_time)
-            if time_diff <= 5.0:
-                is_matched = True
-                break
-
-        if not is_matched:
-            false_negatives.append(machine_event)
-
-    false_positives: list[ApneaEvent | HypopneaEvent] = []
-
-    for prog_event in list(mode_result.apneas) + list(mode_result.hypopneas):
-        is_matched = False
-
-        for machine_event in machine_events:
-            machine_relative_time = machine_event.start_time
-            time_diff = abs(prog_event.start_time - machine_relative_time)
-            if time_diff <= 5.0:
-                is_matched = True
-                break
-
-        if not is_matched:
-            false_positives.append(prog_event)
-
     return {
         "apnea_validation": validation["apnea_validation"],
         "hypopnea_validation": validation["hypopnea_validation"],
-        "false_negatives": false_negatives,
-        "false_positives": false_positives,
+        "false_negatives": validation["false_negative_events"],
+        "false_positives": validation["false_positive_events"],
     }
 
 
