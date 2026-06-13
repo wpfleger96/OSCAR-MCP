@@ -1,5 +1,10 @@
 name: CI
 
+# NOTE: this workflow's single "checks" job was split into the "backend" and
+# "ui" jobs below. If branch protection requires status checks, update the
+# required checks to "backend" and "ui" — a stale required check named "checks"
+# will never report and can block merges.
+
 on:
   push:
     branches:
