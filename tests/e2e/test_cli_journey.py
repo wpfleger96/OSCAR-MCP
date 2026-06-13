@@ -45,10 +45,15 @@ def test_session_list_and_show(snore, imported_db):
     show = snore("session", "show", "1", "--settings", db=imported_db)
     assert show.returncode == 0
     assert "Session ID: 1" in show.stdout
-    assert "Therapy Mode:" in show.stdout
-    assert "AHI:" in show.stdout
-    # Real waveform channels parsed from the EDF files.
-    assert "flow" in show.stdout and "pressure" in show.stdout
+    # Deterministic values for this fixed real night — exact regression guards.
+    assert "Therapy Mode: APAP" in show.stdout
+    assert "AHI: 17.6" in show.stdout
+    assert "OAI: 7.1" in show.stdout
+    assert "CAI: 3.5" in show.stdout
+    assert "HI: 7.1" in show.stdout
+    # All five real waveform channels parsed from the EDF files.
+    for channel in ("epap", "flow", "leak", "pressure", "therapy_pressure"):
+        assert channel in show.stdout
 
 
 def test_full_journey_import_analyze_stats_export_delete(snore, imported_db, tmp_path):

@@ -130,6 +130,34 @@ def synthesize_resmed_sd(
     return sd
 
 
+def synthesize_multi_night_sd(
+    dest: Path,
+    identification: Path,
+    str_edf: Path,
+    night_dirs: Sequence[Path],
+) -> Path:
+    """Compose several real nights' EDF files into one importable SD card.
+
+    Each ``*.edf`` is filed under ``DATALOG/<year>/`` using its filename's 4-digit
+    year prefix (ResMed names files ``YYYYMMDD_HHMMSS_*.edf``), so the device
+    night (2024) and the recorded nights (2025) land in the right year folders.
+    The result is a single multi-night import — 100% real data — used to exercise
+    the cross-night surface (date filtering, trends, day-splitting) that a single
+    night can't reach.
+    """
+    sd = dest / "sdcard"
+    sd.mkdir(parents=True, exist_ok=True)
+    shutil.copy(identification, sd / "Identification.json")
+    shutil.copy(str_edf, sd / "STR.edf")
+    for night in night_dirs:
+        for edf in sorted(Path(night).glob("*.edf")):
+            year = edf.name[:4]
+            datalog = sd / "DATALOG" / year
+            datalog.mkdir(parents=True, exist_ok=True)
+            shutil.copy(edf, datalog / edf.name)
+    return sd
+
+
 def _wait_for_port(host: str, port: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

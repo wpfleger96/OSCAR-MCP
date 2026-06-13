@@ -24,6 +24,8 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 RESMED_SD = FIXTURES / "device_data" / "resmed"
 RECORDED = FIXTURES / "recorded_sessions"
 MULTI_SEGMENT_DAY = "20250910"
+# Real recorded nights composed alongside the device night for breadth coverage.
+RECORDED_NIGHTS = ["20250110", "20250808", "20250910", "20251025"]
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -79,6 +81,44 @@ def _copy_db(src: Path, dest_dir: Path, name: str = "snore.db") -> Path:
 def imported_db(_base_imported_db: Path, tmp_path: Path) -> Path:
     """A private, freshly-imported database for a single test (mutation-safe)."""
     return _copy_db(_base_imported_db, tmp_path)
+
+
+@pytest.fixture(scope="session")
+def _base_multi_night_db(
+    tmp_path_factory: pytest.TempPathFactory, e2e_home: Path
+) -> Path:
+    """Import the device night + all recorded nights into one DB, once.
+
+    Yields a 5-session, 5-day dataset spanning 2024-06 → 2025-10 (real data) for
+    cross-night tests; later copied per test via ``multi_night_db``.
+    """
+    missing = [n for n in RECORDED_NIGHTS if not (RECORDED / n).exists()]
+    if missing:
+        pytest.skip(f"recorded night fixtures missing: {missing}")
+
+    build_dir = tmp_path_factory.mktemp("e2e_multi_build")
+    sd = helpers.synthesize_multi_night_sd(
+        build_dir,
+        identification=RESMED_SD / "Identification.json",
+        str_edf=RESMED_SD / "STR.edf",
+        night_dirs=[
+            RESMED_SD / "DATALOG" / "2024",
+            *[RECORDED / n for n in RECORDED_NIGHTS],
+        ],
+    )
+    db = tmp_path_factory.mktemp("e2e_multi") / "multi.db"
+    result = helpers.import_fixture(sd, db, e2e_home)
+    assert result.returncode == 0, (
+        f"multi-night import failed (rc={result.returncode}):\n"
+        f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    )
+    return db
+
+
+@pytest.fixture
+def multi_night_db(_base_multi_night_db: Path, tmp_path: Path) -> Path:
+    """A private copy of the multi-night dataset for a single test."""
+    return _copy_db(_base_multi_night_db, tmp_path, "multi.db")
 
 
 @pytest.fixture
