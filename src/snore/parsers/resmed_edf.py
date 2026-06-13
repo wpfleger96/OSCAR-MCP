@@ -398,9 +398,10 @@ class ResmedEDFParser(DeviceParser):
         sessions_yielded = 0
 
         if parallel and len(night_items) > 1:
-            if limit is not None and len(night_items) > limit:
-                night_items = night_items[:limit]
-
+            # limit counts yielded sessions, not nights: a night can be dropped
+            # by the per-session date filter or fail to parse, so truncating
+            # night_items up front would under-deliver. The as_completed loop
+            # below enforces the limit and cancels remaining futures instead.
             logger.debug(
                 f"Parsing {len(night_items)} nights in parallel with {os.cpu_count()} workers"
             )
