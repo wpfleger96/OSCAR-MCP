@@ -303,32 +303,22 @@ class SessionService:
                 sessions=[], event_count=0, waveform_count=0, stats_count=0
             )
 
-        event_count = (
-            self.db_session.execute(
+        def _count_subquery(model: type[Any]) -> Any:
+            return (
                 select(func.count())
-                .select_from(models.Event)
-                .where(models.Event.session_id.in_(session_ids_to_delete))
-            ).scalar()
-            or 0
-        )
+                .select_from(model)
+                .where(model.session_id.in_(session_ids_to_delete))
+                .scalar_subquery()
+            )
 
-        waveform_count = (
-            self.db_session.execute(
-                select(func.count())
-                .select_from(models.Waveform)
-                .where(models.Waveform.session_id.in_(session_ids_to_delete))
-            ).scalar()
-            or 0
-        )
-
-        stats_count = (
-            self.db_session.execute(
-                select(func.count())
-                .select_from(models.Statistics)
-                .where(models.Statistics.session_id.in_(session_ids_to_delete))
-            ).scalar()
-            or 0
-        )
+        # One round-trip for all three related-row counts.
+        event_count, waveform_count, stats_count = self.db_session.execute(
+            select(
+                _count_subquery(models.Event),
+                _count_subquery(models.Waveform),
+                _count_subquery(models.Statistics),
+            )
+        ).one()
 
         return DeletePreview(
             sessions=sessions,
