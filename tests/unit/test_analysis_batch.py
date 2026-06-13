@@ -67,7 +67,7 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.groups.analysis.init_db"),
+            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
             patch("snore.analysis.service.AnalysisService.analyze_session"),
             patch("snore.cli.display.console", stdout_console),
@@ -105,7 +105,7 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.groups.analysis.init_db"),
+            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
             patch(
                 "snore.analysis.service.AnalysisService.analyze_session",
@@ -138,7 +138,7 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.groups.analysis.init_db"),
+            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
@@ -161,7 +161,7 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.groups.analysis.init_db"),
+            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
             patch("snore.analysis.service.AnalysisService.analyze_session"),
             patch("snore.cli.display.console", stdout_console),

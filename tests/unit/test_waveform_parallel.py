@@ -23,7 +23,7 @@ class TestWaveformMultiTypeAllFail:
         runner = CliRunner()
 
         with (
-            patch("snore.cli.groups.waveform.init_db"),
+            patch("snore.cli.decorators.init_db"),
             # session_scope is imported inside show_waveform; patch at source
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
@@ -69,7 +69,7 @@ class TestWaveformMultiTypePartialFailure:
         mock_renderer = MagicMock()
 
         with (
-            patch("snore.cli.groups.waveform.init_db"),
+            patch("snore.cli.decorators.init_db"),
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
             ),
@@ -125,7 +125,7 @@ class TestWaveformMultiTypeOrdering:
         mock_renderer = MagicMock()
 
         with (
-            patch("snore.cli.groups.waveform.init_db"),
+            patch("snore.cli.decorators.init_db"),
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
             ),

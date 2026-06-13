@@ -11,7 +11,7 @@ import click
 
 from rich.markup import escape
 
-from snore.cli.decorators import db_option, init_db, session_id_date_options
+from snore.cli.decorators import db_option, session_id_date_options
 from snore.cli.decorators import db_session as open_db_session
 from snore.cli.display import console, print_table, print_warning
 from snore.waveform import format_time_offset
@@ -179,16 +179,12 @@ def show_waveform(
     if len(waveform_types) > 4:
         raise click.ClickException("Maximum 4 waveform types supported")
 
-    # init_db/session_scope are used directly (not via db_session) so unit
-    # tests can patch them independently for the parallel-load path.
-    init_db(db)
-
     try:
         center_seconds = parse_time_offset(time)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         session_id = _resolve_session_id(db_session, session_id, date)
 
         inspector = WaveformInspector(db_session)

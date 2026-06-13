@@ -12,7 +12,6 @@ import click
 from snore.cli.decorators import (
     date_range_options,
     db_option,
-    init_db,
     parse_id_list,
 )
 from snore.cli.decorators import (
@@ -83,12 +82,6 @@ def run(
     plain: bool,
 ) -> int | None:
     """Run analysis on CPAP sessions."""
-    from snore.database.session import session_scope
-
-    # init_db/session_scope are used directly (not via db_session) so unit
-    # tests can patch them independently for the batch path.
-    init_db(db)
-
     single_session_flags = [session_id is not None, date is not None]
     batch_flags = [date_from is not None, date_to is not None]
 
@@ -108,7 +101,7 @@ def run(
             "Must provide at least one selection flag (--session-id, --date, --from, or --to)"
         )
 
-    with session_scope() as session:
+    with open_db_session(db) as session:
         if single_count > 0:
             _analyze_single_session(
                 session,
