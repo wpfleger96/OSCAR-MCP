@@ -1,0 +1,107 @@
+"""Import-command option matrix, driven through the real binary.
+
+`snore import` is the #1 user entry point and the most heavily refactored area
+in the backend-simplification work, so its option surface gets dedicated
+coverage: dry-run, force re-import, parallel/sequential parity, date filtering,
+and the discontinuous (multi-segment) EDF path.
+"""
+
+from __future__ import annotations
+
+import re
+
+
+def _count_from_stats(stats_stdout: str, label: str) -> int:
+    match = re.search(rf"{label}:\s*(\d+)", stats_stdout)
+    assert match, f"could not find '{label}:' in db stats output:\n{stats_stdout}"
+    return int(match.group(1))
+
+
+def test_dry_run_imports_nothing(snore, fresh_db_path, resmed_sd):
+    """`--dry-run` previews without writing sessions to the database."""
+    result = snore(
+        "import", str(resmed_sd), "--no-backup", "--all", "--dry-run", db=fresh_db_path
+    )
+    assert result.returncode == 0
+    assert "dry" in result.stdout.lower()
+
+    # Either no DB was created, or it was created empty — both mean "no writes".
+    if fresh_db_path.exists():
+        stats = snore("db", "stats", db=fresh_db_path)
+        assert "Sessions: 0" in stats.stdout
+
+
+def test_force_reimport_keeps_single_session(snore, imported_db, resmed_sd):
+    """`--force` re-imports in place without duplicating the session."""
+    result = snore(
+        "import", str(resmed_sd), "--no-backup", "--all", "--force", db=imported_db
+    )
+    assert result.returncode == 0
+    stats = snore("db", "stats", db=imported_db)
+    assert "Sessions: 1" in stats.stdout
+
+
+def test_parallel_and_sequential_produce_identical_db_state(snore, resmed_sd, tmp_path):
+    """`--no-parallel` must yield the same persisted data as parallel parsing."""
+    parallel_db = tmp_path / "parallel.db"
+    sequential_db = tmp_path / "sequential.db"
+
+    par = snore("import", str(resmed_sd), "--no-backup", "--all", db=parallel_db)
+    seq = snore(
+        "import",
+        str(resmed_sd),
+        "--no-backup",
+        "--all",
+        "--no-parallel",
+        db=sequential_db,
+    )
+    assert par.returncode == 0 and seq.returncode == 0
+
+    par_stats = snore("db", "stats", db=parallel_db).stdout
+    seq_stats = snore("db", "stats", db=sequential_db).stdout
+
+    for label in ("Sessions", "Events", "Waveforms"):
+        assert _count_from_stats(par_stats, label) == _count_from_stats(
+            seq_stats, label
+        ), f"{label} count differs between parallel and sequential import"
+
+
+def test_date_range_filter_excludes_out_of_range_nights(
+    snore, fresh_db_path, resmed_sd
+):
+    """A date range that excludes the fixture night imports zero sessions."""
+    result = snore(
+        "import",
+        str(resmed_sd),
+        "--no-backup",
+        "--all",
+        "--from",
+        "2030-01-01",
+        "--to",
+        "2030-12-31",
+        db=fresh_db_path,
+    )
+    assert result.returncode == 0
+    if fresh_db_path.exists():
+        stats = snore("db", "stats", db=fresh_db_path)
+        assert "Sessions: 0" in stats.stdout
+
+
+def test_multi_segment_discontinuous_import(snore, multi_segment_sd, tmp_path):
+    """The multi-segment (mask-off gaps) session imports and analyzes via CLI.
+
+    This is the path that depends on discontinuous-EDF handling (the optional
+    `edf-discontinuous` extra after the simplification PR). Behavior to preserve:
+    the session imports with waveforms, and analysis runs to completion on it.
+    """
+    db = tmp_path / "multi.db"
+    result = snore("import", str(multi_segment_sd), "--no-backup", "--all", db=db)
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert db.exists()
+
+    stats = snore("db", "stats", db=db).stdout
+    assert _count_from_stats(stats, "Sessions") >= 1
+    assert _count_from_stats(stats, "Waveforms") >= 1
+
+    analyze = snore("analysis", "run", "--session-id", "1", db=db)
+    assert analyze.returncode == 0, analyze.stderr or analyze.stdout
