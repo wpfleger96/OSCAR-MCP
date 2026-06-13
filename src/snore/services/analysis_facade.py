@@ -325,7 +325,12 @@ class AnalysisFacade:
         return svc.analyze_session(session_id, modes=modes, store_results=store_results)
 
     def get_analysis_result(self, session_id: int) -> Any:
-        """Get stored analysis result for a session, or None if not found."""
+        """Get stored analysis result for a session, or None if not found.
+
+        Intentionally returns None (rather than raising NotFoundError like the
+        resource lookups elsewhere): "not yet analyzed" is a normal state that
+        callers branch on, not a 404 condition.
+        """
         from snore.analysis.service import AnalysisService
 
         svc = AnalysisService(self.db_session)
