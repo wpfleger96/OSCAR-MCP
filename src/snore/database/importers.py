@@ -359,9 +359,13 @@ class SessionImporter:
         if settings.other_settings:
             settings_dict.update(settings.other_settings)
 
+        # exclude_none only covers the main model fields; other_settings is
+        # merged in afterward, so guard against None here to avoid persisting
+        # the literal string "None".
         setting_records = [
             models.Setting(session_id=session_id, key=key, value=str(value))
             for key, value in settings_dict.items()
+            if value is not None
         ]
 
         if setting_records:
