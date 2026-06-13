@@ -25,7 +25,9 @@ def test_limit_counts_yielded_sessions_not_nights_parallel():
     parser = ResmedEDFParser()
     nights = [(f"2024010{i}", {}) for i in range(1, 5)]  # four nights
 
-    def fake_bundle(night_date: str, *args: object, **kwargs: object) -> MagicMock | None:
+    def fake_bundle(
+        night_date: str, *args: object, **kwargs: object
+    ) -> MagicMock | None:
         # First night yields nothing (e.g. filtered out or failed to parse).
         if night_date == "20240101":
             return None
@@ -35,7 +37,9 @@ def test_limit_counts_yielded_sessions_not_nights_parallel():
         patch.object(
             parser, "_discover_session_files", return_value=(Path("/data"), nights)
         ),
-        patch.object(parser, "_filter_night_items", side_effect=lambda items, *a: items),
+        patch.object(
+            parser, "_filter_night_items", side_effect=lambda items, *a: items
+        ),
         patch.object(parser, "_preload_str_settings", return_value={}),
         patch.object(parser, "_preload_str_summaries", return_value={}),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
