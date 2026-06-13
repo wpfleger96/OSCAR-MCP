@@ -46,6 +46,8 @@ markers = [
     "unit: marks tests as unit tests (run in parallel)",
     "integration: marks tests as integration tests (run sequentially)",
     "completions: marks tests for shell completion functionality",
+    "e2e: marks end-to-end tests that drive the real snore binary as a subprocess",
+    "slow: marks tests that take significant time (>5 seconds)",
 ]
 
 [tool.ruff.lint]
