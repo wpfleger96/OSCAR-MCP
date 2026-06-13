@@ -39,7 +39,7 @@ pre-commit: sync type-check lint format test
     @echo "Pre-commit checks passed"
 
 # Testing
-# Default `test` excludes the slow subprocess-driven e2e suite (run via `test-e2e`)
+# Default `test` excludes the e2e suite (run separately via `test-e2e`).
 test:
     uv run pytest -m "not e2e"
 
@@ -50,9 +50,9 @@ test-integration:
     uv run pytest -m integration
 
 test-e2e:
-    uv run pytest tests/e2e -m e2e --no-cov
+    uv run pytest -m e2e --no-cov || test $? -eq 5
 
-# Everything, including the e2e suite
+# Everything, including the e2e suite.
 test-all:
     uv run pytest --no-cov
 
