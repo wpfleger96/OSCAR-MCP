@@ -20,8 +20,8 @@
                 <h2>Current Settings</h2>
                 <div class="current-meta">
                     <span
-                        >{{ formatDate(current.start_date) }} –
-                        {{ formatDate(current.end_date) }}</span
+                        >{{ formatDateFull(current.start_date) }} –
+                        {{ formatDateFull(current.end_date) }}</span
                     >
                     <span>{{ current.days_count }} days</span>
                     <span v-if="current.avg_ahi != null"
@@ -48,7 +48,8 @@
                 <DataTable :value="comparisonRows" striped-rows :row-class="rowClass">
                     <Column header="Period">
                         <template #body="{ data }">
-                            {{ formatDate(data.start_date) }} – {{ formatDate(data.end_date) }}
+                            {{ formatDateFull(data.start_date) }} –
+                            {{ formatDateFull(data.end_date) }}
                         </template>
                     </Column>
                     <Column header="Days" style="width: 70px">
@@ -92,18 +93,27 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Tag from 'primevue/tag'
 import { getRxHistory, getRxCurrent, getRxCompare } from '@/api/rx'
-import type { RxPeriodResponse, RxComparisonResponse } from '@/types'
+import { useApiLoad } from '@/composables/useApiLoad'
+import { formatDateFull } from '@/utils/formatting'
+import type { RxPeriodResponse } from '@/types'
 
-const loading = ref(true)
-const error = ref<string | null>(null)
-const history = ref<RxPeriodResponse[]>([])
-const current = ref<RxPeriodResponse | null>(null)
-const comparison = ref<RxComparisonResponse | null>(null)
+const { data, loading, error } = useApiLoad(async () => {
+    const [history, current, comparison] = await Promise.all([
+        getRxHistory(),
+        getRxCurrent(),
+        getRxCompare(),
+    ])
+    return { history, current, comparison }
+}, 'Failed to load RX data')
+
+const history = computed(() => data.value?.history ?? [])
+const current = computed(() => data.value?.current ?? null)
+const comparison = computed(() => data.value?.comparison ?? null)
 
 interface ComparisonRow extends RxPeriodResponse {
     isBest: boolean
@@ -125,14 +135,6 @@ function rowClass(data: ComparisonRow): string {
     return ''
 }
 
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-    })
-}
-
 function summarizeSettings(settings: Record<string, string>): string {
     const keys = ['Mode', 'Pressure', 'EPR', 'EPR Level']
     const parts: string[] = []
@@ -147,19 +149,6 @@ function summarizeSettings(settings: Record<string, string>): string {
     }
     return parts.join(', ')
 }
-
-onMounted(async () => {
-    try {
-        const [h, c, comp] = await Promise.all([getRxHistory(), getRxCurrent(), getRxCompare()])
-        history.value = h
-        current.value = c
-        comparison.value = comp
-    } catch (err: unknown) {
-        error.value = err instanceof Error ? err.message : 'Failed to load RX data'
-    } finally {
-        loading.value = false
-    }
-})
 </script>
 
 <style scoped>

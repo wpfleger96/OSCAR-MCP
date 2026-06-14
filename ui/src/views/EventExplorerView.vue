@@ -79,7 +79,7 @@
             <Column header="Time">
                 <template #body="{ data }: { data: EventItem }">
                     <a class="time-link" @click="jumpToWaveform(data.offset_seconds)">
-                        {{ formatTime(data.offset_seconds) }}
+                        {{ formatTimeOffset(data.offset_seconds) }}
                     </a>
                 </template>
             </Column>
@@ -93,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
@@ -101,18 +101,33 @@ import Tag from 'primevue/tag'
 import StatCard from '@/components/StatCard.vue'
 import { getSessionEvents, getEventMatch } from '@/api/events'
 import { getSession } from '@/api/sessions'
+import { useApiLoad } from '@/composables/useApiLoad'
+import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
 import type { EventItem, EventMatchResult } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
 const router = useRouter()
 
-const loading = ref(true)
-const error = ref<string | null>(null)
-const allEvents = ref<EventItem[]>([])
 const activeTypes = ref<Set<string>>(new Set())
-const matchResult = ref<EventMatchResult | null>(null)
-const sessionDuration = ref(0)
+
+const { data, loading, error } = useApiLoad(async () => {
+    const [events, session] = await Promise.all([
+        getSessionEvents(props.sessionId),
+        getSession(props.sessionId, false),
+    ])
+    let match: EventMatchResult | null = null
+    try {
+        match = await getEventMatch(props.sessionId)
+    } catch {
+        // No analysis — match panel hidden
+    }
+    return { events, duration: session.duration_hours, match }
+}, 'Failed to load events')
+
+const allEvents = computed<EventItem[]>(() => data.value?.events ?? [])
+const matchResult = computed(() => data.value?.match ?? null)
+const sessionDuration = computed(() => data.value?.duration ?? 0)
 
 const uniqueTypes = computed(() => [...new Set(allEvents.value.map((e) => e.event_type))].sort())
 
@@ -138,13 +153,6 @@ function toggleType(type: string): void {
     activeTypes.value = s
 }
 
-function formatTime(secs: number): string {
-    const h = Math.floor(secs / 3600)
-    const m = Math.floor((secs % 3600) / 60)
-    const s = Math.floor(secs % 60)
-    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-}
-
 function jumpToWaveform(offsetSec: number): void {
     void router.push({
         name: 'session-detail',
@@ -152,28 +160,6 @@ function jumpToWaveform(offsetSec: number): void {
         query: { t: String(Math.floor(offsetSec)) },
     })
 }
-
-onMounted(async () => {
-    try {
-        const [events, session] = await Promise.all([
-            getSessionEvents(props.sessionId),
-            getSession(props.sessionId, false),
-        ])
-        allEvents.value = events
-        sessionDuration.value = session.duration_hours
-
-        // Try to load event match data
-        try {
-            matchResult.value = await getEventMatch(props.sessionId)
-        } catch {
-            // No analysis — match panel hidden
-        }
-    } catch (err: unknown) {
-        error.value = err instanceof Error ? err.message : 'Failed to load events'
-    } finally {
-        loading.value = false
-    }
-})
 </script>
 
 <style scoped>

@@ -94,7 +94,7 @@
                     </template>
                 </Column>
                 <Column header="Start Time">
-                    <template #body="{ data }">{{ formatTime(data.start) }}</template>
+                    <template #body="{ data }">{{ formatTimeOffset(data.start) }}</template>
                 </Column>
                 <Column header="Duration" style="width: 90px">
                     <template #body="{ data }">{{ data.duration.toFixed(1) }}s</template>
@@ -132,6 +132,7 @@ import Button from 'primevue/button'
 import SelectButton from 'primevue/selectbutton'
 import StatCard from '@/components/StatCard.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
+import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
 import type { AnalysisResult } from '@/types'
 
@@ -214,13 +215,6 @@ const modeEvents = computed<EventRow[]>(() => {
     events.sort((a, b) => a.start - b.start)
     return events
 })
-
-function formatTime(secs: number): string {
-    const h = Math.floor(secs / 3600)
-    const m = Math.floor((secs % 3600) / 60)
-    const s = Math.floor(secs % 60)
-    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-}
 
 async function handleRunAnalysis(): Promise<void> {
     running.value = true

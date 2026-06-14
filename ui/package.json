@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --build && vite build",
     "preview": "vite preview",
-    "type-check": "vue-tsc --noEmit",
+    "type-check": "vue-tsc --build",
     "lint-check": "eslint . --max-warnings 0",
     "lint": "eslint . --fix",
     "format-check": "prettier --check 'src/**/*.{ts,vue,json,css}' 'tests/**/*.ts' '*.spec.ts'",
     "format": "prettier --write 'src/**/*.{ts,vue,json,css}' 'tests/**/*.ts' '*.spec.ts'",
+    "generate:types": "openapi-typescript openapi.json --output src/types/generated.ts && prettier --write src/types/generated.ts",
     "test:screenshot": "playwright test screenshot.spec.ts"
   },
   "dependencies": {
@@ -23,8 +24,14 @@
     "vue": "^3.5.34",
     "vue-router": "^5.0.6"
   },
+  "overrides": {
+    "openapi-typescript": {
+      "typescript": "$typescript"
+    }
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.52.0",
     "@types/node": "^25.6.2",
     "@vitejs/plugin-vue": "^6.0.6",
     "@vue/eslint-config-prettier": "^10.2.0",
@@ -32,10 +39,10 @@
     "@vue/tsconfig": "^0.9.1",
     "eslint": "^10.3.0",
     "eslint-plugin-vue": "^10.9.1",
+    "openapi-typescript": "^7.13.0",
     "prettier": "^3.8.3",
     "typescript": "~6.0.3",
     "vite": "^8.0.11",
-    "@playwright/test": "^1.52.0",
     "vue-tsc": "^3.2.8"
   }
 }

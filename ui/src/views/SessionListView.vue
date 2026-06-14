@@ -57,7 +57,7 @@
                         :to="{ name: 'session-detail', params: { id: data.id } }"
                         class="session-link"
                     >
-                        {{ formatDate(data.start_time) }}
+                        {{ formatDateTime(data.start_time) }}
                     </RouterLink>
                 </template>
             </Column>
@@ -155,6 +155,7 @@ import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { getSessions, updateSession, deleteSessions, getSessionDeletePreview } from '@/api/sessions'
 import { getDevices } from '@/api/devices'
 import { ahiClass } from '@/utils/format'
+import { formatDateTime, formatIso } from '@/utils/formatting'
 import type { SessionListItem, DeletePreview, DeviceInfo } from '@/types'
 
 const router = useRouter()
@@ -191,20 +192,6 @@ const deleting = ref(false)
 const deletePreview = ref<DeletePreview | null>(null)
 const deleteTargetId = ref<number | null>(null)
 const deleteMessage = ref('')
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    })
-}
-
-function formatIso(d: Date): string {
-    return d.toISOString().slice(0, 10)
-}
 
 async function fetchPage(newOffset: number): Promise<void> {
     loading.value = true
@@ -250,7 +237,7 @@ async function toggleEnabled(session: SessionListItem): Promise<void> {
 
 async function confirmDelete(session: SessionListItem): Promise<void> {
     deleteTargetId.value = session.id
-    deleteMessage.value = `Delete session from ${formatDate(session.start_time)}? This cannot be undone.`
+    deleteMessage.value = `Delete session from ${formatDateTime(session.start_time)}? This cannot be undone.`
     deleteDialogVisible.value = true
     deletePreviewLoading.value = true
     deletePreview.value = null

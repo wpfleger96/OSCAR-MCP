@@ -42,3 +42,8 @@ screenshot-post PR_NUMBER:
 
 screenshot-pr PR_NUMBER: screenshot
     just screenshot-post {{PR_NUMBER}}
+
+# Generated API types
+ui-generate-types:
+    uv run python scripts/export_openapi.py ui/openapi.json
+    cd ui && npm run generate:types

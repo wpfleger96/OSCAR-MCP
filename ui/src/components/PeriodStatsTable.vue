@@ -5,7 +5,8 @@
         </template>
         <Column header="Period">
             <template #body="{ data }: { data: PeriodStatistics }">
-                {{ formatDate(data.period_start) }} – {{ formatDate(data.period_end) }}
+                {{ formatDateMonthDay(data.period_start) }} –
+                {{ formatDateMonthDay(data.period_end) }}
             </template>
         </Column>
         <Column field="days_used" header="Days Used" style="width: 90px" />
@@ -49,15 +50,12 @@ import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import type { PeriodStatistics } from '@/types'
 import { ahiClass } from '@/utils/format'
+import { formatDateMonthDay } from '@/utils/formatting'
 
 defineProps<{
     periods: PeriodStatistics[]
     loading: boolean
 }>()
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
 </script>
 
 <style scoped>

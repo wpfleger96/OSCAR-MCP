@@ -1,4 +1,4 @@
-import api from './client'
+import { apiGet, apiPost, apiDelete } from './client'
 import type {
     PaginatedResponse,
     AnalysisListItem,
@@ -6,50 +6,38 @@ import type {
     AnalysisDeletePreview,
 } from '@/types'
 
-export async function getAnalysisSessions(
-    params: {
-        limit?: number
-        offset?: number
-        from_date?: string
-        to_date?: string
-        analyzed_only?: boolean
-        sort_by?: string
-    } = {},
-): Promise<PaginatedResponse<AnalysisListItem>> {
-    const { data } = await api.get<PaginatedResponse<AnalysisListItem>>('/analysis/sessions', {
-        params,
-    })
-    return data
+export interface AnalysisSessionsParams {
+    limit?: number
+    offset?: number
+    from_date?: string
+    to_date?: string
+    analyzed_only?: boolean
+    sort_by?: string
 }
 
-export async function getAnalysis(sessionId: number): Promise<AnalysisResult> {
-    const { data } = await api.get<AnalysisResult>(`/sessions/${sessionId}/analysis`)
-    return data
-}
+export const getAnalysisSessions = apiGet<
+    PaginatedResponse<AnalysisListItem>,
+    [params?: AnalysisSessionsParams]
+>('/analysis/sessions', (params = {}) => ({ params }))
 
-export async function runAnalysis(
-    sessionId: number,
-    body: { modes?: string[]; store_results?: boolean } = {},
-): Promise<AnalysisResult> {
-    const { data } = await api.post<AnalysisResult>(`/sessions/${sessionId}/analysis`, {
-        modes: ['aasm'],
-        store_results: true,
-        ...body,
-    })
-    return data
-}
+export const getAnalysis = apiGet<AnalysisResult, [sessionId: number]>(
+    (sessionId) => `/sessions/${sessionId}/analysis`,
+)
 
-export async function deleteAnalysis(body: {
-    session_ids: number[]
-    all_versions?: boolean
-}): Promise<{ deleted_count: number }> {
-    const { data } = await api.delete<{ deleted_count: number }>('/analysis', { data: body })
-    return data
-}
+export const runAnalysis = apiPost<
+    AnalysisResult,
+    [sessionId: number, body?: { modes?: string[]; store_results?: boolean }]
+>(
+    (sessionId) => `/sessions/${sessionId}/analysis`,
+    (_sessionId, body = {}) => ({ data: { modes: ['aasm'], store_results: true, ...body } }),
+)
 
-export async function getAnalysisDeletePreview(
-    params: { session_ids?: number[]; all_versions?: boolean } = {},
-): Promise<AnalysisDeletePreview> {
-    const { data } = await api.get<AnalysisDeletePreview>('/analysis/delete-preview', { params })
-    return data
-}
+export const deleteAnalysis = apiDelete<
+    { deleted_count: number },
+    [body: { session_ids: number[]; all_versions?: boolean }]
+>('/analysis', (body) => ({ data: body }))
+
+export const getAnalysisDeletePreview = apiGet<
+    AnalysisDeletePreview,
+    [params?: { session_ids?: number[]; all_versions?: boolean }]
+>('/analysis/delete-preview', (params = {}) => ({ params }))
