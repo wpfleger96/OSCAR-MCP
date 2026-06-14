@@ -2,15 +2,28 @@
 
 import logging
 
-from collections.abc import Sequence
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
 
-from scipy import signal
-
+from snore.analysis.modes.baseline import _calculate_baseline
+from snore.analysis.modes.classification import (
+    _calculate_apnea_confidence,
+    _calculate_hypopnea_confidence,
+    _calculate_rera_confidence,
+    _check_desaturation,
+    _classify_apnea_type,
+)
 from snore.analysis.modes.config import DetectionModeConfig
-from snore.analysis.modes.types import BaselineMethod, HypopneaMode, ModeResult
+from snore.analysis.modes.postprocess import (
+    EVENT_MATCH_TOLERANCE_SECONDS,
+    _deduplicate_events,
+    _merge_adjacent_events,
+    _validate_event,
+    split_by_tolerance_match,
+    validate_event_type,
+)
+from snore.analysis.modes.types import HypopneaMode, ModeResult
 from snore.analysis.shared.types import (
     ApneaEvent,
     BreathMetrics,
@@ -20,29 +33,6 @@ from snore.analysis.shared.types import (
 from snore.constants import EventDetectionConstants as EDC
 
 logger = logging.getLogger(__name__)
-
-
-def _calculate_event_overlap(event1: ApneaEvent, event2: ApneaEvent) -> float:
-    """
-    Calculate overlap ratio between two events.
-
-    Args:
-        event1: First apnea event
-        event2: Second apnea event
-
-    Returns:
-        Overlap ratio (0.0-1.0) relative to shorter event duration
-    """
-    overlap_start = max(event1.start_time, event2.start_time)
-    overlap_end = min(event1.end_time, event2.end_time)
-
-    if overlap_start >= overlap_end:
-        return 0.0
-
-    overlap_duration = overlap_end - overlap_start
-    shorter_duration = min(event1.duration, event2.duration)
-
-    return overlap_duration / shorter_duration
 
 
 class EventDetector:
@@ -116,11 +106,13 @@ class EventDetector:
             f"{self.config.name}: Combined {len(all_events)} events from all strategies"
         )
 
-        deduplicated = self._deduplicate_events(all_events, overlap_threshold=0.5)
+        deduplicated = _deduplicate_events(
+            self.config, all_events, overlap_threshold=0.5
+        )
 
         merged = cast(
             list[ApneaEvent],
-            self._merge_adjacent_events(deduplicated, self.config.merge_gap),
+            _merge_adjacent_events(deduplicated, self.config.merge_gap),
         )
 
         return merged
@@ -222,7 +214,7 @@ class EventDetector:
         reductions = np.zeros(len(breaths))
 
         for i, breath in enumerate(breaths):
-            baseline = self._calculate_baseline(breaths, i)
+            baseline = _calculate_baseline(self.config, breaths, i)
             baselines[i] = baseline
 
             if baseline > 0:
@@ -264,7 +256,7 @@ class EventDetector:
             ):
                 continue
 
-            if not self._validate_event(reductions, start_idx, end_idx):
+            if not _validate_event(self.config, reductions, start_idx, end_idx):
                 logger.debug(
                     f"  Rejecting apnea {start_idx}-{end_idx}: fails validation"
                 )
@@ -280,10 +272,10 @@ class EventDetector:
             mask = (timestamps >= start_time) & (timestamps <= end_time)
             flow_signal = flow_values[mask]
 
-            event_type, classification_confidence = self._classify_apnea_type(
+            event_type, classification_confidence = _classify_apnea_type(
                 flow_signal=flow_signal, sample_rate=sample_rate
             )
-            confidence = self._calculate_apnea_confidence(
+            confidence = _calculate_apnea_confidence(
                 avg_reduction, duration, avg_baseline
             )
 
@@ -307,7 +299,7 @@ class EventDetector:
             )
 
         apneas = cast(
-            list[ApneaEvent], self._merge_adjacent_events(apneas, self.config.merge_gap)
+            list[ApneaEvent], _merge_adjacent_events(apneas, self.config.merge_gap)
         )
 
         oa = sum(1 for a in apneas if a.event_type == "OA")
@@ -391,7 +383,7 @@ class EventDetector:
         reductions = np.zeros(len(breaths))
 
         for i, breath in enumerate(breaths):
-            baseline = self._calculate_baseline(breaths, i)
+            baseline = _calculate_baseline(self.config, breaths, i)
             baselines[i] = baseline
 
             if baseline > 0:
@@ -448,7 +440,8 @@ class EventDetector:
                 )
                 continue
 
-            if not self._validate_event(
+            if not _validate_event(
+                self.config,
                 reductions,
                 start_idx,
                 end_idx,
@@ -480,15 +473,13 @@ class EventDetector:
                     mask = (timestamps >= start_time) & (timestamps <= end_time)
                     if np.any(mask):
                         if actual_mode == HypopneaMode.AASM_4PCT:
-                            has_desaturation = self._check_desaturation(
+                            has_desaturation = _check_desaturation(
                                 spo2_signal[mask], threshold=4.0
                             )
                         else:
-                            has_desaturation = self._check_desaturation(
-                                spo2_signal[mask]
-                            )
+                            has_desaturation = _check_desaturation(spo2_signal[mask])
 
-            confidence = self._calculate_hypopnea_confidence(
+            confidence = _calculate_hypopnea_confidence(
                 avg_reduction, duration, has_desaturation, detection_mode=actual_mode
             )
 
@@ -511,7 +502,7 @@ class EventDetector:
 
         hypopneas = cast(
             list[HypopneaEvent],
-            self._merge_adjacent_events(hypopneas, self.config.merge_gap),
+            _merge_adjacent_events(hypopneas, self.config.merge_gap),
         )
 
         logger.info(f"{self.config.name}: Detected {len(hypopneas)} hypopneas")
@@ -553,7 +544,7 @@ class EventDetector:
         reductions = np.zeros(len(breaths))
 
         for i, breath in enumerate(breaths):
-            baseline = self._calculate_baseline(breaths, i)
+            baseline = _calculate_baseline(self.config, breaths, i)
             baselines[i] = baseline
 
             if baseline > 0:
@@ -637,7 +628,7 @@ class EventDetector:
                                 else 0.0
                             )
 
-                            confidence = self._calculate_rera_confidence(
+                            confidence = _calculate_rera_confidence(
                                 seq_count, float(amplitude_increase), duration
                             )
 
@@ -669,139 +660,6 @@ class EventDetector:
         logger.info(f"{self.config.name}: Detected {len(reras)} RERA events")
 
         return reras
-
-    def _validate_event(
-        self,
-        reductions: np.ndarray,
-        start_idx: int,
-        end_idx: int,
-        threshold: float | None = None,
-    ) -> bool:
-        """
-        Validate that event contains at least one breath meeting the threshold.
-
-        Uses configured validation threshold.
-
-        Args:
-            reductions: Array of reduction values per breath (0.0-1.0)
-            start_idx: Event start index in breaths array
-            end_idx: Event end index in breaths array
-            threshold: Override threshold (if None, uses config.apnea_validation_threshold)
-
-        Returns:
-            True if at least one breath meets the threshold
-        """
-        event_reductions = reductions[start_idx:end_idx]
-        if len(event_reductions) == 0:
-            return False
-
-        max_reduction = float(np.max(event_reductions))
-
-        validation_threshold = (
-            threshold
-            if threshold is not None
-            else self.config.apnea_validation_threshold
-        )
-        return max_reduction >= validation_threshold
-
-    # ========================================================================
-    # Baseline Calculation (branches on config)
-    # ========================================================================
-
-    def _calculate_baseline(self, breaths: list[Any], current_idx: int) -> float:
-        """Calculate baseline using configured method."""
-        if self.config.baseline_method == BaselineMethod.TIME:
-            return self._calculate_time_based_baseline(breaths, current_idx)
-        else:
-            return self._calculate_breath_based_baseline(breaths, current_idx)
-
-    def _calculate_time_based_baseline(
-        self, breaths: list[Any], current_idx: int
-    ) -> float:
-        """
-        Calculate baseline from breaths within time window (AASM-compliant).
-
-        Uses a time-based window (default 2 minutes per AASM) of preceding breaths
-        to calculate baseline, excluding breaths that are part of detected events.
-
-        Args:
-            breaths: List of BreathMetrics objects
-            current_idx: Index of current breath
-
-        Returns:
-            Baseline value, minimum 10.0 for amplitude or 100.0 for tidal_volume
-        """
-        if current_idx == 0:
-            return 30.0 if self.config.metric == "amplitude" else 300.0
-
-        current_breath = breaths[current_idx]
-        current_time = current_breath.start_time
-        window_start = current_time - self.config.baseline_window
-
-        values = []
-        for i in range(current_idx - 1, -1, -1):
-            breath = breaths[i]
-            if breath.start_time < window_start:
-                break
-
-            if not breath.in_event:
-                if self.config.metric == "amplitude":
-                    if breath.amplitude > 0:
-                        values.append(breath.amplitude)
-                elif self.config.metric == "tidal_volume":
-                    if breath.tidal_volume > 0:
-                        values.append(breath.tidal_volume)
-
-        if len(values) < 5:
-            return 30.0 if self.config.metric == "amplitude" else 300.0
-
-        baseline = float(np.percentile(values, self.config.baseline_percentile))
-        min_baseline = 10.0 if self.config.metric == "amplitude" else 100.0
-        return max(baseline, min_baseline)
-
-    def _calculate_breath_based_baseline(
-        self, breaths: list[Any], current_idx: int
-    ) -> float:
-        """
-        Calculate baseline from preceding breath count.
-
-        Uses a rolling window of recent breaths to calculate baseline,
-        excluding breaths that are part of detected events.
-
-        Args:
-            breaths: List of BreathMetrics objects
-            current_idx: Index of current breath
-
-        Returns:
-            Baseline value, minimum 10.0 for amplitude or 100.0 for tidal_volume
-        """
-        if current_idx == 0:
-            return 30.0 if self.config.metric == "amplitude" else 300.0
-
-        window_breaths = int(
-            self.config.baseline_window
-        )  # baseline_window is breath count
-        start_idx = max(0, current_idx - window_breaths)
-        window = breaths[start_idx:current_idx]
-
-        if len(window) < 5:
-            return 30.0 if self.config.metric == "amplitude" else 300.0
-
-        values = []
-        for b in window:
-            if self.config.metric == "amplitude":
-                if b.amplitude > 0 and not b.in_event:
-                    values.append(b.amplitude)
-            elif self.config.metric == "tidal_volume":
-                if b.tidal_volume > 0 and not b.in_event:
-                    values.append(b.tidal_volume)
-
-        if not values:
-            return 30.0 if self.config.metric == "amplitude" else 300.0
-
-        baseline = float(np.percentile(values, self.config.baseline_percentile))
-        min_baseline = 10.0 if self.config.metric == "amplitude" else 100.0
-        return max(baseline, min_baseline)
 
     # ========================================================================
     # Shared Utilities (no duplication - single implementation)
@@ -943,63 +801,6 @@ class EventDetector:
 
         return events
 
-    def _deduplicate_events(
-        self,
-        events: list[ApneaEvent],
-        overlap_threshold: float = 0.5,
-    ) -> list[ApneaEvent]:
-        """
-        Remove duplicate/overlapping events, keeping highest confidence.
-
-        When multiple detection methods find the same event, keep the
-        detection with highest confidence. Merge events that overlap
-        by more than overlap_threshold (50% default).
-
-        Args:
-            events: List of apnea events (potentially overlapping)
-            overlap_threshold: Minimum overlap ratio to consider duplicates (0.0-1.0)
-
-        Returns:
-            List of deduplicated events
-        """
-        if not events:
-            return []
-
-        sorted_events = sorted(events, key=lambda e: e.start_time)
-
-        deduplicated = []
-        current = sorted_events[0]
-
-        for next_event in sorted_events[1:]:
-            overlap = _calculate_event_overlap(current, next_event)
-
-            if overlap > overlap_threshold:
-                if next_event.confidence > current.confidence:
-                    logger.debug(
-                        f"  Replacing {current.detection_method} event at {current.start_time:.1f}s "
-                        f"(conf={current.confidence:.2f}) with {next_event.detection_method} "
-                        f"(conf={next_event.confidence:.2f})"
-                    )
-                    current = next_event
-                else:
-                    logger.debug(
-                        f"  Keeping {current.detection_method} event at {current.start_time:.1f}s "
-                        f"(conf={current.confidence:.2f}), dropping {next_event.detection_method} "
-                        f"(conf={next_event.confidence:.2f})"
-                    )
-            else:
-                deduplicated.append(current)
-                current = next_event
-
-        deduplicated.append(current)
-
-        if len(events) > len(deduplicated):
-            logger.info(
-                f"{self.config.name}: Deduplicated {len(events)} events to {len(deduplicated)}"
-            )
-
-        return deduplicated
-
     def _find_consecutive_reduced_breaths(
         self,
         breaths: list[BreathMetrics],
@@ -1063,331 +864,13 @@ class EventDetector:
 
         return regions
 
-    def _merge_adjacent_events(
-        self,
-        events: Sequence[ApneaEvent | HypopneaEvent],
-        max_gap: float,
-    ) -> list[ApneaEvent | HypopneaEvent]:
-        """
-        Merge events that are close together in time AND of the same type.
-
-        Per AASM standards, only events of the same type should be merged.
-
-        Args:
-            events: List of ApneaEvent or HypopneaEvent objects
-            max_gap: Maximum gap in seconds to merge
-
-        Returns:
-            List of merged events
-        """
-        if len(events) <= 1:
-            return list(events)
-
-        merged = []
-        current = events[0]
-
-        for next_event in events[1:]:
-            gap = next_event.start_time - current.end_time
-            same_type = type(next_event) == type(current)
-
-            if gap <= max_gap and same_type:
-                current = self._merge_two_events(current, next_event)
-            else:
-                merged.append(current)
-                current = next_event
-
-        merged.append(current)
-        return merged
-
-    def _merge_two_events(
-        self,
-        event1: ApneaEvent | HypopneaEvent,
-        event2: ApneaEvent | HypopneaEvent,
-    ) -> ApneaEvent | HypopneaEvent:
-        """
-        Merge two adjacent events of the same type.
-
-        Args:
-            event1: First event
-            event2: Second event
-
-        Returns:
-            Merged event
-        """
-        merged_duration = event2.end_time - event1.start_time
-
-        if isinstance(event1, ApneaEvent) and isinstance(event2, ApneaEvent):
-            return ApneaEvent(
-                start_time=event1.start_time,
-                end_time=event2.end_time,
-                duration=merged_duration,
-                event_type=(
-                    event1.event_type
-                    if event1.classification_confidence
-                    >= event2.classification_confidence
-                    else event2.event_type
-                ),
-                flow_reduction=(event1.flow_reduction + event2.flow_reduction) / 2,
-                confidence=min(event1.confidence, event2.confidence),
-                classification_confidence=min(
-                    event1.classification_confidence, event2.classification_confidence
-                ),
-                baseline_flow=event1.baseline_flow,
-                detection_method=event1.detection_method,
-            )
-        elif isinstance(event1, HypopneaEvent) and isinstance(event2, HypopneaEvent):
-            return HypopneaEvent(
-                start_time=event1.start_time,
-                end_time=event2.end_time,
-                duration=merged_duration,
-                flow_reduction=(event1.flow_reduction + event2.flow_reduction) / 2,
-                confidence=min(event1.confidence, event2.confidence),
-                baseline_flow=event1.baseline_flow,
-                has_arousal=event1.has_arousal or event2.has_arousal,
-                has_desaturation=event1.has_desaturation or event2.has_desaturation,
-            )
-
-        event_typed: ApneaEvent | HypopneaEvent = event1
-        return event_typed
-
-    def _classify_apnea_type(
-        self,
-        flow_signal: np.ndarray | None,
-        sample_rate: float,
-    ) -> tuple[Literal["OA", "CA", "MA", "UA"], float]:
-        """
-        Classify apnea as obstructive, central, or unclassified.
-
-        Without effort sensors, estimates effort from flow characteristics.
-
-        Args:
-            flow_signal: Flow values during the apnea event
-            sample_rate: Sampling rate in Hz
-
-        Returns:
-            Tuple of (event_type, classification_confidence)
-            - event_type: "OA", "CA", "MA", or "UA"
-            - classification_confidence: 0-1 score based on effort score distinctiveness
-        """
-        if flow_signal is not None and len(flow_signal) > 5:
-            effort_from_flow = self._estimate_effort_from_flow(flow_signal, sample_rate)
-
-            if effort_from_flow > 0.15:
-                distance_from_boundary = min(effort_from_flow - 0.15, 0.35)
-                classification_confidence = 0.5 + (distance_from_boundary / 0.35) * 0.5
-                return "OA", float(classification_confidence)
-
-            elif effort_from_flow < 0.05:
-                distance_from_boundary = min(0.05 - effort_from_flow, 0.05)
-                classification_confidence = 0.5 + (distance_from_boundary / 0.05) * 0.5
-                return "CA", float(classification_confidence)
-
-            else:
-                distance_from_midpoint = abs(effort_from_flow - 0.10)
-                classification_confidence = 0.3 + (distance_from_midpoint / 0.05) * 0.2
-                return "MA", float(classification_confidence)
-
-        return "UA", 0.2
-
-    def _estimate_effort_from_flow(
-        self, flow_signal: np.ndarray, sample_rate: float
-    ) -> float:
-        """
-        Estimate respiratory effort from flow signal characteristics.
-
-        Args:
-            flow_signal: Flow values during the event
-            sample_rate: Sampling rate in Hz
-
-        Returns:
-            Normalized effort magnitude (0.0-1.0, where 0.0 = no effort, 1.0 = maximum effort)
-        """
-        if len(flow_signal) < 5:
-            return 0.0
-
-        flow_std = np.std(flow_signal)
-        flow_range = np.ptp(flow_signal)
-
-        detrended = flow_signal - np.mean(flow_signal)
-        variations = np.abs(np.diff(detrended))
-        avg_variation = np.mean(variations) if len(variations) > 0 else 0.0
-
-        spectral_power = self._calculate_spectral_effort(flow_signal, sample_rate)
-
-        normalized_std = min(flow_std / 30.0, 1.0)
-        normalized_range = min(flow_range / 100.0, 1.0)
-        normalized_variation = min(avg_variation / 20.0, 1.0)
-
-        effort_score = (
-            normalized_std * 0.3
-            + normalized_range * 0.3
-            + normalized_variation * 0.2
-            + spectral_power * 0.2
-        )
-
-        return float(effort_score)
-
-    def _calculate_spectral_effort(
-        self,
-        flow_signal: np.ndarray,
-        sample_rate: float,
-    ) -> float:
-        """
-        Calculate spectral power in breathing frequency range (0.1-0.5 Hz).
-
-        Args:
-            flow_signal: Flow values during the event
-            sample_rate: Sampling rate in Hz (default 25 Hz for CPAP devices)
-
-        Returns:
-            Normalized spectral power in breathing frequency range (0.0-1.0)
-        """
-        if len(flow_signal) < EDC.SPECTRAL_MIN_SAMPLES:
-            return 0.0
-
-        detrended = flow_signal - np.mean(flow_signal)
-        freqs, power = signal.periodogram(detrended, fs=sample_rate)
-
-        breathing_mask = (freqs >= EDC.BREATHING_FREQ_MIN) & (
-            freqs <= EDC.BREATHING_FREQ_MAX
-        )
-        breathing_power = np.sum(power[breathing_mask])
-
-        total_power = np.sum(power)
-        if total_power > 0:
-            return float(breathing_power / total_power)
-        return 0.0
-
-    def _calculate_apnea_confidence(
-        self, reduction: float, duration: float, baseline: float
-    ) -> float:
-        """Calculate confidence score for apnea detection."""
-        confidence = EDC.APNEA_BASE_CONFIDENCE
-
-        if reduction > EDC.APNEA_HIGH_REDUCTION_THRESHOLD:
-            confidence += EDC.APNEA_HIGH_REDUCTION_BONUS
-        if duration > EDC.APNEA_LONG_DURATION_THRESHOLD:
-            confidence += EDC.APNEA_LONG_DURATION_BONUS
-        if baseline > EDC.APNEA_HIGH_BASELINE_THRESHOLD:
-            confidence += EDC.APNEA_BASELINE_FLOW_BONUS
-
-        return min(1.0, confidence)
-
-    def _calculate_hypopnea_confidence(
-        self,
-        reduction: float,
-        duration: float,
-        has_desaturation: bool | None,
-        detection_mode: HypopneaMode,
-    ) -> float:
-        """
-        Calculate confidence score for hypopnea detection.
-
-        Confidence levels by detection method:
-        - HIGH: SpO2-validated (≥50% reduction OR 30-50% with desaturation)
-        - MEDIUM: Flow-only ≥50% reduction
-        - LOW: Flow-only 30-50% reduction
-
-        Args:
-            reduction: Flow reduction percentage (0-1)
-            duration: Event duration in seconds
-            has_desaturation: Whether SpO2 desaturation occurred (if available)
-            detection_mode: Detection mode used
-
-        Returns:
-            Confidence score (0-1)
-        """
-        if detection_mode == HypopneaMode.FLOW_ONLY:
-            if reduction >= 0.50:
-                confidence = 0.6  # MEDIUM
-            else:
-                confidence = 0.4  # LOW
-        else:
-            confidence = EDC.HYPOPNEA_BASE_CONFIDENCE
-
-        if (
-            EDC.HYPOPNEA_IDEAL_MIN_REDUCTION
-            <= reduction
-            <= EDC.HYPOPNEA_IDEAL_MAX_REDUCTION
-        ):
-            confidence += 0.1
-
-        if duration > EDC.HYPOPNEA_LONG_DURATION_THRESHOLD:
-            confidence += 0.1
-
-        if has_desaturation:
-            confidence += EDC.HYPOPNEA_DESATURATION_BONUS
-
-        return min(1.0, confidence)
-
-    def _check_desaturation(
-        self, spo2_values: np.ndarray, threshold: float = 3.0
-    ) -> bool:
-        """
-        Check if SpO2 desaturation occurred.
-
-        Args:
-            spo2_values: SpO2 signal values
-            threshold: Desaturation threshold (default 3% for AASM, 4% for CMS)
-
-        Returns:
-            True if desaturation >= threshold occurred
-        """
-        if len(spo2_values) < 2:
-            return False
-
-        max_spo2 = np.max(spo2_values)
-        min_spo2 = np.min(spo2_values)
-        drop = max_spo2 - min_spo2
-
-        return bool(drop >= threshold)
-
-    def _calculate_rera_confidence(
-        self, breath_count: int, amplitude_increase: float, duration: float
-    ) -> float:
-        """
-        Calculate confidence score for RERA detection.
-
-        RERAs detected from flow patterns (without EEG) have inherently
-        lower confidence than EEG-confirmed events.
-
-        Confidence factors:
-        - More obstructed breaths = higher confidence
-        - Larger recovery amplitude = higher confidence
-        - Longer duration = higher confidence
-
-        Args:
-            breath_count: Number of flow-limited breaths in sequence
-            amplitude_increase: Recovery breath amplitude increase (0-1 = 0-100%)
-            duration: Event duration in seconds
-
-        Returns:
-            Confidence score (0-1), typically 0.4-0.7 for flow-only detection
-        """
-        confidence = 0.4
-
-        if breath_count >= 3:
-            confidence += 0.1
-        if breath_count >= 5:
-            confidence += 0.1
-
-        if amplitude_increase >= 1.0:  # 100% increase (doubling)
-            confidence += 0.2
-        elif amplitude_increase >= 0.75:  # 75% increase
-            confidence += 0.1
-
-        if duration >= 15.0:
-            confidence += 0.1
-
-        return min(0.7, confidence)  # Cap at 0.7 without EEG
-
     def validate_against_machine_events(
         self,
         programmatic_apneas: list[ApneaEvent],
         programmatic_hypopneas: list[HypopneaEvent],
         machine_apneas: list[ApneaEvent],
         machine_hypopneas: list[HypopneaEvent],
-        tolerance_seconds: float = 5.0,
+        tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
     ) -> dict[str, Any]:
         """
         Validate programmatic event detection against machine-detected events.
@@ -1403,76 +886,41 @@ class EventDetector:
             tolerance_seconds: Max time difference for event matching (default 5s)
 
         Returns:
-            Dictionary with validation metrics for apneas and hypopneas
+            Dictionary with validation metrics for apneas and hypopneas, the
+            per-type matched/unmatched event lists ("apnea_matches",
+            "hypopnea_matches") and the combined cross-type
+            "false_negative_events" / "false_positive_events" lists.
         """
-        from snore.services.schemas import EventValidationResult
+        apnea_validation, apnea_matches = validate_event_type(
+            programmatic_apneas, machine_apneas, tolerance_seconds
+        )
+        hypopnea_validation, hypopnea_matches = validate_event_type(
+            programmatic_hypopneas, machine_hypopneas, tolerance_seconds
+        )
 
-        def validate_event_type(
-            programmatic: Sequence[ApneaEvent | HypopneaEvent],
-            machine: Sequence[ApneaEvent | HypopneaEvent],
-        ) -> EventValidationResult:
-            """Validate a single event type."""
-            matched = 0
-            matched_machine_indices = set()
+        all_programmatic: list[ApneaEvent | HypopneaEvent] = [
+            *programmatic_apneas,
+            *programmatic_hypopneas,
+        ]
+        all_machine: list[ApneaEvent | HypopneaEvent] = sorted(
+            [*machine_apneas, *machine_hypopneas], key=lambda e: e.start_time
+        )
 
-            for prog_event in programmatic:
-                for m_idx, mach_event in enumerate(machine):
-                    if m_idx in matched_machine_indices:
-                        continue
-
-                    time_diff = abs(prog_event.start_time - mach_event.start_time)
-                    if time_diff <= tolerance_seconds:
-                        matched += 1
-                        matched_machine_indices.add(m_idx)
-                        break
-
-            machine_count = len(machine)
-            programmatic_count = len(programmatic)
-            false_positives = programmatic_count - matched
-            false_negatives = machine_count - matched
-
-            if machine_count == 0:
-                sensitivity = 1.0
-            elif matched + false_negatives > 0:
-                sensitivity = matched / (matched + false_negatives)
-            else:
-                sensitivity = 0.0
-
-            if matched + false_positives > 0:
-                precision = matched / (matched + false_positives)
-            else:
-                precision = 0.0 if machine_count == 0 else 1.0
-
-            if precision + sensitivity > 0:
-                f1_score = 2 * (precision * sensitivity) / (precision + sensitivity)
-            else:
-                f1_score = 0.0
-
-            total_unique = machine_count + programmatic_count - matched
-            agreement_percentage = (
-                (matched / total_unique * 100) if total_unique > 0 else 100.0
-            )
-
-            return EventValidationResult(
-                machine_event_count=machine_count,
-                programmatic_event_count=programmatic_count,
-                matched_events=matched,
-                false_positives=false_positives,
-                false_negatives=false_negatives,
-                sensitivity=sensitivity,
-                precision=precision,
-                f1_score=f1_score,
-                agreement_percentage=agreement_percentage,
-            )
-
-        apnea_validation = validate_event_type(programmatic_apneas, machine_apneas)
-        hypopnea_validation = validate_event_type(
-            programmatic_hypopneas, machine_hypopneas
+        _, false_negative_events = split_by_tolerance_match(
+            all_machine, all_programmatic, tolerance_seconds
+        )
+        matched_events, false_positive_events = split_by_tolerance_match(
+            all_programmatic, all_machine, tolerance_seconds
         )
 
         return {
             "apnea_validation": apnea_validation,
             "hypopnea_validation": hypopnea_validation,
+            "apnea_matches": apnea_matches,
+            "hypopnea_matches": hypopnea_matches,
+            "matched_events": matched_events,
+            "false_negative_events": false_negative_events,
+            "false_positive_events": false_positive_events,
             "overall_agreement": {
                 "total_machine_events": len(machine_apneas) + len(machine_hypopneas),
                 "total_programmatic_events": len(programmatic_apneas)

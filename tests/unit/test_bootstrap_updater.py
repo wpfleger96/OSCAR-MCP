@@ -165,7 +165,7 @@ class TestPerformUpdatePythonSwitch:
 
             return Result()
 
-        monkeypatch.setattr("snore.bootstrap.updater.subprocess.run", mock_run)
+        monkeypatch.setattr("snore.bootstrap.core.subprocess.run", mock_run)
         success, msg, was_upgraded = perform_update(target_version="2.0.0")
         assert success is True
         assert was_upgraded is True
@@ -196,7 +196,7 @@ class TestPerformUpdatePythonSwitch:
 
             return Result()
 
-        monkeypatch.setattr("snore.bootstrap.updater.subprocess.run", mock_run)
+        monkeypatch.setattr("snore.bootstrap.core.subprocess.run", mock_run)
         perform_update(target_version="1.0.0")
         assert "--python" not in captured_cmd
 
@@ -220,7 +220,7 @@ class TestPerformUpdatePythonSwitch:
 
             return Result()
 
-        monkeypatch.setattr("snore.bootstrap.updater.subprocess.run", mock_run)
+        monkeypatch.setattr("snore.bootstrap.core.subprocess.run", mock_run)
         perform_update()
         assert "--python" not in captured_cmd
 
@@ -248,7 +248,7 @@ class TestPerformUpdatePythonSwitch:
 
             return Result()
 
-        monkeypatch.setattr("snore.bootstrap.updater.subprocess.run", mock_run)
+        monkeypatch.setattr("snore.bootstrap.core.subprocess.run", mock_run)
         perform_update(target_version="1.0.0")
         assert "--force" in captured_cmd
         assert "--reinstall" in captured_cmd
@@ -278,7 +278,7 @@ class TestPerformUpdatePythonSwitch:
 
             return Result()
 
-        monkeypatch.setattr("snore.bootstrap.updater.subprocess.run", mock_run)
+        monkeypatch.setattr("snore.bootstrap.core.subprocess.run", mock_run)
         success, msg, was_upgraded = perform_update(target_version="2.0.0")
         assert success is True
         assert "--python" in captured_cmd

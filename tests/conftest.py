@@ -42,6 +42,16 @@ def pytest_configure(config):
     )
 
 
+def pytest_collection_modifyitems(items):
+    """Auto-apply unit/integration markers based on test location."""
+    for item in items:
+        path = str(item.fspath)
+        if "/unit/" in path:
+            item.add_marker(pytest.mark.unit)
+        elif "/integration/" in path:
+            item.add_marker(pytest.mark.integration)
+
+
 @pytest.fixture
 def fixtures_dir():
     """Return path to test fixtures directory."""
@@ -113,23 +123,6 @@ def db_session(temp_db):
 
     session.close()
     engine.dispose()
-
-
-@pytest.fixture
-def initialized_db(temp_db):
-    """Create database initialized with global session factory (for validation tests)."""
-    from snore.database.session import (
-        cleanup_database,
-        init_database,
-        session_scope,
-    )
-
-    init_database(str(temp_db))
-
-    with session_scope() as session:
-        yield session
-
-    cleanup_database()
 
 
 @pytest.fixture

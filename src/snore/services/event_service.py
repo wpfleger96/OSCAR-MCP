@@ -9,49 +9,52 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
+from snore.exceptions import NotFoundError
 from snore.services.schemas import EventMatchResult
 
-__all__ = ["EventService"]
-
-EVENT_MATCH_TOLERANCE_SECONDS = 5.0
+__all__ = ["EVENT_MATCH_TOLERANCE_SECONDS", "EventService"]
 
 
 class EventService:
     """Service for event matching and comparison.
 
-    Pass db_session to use DB-backed methods (list_session_events,
-    get_machine_event_times). Omit for purely algorithmic operations
-    (match_events, classify_matches).
+    DB-backed methods (list_session_events, get_machine_event_times) require
+    an instance. The purely algorithmic operations (match_events,
+    classify_matches) are static methods.
     """
 
-    def __init__(self, db_session: Session | None = None):
+    def __init__(self, db_session: Session):
         self.db_session = db_session
 
     def list_session_events(
         self,
         session_id: int,
         event_type: str | None = None,
-    ) -> tuple[list[Any], datetime] | None:
-        """Return (events, session_start) for a session, or None if session not found.
+    ) -> tuple[list[Any], datetime]:
+        """Return (events, session_start) for a session.
 
         Args:
             session_id: Session to query events for.
             event_type: Optional filter by event type string.
 
         Returns:
-            Tuple of (list of Event ORM objects, session start datetime), or None.
+            Tuple of (list of Event ORM objects, session start datetime).
+
+        Raises:
+            NotFoundError: If the session does not exist.
         """
         from snore.database import models
 
         session = (
-            self.db_session.query(models.Session)  # type: ignore[union-attr]
+            self.db_session.query(models.Session)
             .filter(models.Session.id == session_id)
             .first()
         )
         if session is None:
-            return None
+            raise NotFoundError(f"Session {session_id} not found")
 
-        query = self.db_session.query(models.Event).filter(  # type: ignore[union-attr]
+        query = self.db_session.query(models.Event).filter(
             models.Event.session_id == session_id
         )
         if event_type:
@@ -59,34 +62,53 @@ class EventService:
         events = query.order_by(models.Event.start_time).all()
         return events, session.start_time
 
-    def get_machine_event_times(self, session_id: int) -> list[float] | None:
-        """Return sorted machine event timestamps for a session, or None if not found.
+    def get_machine_event_times(self, session_id: int) -> list[float]:
+        """Return sorted machine event timestamps for a session.
 
         Args:
             session_id: Session to query events for.
 
         Returns:
-            Sorted list of Unix timestamps, or None if session not found.
+            Sorted list of Unix timestamps.
+
+        Raises:
+            NotFoundError: If the session does not exist.
         """
         from snore.database import models
 
         session = (
-            self.db_session.query(models.Session)  # type: ignore[union-attr]
+            self.db_session.query(models.Session)
             .filter(models.Session.id == session_id)
             .first()
         )
         if session is None:
-            return None
+            raise NotFoundError(f"Session {session_id} not found")
 
         events = (
-            self.db_session.query(models.Event)  # type: ignore[union-attr]
+            self.db_session.query(models.Event)
             .filter(models.Event.session_id == session_id)
             .all()
         )
         return sorted(e.start_time.timestamp() for e in events)
 
+    @staticmethod
+    def _within_tolerance(
+        t: float, sorted_other: list[float], tolerance: float
+    ) -> bool:
+        """Whether any timestamp in a sorted list is within tolerance of ``t``.
+
+        Note: this float-timestamp matcher is the legacy event-comparison path.
+        The richer event-object matcher in ``analysis.modes.postprocess`` shares
+        the same ``EVENT_MATCH_TOLERANCE_SECONDS`` constant.
+        """
+        idx = bisect.bisect_left(sorted_other, t - tolerance)
+        return any(
+            abs(t - sorted_other[j]) <= tolerance
+            for j in range(idx, min(idx + 10, len(sorted_other)))
+        )
+
+    @staticmethod
     def match_events(
-        self,
         machine_times: list[float],
         programmatic_times: list[float],
         tolerance: float = EVENT_MATCH_TOLERANCE_SECONDS,
@@ -104,25 +126,14 @@ class EventService:
         sorted_machine = sorted(machine_times)
         sorted_prog = sorted(programmatic_times)
 
-        false_negatives = 0
-        for t in sorted_machine:
-            idx = bisect.bisect_left(sorted_prog, t - tolerance)
-            matched = any(
-                abs(t - sorted_prog[j]) <= tolerance
-                for j in range(idx, min(idx + 10, len(sorted_prog)))
-            )
-            if not matched:
-                false_negatives += 1
-
-        false_positives = 0
-        for t in sorted_prog:
-            idx = bisect.bisect_left(sorted_machine, t - tolerance)
-            matched = any(
-                abs(t - sorted_machine[j]) <= tolerance
-                for j in range(idx, min(idx + 10, len(sorted_machine)))
-            )
-            if not matched:
-                false_positives += 1
+        false_negatives = sum(
+            not EventService._within_tolerance(t, sorted_prog, tolerance)
+            for t in sorted_machine
+        )
+        false_positives = sum(
+            not EventService._within_tolerance(t, sorted_machine, tolerance)
+            for t in sorted_prog
+        )
 
         machine_count = len(sorted_machine)
         prog_count = len(sorted_prog)
@@ -136,8 +147,8 @@ class EventService:
             false_negatives=false_negatives,
         )
 
+    @staticmethod
     def classify_matches(
-        self,
         machine_times: list[float],
         programmatic_times: list[float],
         tolerance: float = EVENT_MATCH_TOLERANCE_SECONDS,
@@ -155,22 +166,13 @@ class EventService:
         sorted_machine = sorted(machine_times)
         sorted_prog = sorted(programmatic_times)
 
-        machine_matched = []
-        for t in sorted_machine:
-            idx = bisect.bisect_left(sorted_prog, t - tolerance)
-            matched = any(
-                abs(t - sorted_prog[j]) <= tolerance
-                for j in range(idx, min(idx + 10, len(sorted_prog)))
-            )
-            machine_matched.append(matched)
-
-        prog_matched = []
-        for t in sorted_prog:
-            idx = bisect.bisect_left(sorted_machine, t - tolerance)
-            matched = any(
-                abs(t - sorted_machine[j]) <= tolerance
-                for j in range(idx, min(idx + 10, len(sorted_machine)))
-            )
-            prog_matched.append(matched)
+        machine_matched = [
+            EventService._within_tolerance(t, sorted_prog, tolerance)
+            for t in sorted_machine
+        ]
+        prog_matched = [
+            EventService._within_tolerance(t, sorted_machine, tolerance)
+            for t in sorted_prog
+        ]
 
         return machine_matched, prog_matched

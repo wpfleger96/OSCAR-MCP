@@ -7,7 +7,7 @@ import numpy as np
 
 from sqlalchemy.orm import Session
 
-from snore.analysis.data.waveform_loader import WaveformLoader
+from snore.services.waveform_service import WaveformService
 
 if TYPE_CHECKING:
     from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
@@ -41,15 +41,17 @@ def parse_time_offset(time_str: str) -> float:
 class WaveformInspector:
     """Inspector for waveform data extraction and event filtering."""
 
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: Session, service: WaveformService | None = None):
         """
         Initialize waveform inspector.
 
         Args:
             db_session: Database session
+            service: Waveform access service (constructed from db_session if
+                not provided)
         """
         self.db_session = db_session
-        self.loader = WaveformLoader(db_session)
+        self.service = service or WaveformService(db_session)
 
     def get_window(
         self,
@@ -70,20 +72,15 @@ class WaveformInspector:
         Returns:
             Tuple of (timestamps, values, metadata)
         """
-        timestamps, values, metadata = self.loader.load_waveform(
-            session_id=session_id,
-            waveform_type=waveform_type,
-            apply_filter=False,
-        )
-
         start = center_seconds - window_seconds / 2
         end = center_seconds + window_seconds / 2
 
-        mask = (timestamps >= start) & (timestamps <= end)
-        windowed_timestamps = timestamps[mask]
-        windowed_values = values[mask]
-
-        return windowed_timestamps, windowed_values, metadata
+        return self.service.get_waveform_data(
+            session_id=session_id,
+            waveform_type=waveform_type,
+            start_seconds=start,
+            end_seconds=end,
+        )
 
     def find_events_in_window(
         self,

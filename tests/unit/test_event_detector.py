@@ -3,8 +3,23 @@
 import numpy as np
 import pytest
 
+from snore.analysis.modes.baseline import (
+    _calculate_breath_based_baseline,
+    _calculate_time_based_baseline,
+)
+from snore.analysis.modes.classification import (
+    _check_desaturation,
+    _classify_apnea_type,
+)
 from snore.analysis.modes.config import AASM_CONFIG, AASM_RELAXED_CONFIG, RESMED_CONFIG
-from snore.analysis.modes.detector import EventDetector, _calculate_event_overlap
+from snore.analysis.modes.detector import EventDetector
+from snore.analysis.modes.postprocess import (
+    _calculate_event_overlap,
+    _deduplicate_events,
+    _merge_adjacent_events,
+    _merge_two_events,
+    _validate_event,
+)
 from snore.analysis.modes.types import HypopneaMode
 from snore.analysis.shared.types import (
     ApneaEvent,
@@ -372,8 +387,8 @@ class TestDeduplicateEvents:
             ),
         ]
 
-        deduplicated = resmed_detector._deduplicate_events(
-            events, overlap_threshold=0.5
+        deduplicated = _deduplicate_events(
+            resmed_detector.config, events, overlap_threshold=0.5
         )
 
         assert len(deduplicated) == 2
@@ -403,8 +418,8 @@ class TestDeduplicateEvents:
             ),
         ]
 
-        deduplicated = resmed_detector._deduplicate_events(
-            events, overlap_threshold=0.5
+        deduplicated = _deduplicate_events(
+            resmed_detector.config, events, overlap_threshold=0.5
         )
 
         assert len(deduplicated) == 1
@@ -436,8 +451,8 @@ class TestDeduplicateEvents:
             ),
         ]
 
-        deduplicated = resmed_detector._deduplicate_events(
-            events, overlap_threshold=0.5
+        deduplicated = _deduplicate_events(
+            resmed_detector.config, events, overlap_threshold=0.5
         )
 
         assert len(deduplicated) == 1
@@ -446,7 +461,9 @@ class TestDeduplicateEvents:
 
     def test_dedupe_empty_list(self, resmed_detector):
         """Empty list should return empty list."""
-        deduplicated = resmed_detector._deduplicate_events([], overlap_threshold=0.5)
+        deduplicated = _deduplicate_events(
+            resmed_detector.config, [], overlap_threshold=0.5
+        )
 
         assert len(deduplicated) == 0
 
@@ -465,8 +482,8 @@ class TestDeduplicateEvents:
             )
         ]
 
-        deduplicated = resmed_detector._deduplicate_events(
-            events, overlap_threshold=0.5
+        deduplicated = _deduplicate_events(
+            resmed_detector.config, events, overlap_threshold=0.5
         )
 
         assert len(deduplicated) == 1
@@ -639,7 +656,7 @@ class TestMergeTwoEvents:
             detection_method="gap",
         )
 
-        merged = aasm_detector._merge_two_events(event1, event2)
+        merged = _merge_two_events(event1, event2)
 
         assert merged.detection_method == "gap"
         assert merged.start_time == 0.0
@@ -666,7 +683,7 @@ class TestMergeTwoEvents:
             baseline_flow=30.0,
         )
 
-        merged = aasm_detector._merge_two_events(event1, event2)
+        merged = _merge_two_events(event1, event2)
 
         assert isinstance(merged, ApneaEvent)
         assert merged.start_time == 0.0
@@ -695,7 +712,7 @@ class TestMergeTwoEvents:
             has_desaturation=False,
         )
 
-        merged = aasm_detector._merge_two_events(event1, event2)
+        merged = _merge_two_events(event1, event2)
 
         assert isinstance(merged, HypopneaEvent)
         assert merged.start_time == 0.0
@@ -723,7 +740,7 @@ class TestMergeTwoEvents:
             baseline_flow=30.0,
         )
 
-        merged = aasm_detector._merge_two_events(event1, event2)
+        merged = _merge_two_events(event1, event2)
 
         assert merged.flow_reduction == pytest.approx(0.7, abs=0.01)
 
@@ -748,7 +765,7 @@ class TestMergeTwoEvents:
             baseline_flow=30.0,
         )
 
-        merged = aasm_detector._merge_two_events(event1, event2)
+        merged = _merge_two_events(event1, event2)
 
         assert merged.confidence == 0.70
 
@@ -779,7 +796,7 @@ class TestMergeAdjacentEvents:
             ),
         ]
 
-        merged = aasm_detector._merge_adjacent_events(events, max_gap=3.0)
+        merged = _merge_adjacent_events(events, max_gap=3.0)
 
         assert len(merged) == 1
         assert merged[0].start_time == 0.0
@@ -808,7 +825,7 @@ class TestMergeAdjacentEvents:
             ),
         ]
 
-        merged = aasm_detector._merge_adjacent_events(events, max_gap=3.0)
+        merged = _merge_adjacent_events(events, max_gap=3.0)
 
         assert len(merged) == 2
 
@@ -834,13 +851,13 @@ class TestMergeAdjacentEvents:
             ),
         ]
 
-        merged = aasm_detector._merge_adjacent_events(events, max_gap=3.0)
+        merged = _merge_adjacent_events(events, max_gap=3.0)
 
         assert len(merged) == 2
 
     def test_merge_empty_list(self, aasm_detector):
         """Empty list should return empty list."""
-        merged = aasm_detector._merge_adjacent_events([], max_gap=3.0)
+        merged = _merge_adjacent_events([], max_gap=3.0)
 
         assert len(merged) == 0
 
@@ -858,7 +875,7 @@ class TestMergeAdjacentEvents:
             )
         ]
 
-        merged = aasm_detector._merge_adjacent_events(events, max_gap=3.0)
+        merged = _merge_adjacent_events(events, max_gap=3.0)
 
         assert len(merged) == 1
         assert merged[0] == events[0]
@@ -871,7 +888,7 @@ class TestClassifyApneaType:
         """High effort flow signal should be classified as OA."""
         flow_signal = np.array([5, -5, 6, -6, 5, -5, 6, -6, 5, -5])
 
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=flow_signal, sample_rate=25.0
         )
 
@@ -884,7 +901,7 @@ class TestClassifyApneaType:
             [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
         )
 
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=flow_signal, sample_rate=25.0
         )
 
@@ -897,7 +914,7 @@ class TestClassifyApneaType:
         # std ≈ 3.5, range ≈ 7, normalizes to effort ≈ 0.08-0.10
         flow_signal = np.array([3.0, -3.0, 3.5, -2.5, 3.0, -3.0, 3.5, -2.5, 3.0, -3.0])
 
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=flow_signal, sample_rate=25.0
         )
 
@@ -906,7 +923,7 @@ class TestClassifyApneaType:
 
     def test_classify_no_flow_data(self, aasm_detector):
         """No flow data should be classified as UA."""
-        apnea_type, confidence = aasm_detector._classify_apnea_type(
+        apnea_type, confidence = _classify_apnea_type(
             flow_signal=None, sample_rate=25.0
         )
 
@@ -921,7 +938,7 @@ class TestCheckDesaturation:
         """SpO2 drop of 4% should be detected."""
         spo2_values = np.array([96, 95, 94, 93, 92, 91, 90])
 
-        has_desat = aasm_detector._check_desaturation(spo2_values)
+        has_desat = _check_desaturation(spo2_values)
 
         assert has_desat is True
 
@@ -929,7 +946,7 @@ class TestCheckDesaturation:
         """SpO2 drop of 2% should not be detected."""
         spo2_values = np.array([96, 95, 94, 94, 95, 96])
 
-        has_desat = aasm_detector._check_desaturation(spo2_values)
+        has_desat = _check_desaturation(spo2_values)
 
         assert has_desat is False
 
@@ -937,7 +954,7 @@ class TestCheckDesaturation:
         """Less than 2 samples should return False."""
         spo2_values = np.array([96])
 
-        has_desat = aasm_detector._check_desaturation(spo2_values)
+        has_desat = _check_desaturation(spo2_values)
 
         assert has_desat is False
 
@@ -988,7 +1005,7 @@ class TestValidateEvent:
         """Event with 95% reduction should validate."""
         reductions = np.array([0.85, 0.90, 0.95, 0.92, 0.88])
 
-        is_valid = aasm_detector._validate_event(reductions, 0, 5)
+        is_valid = _validate_event(aasm_detector.config, reductions, 0, 5)
 
         assert is_valid is True
 
@@ -996,7 +1013,7 @@ class TestValidateEvent:
         """Event with max 85% reduction should not validate for AASM strict."""
         reductions = np.array([0.80, 0.82, 0.85, 0.83, 0.81])
 
-        is_valid = aasm_detector._validate_event(reductions, 0, 5)
+        is_valid = _validate_event(aasm_detector.config, reductions, 0, 5)
 
         assert is_valid is False
 
@@ -1004,7 +1021,7 @@ class TestValidateEvent:
         """Event with 87% reduction should validate for aasm_relaxed."""
         reductions = np.array([0.80, 0.82, 0.87, 0.83, 0.81])
 
-        is_valid = aasm_relaxed_detector._validate_event(reductions, 0, 5)
+        is_valid = _validate_event(aasm_relaxed_detector.config, reductions, 0, 5)
 
         assert is_valid is True
 
@@ -1012,7 +1029,7 @@ class TestValidateEvent:
         """Empty reductions array should return False."""
         reductions = np.array([])
 
-        is_valid = aasm_detector._validate_event(reductions, 0, 0)
+        is_valid = _validate_event(aasm_detector.config, reductions, 0, 0)
 
         assert is_valid is False
 
@@ -1161,7 +1178,7 @@ class TestCalculateTimeBasedBaseline:
                 )
             )
 
-        baseline = aasm_detector._calculate_time_based_baseline(breaths, 35)
+        baseline = _calculate_time_based_baseline(aasm_detector.config, breaths, 35)
 
         assert baseline >= 10.0
 
@@ -1191,7 +1208,7 @@ class TestCalculateTimeBasedBaseline:
             )
             breaths.append(breath)
 
-        baseline = aasm_detector._calculate_time_based_baseline(breaths, 35)
+        baseline = _calculate_time_based_baseline(aasm_detector.config, breaths, 35)
 
         assert baseline >= 10.0
 
@@ -1221,7 +1238,7 @@ class TestCalculateTimeBasedBaseline:
                 )
             )
 
-        baseline = aasm_detector._calculate_time_based_baseline(breaths, 35)
+        baseline = _calculate_time_based_baseline(aasm_detector.config, breaths, 35)
 
         assert baseline == 10.0
 
@@ -1255,7 +1272,9 @@ class TestCalculateBreathBasedBaseline:
                 )
             )
 
-        baseline = aasm_relaxed_detector._calculate_breath_based_baseline(breaths, 45)
+        baseline = _calculate_breath_based_baseline(
+            aasm_relaxed_detector.config, breaths, 45
+        )
 
         assert baseline >= 10.0
 
@@ -1285,7 +1304,9 @@ class TestCalculateBreathBasedBaseline:
             )
             breaths.append(breath)
 
-        baseline = aasm_relaxed_detector._calculate_breath_based_baseline(breaths, 45)
+        baseline = _calculate_breath_based_baseline(
+            aasm_relaxed_detector.config, breaths, 45
+        )
 
         assert baseline >= 10.0
 

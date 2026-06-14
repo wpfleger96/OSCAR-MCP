@@ -15,7 +15,6 @@ dependencies = [
     "click>=8.3.3",
     "pyedflib>=0.1.42",
     "numpy>=2.4.4",
-    "mne>=1.6.0",
     "scipy>=1.17.1",
     "packaging>=26.2",
     "rich>=15.0.0",
@@ -23,7 +22,12 @@ dependencies = [
     "pint>=0.25.3",
     "fastapi>=0.136.1",
     "uvicorn[standard]>=0.46.0",
-    "httpx>=0.28.1",
+]
+
+[project.optional-dependencies]
+# Reading discontinuous EDF+D files (mask-removal sessions, ~1-2% of files)
+edf-discontinuous = [
+    "mne>=1.6.0",
 ]
 
 [project.scripts]
@@ -76,6 +80,8 @@ disable_error_code = ["var-annotated", "type-arg", "union-attr", "assignment", "
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
+    "mne>=1.6.0",
     "mypy>=2.0.0",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",

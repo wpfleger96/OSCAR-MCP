@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
+
 from rich.console import Console
 from rich.markup import escape
 
@@ -72,6 +74,37 @@ def print_footer(*, wide: bool = False) -> None:
 def print_separator(*, wide: bool = False) -> None:
     width = SEP_WIDE if wide else SEP_NARROW
     console.print("-" * width)
+
+
+def print_table(
+    columns: Sequence[tuple[str, int]],
+    rows: Iterable[Sequence[str]],
+    *,
+    header_separator: bool = True,
+    wide: bool = True,
+    indent: int = 0,
+) -> None:
+    """Print a plain-text table of left-aligned, space-separated columns.
+
+    Each column is a ``(header, width)`` pair; a width of 0 leaves the cell
+    unpadded (useful for a ragged last column). Cells longer than their
+    column width are not truncated.
+    """
+    prefix = _indent_prefix(indent)
+
+    def _format_row(cells: Sequence[str]) -> str:
+        return prefix + " ".join(
+            f"{cell:<{width}}" if width else cell
+            for cell, (_, width) in zip(cells, columns, strict=True)
+        )
+
+    console.print(
+        _format_row([name for name, _ in columns]), markup=False, highlight=False
+    )
+    if header_separator:
+        print_separator(wide=wide)
+    for row in rows:
+        console.print(_format_row(row), markup=False, highlight=False)
 
 
 def print_subsection(title: str) -> None:

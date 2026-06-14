@@ -18,6 +18,11 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+def extract_basic_stats(values: np.ndarray) -> tuple[float, float, float]:
+    """Compute (min, max, mean) summary statistics for a waveform array."""
+    return float(np.min(values)), float(np.max(values)), float(np.mean(values))
+
+
 class RespiratoryEventType(Enum):
     """Universal respiratory event types across all devices."""
 
@@ -400,14 +405,6 @@ class UnifiedSession(BaseModel):
         """Add a respiratory event to this session."""
         self.events.append(event)
         self.has_event_data = True
-
-    def get_waveform(self, waveform_type: WaveformType) -> WaveformData | None:
-        """Get a specific waveform by type."""
-        return self.waveforms.get(waveform_type)
-
-    def has_waveform(self, waveform_type: WaveformType) -> bool:
-        """Check if session has data for a specific waveform type."""
-        return waveform_type in self.waveforms
 
     def finalize_statistics(self) -> None:
         """Calculate all statistics from parsed events and waveforms."""

@@ -26,7 +26,13 @@ from typing import Any
 
 import numpy as np
 
-from snore.constants import PARSER_MAX_SEARCH_DEPTH
+from snore.constants import (
+    PARSER_MAX_SEARCH_DEPTH,
+    UNIT_BPM,
+    UNIT_FLOW,
+    UNIT_PERCENT,
+    UNIT_PRESSURE,
+)
 from snore.parsers.base import (
     DeviceParser,
     ParserDetectionResult,
@@ -35,16 +41,17 @@ from snore.parsers.base import (
     RawFileManifest,
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
+from snore.parsers.event_labels import EVENT_TYPE_MAP, FILTERED_ANNOTATIONS
 from snore.parsers.formats.edf import EDFReader
 from snore.parsers.unified import (
     DeviceInfo,
     RespiratoryEvent,
-    RespiratoryEventType,
     TherapyMode,
     TherapySettings,
     UnifiedSession,
     WaveformData,
     WaveformType,
+    extract_basic_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,43 +78,6 @@ class ResmedEDFParser(DeviceParser):
     FILE_TYPE_SA2 = "_SA2.edf"  # Statistics
     FILE_TYPE_EVE = "_EVE.edf"  # Events
     FILE_TYPE_CSL = "_CSL.edf"  # Compliance
-
-    EVENT_TYPE_MAP = {
-        "Obstructive Apnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "ObstructiveApnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "Obstructive apnea": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "OA": RespiratoryEventType.OBSTRUCTIVE_APNEA,
-        "Central Apnea": RespiratoryEventType.CENTRAL_APNEA,
-        "CentralApnea": RespiratoryEventType.CENTRAL_APNEA,
-        "Central apnea": RespiratoryEventType.CENTRAL_APNEA,
-        "CA": RespiratoryEventType.CENTRAL_APNEA,
-        "Clear Airway": RespiratoryEventType.CLEAR_AIRWAY,  # (same as Central Apnea in some ResMed devices)
-        "ClearAirway": RespiratoryEventType.CLEAR_AIRWAY,
-        "Apnea": RespiratoryEventType.UNCLASSIFIED_APNEA,
-        "UA": RespiratoryEventType.UNCLASSIFIED_APNEA,
-        "Hypopnea": RespiratoryEventType.HYPOPNEA,
-        "H": RespiratoryEventType.HYPOPNEA,
-        "RERA": RespiratoryEventType.RERA,  # (Respiratory Effort Related Arousal)
-        "RE": RespiratoryEventType.RERA,
-        "Arousal": RespiratoryEventType.RERA,  # OSCAR uses "Arousal" for RERA
-        "Flow Limitation": RespiratoryEventType.FLOW_LIMITATION,
-        "FlowLimitation": RespiratoryEventType.FLOW_LIMITATION,
-        "FL": RespiratoryEventType.FLOW_LIMITATION,
-        "Periodic Breathing": RespiratoryEventType.PERIODIC_BREATHING,
-        "PeriodicBreathing": RespiratoryEventType.PERIODIC_BREATHING,
-        "PB": RespiratoryEventType.PERIODIC_BREATHING,
-        "Large Leak": RespiratoryEventType.LARGE_LEAK,
-        "LargeLeak": RespiratoryEventType.LARGE_LEAK,
-        "LL": RespiratoryEventType.LARGE_LEAK,
-        "Vibratory Snore": RespiratoryEventType.VIBRATORY_SNORE,
-        "VibratorySnore": RespiratoryEventType.VIBRATORY_SNORE,
-        "VS": RespiratoryEventType.VIBRATORY_SNORE,
-    }
-
-    FILTERED_ANNOTATIONS = {
-        "Recording starts",
-        "SpO2 Desaturation",  # handled separately if needed
-    }
 
     STR_SETTINGS_MAP = {
         "Mode": "mode",
@@ -416,6 +386,102 @@ class ResmedEDFParser(DeviceParser):
         """
         path = Path(path)
 
+        path, night_items = self._discover_session_files(path, sort_by)
+        night_items = self._filter_night_items(night_items, date_from, date_to)
+
+        device_info = self.get_device_info(path)
+
+        str_file = path / "STR.edf"
+        str_settings_cache = self._preload_str_settings(str_file)
+        str_summaries_cache = self._preload_str_summaries(str_file)
+
+        sessions_yielded = 0
+
+        if parallel and len(night_items) > 1:
+            # limit counts yielded sessions, not nights: a night can be dropped
+            # by the per-session date filter or fail to parse, so truncating
+            # night_items up front would under-deliver. The as_completed loop
+            # below enforces the limit and cancels remaining futures instead.
+            logger.debug(
+                f"Parsing {len(night_items)} nights in parallel with {os.cpu_count()} workers"
+            )
+
+            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+                futures = {
+                    executor.submit(
+                        self._parse_single_session_bundle,
+                        night_date,
+                        segments,
+                        device_info,
+                        path,
+                        str_settings_cache,
+                        str_summaries_cache,
+                        date_from,
+                        date_to,
+                    ): night_date
+                    for night_date, segments in night_items
+                }
+
+                for future in as_completed(futures):
+                    night_date = futures[future]
+
+                    if limit is not None and sessions_yielded >= limit:
+                        logger.debug(
+                            f"Reached session limit of {limit}, cancelling remaining"
+                        )
+                        for remaining_future in futures:
+                            if not remaining_future.done():
+                                remaining_future.cancel()
+                        break
+
+                    try:
+                        session = future.result()
+                    except Exception as e:
+                        logger.error(f"Failed to parse night {night_date}: {e}")
+                        continue
+
+                    if session is None:
+                        continue
+
+                    yield session
+                    sessions_yielded += 1
+        else:
+            for night_date, segments in night_items:
+                if limit is not None and sessions_yielded >= limit:
+                    logger.debug(f"Reached session limit of {limit}, stopping")
+                    break
+
+                try:
+                    session = self._parse_single_session_bundle(
+                        night_date,
+                        segments,
+                        device_info,
+                        path,
+                        str_settings_cache,
+                        str_summaries_cache,
+                        date_from,
+                        date_to,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to parse night {night_date}: {e}")
+                    continue
+
+                if session is None:
+                    continue
+
+                yield session
+                sessions_yielded += 1
+
+    def _discover_session_files(
+        self, path: Path, sort_by: str | None
+    ) -> tuple[Path, list[tuple[str, dict[str, dict[str, Path]]]]]:
+        """
+        Resolve the data root and collect session files grouped by night.
+
+        Returns:
+            (resolved_path, night_items) where night_items is a list of
+            (night_date, segments) tuples in the requested sort order
+        """
         if self._all_roots:
             matching_roots = [r for r in self._all_roots if r.path == path]
             if matching_roots:
@@ -429,8 +495,6 @@ class ResmedEDFParser(DeviceParser):
 
         if not datalog_dir.exists():
             raise ParserError("DATALOG directory not found", self)
-
-        device_info = self.get_device_info(path)
 
         night_groups = self._group_session_files(datalog_dir)
 
@@ -447,199 +511,89 @@ class ResmedEDFParser(DeviceParser):
         else:
             night_items = list(night_groups.items())
 
-        if parallel and len(night_items) > 1:
-            yield from self._parse_sessions_parallel(
-                night_items, device_info, path, date_from, date_to, limit
-            )
-        else:
-            yield from self._parse_sessions_sequential(
-                night_items, device_info, path, date_from, date_to, limit
-            )
+        return path, night_items
 
-    def _parse_sessions_sequential(
+    def _filter_night_items(
         self,
         night_items: list[tuple[str, dict[str, dict[str, Path]]]],
-        device_info: Any,
-        path: Path,
         date_from: str | None,
         date_to: str | None,
-        limit: int | None,
-    ) -> Iterator[UnifiedSession]:
-        """Parse sessions sequentially (original behavior)."""
-        sessions_yielded = 0
+    ) -> list[tuple[str, dict[str, dict[str, Path]]]]:
+        """Filter night items by date range based on their night-date IDs."""
+        if not (date_from or date_to):
+            return night_items
 
-        str_file = path / "STR.edf"
-        str_settings_cache = self._preload_str_settings(str_file)
-        str_summaries_cache = self._preload_str_summaries(str_file)
-
-        for night_date, segments in night_items:
-            if date_from or date_to:
-                try:
-                    night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
-
-                    if date_from:
-                        filter_date_from = datetime.fromisoformat(date_from).date()
-                        if night_date_obj < filter_date_from:
-                            logger.debug(
-                                f"Skipping night {night_date}: before {filter_date_from}"
-                            )
-                            continue
-
-                    if date_to:
-                        filter_date_to = datetime.fromisoformat(date_to).date()
-                        if night_date_obj > filter_date_to:
-                            logger.debug(
-                                f"Skipping night {night_date}: after {filter_date_to}"
-                            )
-                            continue
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Could not parse night date {night_date}: {e}")
-
-            if limit is not None and sessions_yielded >= limit:
-                logger.debug(f"Reached session limit of {limit}, stopping")
-                break
-
-            try:
-                session = self._parse_night_session(
-                    night_date,
-                    segments,
-                    device_info,
-                    path,
-                    str_settings_cache,
-                    str_summaries_cache,
-                )
-
-                if session is None:
-                    continue
-
-                if date_from:
-                    if (
-                        session.start_time.date()
-                        < datetime.fromisoformat(date_from).date()
-                    ):
-                        logger.warning(
-                            f"Night {night_date} has mismatched date in ID vs file contents"
-                        )
-                        continue
-                if date_to:
-                    if (
-                        session.start_time.date()
-                        > datetime.fromisoformat(date_to).date()
-                    ):
-                        logger.warning(
-                            f"Night {night_date} has mismatched date in ID vs file contents"
-                        )
-                        continue
-
-                session.finalize_statistics()
-                yield session
-                sessions_yielded += 1
-
-            except Exception as e:
-                logger.error(f"Failed to parse night {night_date}: {e}")
-                continue
-
-    def _parse_sessions_parallel(
-        self,
-        night_items: list[tuple[str, dict[str, dict[str, Path]]]],
-        device_info: Any,
-        path: Path,
-        date_from: str | None,
-        date_to: str | None,
-        limit: int | None,
-    ) -> Iterator[UnifiedSession]:
-        """Parse sessions in parallel using ThreadPoolExecutor for I/O-bound EDF reading."""
         filtered_items = []
         for night_date, segments in night_items:
-            if date_from or date_to:
-                try:
-                    night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
+            try:
+                night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
 
-                    if date_from:
-                        filter_date_from = datetime.fromisoformat(date_from).date()
-                        if night_date_obj < filter_date_from:
-                            logger.debug(
-                                f"Skipping night {night_date}: before {filter_date_from}"
-                            )
-                            continue
+                if date_from:
+                    filter_date_from = datetime.fromisoformat(date_from).date()
+                    if night_date_obj < filter_date_from:
+                        logger.debug(
+                            f"Skipping night {night_date}: before {filter_date_from}"
+                        )
+                        continue
 
-                    if date_to:
-                        filter_date_to = datetime.fromisoformat(date_to).date()
-                        if night_date_obj > filter_date_to:
-                            logger.debug(
-                                f"Skipping night {night_date}: after {filter_date_to}"
-                            )
-                            continue
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Could not parse night date {night_date}: {e}")
+                if date_to:
+                    filter_date_to = datetime.fromisoformat(date_to).date()
+                    if night_date_obj > filter_date_to:
+                        logger.debug(
+                            f"Skipping night {night_date}: after {filter_date_to}"
+                        )
+                        continue
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not parse night date {night_date}: {e}")
 
             filtered_items.append((night_date, segments))
 
-        if limit is not None and len(filtered_items) > limit:
-            filtered_items = filtered_items[:limit]
+        return filtered_items
 
-        logger.debug(
-            f"Parsing {len(filtered_items)} nights in parallel with {os.cpu_count()} workers"
+    def _parse_single_session_bundle(
+        self,
+        night_date: str,
+        segments: dict[str, dict[str, Path]],
+        device_info: DeviceInfo,
+        base_path: Path,
+        str_settings_cache: dict[date, dict[str, float]] | None,
+        str_summaries_cache: dict[date, dict[str, float]] | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """
+        Parse one night's file bundle into a finalized session.
+
+        Returns None when the night has no valid segments or its actual
+        start date falls outside the requested date range.
+        """
+        session = self._parse_night_session(
+            night_date,
+            segments,
+            device_info,
+            base_path,
+            str_settings_cache,
+            str_summaries_cache,
         )
 
-        str_file = path / "STR.edf"
-        str_settings_cache = self._preload_str_settings(str_file)
-        str_summaries_cache = self._preload_str_summaries(str_file)
+        if session is None:
+            return None
 
-        sessions_yielded = 0
+        if date_from:
+            if session.start_time.date() < datetime.fromisoformat(date_from).date():
+                logger.warning(
+                    f"Night {night_date} has mismatched date in ID vs file contents"
+                )
+                return None
+        if date_to:
+            if session.start_time.date() > datetime.fromisoformat(date_to).date():
+                logger.warning(
+                    f"Night {night_date} has mismatched date in ID vs file contents"
+                )
+                return None
 
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-            futures = {
-                executor.submit(
-                    self._parse_night_session,
-                    night_date,
-                    segments,
-                    device_info,
-                    path,
-                    str_settings_cache,
-                    str_summaries_cache,
-                ): night_date
-                for night_date, segments in filtered_items
-            }
-
-            for future in as_completed(futures):
-                night_date = futures[future]
-
-                if limit is not None and sessions_yielded >= limit:
-                    logger.debug(
-                        f"Reached session limit of {limit}, cancelling remaining"
-                    )
-                    for remaining_future in futures:
-                        if not remaining_future.done():
-                            remaining_future.cancel()
-                    break
-
-                try:
-                    session = future.result()
-
-                    if session is None:
-                        continue
-
-                    if date_from:
-                        if (
-                            session.start_time.date()
-                            < datetime.fromisoformat(date_from).date()
-                        ):
-                            continue
-                    if date_to:
-                        if (
-                            session.start_time.date()
-                            > datetime.fromisoformat(date_to).date()
-                        ):
-                            continue
-
-                    session.finalize_statistics()
-                    yield session
-                    sessions_yielded += 1
-
-                except Exception as e:
-                    logger.error(f"Failed to parse night {night_date}: {e}")
-                    continue
+        session.finalize_statistics()
+        return session
 
     # ------------------------------------------------------------------
     # Raw file backup / export
@@ -1249,37 +1203,23 @@ class ResmedEDFParser(DeviceParser):
 
                 spo2_signal = self._find_signal(edf, ["SpO2"])
                 if spo2_signal:
-                    data, info = edf.read_signal(spo2_signal)
+                    result = self._read_waveform(
+                        edf,
+                        spo2_signal,
+                        WaveformType.SPO2,
+                        UNIT_PERCENT,
+                        valid_range=(70, 100),
+                    )
+                    if result is not None:
+                        waveform, valid_data = result
 
-                    valid_mask = (data >= 70) & (data <= 100)
-                    valid_data = data[valid_mask]
-
-                    if len(valid_data) > 0:
-                        timestamps_seconds = edf.get_timestamps(spo2_signal, data)
-
-                        spo2_min = float(np.min(valid_data))
-                        spo2_max = float(np.max(valid_data))
-                        spo2_mean = float(np.mean(valid_data))
-
-                        below_90 = np.sum(valid_data < 90)
-                        time_below_90_seconds = int(below_90)
-
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.SPO2,
-                            sample_rate=edf.get_sample_rate(spo2_signal),
-                            unit=info.physical_dimension or "%",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=spo2_min,
-                            max_value=spo2_max,
-                            mean_value=spo2_mean,
-                        )
+                        time_below_90_seconds = int(np.sum(valid_data < 90))
 
                         session.add_waveform(waveform)
 
-                        session.statistics.spo2_min = spo2_min
-                        session.statistics.spo2_max = spo2_max
-                        session.statistics.spo2_mean = spo2_mean
+                        session.statistics.spo2_min = waveform.min_value
+                        session.statistics.spo2_max = waveform.max_value
+                        session.statistics.spo2_mean = waveform.mean_value
                         session.statistics.spo2_time_below_90 = time_below_90_seconds
 
                         has_valid_data = True
@@ -1291,34 +1231,21 @@ class ResmedEDFParser(DeviceParser):
 
                 pulse_signal = self._find_signal(edf, ["Pulse"])
                 if pulse_signal:
-                    data, info = edf.read_signal(pulse_signal)
-
-                    valid_mask = (data >= 40) & (data <= 200)
-                    valid_data = data[valid_mask]
-
-                    if len(valid_data) > 0:
-                        timestamps_seconds = edf.get_timestamps(pulse_signal, data)
-
-                        pulse_min = float(np.min(valid_data))
-                        pulse_max = float(np.max(valid_data))
-                        pulse_mean = float(np.mean(valid_data))
-
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.PULSE,
-                            sample_rate=edf.get_sample_rate(pulse_signal),
-                            unit=info.physical_dimension or "bpm",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=pulse_min,
-                            max_value=pulse_max,
-                            mean_value=pulse_mean,
-                        )
+                    result = self._read_waveform(
+                        edf,
+                        pulse_signal,
+                        WaveformType.PULSE,
+                        UNIT_BPM,
+                        valid_range=(40, 200),
+                    )
+                    if result is not None:
+                        waveform, valid_data = result
 
                         session.add_waveform(waveform)
 
-                        session.statistics.pulse_min = pulse_min
-                        session.statistics.pulse_max = pulse_max
-                        session.statistics.pulse_mean = pulse_mean
+                        session.statistics.pulse_min = waveform.min_value
+                        session.statistics.pulse_max = waveform.max_value
+                        session.statistics.pulse_mean = waveform.mean_value
 
                         has_valid_data = True
                         logger.debug(
@@ -1365,30 +1292,18 @@ class ResmedEDFParser(DeviceParser):
                 flow_signal = self._find_signal(edf, ["Flow"])
 
                 if flow_signal:
-                    data, info = edf.read_signal(flow_signal)
-                    timestamps_seconds = edf.get_timestamps(flow_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf,
+                        flow_signal,
+                        WaveformType.FLOW_RATE,
+                        UNIT_FLOW,
+                        convert_lps_to_lpm=True,
+                    )
+                    if result is None:
                         logger.warning(f"No data in flow signal {flow_signal}")
                         return
 
-                    unit = info.physical_dimension or "L/min"
-
-                    if unit == "L/s":
-                        data = data * 60.0
-                        unit = "L/min"
-
-                    waveform = WaveformData(
-                        waveform_type=WaveformType.FLOW_RATE,
-                        sample_rate=edf.get_sample_rate(flow_signal),
-                        unit=unit,
-                        timestamps=timestamps_seconds,
-                        values=data,
-                        min_value=float(np.min(data)),
-                        max_value=float(np.max(data)),
-                        mean_value=float(np.mean(data)),
-                    )
-
+                    waveform, data = result
                     session.add_waveform(waveform)
                     logger.debug(
                         f"Parsed {len(data)} flow samples from {file_path.name}"
@@ -1397,6 +1312,63 @@ class ResmedEDFParser(DeviceParser):
         except Exception as e:
             logger.warning(f"Failed to parse breathing waveforms: {e}")
             session.data_quality_notes.append(f"BRP parsing failed: {e}")
+
+    def _read_waveform(
+        self,
+        edf: EDFReader,
+        signal: str,
+        waveform_type: WaveformType,
+        default_unit: str,
+        *,
+        valid_range: tuple[float, float] | None = None,
+        convert_lps_to_lpm: bool = False,
+    ) -> tuple[WaveformData, np.ndarray] | None:
+        """
+        Read an EDF signal and build a WaveformData with min/max/mean stats.
+
+        Args:
+            edf: Open EDF reader
+            signal: Signal label to read
+            waveform_type: Waveform type for the resulting WaveformData
+            default_unit: Unit to use when the EDF physical dimension is empty
+            valid_range: Optional (low, high) inclusive range; stats are
+                computed over the valid subset while the full array is stored
+            convert_lps_to_lpm: Convert L/s data to L/min when applicable
+
+        Returns:
+            (waveform, valid_data) tuple, or None if the signal has no
+            (valid) data. valid_data is the subset used for stats.
+        """
+        data, info = edf.read_signal(signal)
+
+        if valid_range is not None:
+            low, high = valid_range
+            valid_data = data[(data >= low) & (data <= high)]
+            if len(valid_data) == 0:
+                return None
+        else:
+            if len(data) == 0:
+                return None
+            valid_data = data
+
+        unit = info.physical_dimension or default_unit
+        if convert_lps_to_lpm and unit == "L/s":
+            data = data * 60.0
+            valid_data = data
+            unit = UNIT_FLOW
+
+        min_value, max_value, mean_value = extract_basic_stats(valid_data)
+        waveform = WaveformData(
+            waveform_type=waveform_type,
+            sample_rate=edf.get_sample_rate(signal),
+            unit=unit,
+            timestamps=edf.get_timestamps(signal, data),
+            values=data,
+            min_value=min_value,
+            max_value=max_value,
+            mean_value=mean_value,
+        )
+        return waveform, valid_data
 
     def _find_signal(self, edf: Any, patterns: list[str]) -> str | None:
         """Find signal name matching any of the patterns."""
@@ -1457,94 +1429,54 @@ class ResmedEDFParser(DeviceParser):
 
                 # Parse therapy pressure (device's target pressure)
                 if therapy_signal:
-                    data, info = edf.read_signal(therapy_signal)
-                    timestamps_seconds = edf.get_timestamps(therapy_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf,
+                        therapy_signal,
+                        WaveformType.THERAPY_PRESSURE,
+                        UNIT_PRESSURE,
+                    )
+                    if result is None:
                         logger.warning(
                             f"No data in therapy pressure signal {therapy_signal}"
                         )
                     else:
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.THERAPY_PRESSURE,
-                            sample_rate=edf.get_sample_rate(therapy_signal),
-                            unit=info.physical_dimension or "cmH2O",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 # Parse mask pressure (measured at mask)
                 if mask_signal:
-                    data, info = edf.read_signal(mask_signal)
-                    timestamps_seconds = edf.get_timestamps(mask_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf, mask_signal, WaveformType.MASK_PRESSURE, UNIT_PRESSURE
+                    )
+                    if result is None:
                         logger.warning(f"No data in mask pressure signal {mask_signal}")
                     else:
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.MASK_PRESSURE,
-                            sample_rate=edf.get_sample_rate(mask_signal),
-                            unit=info.physical_dimension or "cmH2O",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 # Parse EPAP (therapy pressure minus EPR)
                 if epap_signal:
-                    data, info = edf.read_signal(epap_signal)
-                    timestamps_seconds = edf.get_timestamps(epap_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf, epap_signal, WaveformType.EPAP, UNIT_PRESSURE
+                    )
+                    if result is None:
                         logger.warning(f"No data in EPAP signal {epap_signal}")
                     else:
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.EPAP,
-                            sample_rate=edf.get_sample_rate(epap_signal),
-                            unit=info.physical_dimension or "cmH2O",
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 # ResMed uses names like "Leak.2s", "LeakRate"
                 leak_signal = self._find_signal(edf, ["Leak"])
 
                 if leak_signal:
-                    data, info = edf.read_signal(leak_signal)
-                    timestamps_seconds = edf.get_timestamps(leak_signal, data)
-
-                    if len(data) == 0:
+                    result = self._read_waveform(
+                        edf,
+                        leak_signal,
+                        WaveformType.LEAK_RATE,
+                        UNIT_FLOW,
+                        convert_lps_to_lpm=True,
+                    )
+                    if result is None:
                         logger.warning(f"No data in leak signal {leak_signal}")
                     else:
-                        unit = info.physical_dimension or "L/min"
-
-                        if unit == "L/s":
-                            data = data * 60.0
-                            unit = "L/min"
-
-                        waveform = WaveformData(
-                            waveform_type=WaveformType.LEAK_RATE,
-                            sample_rate=edf.get_sample_rate(leak_signal),
-                            unit=unit,
-                            timestamps=timestamps_seconds,
-                            values=data,
-                            min_value=float(np.min(data)),
-                            max_value=float(np.max(data)),
-                            mean_value=float(np.mean(data)),
-                        )
-
-                        session.add_waveform(waveform)
+                        session.add_waveform(result[0])
 
                 logger.debug(f"Parsed pressure/leak from {file_path.name}")
 
@@ -1585,18 +1517,18 @@ class ResmedEDFParser(DeviceParser):
                 annotation_text = None
 
                 for text in annotation.annotations:
-                    if text in self.FILTERED_ANNOTATIONS:
+                    if text in FILTERED_ANNOTATIONS:
                         filtered_count += 1
                         break
 
-                    if text in self.EVENT_TYPE_MAP:
-                        event_type = self.EVENT_TYPE_MAP[text]
+                    if text in EVENT_TYPE_MAP:
+                        event_type = EVENT_TYPE_MAP[text]
                         annotation_text = text
                         break
 
                 if annotation_text is None and event_type is None:
                     for text in annotation.annotations:
-                        if text not in self.FILTERED_ANNOTATIONS:
+                        if text not in FILTERED_ANNOTATIONS:
                             unknown_annotations.add(text)
                             unknown_count += 1
                     continue
@@ -1700,11 +1632,11 @@ class ResmedEDFParser(DeviceParser):
                     event_type = None
 
                     for text in annotation.annotations:
-                        if text in self.FILTERED_ANNOTATIONS:
+                        if text in FILTERED_ANNOTATIONS:
                             break
 
-                        if text in self.EVENT_TYPE_MAP:
-                            event_type = self.EVENT_TYPE_MAP[text]
+                        if text in EVENT_TYPE_MAP:
+                            event_type = EVENT_TYPE_MAP[text]
                             break
 
                     if event_type is None:

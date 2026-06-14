@@ -9,7 +9,13 @@ from pathlib import Path
 
 import click
 
-from snore.cli.decorators import date_range_options_required, db_option, init_db
+from snore.cli.decorators import (
+    date_range_options_required,
+    db_option,
+)
+from snore.cli.decorators import (
+    db_session as open_db_session,
+)
 from snore.cli.display import console, err_console, print_footer, print_header
 
 
@@ -41,7 +47,6 @@ def validate(
     Validates SNORE's detection against machine events for sessions in the specified
     date range, and displays aggregate metrics.
     """
-    from snore.database.session import session_scope
     from snore.validation import BatchValidator, export_report_csv, export_report_json
 
     if date_from > date_to:
@@ -50,9 +55,7 @@ def validate(
     if db and not Path(db).expanduser().exists():
         raise click.ClickException(f"Database not found: {db}")
 
-    init_db(db)
-
-    with session_scope() as db_session:
+    with open_db_session(db) as db_session:
         try:
             validator = BatchValidator(db_session, None)
 

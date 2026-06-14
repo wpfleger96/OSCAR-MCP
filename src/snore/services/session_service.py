@@ -1,8 +1,9 @@
 """Session service for session listing, detail, deletion, and management operations."""
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import ColumnElement, UnaryExpression, func, select
 from sqlalchemy.orm import Session
 
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
@@ -33,6 +34,30 @@ class SessionService:
         """
         self.db_session = db_session
 
+    @staticmethod
+    def _session_filters(
+        device: str | None,
+        from_date: datetime | None,
+        to_date: datetime | None,
+        include_disabled: bool,
+    ) -> list[ColumnElement[bool]]:
+        """Build shared WHERE conditions for session list and count queries."""
+        filters: list[ColumnElement[bool]] = []
+
+        if not include_disabled:
+            filters.append(models.Session.enabled.is_(True))
+
+        if device:
+            filters.append(models.Device.serial_number == device)
+
+        if from_date:
+            filters.append(models.Session.start_time >= from_date)
+
+        if to_date:
+            filters.append(models.Session.start_time <= to_date)
+
+        return filters
+
     def list_sessions(
         self,
         device: str | None = None,
@@ -58,99 +83,52 @@ class SessionService:
         Returns:
             SessionListResult with sessions and total count
         """
-        where_clauses = []
-        params: dict[str, str | int] = {}
+        filters = self._session_filters(device, from_date, to_date, include_disabled)
 
-        if not include_disabled:
-            where_clauses.append("sessions.enabled = 1")
-
-        if device:
-            where_clauses.append("devices.serial_number = :device")
-            params["device"] = device
-
-        if from_date:
-            where_clauses.append("sessions.start_time >= :from_date")
-            params["from_date"] = from_date.isoformat()
-
-        if to_date:
-            where_clauses.append("sessions.start_time <= :to_date")
-            params["to_date"] = to_date.isoformat()
-
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-
-        # Built from hardcoded maps (safe from injection)
-        sort_map = {
-            "date-asc": "sessions.start_time ASC",
-            "date-desc": "sessions.start_time DESC",
-            "session-id": "sessions.id ASC",
-            "duration": "sessions.duration_seconds DESC",
+        sort_map: dict[str, UnaryExpression[Any]] = {
+            "date-asc": models.Session.start_time.asc(),
+            "date-desc": models.Session.start_time.desc(),
+            "session-id": models.Session.id.asc(),
+            "duration": models.Session.duration_seconds.desc(),
         }
-        order_by = sort_map.get(sort_by, "sessions.start_time DESC")
+        order_by = sort_map.get(sort_by, models.Session.start_time.desc())
 
-        count_query = text(
-            f"""
-            SELECT COUNT(*)
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            WHERE {where_sql}
-            """
+        count_query = (
+            select(func.count())
+            .select_from(models.Session)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(*filters)
         )
-        total_count = self.db_session.execute(count_query, params).scalar() or 0
+        total_count = self.db_session.execute(count_query).scalar() or 0
+
+        list_query = (
+            select(models.Session, models.Device, models.Statistics.ahi)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .outerjoin(
+                models.Statistics, models.Session.id == models.Statistics.session_id
+            )
+            .where(*filters)
+            .order_by(order_by)
+        )
 
         if limit > 0:
-            limit_sql = "LIMIT :limit"
-            params["limit"] = limit
-        else:
-            limit_sql = ""
+            list_query = list_query.limit(limit)
 
         if offset > 0:
-            offset_sql = "OFFSET :offset"
-            params["offset"] = offset
-        else:
-            offset_sql = ""
-
-        list_query = text(
-            f"""
-            SELECT
-                sessions.id,
-                sessions.start_time,
-                sessions.duration_seconds,
-                sessions.enabled,
-                devices.manufacturer,
-                devices.model,
-                devices.serial_number,
-                statistics.ahi
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            LEFT JOIN statistics ON sessions.id = statistics.session_id
-            WHERE {where_sql}
-            ORDER BY {order_by}
-            {limit_sql}
-            {offset_sql}
-            """
-        )
-
-        results = self.db_session.execute(list_query, params).fetchall()
+            list_query = list_query.offset(offset)
 
         sessions = []
-        for row in results:
-            start_time_parsed = (
-                datetime.fromisoformat(row.start_time)
-                if isinstance(row.start_time, str)
-                else row.start_time
-            )
-            duration_hours = row.duration_seconds / 3600
-
+        for session, dev, ahi in self.db_session.execute(list_query):
             sessions.append(
                 SessionListItem(
-                    id=row.id,
-                    start_time=start_time_parsed,
-                    duration_hours=duration_hours,
-                    enabled=bool(row.enabled),
-                    manufacturer=row.manufacturer,
-                    model=row.model,
-                    serial_number=row.serial_number,
-                    ahi=row.ahi,
+                    id=session.id,
+                    start_time=session.start_time,
+                    duration_hours=(session.duration_seconds or 0.0) / 3600,
+                    enabled=bool(session.enabled),
+                    manufacturer=dev.manufacturer,
+                    model=dev.model,
+                    serial_number=dev.serial_number,
+                    ahi=ahi,
                 )
             )
 
@@ -216,40 +194,7 @@ class SessionService:
 
         statistics = None
         if stats_record:
-            statistics = SessionStatistics(
-                usage_hours=stats_record.usage_hours,
-                ahi=stats_record.ahi,
-                rei=stats_record.rei,
-                oai=stats_record.oai,
-                cai=stats_record.cai,
-                hi=stats_record.hi,
-                obstructive_apneas=stats_record.obstructive_apneas,
-                central_apneas=stats_record.central_apneas,
-                mixed_apneas=stats_record.mixed_apneas,
-                hypopneas=stats_record.hypopneas,
-                reras=stats_record.reras,
-                flow_limitations=stats_record.flow_limitations,
-                pressure_mean=stats_record.pressure_mean,
-                pressure_min=stats_record.pressure_min,
-                pressure_max=stats_record.pressure_max,
-                pressure_95th=stats_record.pressure_95th,
-                epap_mean=stats_record.epap_mean,
-                epap_min=stats_record.epap_min,
-                epap_max=stats_record.epap_max,
-                epap_95th=stats_record.epap_95th,
-                leak_mean=stats_record.leak_mean,
-                leak_percentile_70=stats_record.leak_percentile_70,
-                leak_95th=stats_record.leak_95th,
-                spo2_mean=stats_record.spo2_mean,
-                spo2_min=stats_record.spo2_min,
-                spo2_time_below_90=stats_record.spo2_time_below_90,
-                pulse_mean=stats_record.pulse_mean,
-                pulse_min=stats_record.pulse_min,
-                pulse_max=stats_record.pulse_max,
-                respiratory_rate_mean=stats_record.respiratory_rate_mean,
-                tidal_volume_mean=stats_record.tidal_volume_mean,
-                minute_ventilation_mean=stats_record.minute_ventilation_mean,
-            )
+            statistics = SessionStatistics.model_validate(stats_record)
 
         settings_list = None
         if include_settings:
@@ -315,105 +260,65 @@ class SessionService:
                 "--device, --session-id, --from, --to, or --all"
             )
 
-        where_clauses = []
-        params: dict[str, str | tuple[int, ...]] = {}
+        filters: list[ColumnElement[bool]] = []
 
         if device:
-            where_clauses.append("devices.serial_number = :device")
-            params["device"] = device
+            filters.append(models.Device.serial_number == device)
 
         if session_ids:
-            where_clauses.append("sessions.id IN :session_ids")
-            params["session_ids"] = tuple(session_ids)
+            filters.append(models.Session.id.in_(session_ids))
 
         if from_date:
-            where_clauses.append("sessions.start_time >= :from_date")
-            params["from_date"] = from_date.isoformat()
+            filters.append(models.Session.start_time >= from_date)
 
         if to_date:
-            where_clauses.append("sessions.start_time <= :to_date")
-            params["to_date"] = to_date.isoformat()
+            filters.append(models.Session.start_time <= to_date)
 
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-
-        query = text(
-            f"""
-            SELECT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                sessions.duration_seconds,
-                devices.manufacturer,
-                devices.model,
-                devices.serial_number
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            WHERE {where_sql}
-            ORDER BY sessions.start_time DESC
-            """
+        query = (
+            select(models.Session, models.Device)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(*filters)
+            .order_by(models.Session.start_time.desc())
         )
 
-        if session_ids:
-            query = query.bindparams(bindparam("session_ids", expanding=True))
-
-        results = self.db_session.execute(query, params).fetchall()
-
         sessions = []
-        session_ids_to_delete = []
-        for row in results:
-            start_time_parsed = (
-                datetime.fromisoformat(row.start_time)
-                if isinstance(row.start_time, str)
-                else row.start_time
-            )
+        session_ids_to_delete: list[int] = []
+        for session, dev in self.db_session.execute(query):
             sessions.append(
                 SessionListItem(
-                    id=row.id,
-                    start_time=start_time_parsed,
-                    duration_hours=row.duration_seconds / 3600,
+                    id=session.id,
+                    start_time=session.start_time,
+                    duration_hours=(session.duration_seconds or 0.0) / 3600,
                     enabled=True,
-                    manufacturer=row.manufacturer,
-                    model=row.model,
-                    serial_number=row.serial_number,
+                    manufacturer=dev.manufacturer,
+                    model=dev.model,
+                    serial_number=dev.serial_number,
                     ahi=None,
                 )
             )
-            session_ids_to_delete.append(row.id)
+            session_ids_to_delete.append(session.id)
 
         if not session_ids_to_delete:
             return DeletePreview(
                 sessions=[], event_count=0, waveform_count=0, stats_count=0
             )
 
-        event_count_query = text(
-            "SELECT COUNT(*) FROM events WHERE session_id IN :session_ids"
-        ).bindparams(bindparam("session_ids", expanding=True))
-        event_count = (
-            self.db_session.execute(
-                event_count_query, {"session_ids": tuple(session_ids_to_delete)}
-            ).scalar()
-            or 0
-        )
+        def _count_subquery(model: type[Any]) -> Any:
+            return (
+                select(func.count())
+                .select_from(model)
+                .where(model.session_id.in_(session_ids_to_delete))
+                .scalar_subquery()
+            )
 
-        waveform_count_query = text(
-            "SELECT COUNT(*) FROM waveforms WHERE session_id IN :session_ids"
-        ).bindparams(bindparam("session_ids", expanding=True))
-        waveform_count = (
-            self.db_session.execute(
-                waveform_count_query, {"session_ids": tuple(session_ids_to_delete)}
-            ).scalar()
-            or 0
-        )
-
-        stats_count_query = text(
-            "SELECT COUNT(*) FROM statistics WHERE session_id IN :session_ids"
-        ).bindparams(bindparam("session_ids", expanding=True))
-        stats_count = (
-            self.db_session.execute(
-                stats_count_query, {"session_ids": tuple(session_ids_to_delete)}
-            ).scalar()
-            or 0
-        )
+        # One round-trip for all three related-row counts.
+        event_count, waveform_count, stats_count = self.db_session.execute(
+            select(
+                _count_subquery(models.Event),
+                _count_subquery(models.Waveform),
+                _count_subquery(models.Statistics),
+            )
+        ).one()
 
         return DeletePreview(
             sessions=sessions,

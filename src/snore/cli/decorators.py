@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from sqlalchemy.orm import Session
 
 
 def init_db(db: str | None) -> None:
@@ -13,6 +19,16 @@ def init_db(db: str | None) -> None:
     from snore.database.session import init_database
 
     init_database(str(Path(db).expanduser()) if db else None)
+
+
+@contextmanager
+def db_session(db: str | None) -> Iterator[Session]:
+    """Initialize the database and provide a transactional session scope."""
+    from snore.database.session import session_scope
+
+    init_db(db)
+    with session_scope() as session:
+        yield session
 
 
 def db_option(f: Any) -> Any:
@@ -23,6 +39,22 @@ def db_option(f: Any) -> Any:
         type=click.Path(),
         help="Path to SQLite database file",
     )(f)
+
+
+def device_option(f: Any) -> Any:
+    """Shared --device/-d option for filtering by device serial number."""
+    return click.option("--device", "-d", help="Device serial number")(f)
+
+
+def session_id_date_options(f: Any) -> Any:
+    """Shared --session-id/--date options for selecting a session."""
+    f = click.option(
+        "--date",
+        type=click.DateTime(formats=["%Y-%m-%d"]),
+        help="Session date (YYYY-MM-DD)",
+    )(f)
+    f = click.option("--session-id", type=int, help="Session ID")(f)
+    return f
 
 
 def date_range_options(f: Any) -> Any:

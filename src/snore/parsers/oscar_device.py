@@ -62,6 +62,7 @@ from snore.parsers.unified import (
     TherapySettings,
     UnifiedSession,
     WaveformData,
+    extract_basic_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -630,15 +631,16 @@ class OscarDeviceParser(DeviceParser):
                     dtype=np.float32,
                 )
 
+                min_value, max_value, mean_value = extract_basic_stats(values)
                 waveform = WaveformData(
                     waveform_type=waveform_type,
                     sample_rate=event_list.sample_rate,
                     unit=event_list.dimension or unit,
                     timestamps=timestamps_seconds,
                     values=values,
-                    min_value=float(np.min(values)),
-                    max_value=float(np.max(values)),
-                    mean_value=float(np.mean(values)),
+                    min_value=min_value,
+                    max_value=max_value,
+                    mean_value=mean_value,
                 )
 
                 session.add_waveform(waveform)

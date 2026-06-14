@@ -25,6 +25,13 @@ from snore.parsers.formats.types import EDFAnnotation, EDFHeader, EDFSignalInfo
 
 logger = logging.getLogger(__name__)
 
+_MNE_MISSING_MESSAGE = (
+    "MNE library is required to read discontinuous EDF+ (EDF+D) files. "
+    "Install the 'edf-discontinuous' extra: "
+    "uv tool install 'snore[edf-discontinuous]' "
+    "(or in a development checkout: uv sync --extra edf-discontinuous)"
+)
+
 
 class EDFReader:
     """
@@ -730,10 +737,7 @@ def read_annotations_from_discontinuous(file_path: Path) -> list[EDFAnnotation]:
 
     except ImportError:
         logger.error("MNE library not installed - cannot read discontinuous EDF+ files")
-        raise ValueError(
-            "MNE library is required to read discontinuous EDF+ files. "
-            "Install with: pip install mne"
-        ) from None
+        raise ValueError(_MNE_MISSING_MESSAGE) from None
     except Exception as e:
         logger.error(f"Failed to read discontinuous file with MNE: {e}")
         raise ValueError(f"Failed to read discontinuous EDF+ file: {e}") from e
@@ -880,7 +884,13 @@ class EDFDiscontinuousReader:
         if self._mne_raw is None:
             import os
 
-            import mne
+            try:
+                import mne
+            except ImportError:
+                logger.error(
+                    "MNE library not installed - cannot read discontinuous EDF+ files"
+                )
+                raise ValueError(_MNE_MISSING_MESSAGE) from None
 
             try:
                 # Suppress both stdout and stderr at C-level to silence libsndfile warnings

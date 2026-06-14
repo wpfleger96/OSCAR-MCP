@@ -19,21 +19,13 @@ from sqlalchemy import text
 from snore.cli import cli
 from snore.database import models
 from snore.database.day_manager import DayManager
-from snore.database.session import cleanup_database, init_database, session_scope
+from snore.database.session import init_database, session_scope
 
 
 @pytest.fixture
 def cli_runner():
     """Create a Click CLI test runner."""
     return CliRunner()
-
-
-@pytest.fixture(autouse=True)
-def reset_database_state():
-    """Reset global database state before and after each test."""
-    cleanup_database()
-    yield
-    cleanup_database()
 
 
 @pytest.fixture

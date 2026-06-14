@@ -338,53 +338,7 @@ class SessionImporter:
         """Import session statistics."""
         stats = session_data.statistics
 
-        stats_record = models.Statistics(
-            session_id=session_id,
-            obstructive_apneas=stats.obstructive_apneas,
-            central_apneas=stats.central_apneas,
-            mixed_apneas=stats.mixed_apneas,
-            hypopneas=stats.hypopneas,
-            reras=stats.reras,
-            flow_limitations=stats.flow_limitations,
-            ahi=stats.ahi,
-            oai=stats.oai,
-            cai=stats.cai,
-            hi=stats.hi,
-            rei=stats.rei,
-            pressure_min=stats.pressure_min,
-            pressure_max=stats.pressure_max,
-            pressure_median=stats.pressure_median,
-            pressure_mean=stats.pressure_mean,
-            pressure_95th=stats.pressure_95th,
-            epap_min=stats.epap_min,
-            epap_max=stats.epap_max,
-            epap_median=stats.epap_median,
-            epap_mean=stats.epap_mean,
-            epap_95th=stats.epap_95th,
-            leak_min=stats.leak_min,
-            leak_max=stats.leak_max,
-            leak_median=stats.leak_median,
-            leak_mean=stats.leak_mean,
-            leak_95th=stats.leak_95th,
-            leak_percentile_70=stats.leak_percentile_70,
-            respiratory_rate_min=stats.respiratory_rate_min,
-            respiratory_rate_max=stats.respiratory_rate_max,
-            respiratory_rate_mean=stats.respiratory_rate_mean,
-            tidal_volume_min=stats.tidal_volume_min,
-            tidal_volume_max=stats.tidal_volume_max,
-            tidal_volume_mean=stats.tidal_volume_mean,
-            minute_ventilation_min=stats.minute_ventilation_min,
-            minute_ventilation_max=stats.minute_ventilation_max,
-            minute_ventilation_mean=stats.minute_ventilation_mean,
-            spo2_min=stats.spo2_min,
-            spo2_max=stats.spo2_max,
-            spo2_mean=stats.spo2_mean,
-            spo2_time_below_90=stats.spo2_time_below_90,
-            pulse_min=stats.pulse_min,
-            pulse_max=stats.pulse_max,
-            pulse_mean=stats.pulse_mean,
-            usage_hours=stats.usage_hours,
-        )
+        stats_record = models.Statistics(session_id=session_id, **stats.model_dump())
         db.add(stats_record)
 
         logger.debug("Imported session statistics")
@@ -398,31 +352,16 @@ class SessionImporter:
         if not settings:
             return
 
-        settings_dict = {
-            "mode": settings.mode.value,
-            "pressure_min": settings.pressure_min,
-            "pressure_max": settings.pressure_max,
-            "pressure_fixed": settings.pressure_fixed,
-            "ipap": settings.ipap,
-            "epap": settings.epap,
-            "epr_level": settings.epr_level,
-            "epr_mode": settings.epr_mode,
-            "ramp_time": settings.ramp_time,
-            "ramp_enabled": settings.ramp_enabled,
-            "ramp_start_pressure": settings.ramp_start_pressure,
-            "humidity_level": settings.humidity_level,
-            "humidity_enabled": settings.humidity_enabled,
-            "tube_temp": settings.tube_temp,
-            "tube_temp_enabled": settings.tube_temp_enabled,
-            "climate_control": settings.climate_control,
-            "mask_type": settings.mask_type,
-            "smart_start": settings.smart_start,
-            "ab_filter": settings.ab_filter,
-        }
+        settings_dict: dict[str, object] = settings.model_dump(
+            mode="json", exclude={"ps", "other_settings"}, exclude_none=True
+        )
 
         if settings.other_settings:
             settings_dict.update(settings.other_settings)
 
+        # exclude_none only covers the main model fields; other_settings is
+        # merged in afterward, so guard against None here to avoid persisting
+        # the literal string "None".
         setting_records = [
             models.Setting(session_id=session_id, key=key, value=str(value))
             for key, value in settings_dict.items()

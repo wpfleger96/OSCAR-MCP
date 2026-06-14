@@ -168,6 +168,8 @@ class SessionListResult(BaseModel):
 class SessionStatistics(BaseModel):
     """Statistics for a single session (from Statistics table)."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     usage_hours: float | None = None
     ahi: float | None = None
     rei: float | None = None
@@ -337,6 +339,8 @@ class DeviceInfo(BaseModel):
 
 class DayListItem(BaseModel):
     """Summary of a single therapy day."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     date: date
     device_id: int

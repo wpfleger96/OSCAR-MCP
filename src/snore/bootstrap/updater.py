@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import subprocess
 import tomllib
 import urllib.request
 
@@ -12,14 +11,15 @@ from pathlib import Path
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
-from .installer import (
+from .core import (
     GITHUB_REPO,
     GITHUB_REPO_URL,
     PACKAGE_NAME,
     UV_NOT_FOUND_ERROR,
-    get_tool_source,
     is_command_available,
+    run_uv_tool_command,
 )
+from .installer import get_tool_source
 from .version import get_package_version, is_newer
 
 logger = logging.getLogger(__name__)
@@ -272,37 +272,19 @@ def perform_update(
     if python_flag:
         cmd.extend(["--python", python_flag])
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+    success, message, output = run_uv_tool_command(cmd, "Upgrade")
+    if not success:
+        return False, message, False
 
-        if result.returncode == 0:
-            output = result.stdout + result.stderr
+    if (
+        "Upgraded" in output
+        or "Successfully installed" in output
+        or "Installed" in output
+    ):
+        was_upgraded = True
+    elif "Nothing to upgrade" in output or "already" in output.lower():
+        was_upgraded = False
+    else:
+        was_upgraded = True
 
-            if (
-                "Upgraded" in output
-                or "Successfully installed" in output
-                or "Installed" in output
-            ):
-                was_upgraded = True
-            elif "Nothing to upgrade" in output or "already" in output.lower():
-                was_upgraded = False
-            else:
-                was_upgraded = True
-
-            return True, "Upgrade successful", was_upgraded
-
-        error_msg = result.stderr.strip()
-        if not error_msg:
-            error_msg = "Upgrade failed with no error message"
-
-        return False, error_msg, False
-
-    except subprocess.TimeoutExpired:
-        return False, "Upgrade timed out after 60 seconds", False
-    except Exception as e:
-        return False, f"Unexpected error: {e}", False
+    return True, "Upgrade successful", was_upgraded

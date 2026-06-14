@@ -1,13 +1,14 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Response
-from sqlalchemy.orm import Session
 
-from snore.api.deps import get_db
+from snore.api.deps import service_dep
 from snore.services import StatsService
 from snore.services.schemas import PeriodStatistics, TherapySummary
 
 router = APIRouter()
+
+StatsServiceDep = Annotated[StatsService, Depends(service_dep(StatsService))]
 
 
 @router.get(
@@ -19,10 +20,9 @@ router = APIRouter()
     },
 )
 def get_summary(
+    service: StatsServiceDep,
     days_limit: int | None = Query(default=None),
-    db: Session = Depends(get_db),
 ) -> TherapySummary | Response:
-    service = StatsService(db)
     result = service.get_summary(days_limit)
     if result is None:
         return Response(status_code=204)
@@ -31,30 +31,27 @@ def get_summary(
 
 @router.get("/periods", response_model=list[PeriodStatistics])
 def get_periods(
+    service: StatsServiceDep,
     period_type: Literal["week", "month", "6month", "year"] = Query(default="month"),
     days_limit: int | None = Query(default=None),
-    db: Session = Depends(get_db),
 ) -> list[PeriodStatistics]:
-    service = StatsService(db)
     return service.get_period_statistics(period_type, days_limit)
 
 
 @router.get("/trends")
 def get_trends(
+    service: StatsServiceDep,
     period_type: Literal["week", "month", "6month", "year"] = Query(default="month"),
     days_limit: int | None = Query(default=None),
-    db: Session = Depends(get_db),
 ) -> Any:
-    service = StatsService(db)
     period_stats = service.get_period_statistics(period_type, days_limit)
     return service.get_trends(period_stats)
 
 
 @router.get("/records")
 def get_records(
+    service: StatsServiceDep,
     days_limit: int | None = Query(default=None),
     top_n: int = Query(default=5),
-    db: Session = Depends(get_db),
 ) -> Any:
-    service = StatsService(db)
     return service.get_records(days_limit, top_n)

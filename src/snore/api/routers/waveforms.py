@@ -1,14 +1,15 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
 
-from snore.api.deps import get_db
+from snore.api.deps import service_dep
 from snore.api.schemas import WaveformDataResponse
 from snore.services import WaveformService
 from snore.services.schemas import WaveformInfo
 
 router = APIRouter()
+
+WaveformServiceDep = Annotated[WaveformService, Depends(service_dep(WaveformService))]
 
 VALID_WAVEFORM_TYPES = Literal[
     "flow",
@@ -27,10 +28,7 @@ VALID_WAVEFORM_TYPES = Literal[
 
 
 @router.get("/{session_id}/waveforms", response_model=list[WaveformInfo])
-def list_waveforms(
-    session_id: int, db: Session = Depends(get_db)
-) -> list[WaveformInfo]:
-    service = WaveformService(db)
+def list_waveforms(session_id: int, service: WaveformServiceDep) -> list[WaveformInfo]:
     return service.list_waveforms(session_id)
 
 
@@ -40,12 +38,11 @@ def list_waveforms(
 def get_waveform(
     session_id: int,
     waveform_type: VALID_WAVEFORM_TYPES,
+    service: WaveformServiceDep,
     max_points: int = Query(default=2000),
     start_seconds: float | None = Query(default=None),
     end_seconds: float | None = Query(default=None),
-    db: Session = Depends(get_db),
 ) -> WaveformDataResponse:
-    service = WaveformService(db)
     timestamps, values, metadata = service.get_waveform_data(
         session_id=session_id,
         waveform_type=waveform_type,

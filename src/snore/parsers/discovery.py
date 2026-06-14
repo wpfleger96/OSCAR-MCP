@@ -61,7 +61,7 @@ class DataRootFinder:
                     depth = len(subpath.relative_to(path).parts)
                     if depth <= max_levels_down:
                         add_root_if_valid(subpath)
-        except PermissionError, OSError:
+        except OSError:
             pass
 
         return sorted(roots, key=lambda r: r.confidence, reverse=True)

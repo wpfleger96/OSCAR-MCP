@@ -72,10 +72,6 @@ class QDataStreamReader:
         """Read signed 16-bit integer."""
         return cast(int, struct.unpack(f"{self.byte_order}h", self.read_bytes(2))[0])
 
-    def read_uint16(self) -> int:
-        """Read unsigned 16-bit integer."""
-        return cast(int, struct.unpack(f"{self.byte_order}H", self.read_bytes(2))[0])
-
     def read_int32(self) -> int:
         """Read signed 32-bit integer."""
         return cast(int, struct.unpack(f"{self.byte_order}i", self.read_bytes(4))[0])
@@ -186,61 +182,6 @@ class QDataStreamReader:
                 f"Skipping unsupported QVariant type: {type_code}", stacklevel=2
             )
             return None
-
-    def skip_qhash_uint32_qvariant(self) -> None:
-        """
-        Skip QHash<quint32, QVariant> without parsing values.
-
-        This is useful for skipping settings that contain unknown QVariant types.
-        """
-        count = self.read_uint32()
-
-        for _ in range(count):
-            self.read_uint32()
-            type_code = self.read_uint32()
-            is_null = self.read_bool()
-
-            if is_null:
-                continue
-
-            if type_code == QVariantType.Bool:
-                self.read_bool()
-            elif type_code == QVariantType.Int:
-                self.read_int32()
-            elif type_code == QVariantType.UInt:
-                self.read_uint32()
-            elif type_code == QVariantType.LongLong:
-                self.read_int64()
-            elif type_code == QVariantType.ULongLong:
-                self.read_uint64()
-            elif type_code == QVariantType.Double:
-                self.read_double()
-            elif type_code == QVariantType.String:
-                self.read_qstring()
-            elif type_code == QVariantType.ByteArray:
-                length = self.read_uint32()
-                if length != 0xFFFFFFFF:
-                    self.skip_bytes(length)
-
-    def read_qhash_uint32_qvariant(self) -> dict[int, Any]:
-        """
-        Read QHash<quint32, QVariant>.
-
-        Format: 4-byte count, then pairs of (key, value).
-        Used for OSCAR channel settings.
-
-        Returns:
-            Dictionary mapping channel IDs to values
-        """
-        count = self.read_uint32()
-        result = {}
-
-        for _ in range(count):
-            key = self.read_uint32()
-            value = self.read_qvariant()
-            result[key] = value
-
-        return result
 
     def read_qhash_uint32_float(self) -> dict[int, float]:
         """
@@ -409,15 +350,3 @@ class QDataStreamReader:
         result = list(struct.unpack(f"{self.byte_order}{count}I", data))
 
         return result
-
-    def skip_bytes(self, count: int) -> None:
-        """Skip specified number of bytes."""
-        self.stream.seek(count, 1)
-
-    def tell(self) -> int:
-        """Get current position in stream."""
-        return self.stream.tell()
-
-    def seek(self, position: int, whence: int = 0) -> None:
-        """Seek to position in stream."""
-        self.stream.seek(position, whence)

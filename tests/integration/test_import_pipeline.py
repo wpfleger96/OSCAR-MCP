@@ -10,15 +10,7 @@ from sqlalchemy import text
 
 from snore.database import models
 from snore.database.importers import SessionImporter
-from snore.database.session import cleanup_database, init_database, session_scope
-
-
-@pytest.fixture(autouse=True)
-def reset_database_state():
-    """Reset global database state before and after each test to ensure isolation."""
-    cleanup_database()
-    yield
-    cleanup_database()
+from snore.database.session import init_database, session_scope
 
 
 class TestImportPipeline:
@@ -162,6 +154,29 @@ class TestImportPipeline:
 
         if session_data.has_statistics:
             assert stats is not None
+
+    def test_settings_import_skips_none_values(
+        self, temp_db, resmed_parser, resmed_fixture_path
+    ):
+        """None values in other_settings must not be persisted as the string 'None'."""
+        init_database(str(temp_db))
+
+        sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
+        session_data = sessions[0]
+        if session_data.settings is None:
+            pytest.skip("fixture session has no settings")
+
+        # Dict mutation bypasses pydantic validation, mirroring a parser that
+        # populates an optional setting with None. The importer must drop it.
+        session_data.settings.other_settings["unexpected_none"] = None
+
+        importer = SessionImporter()
+        importer.import_session(session_data)
+
+        with session_scope() as session:
+            values = [s.value for s in session.query(models.Setting).all()]
+
+        assert "None" not in values
 
     def test_database_stats(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test database statistics reporting."""

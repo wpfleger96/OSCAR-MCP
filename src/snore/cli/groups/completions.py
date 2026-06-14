@@ -16,6 +16,17 @@ from snore.completions import (
 _SUPPORTED_SHELLS = ["bash", "zsh"]
 
 
+def _print_completion_script(shell: str) -> None:
+    """Output a shell completion script for manual installation."""
+    try:
+        script = generate_completion_script(shell)
+        print_raw(script)
+        console.print(f"\nTo install: Add the above to your ~/.{shell}rc or run:")
+        console.print("\nsnore completions install")
+    except Exception as e:
+        raise click.ClickException(f"Error generating completion script: {e}") from e
+
+
 @click.group()
 def completions() -> None:
     """Manage shell tab completion."""
@@ -25,25 +36,13 @@ def completions() -> None:
 @completions.command(name="bash")
 def completions_bash() -> None:
     """Output bash completion script for manual installation."""
-    try:
-        script = generate_completion_script("bash")
-        print_raw(script)
-        console.print("\nTo install: Add the above to your ~/.bashrc or run:")
-        console.print("\nsnore completions install")
-    except Exception as e:
-        raise click.ClickException(f"Error generating completion script: {e}") from e
+    _print_completion_script("bash")
 
 
 @completions.command(name="zsh")
 def completions_zsh() -> None:
     """Output zsh completion script for manual installation."""
-    try:
-        script = generate_completion_script("zsh")
-        print_raw(script)
-        console.print("\nTo install: Add the above to your ~/.zshrc or run:")
-        console.print("\nsnore completions install")
-    except Exception as e:
-        raise click.ClickException(f"Error generating completion script: {e}") from e
+    _print_completion_script("zsh")
 
 
 @completions.command(name="install")
