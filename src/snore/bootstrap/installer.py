@@ -89,5 +89,5 @@ def get_tool_source(package_name: str) -> str | None:
 
         return "pypi"
 
-    except OSError, tomllib.TOMLDecodeError, KeyError, IndexError:
+    except (OSError, tomllib.TOMLDecodeError, KeyError, IndexError):
         return None

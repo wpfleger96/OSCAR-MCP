@@ -1,5 +1,7 @@
 """Event post-processing: validation, deduplication, merging and matching."""
 
+from __future__ import annotations
+
 import logging
 
 from collections.abc import Sequence
