@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Unified Data Model for CPAP Data Platform
 
@@ -10,6 +8,8 @@ between the parser layer and the rest of the system.
 Key Principle: The database layer and analysis tools only work with these
 unified structures - they never see parser-specific formats.
 """
+
+from __future__ import annotations
 
 from datetime import datetime, timedelta
 from enum import Enum
