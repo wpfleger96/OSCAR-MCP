@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Unified Data Model for CPAP Data Platform
 

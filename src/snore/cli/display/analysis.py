@@ -539,7 +539,7 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
                     temp_c = ureg.Quantity(float(s.value), ureg.degC)
                     temp_f = temp_c.to(ureg.degF)
                     console.print(f"    {escape(s.key)}: {temp_f.magnitude:.1f}°F")
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     console.print(f"    {escape(s.key)}: {escape(str(s.value))}")
             else:
                 console.print(f"    {escape(str(s.key))}: {escape(str(s.value))}")
