@@ -38,20 +38,25 @@ def get_periods(
     return service.get_period_statistics(period_type, days_limit)
 
 
-@router.get("/trends")
+@router.get("/trends", response_model=dict[str, list[list[Any]]])
 def get_trends(
     service: StatsServiceDep,
     period_type: Literal["week", "month", "6month", "year"] = Query(default="month"),
     days_limit: int | None = Query(default=None),
 ) -> Any:
+    # Service returns dict[str, list[tuple[date, float | None]]]; tuples serialize as
+    # JSON arrays, so response_model=dict[str, list[list[Any]]] reflects the wire shape.
     period_stats = service.get_period_statistics(period_type, days_limit)
     return service.get_trends(period_stats)
 
 
-@router.get("/records")
+@router.get("/records", response_model=dict[str, dict[str, list[list[Any]]]])
 def get_records(
     service: StatsServiceDep,
     days_limit: int | None = Query(default=None),
     top_n: int = Query(default=5),
 ) -> Any:
+    # Service returns dict[str, dict[str, list[tuple[date, float]]]]; tuples serialize
+    # as JSON arrays, so response_model=dict[str, dict[str, list[list[Any]]]] reflects
+    # the wire shape.
     return service.get_records(days_limit, top_n)

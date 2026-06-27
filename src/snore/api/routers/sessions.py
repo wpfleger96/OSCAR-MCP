@@ -1,9 +1,11 @@
+from datetime import datetime, time
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.schemas import (
+    BulkDeletePreviewRequest,
     PaginatedResponse,
     SessionDeleteRequest,
     SessionEnabledRequest,
@@ -41,6 +43,19 @@ def list_sessions(
         total=result.total_count,
         limit=pagination.limit,
         offset=pagination.offset,
+    )
+
+
+@router.post("/delete-preview", response_model=DeletePreview)
+def bulk_delete_preview(
+    body: BulkDeletePreviewRequest, service: SessionServiceDep
+) -> DeletePreview:
+    return service.get_delete_preview(
+        device=body.device,
+        session_ids=body.session_ids,
+        from_date=datetime.combine(body.from_date, time.min) if body.from_date else None,
+        to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
+        delete_all=body.delete_all,
     )
 
 

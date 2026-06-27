@@ -55,6 +55,9 @@ def list_analysis_sessions(
 
 
 @router.get("/sessions/{session_id}/analysis")
+# response_model omitted intentionally: AnalysisResult is a complex internal Pydantic
+# model whose schema changes across analysis modes. Exposing it via response_model would
+# tightly couple the OpenAPI spec to internal analysis model structure.
 def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> Any:
     result = facade.get_analysis_result(session_id)
     if result is None:
@@ -63,6 +66,7 @@ def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> Any:
 
 
 @router.post("/sessions/{session_id}/analysis", status_code=201)
+# response_model omitted intentionally: same reason as get_analysis above.
 def run_analysis(
     session_id: int,
     body: AnalysisRunRequest,

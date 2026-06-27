@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 from pydantic import BaseModel, Field
 
 from snore.services.schemas import (
@@ -14,6 +16,7 @@ __all__ = [
     "WaveformDataResponse",
     "SessionEnabledRequest",
     "SessionDeleteRequest",
+    "BulkDeletePreviewRequest",
     "AnalysisRunRequest",
     "AnalysisDeleteRequest",
     "EventItem",
@@ -47,6 +50,14 @@ class SessionEnabledRequest(BaseModel):
 
 class SessionDeleteRequest(BaseModel):
     session_ids: list[int]
+
+
+class BulkDeletePreviewRequest(BaseModel):
+    session_ids: list[int] | None = None
+    device: str | None = None
+    from_date: date | None = None
+    to_date: date | None = None
+    delete_all: bool = False
 
 
 class AnalysisRunRequest(BaseModel):
