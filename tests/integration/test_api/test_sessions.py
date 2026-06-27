@@ -218,3 +218,47 @@ class TestDeletePreview:
         assert data["sessions"][0]["id"] == session.id
         assert data["event_count"] == 0
         assert data["waveform_count"] == 0
+
+
+class TestBulkDeletePreview:
+    def test_delete_all_true_empty_db(self, api_client):
+        response = api_client.post(
+            "/api/v1/sessions/delete-preview", json={"delete_all": True}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["sessions"] == []
+
+    def test_session_ids_filter(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
+        response = api_client.post(
+            "/api/v1/sessions/delete-preview",
+            json={"session_ids": [session.id]},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["sessions"]) == 1
+        assert data["sessions"][0]["id"] == session.id
+
+    def test_date_range_filter(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        test_session_factory(test_device.id, start_time=datetime(2025, 1, 15, 22, 0))
+        response = api_client.post(
+            "/api/v1/sessions/delete-preview",
+            json={"from_date": "2025-01-01", "to_date": "2025-01-31"},
+        )
+        assert response.status_code == 200
+
+    def test_response_shape(self, api_client):
+        response = api_client.post(
+            "/api/v1/sessions/delete-preview", json={"delete_all": True}
+        )
+        data = response.json()
+        assert "sessions" in data
+        assert "event_count" in data
+        assert "waveform_count" in data

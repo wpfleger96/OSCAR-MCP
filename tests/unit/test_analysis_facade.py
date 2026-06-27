@@ -1,5 +1,6 @@
 """Unit tests for AnalysisFacade."""
 
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -257,3 +258,91 @@ class TestDeleteAnalysis:
 
         remaining = db_session.query(AnalysisResult).count()
         assert remaining == 0
+
+
+class TestRunBatchAnalysis:
+    def test_no_sessions_returns_empty_result(self, db_session):
+        facade = AnalysisFacade(db_session)
+        result = facade.run_batch_analysis(
+            from_date=datetime(2099, 1, 1), to_date=datetime(2099, 12, 31)
+        )
+        assert result.total == 0
+        assert result.successful == 0
+        assert result.failed == 0
+        assert result.results == []
+
+    def test_successful_analysis(self, db_session, test_device, monkeypatch):
+        """Mock analyze_session to succeed, verify successful count."""
+        day, sess = _create_session_with_analysis(
+            db_session, test_device, date(2025, 1, 10), num_analyses=0
+        )
+        db_session.commit()
+
+        @contextmanager
+        def fake_scope():
+            yield db_session
+
+        monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.analyze_session",
+            lambda *a, **kw: None,
+        )
+        facade = AnalysisFacade(db_session)
+        result = facade.run_batch_analysis(
+            from_date=datetime(2025, 1, 1), to_date=datetime(2025, 1, 31)
+        )
+        assert result.total == 1
+        assert result.successful == 1
+        assert result.failed == 0
+
+    def test_failed_analysis(self, db_session, test_device, monkeypatch):
+        """Mock analyze_session to raise, verify failed count."""
+        day, sess = _create_session_with_analysis(
+            db_session, test_device, date(2025, 1, 10), num_analyses=0
+        )
+        db_session.commit()
+
+        @contextmanager
+        def fake_scope():
+            yield db_session
+
+        def raise_error(*a, **kw):
+            raise RuntimeError("test error")
+
+        monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.analyze_session",
+            raise_error,
+        )
+        facade = AnalysisFacade(db_session)
+        result = facade.run_batch_analysis(
+            from_date=datetime(2025, 1, 1), to_date=datetime(2025, 1, 31)
+        )
+        assert result.total == 1
+        assert result.failed == 1
+        assert result.results[0].success is False
+
+    def test_progress_callback_called(self, db_session, test_device, monkeypatch):
+        day, sess = _create_session_with_analysis(
+            db_session, test_device, date(2025, 1, 10), num_analyses=0
+        )
+        db_session.commit()
+
+        @contextmanager
+        def fake_scope():
+            yield db_session
+
+        monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.analyze_session",
+            lambda *a, **kw: None,
+        )
+        calls = []
+        facade = AnalysisFacade(db_session)
+        facade.run_batch_analysis(
+            from_date=datetime(2025, 1, 1),
+            to_date=datetime(2025, 1, 31),
+            progress_callback=lambda completed, total: calls.append((completed, total)),
+        )
+        assert len(calls) == 1
+        assert calls[0] == (1, 1)

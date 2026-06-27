@@ -216,3 +216,20 @@ class TestDatabaseServiceListDevices:
         assert result[0].manufacturer == "ResMed"
         assert result[0].model == "AirSense 10"
         assert result[0].serial_number == "12345ABC"
+
+
+class TestVacuum:
+    def test_vacuum_returns_success_status(self, db_session, temp_db):
+        service = DatabaseService(db_session)
+        result = service.vacuum(str(temp_db))
+        assert result.status == "success"
+
+    def test_vacuum_size_before_positive(self, db_session, temp_db):
+        service = DatabaseService(db_session)
+        result = service.vacuum(str(temp_db))
+        assert result.size_before_mb > 0
+
+    def test_vacuum_size_after_nonnegative(self, db_session, temp_db):
+        service = DatabaseService(db_session)
+        result = service.vacuum(str(temp_db))
+        assert result.size_after_mb >= 0
