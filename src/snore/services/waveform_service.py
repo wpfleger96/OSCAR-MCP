@@ -10,7 +10,11 @@ from snore.analysis.data.waveform_loader import WaveformLoader
 from snore.database import models
 from snore.exceptions import NotFoundError
 from snore.services.lttb import lttb_downsample
-from snore.services.schemas import WaveformInfo
+from snore.services.schemas import (
+    EventComparisonDetail,
+    EventComparisonResult,
+    WaveformInfo,
+)
 
 __all__ = ["WaveformService"]
 
@@ -110,3 +114,106 @@ class WaveformService:
             timestamps, values = lttb_downsample(timestamps, values, max_points)
 
         return timestamps, values, metadata
+
+    def compare_events(
+        self,
+        session_id: int,
+        mode: str = "aasm",
+        tolerance_seconds: float = 5.0,
+    ) -> EventComparisonResult:
+        """
+        Compare machine vs programmatic events for a session.
+
+        Args:
+            session_id: Database session ID
+            mode: Detection mode to compare
+            tolerance_seconds: Time tolerance in seconds for matching events
+
+        Returns:
+            EventComparisonResult with false negatives and false positives
+
+        Raises:
+            NotFoundError: If no analysis result found or mode not available
+        """
+        from snore.analysis.service import AnalysisService
+        from snore.analysis.utils import convert_machine_events
+
+        result = AnalysisService(self.db_session).get_analysis_result(session_id)
+
+        if result is None:
+            raise NotFoundError(f"No analysis results found for session {session_id}")
+
+        if mode not in result.mode_results:
+            raise NotFoundError(f"Mode {mode} not found in analysis results")
+
+        mode_result = result.mode_results[mode]
+
+        machine_events_raw = result.machine_events or []
+        machine_apneas, machine_hypopneas = convert_machine_events(machine_events_raw)
+        all_machine = machine_apneas + machine_hypopneas
+
+        prog_apneas = list(mode_result.apneas)
+        prog_hypopneas = list(mode_result.hypopneas)
+        all_prog = prog_apneas + prog_hypopneas
+
+        false_negatives: list[EventComparisonDetail] = []
+        false_positives_apnea: list[EventComparisonDetail] = []
+        false_positives_hypopnea: list[EventComparisonDetail] = []
+
+        for m_event in all_machine:
+            is_matched = any(
+                abs(p_event.start_time - m_event.start_time) <= tolerance_seconds
+                for p_event in all_prog
+            )
+            if not is_matched:
+                false_negatives.append(
+                    EventComparisonDetail(
+                        event_type=getattr(m_event, "event_type", "unknown"),
+                        start_time=m_event.start_time,
+                        duration=getattr(m_event, "duration", 0.0),
+                        confidence=None,
+                        flow_reduction=None,
+                    )
+                )
+
+        for apnea_event in prog_apneas:
+            is_matched = any(
+                abs(apnea_event.start_time - m_event.start_time) <= tolerance_seconds
+                for m_event in all_machine
+            )
+            if not is_matched:
+                false_positives_apnea.append(
+                    EventComparisonDetail(
+                        event_type=apnea_event.event_type,
+                        start_time=apnea_event.start_time,
+                        duration=apnea_event.duration,
+                        confidence=getattr(apnea_event, "confidence", None),
+                        flow_reduction=getattr(apnea_event, "flow_reduction", None),
+                    )
+                )
+
+        for hypopnea_event in prog_hypopneas:
+            is_matched = any(
+                abs(hypopnea_event.start_time - m_event.start_time) <= tolerance_seconds
+                for m_event in all_machine
+            )
+            if not is_matched:
+                false_positives_hypopnea.append(
+                    EventComparisonDetail(
+                        event_type="H",
+                        start_time=hypopnea_event.start_time,
+                        duration=hypopnea_event.duration,
+                        confidence=hypopnea_event.confidence,
+                        flow_reduction=hypopnea_event.flow_reduction,
+                    )
+                )
+
+        return EventComparisonResult(
+            session_id=session_id,
+            mode=mode,
+            machine_event_count=len(machine_events_raw),
+            programmatic_event_count=len(prog_apneas) + len(prog_hypopneas),
+            false_negatives=false_negatives,
+            false_positives_apnea=false_positives_apnea,
+            false_positives_hypopnea=false_positives_hypopnea,
+        )
