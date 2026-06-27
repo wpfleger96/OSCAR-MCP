@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import date
 from io import StringIO
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -21,6 +22,8 @@ def _make_mock_sessions(count: int) -> list[MagicMock]:
     for i in range(1, count + 1):
         s = MagicMock()
         s.id = i
+        s.day.date = date(2024, 1, i)
+        s.start_time.date.return_value = date(2024, 1, i)
         sessions.append(s)
     return sessions
 
@@ -81,7 +84,7 @@ class TestAnalyzeBatch:
 
         assert result.exit_code == 0, result.output
         captured = stdout_buf.getvalue()
-        assert "Analyzing 3 sessions" in captured
+        assert "Analyzed 3 sessions" in captured
         assert "3" in captured
         assert "0" in captured
 
@@ -122,12 +125,11 @@ class TestAnalyzeBatch:
 
         assert result.exit_code == 0, result.output
         stdout_captured = stdout_buf.getvalue()
-        stderr_captured = stderr_buf.getvalue()
         # successful=2, failed=1
         assert "2" in stdout_captured
         assert "1" in stdout_captured
-        # the failed session ID must appear in the warning on stderr
-        assert str(failing_id) in stderr_captured
+        # the failed session ID must appear in the warning output
+        assert str(failing_id) in stdout_captured
 
     def test_analyze_batch_empty_sessions_prints_no_sessions_found(self):
         """When query returns no sessions, the empty-result message is printed and command exits cleanly."""
@@ -174,5 +176,5 @@ class TestAnalyzeBatch:
 
         assert result.exit_code == 0, result.output
         captured = stdout_buf.getvalue()
-        assert "Analyzing 1 sessions" in captured
+        assert "Analyzed 1 sessions" in captured
         assert "1" in captured

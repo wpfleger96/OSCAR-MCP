@@ -13,11 +13,15 @@ from snore.api.middleware import AuthMiddleware, RateLimitMiddleware
 from snore.api.routers import (
     analysis,
     days,
+    db,
     devices,
     events,
+    export,
+    import_data,
     rx,
     sessions,
     stats,
+    validation,
     waveforms,
 )
 from snore.database.session import init_database
@@ -74,5 +78,14 @@ def create_app() -> FastAPI:
     app.include_router(analysis.router, prefix=API_V1_PREFIX, tags=["analysis"])
     app.include_router(days.router, prefix=f"{API_V1_PREFIX}/days", tags=["days"])
     app.include_router(rx.router, prefix=f"{API_V1_PREFIX}/rx", tags=["rx"])
+
+    app.include_router(
+        import_data.router, prefix=f"{API_V1_PREFIX}/import", tags=["import"]
+    )
+    app.include_router(export.router, prefix=f"{API_V1_PREFIX}/export", tags=["export"])
+    app.include_router(db.router, prefix=f"{API_V1_PREFIX}/db", tags=["database"])
+    app.include_router(
+        validation.router, prefix=f"{API_V1_PREFIX}/validate", tags=["validation"]
+    )
 
     return app

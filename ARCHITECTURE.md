@@ -15,11 +15,11 @@ Technical documentation for the SNORE system architecture, components, and desig
 │  PrimeVue components + uPlot charts         │
 ├─────────────────────────────────────────────┤
 │        FastAPI REST API (api/)              │
-│  8 routers, 24 endpoints, LTTB             │
+│  12 routers, 35 endpoints, LTTB            │
 │  OpenAPI docs at /docs                      │
 ├─────────────────────────────────────────────┤
 │        Service Layer (services/)            │
-│  10 services: business logic between        │
+│  11 services: business logic between        │
 │  CLI/API and database                       │
 ├─────────────────────────────────────────────┤
 │        Analysis Layer (Parser Agnostic)     │
@@ -320,17 +320,21 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 
 **Application:** `src/snore/api/app.py`
 
-**Routers (8):**
+**Routers (12):**
 | Router | Prefix | Endpoints |
 |--------|--------|-----------|
-| sessions | `/sessions` | List, detail, enable/disable, delete |
-| waveforms | `/waveforms` | List types, get data (LTTB downsampling) |
+| sessions | `/sessions` | List, detail, enable/disable, delete, bulk delete-preview |
+| waveforms | `/waveforms` | List types, get data (LTTB downsampling), compare events |
 | events | `/events` | List, match machine vs programmatic |
-| analysis | `/analysis` | List status, get result, run, delete |
+| analysis | `/analysis` | List status, get result, run, delete, batch analysis |
 | stats | `/stats` | Summary, periods, trends, records |
 | devices | `/devices` | List |
 | days | `/days` | List, detail |
 | rx | `/rx` | History, current, compare |
+| import | `/import` | Detect sources, upload+import |
+| export | `/export` | CSV, JSON, raw file download |
+| db | `/db` | Stats, vacuum |
+| validation | `/validate` | Batch validation report |
 
 **Key patterns:**
 - Dependency injection: `db: Session = Depends(get_db)` for database sessions
@@ -349,16 +353,17 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 
 | Service | Responsibility |
 |---------|---------------|
-| AnalysisFacade | Analysis orchestration and result retrieval |
+| AnalysisFacade | Analysis orchestration, result retrieval, batch analysis |
 | BackupService | Raw SD card file backup to `~/.snore/raw/` |
 | DatabaseService | Database operations (stats, vacuum, init) and device listing |
 | DayService | Day aggregation and lookup |
 | EventService | Event queries and matching |
-| ExportService | Data export (CSV, JSON) |
+| ExportService | Data export (CSV, JSON, raw files) |
+| ImportService | CPAP data import: source detection, file upload, backup, parse orchestration |
 | lttb (module) | Largest-Triangle-Three-Buckets downsampling via `lttb_downsample()` |
 | SessionService | Session CRUD and filtering |
 | StatsService | Statistics calculations and summaries |
-| WaveformService | Waveform data access and formatting (single high-level entry point) |
+| WaveformService | Waveform data access, formatting, event comparison |
 
 Prescription/therapy settings tracking lives in `analysis/rx_tracker.py` (RxTracker),
 which returns the Pydantic responses from `services/schemas.py` directly.

@@ -30,6 +30,18 @@ __all__ = [
     "DayDetail",
     "RxPeriodResponse",
     "RxComparisonResponse",
+    # Import schemas
+    "ImportSource",
+    "ImportSourceResult",
+    "ImportResult",
+    # Batch analysis schemas
+    "BatchSessionResult",
+    "BatchAnalysisResult",
+    # Event comparison schemas
+    "EventComparisonDetail",
+    "EventComparisonResult",
+    # Vacuum schema
+    "VacuumResult",
 ]
 
 
@@ -381,3 +393,103 @@ class RxComparisonResponse(BaseModel):
     periods: list[RxPeriodResponse]
     best_index: int | None = None
     worst_index: int | None = None
+
+
+class ImportSource(BaseModel):
+    """Detected data source for import."""
+
+    parser_name: str = Field(description="Parser identifier (e.g., 'resmed')")
+    device_serial: str | None = Field(default=None, description="Device serial number")
+    profile_name: str | None = Field(default=None, description="Data profile name")
+    structure_type: str | None = Field(
+        default=None, description="Directory structure type"
+    )
+    root_path: str = Field(description="Root path of data source")
+    data_root: str | None = Field(default=None, description="Data root within source")
+
+
+class ImportSourceResult(BaseModel):
+    """Result of importing a single data source."""
+
+    source: ImportSource = Field(description="The source that was imported")
+    imported: int = Field(default=0, description="Sessions successfully imported")
+    skipped: int = Field(default=0, description="Sessions skipped (already exist)")
+    failed: int = Field(default=0, description="Sessions that failed to import")
+    warnings: list[str] = Field(default_factory=list, description="Non-fatal warnings")
+
+
+class ImportResult(BaseModel):
+    """Aggregate result of an import operation across all sources."""
+
+    total_imported: int = Field(default=0, description="Total sessions imported")
+    total_skipped: int = Field(default=0, description="Total sessions skipped")
+    total_failed: int = Field(default=0, description="Total sessions that failed")
+    sources: list[ImportSourceResult] = Field(
+        default_factory=list, description="Per-source results"
+    )
+    warnings: list[str] = Field(default_factory=list, description="Global warnings")
+
+
+class BatchSessionResult(BaseModel):
+    """Result of analyzing a single session in a batch."""
+
+    session_id: int = Field(description="Session database ID")
+    session_date: date | None = Field(default=None, description="Session date")
+    success: bool = Field(description="Whether analysis succeeded")
+    error: str | None = Field(default=None, description="Error message if failed")
+
+
+class BatchAnalysisResult(BaseModel):
+    """Aggregate result of batch analysis across multiple sessions."""
+
+    total: int = Field(description="Total sessions processed")
+    successful: int = Field(default=0, description="Sessions analyzed successfully")
+    failed: int = Field(default=0, description="Sessions that failed analysis")
+    results: list[BatchSessionResult] = Field(
+        default_factory=list, description="Per-session results"
+    )
+
+
+class EventComparisonDetail(BaseModel):
+    """Detail of a single unmatched event in a comparison."""
+
+    event_type: str = Field(description="Event type (OA, CA, MA, H, etc.)")
+    start_time: float = Field(
+        description="Event start time in seconds from session start"
+    )
+    duration: float = Field(description="Event duration in seconds")
+    confidence: float | None = Field(
+        default=None, description="Detection confidence (programmatic events only)"
+    )
+    flow_reduction: float | None = Field(
+        default=None, description="Flow reduction fraction (programmatic events only)"
+    )
+
+
+class EventComparisonResult(BaseModel):
+    """Result of comparing machine vs programmatic events for a session."""
+
+    session_id: int = Field(description="Session database ID")
+    mode: str = Field(description="Detection mode used (e.g., 'aasm')")
+    machine_event_count: int = Field(description="Total machine-detected events")
+    programmatic_event_count: int = Field(
+        description="Total programmatically-detected events"
+    )
+    false_negatives: list[EventComparisonDetail] = Field(
+        default_factory=list,
+        description="Machine events missed by programmatic detection",
+    )
+    false_positives_apnea: list[EventComparisonDetail] = Field(
+        default_factory=list, description="Programmatic apneas not in machine events"
+    )
+    false_positives_hypopnea: list[EventComparisonDetail] = Field(
+        default_factory=list, description="Programmatic hypopneas not in machine events"
+    )
+
+
+class VacuumResult(BaseModel):
+    """Result of a database vacuum operation."""
+
+    status: str = Field(description="Operation status ('success')")
+    size_before_mb: float = Field(description="Database size before vacuum in MB")
+    size_after_mb: float = Field(description="Database size after vacuum in MB")

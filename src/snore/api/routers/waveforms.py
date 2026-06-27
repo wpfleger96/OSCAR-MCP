@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from snore.api.deps import service_dep
 from snore.api.schemas import WaveformDataResponse
 from snore.services import WaveformService
-from snore.services.schemas import WaveformInfo
+from snore.services.schemas import EventComparisonResult, WaveformInfo
 
 router = APIRouter()
 
@@ -30,6 +30,15 @@ VALID_WAVEFORM_TYPES = Literal[
 @router.get("/{session_id}/waveforms", response_model=list[WaveformInfo])
 def list_waveforms(session_id: int, service: WaveformServiceDep) -> list[WaveformInfo]:
     return service.list_waveforms(session_id)
+
+
+@router.get("/{session_id}/waveforms/compare", response_model=EventComparisonResult)
+def compare_waveform_events(
+    session_id: int,
+    service: WaveformServiceDep,
+    mode: Literal["aasm", "aasm_relaxed", "resmed"] = Query(default="aasm"),
+) -> EventComparisonResult:
+    return service.compare_events(session_id, mode=mode)
 
 
 @router.get(

@@ -1,16 +1,22 @@
-from typing import Annotated, Any
+from datetime import datetime, time
+from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
 from snore.api.schemas import (
     AnalysisDeleteRequest,
     AnalysisRunRequest,
+    BatchAnalysisRequest,
     PaginatedResponse,
 )
 from snore.services import AnalysisFacade
-from snore.services.schemas import AnalysisDeletePreview, AnalysisListItem
+from snore.services.schemas import (
+    AnalysisDeletePreview,
+    AnalysisListItem,
+    BatchAnalysisResult,
+)
 
 router = APIRouter()
 
@@ -42,6 +48,9 @@ def list_analysis_sessions(
 
 
 @router.get("/sessions/{session_id}/analysis")
+# response_model omitted intentionally: AnalysisResult is a complex internal Pydantic
+# model whose schema changes across analysis modes. Exposing it via response_model would
+# tightly couple the OpenAPI spec to internal analysis model structure.
 def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> Any:
     result = facade.get_analysis_result(session_id)
     if result is None:
@@ -50,6 +59,7 @@ def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> Any:
 
 
 @router.post("/sessions/{session_id}/analysis", status_code=201)
+# response_model omitted intentionally: same reason as get_analysis above.
 def run_analysis(
     session_id: int,
     body: AnalysisRunRequest,
@@ -84,3 +94,23 @@ def get_analysis_delete_preview(
             patterns_count=0,
         )
     return facade.get_delete_preview(session_ids, all_versions=all_versions)
+
+
+@router.post("/analysis/batch", status_code=201, response_model=BatchAnalysisResult)
+def run_batch_analysis(
+    body: BatchAnalysisRequest,
+    facade: AnalysisFacadeDep,
+) -> BatchAnalysisResult:
+    if body.from_date is None and body.to_date is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of from_date or to_date is required",
+        )
+    return facade.run_batch_analysis(
+        from_date=datetime.combine(body.from_date, time.min)
+        if body.from_date
+        else None,
+        to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
+        modes=cast(list[str], body.modes),
+        store_results=body.store_results,
+    )

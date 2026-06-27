@@ -341,8 +341,8 @@ def compare_events(
         snore waveform compare --session-id 37 --mode aasm
         snore waveform compare --date 2025-10-25 --mode resmed --show-unmatched
     """
-    from snore.analysis.service import AnalysisService
-    from snore.analysis.utils import convert_machine_events
+    from snore.exceptions import NotFoundError
+    from snore.services.waveform_service import WaveformService
 
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")
@@ -350,83 +350,26 @@ def compare_events(
     with open_db_session(db) as db_session:
         session_id = _resolve_session_id(db_session, session_id, date)
 
-        analysis_service = AnalysisService(db_session)
+        service = WaveformService(db_session)
         try:
-            result = analysis_service.get_analysis_result(session_id)
-        except Exception as e:
-            raise click.ClickException(f"Error loading analysis: {e}") from e
-
-        if result is None:
-            raise click.ClickException(
-                f"No analysis results found for session {session_id}"
-            )
-
-        if mode not in result.mode_results:
-            raise click.ClickException(f"Mode {mode} not found in analysis results")
-
-        mode_result = result.mode_results[mode]
-
-        machine_events = result.machine_events or []
-        machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
-
-        prog_apneas = list(mode_result.apneas)
-        prog_hypopneas = list(mode_result.hypopneas)
-
-        false_negatives = []
-        false_positives_apnea = []
-        false_positives_hypopnea = []
-
-        for m_event in machine_apneas + machine_hypopneas:
-            machine_relative_time = m_event.start_time
-            is_matched = False
-
-            for p_event in prog_apneas + prog_hypopneas:
-                if abs(p_event.start_time - machine_relative_time) <= 5.0:
-                    is_matched = True
-                    break
-
-            if not is_matched:
-                false_negatives.append(m_event)
-
-        for p_event in prog_apneas:
-            is_matched = False
-
-            for m_event in machine_apneas + machine_hypopneas:
-                machine_relative_time = m_event.start_time
-                if abs(p_event.start_time - machine_relative_time) <= 5.0:
-                    is_matched = True
-                    break
-
-            if not is_matched:
-                false_positives_apnea.append(p_event)
-
-        for p_event in prog_hypopneas:
-            is_matched = False
-
-            for m_event in machine_apneas + machine_hypopneas:
-                machine_relative_time = m_event.start_time
-                if abs(p_event.start_time - machine_relative_time) <= 5.0:
-                    is_matched = True
-                    break
-
-            if not is_matched:
-                false_positives_hypopnea.append(p_event)
+            comparison = service.compare_events(session_id, mode, tolerance_seconds=5.0)
+        except NotFoundError as e:
+            raise click.ClickException(str(e)) from e
 
         console.print(f"Session {session_id} - Event Comparison ({mode} mode)")
         console.print(
-            f"Machine: {len(machine_events)} events | Programmatic: {len(prog_apneas) + len(prog_hypopneas)} events"
+            f"Machine: {comparison.machine_event_count} events | Programmatic: {comparison.programmatic_event_count} events"
         )
         console.print("")
 
-        if not show_unmatched or len(false_negatives) > 0:
+        if not show_unmatched or len(comparison.false_negatives) > 0:
             console.print(
-                f"FALSE NEGATIVES (machine events missed by programmatic): {len(false_negatives)}"
+                f"FALSE NEGATIVES (machine events missed by programmatic): {len(comparison.false_negatives)}"
             )
-            for event in false_negatives:
+            for event in comparison.false_negatives:
                 time_str = format_time_offset(event.start_time)
-                event_type = getattr(event, "event_type", "H")
                 console.print(
-                    f"  {escape(str(event_type))} at {time_str} ({event.duration:.1f}s)"
+                    f"  {escape(str(event.event_type))} at {time_str} ({event.duration:.1f}s)"
                 )
                 console.print(
                     f"    → View: snore waveform show --session-id {session_id} --time {time_str}"
@@ -435,28 +378,29 @@ def compare_events(
 
         if (
             not show_unmatched
-            or len(false_positives_apnea) + len(false_positives_hypopnea) > 0
+            or len(comparison.false_positives_apnea)
+            + len(comparison.false_positives_hypopnea)
+            > 0
         ):
             console.print(
-                f"FALSE POSITIVES (programmatic events not in machine): {len(false_positives_apnea) + len(false_positives_hypopnea)}"
+                f"FALSE POSITIVES (programmatic events not in machine): {len(comparison.false_positives_apnea) + len(comparison.false_positives_hypopnea)}"
             )
 
-            for event in false_positives_apnea:
+            for event in comparison.false_positives_apnea:
                 time_str = format_time_offset(event.start_time)
-                event_type = event.event_type
-                conf = getattr(event, "confidence", 0)
-                flow_red = getattr(event, "flow_reduction", 0)
+                conf = event.confidence or 0
+                flow_red = event.flow_reduction or 0
                 console.print(
-                    f"  {escape(str(event_type))} at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
+                    f"  {escape(str(event.event_type))} at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
                 )
                 console.print(
                     f"    → View: snore waveform show --session-id {session_id} --time {time_str}"
                 )
 
-            for event in false_positives_hypopnea:
+            for event in comparison.false_positives_hypopnea:
                 time_str = format_time_offset(event.start_time)
-                conf = getattr(event, "confidence", 0)
-                flow_red = getattr(event, "flow_reduction", 0)
+                conf = event.confidence or 0
+                flow_red = event.flow_reduction or 0
                 console.print(
                     f"  H at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
                 )
