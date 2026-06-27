@@ -24,8 +24,8 @@ defineProps<{
 
 <style scoped>
 .stat-card {
-    background: var(--p-surface-card, #fff);
-    border: 1px solid var(--p-surface-border, #e2e8f0);
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 1rem 1.25rem;
 }
@@ -34,26 +34,26 @@ defineProps<{
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
     margin-bottom: 0.35rem;
 }
 
 .stat-value {
     font-size: 1.5rem;
     font-weight: 600;
-    color: var(--p-text-color, #1a1a1a);
+    color: var(--color-foreground);
     line-height: 1.2;
 }
 
 .stat-unit {
     font-size: 0.85rem;
     font-weight: 400;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
     margin-left: 0.2rem;
 }
 
 .stat-empty {
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
     font-size: 1.1rem;
 }
 </style>

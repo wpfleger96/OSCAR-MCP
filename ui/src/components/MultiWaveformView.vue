@@ -1,31 +1,47 @@
 <template>
-    <div class="multi-waveform">
-        <div v-for="(chart, idx) in charts" :key="chart.id" class="chart-row">
-            <div class="chart-row-header">
+    <div class="flex flex-col gap-4">
+        <div
+            v-for="(chart, idx) in charts"
+            :key="chart.id"
+            class="border border-border rounded-lg p-3 bg-card"
+        >
+            <div class="flex items-center justify-between mb-2">
                 <Select
                     :model-value="chart.type"
-                    :options="typeOptions"
-                    option-label="label"
-                    option-value="value"
-                    size="small"
-                    @update:model-value="(v: string) => updateChartType(idx, v)"
-                />
+                    @update:model-value="(v) => updateChartType(idx, v as string)"
+                >
+                    <SelectTrigger class="w-[180px] h-8 text-sm">
+                        <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                        <SelectItem v-for="opt in typeOptions" :key="opt.value" :value="opt.value">
+                            {{ opt.label }}
+                        </SelectItem>
+                    </SelectContent>
+                </Select>
                 <Button
                     v-if="charts.length > 1"
-                    icon="pi pi-times"
-                    size="small"
-                    severity="danger"
-                    text
-                    rounded
+                    variant="ghost"
+                    size="icon"
+                    class="text-destructive hover:text-destructive"
                     @click="removeChart(idx)"
-                />
+                >
+                    <X class="h-4 w-4" />
+                </Button>
             </div>
-            <div v-if="chart.loading" class="chart-placeholder">
-                <i class="pi pi-spin pi-spinner" /> Loading
-                {{ WAVEFORM_LABELS[chart.type] ?? chart.type }}...
+            <div
+                v-if="chart.loading"
+                class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
+            >
+                <Loader2 class="h-4 w-4 animate-spin" />
+                Loading {{ WAVEFORM_LABELS[chart.type] ?? chart.type }}...
             </div>
-            <div v-else-if="chart.error" class="chart-error">
-                <i class="pi pi-exclamation-triangle" /> {{ chart.error }}
+            <div
+                v-else-if="chart.error"
+                class="h-60 flex items-center justify-center gap-2 text-destructive"
+            >
+                <AlertTriangle class="h-4 w-4" />
+                {{ chart.error }}
             </div>
             <WaveformChart
                 v-else-if="chart.data"
@@ -45,8 +61,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import uPlot from 'uplot'
-import Select from 'primevue/select'
-import Button from 'primevue/button'
+import { X, Loader2, AlertTriangle } from '@lucide/vue'
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select'
+import { Button } from '@/components/ui/button'
 import WaveformChart from './WaveformChart.vue'
 import { getWaveformData } from '@/api/waveforms'
 import { WAVEFORM_LABELS } from '@/types'
@@ -148,43 +171,3 @@ defineExpose({
     },
 })
 </script>
-
-<style scoped>
-.multi-waveform {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-}
-
-.chart-row {
-    border: 1px solid var(--p-surface-border, #e2e8f0);
-    border-radius: 8px;
-    padding: 0.75rem;
-    background: var(--p-surface-card, #fff);
-}
-
-.chart-row-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-}
-
-.chart-placeholder {
-    height: 240px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
-.chart-error {
-    height: 240px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    color: var(--p-red-500, #ef4444);
-}
-</style>

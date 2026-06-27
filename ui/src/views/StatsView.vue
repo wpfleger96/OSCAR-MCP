@@ -4,12 +4,11 @@
 
         <!-- Period Selector -->
         <div class="period-selector">
-            <SelectButton
-                v-model="periodType"
-                :options="periodOptions"
-                option-label="label"
-                option-value="value"
-            />
+            <ToggleGroup v-model="periodType" type="single" variant="outline">
+                <ToggleGroupItem v-for="opt in periodOptions" :key="opt.value" :value="opt.value">
+                    {{ opt.label }}
+                </ToggleGroupItem>
+            </ToggleGroup>
         </div>
 
         <!-- Period Stats Table -->
@@ -34,7 +33,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import SelectButton from 'primevue/selectbutton'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import RecordsPanel from '@/components/RecordsPanel.vue'

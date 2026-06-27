@@ -3,18 +3,14 @@
         <h1 class="page-title">RX History</h1>
 
         <div v-if="loading" class="loading-state">
-            <i class="pi pi-spin pi-spinner" /> Loading RX data...
-        </div>
-
-        <div v-else-if="!history.length" class="no-data">
-            <i class="pi pi-info-circle" /> No prescription data available.
+            <Loader2 class="h-4 w-4 animate-spin" /> Loading RX data...
         </div>
 
         <div v-else-if="error" class="error-state">
-            <i class="pi pi-exclamation-triangle" /> {{ error }}
+            <AlertTriangle class="h-4 w-4" /> {{ error }}
         </div>
 
-        <template v-else>
+        <template v-else-if="history.length">
             <!-- Current Settings -->
             <div v-if="current" class="section-card">
                 <h2>Current Settings</h2>
@@ -32,71 +28,83 @@
                     >
                 </div>
                 <div class="settings-pills">
-                    <Tag
+                    <Badge
                         v-for="(value, key) in current.settings"
                         :key="key"
-                        :value="`${key}: ${value}`"
-                        severity="info"
+                        variant="secondary"
                         class="setting-pill"
-                    />
+                    >
+                        {{ key }}: {{ value }}
+                    </Badge>
                 </div>
             </div>
 
             <!-- Comparison Table -->
             <div v-if="comparison" class="section-card">
                 <h2>Period Comparison</h2>
-                <DataTable :value="comparisonRows" striped-rows :row-class="rowClass">
-                    <Column header="Period">
-                        <template #body="{ data }">
-                            {{ formatDateFull(data.start_date) }} –
-                            {{ formatDateFull(data.end_date) }}
-                        </template>
-                    </Column>
-                    <Column header="Days" style="width: 70px">
-                        <template #body="{ data }">{{ data.days_count }}</template>
-                    </Column>
-                    <Column header="Settings">
-                        <template #body="{ data }">
-                            {{ summarizeSettings(data.settings) }}
-                        </template>
-                    </Column>
-                    <Column header="Avg AHI" style="width: 90px">
-                        <template #body="{ data }">
-                            {{ data.avg_ahi?.toFixed(1) ?? '---' }}
-                        </template>
-                    </Column>
-                    <Column header="Median AHI" style="width: 100px">
-                        <template #body="{ data }">
-                            {{ data.median_ahi?.toFixed(1) ?? '---' }}
-                        </template>
-                    </Column>
-                    <Column header="Avg Hours" style="width: 90px">
-                        <template #body="{ data }">
-                            {{ data.avg_hours?.toFixed(1) ?? '---' }}
-                        </template>
-                    </Column>
-                    <Column header="Avg Leak" style="width: 90px">
-                        <template #body="{ data }">
-                            {{ data.avg_leak?.toFixed(1) ?? '---' }}
-                        </template>
-                    </Column>
-                    <Column header="" style="width: 80px">
-                        <template #body="{ data }">
-                            <Tag v-if="data.isBest" value="Best" severity="success" />
-                            <Tag v-if="data.isWorst" value="Worst" severity="danger" />
-                        </template>
-                    </Column>
-                </DataTable>
+                <Table>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead>Period</TableHead>
+                            <TableHead class="w-[70px]">Days</TableHead>
+                            <TableHead>Settings</TableHead>
+                            <TableHead class="w-[90px]">Avg AHI</TableHead>
+                            <TableHead class="w-[100px]">Median AHI</TableHead>
+                            <TableHead class="w-[90px]">Avg Hours</TableHead>
+                            <TableHead class="w-[90px]">Avg Leak</TableHead>
+                            <TableHead class="w-[80px]"></TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                        <TableRow
+                            v-for="row in comparisonRows"
+                            :key="row.start_date"
+                            class="even:bg-muted/50"
+                            :class="{
+                                'bg-[rgba(34,197,94,0.08)]': row.isBest,
+                                'bg-[rgba(239,68,68,0.08)]': row.isWorst,
+                            }"
+                        >
+                            <TableCell>
+                                {{ formatDateFull(row.start_date) }} –
+                                {{ formatDateFull(row.end_date) }}
+                            </TableCell>
+                            <TableCell>{{ row.days_count }}</TableCell>
+                            <TableCell>{{ summarizeSettings(row.settings) }}</TableCell>
+                            <TableCell>{{ row.avg_ahi?.toFixed(1) ?? '---' }}</TableCell>
+                            <TableCell>{{ row.median_ahi?.toFixed(1) ?? '---' }}</TableCell>
+                            <TableCell>{{ row.avg_hours?.toFixed(1) ?? '---' }}</TableCell>
+                            <TableCell>{{ row.avg_leak?.toFixed(1) ?? '---' }}</TableCell>
+                            <TableCell>
+                                <Badge
+                                    v-if="row.isBest"
+                                    class="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                                    >Best</Badge
+                                >
+                                <Badge v-if="row.isWorst" variant="destructive">Worst</Badge>
+                            </TableCell>
+                        </TableRow>
+                    </TableBody>
+                </Table>
             </div>
         </template>
+
+        <div v-else class="no-data"><Info class="h-4 w-4" /> No prescription data available.</div>
     </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import Tag from 'primevue/tag'
+import { Loader2, AlertTriangle, Info } from '@lucide/vue'
+import { Badge } from '@/components/ui/badge'
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table'
 import { getRxHistory, getRxCurrent, getRxCompare } from '@/api/rx'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
@@ -129,12 +137,6 @@ const comparisonRows = computed<ComparisonRow[]>(() => {
     }))
 })
 
-function rowClass(data: ComparisonRow): string {
-    if (data.isBest) return 'row-best'
-    if (data.isWorst) return 'row-worst'
-    return ''
-}
-
 function summarizeSettings(settings: Record<string, string>): string {
     const keys = ['Mode', 'Pressure', 'EPR', 'EPR Level']
     const parts: string[] = []
@@ -159,7 +161,7 @@ function summarizeSettings(settings: Record<string, string>): string {
 .no-data {
     padding: 2rem;
     text-align: center;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
 }
 
 .current-meta {
@@ -167,7 +169,7 @@ function summarizeSettings(settings: Record<string, string>): string {
     gap: 1.25rem;
     flex-wrap: wrap;
     font-size: 0.9rem;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
     margin-bottom: 0.75rem;
 }
 
@@ -179,12 +181,5 @@ function summarizeSettings(settings: Record<string, string>): string {
 
 .setting-pill {
     font-size: 0.78rem;
-}
-
-:deep(.row-best) {
-    background: rgba(34, 197, 94, 0.08) !important;
-}
-:deep(.row-worst) {
-    background: rgba(239, 68, 68, 0.08) !important;
 }
 </style>

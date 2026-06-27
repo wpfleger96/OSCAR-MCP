@@ -1,15 +1,15 @@
 <template>
     <div v-if="loading" class="loading-state">
-        <i class="pi pi-spin pi-spinner" /> Loading events...
+        <Loader2 class="inline h-4 w-4 animate-spin" /> Loading events...
     </div>
 
     <div v-else-if="error" class="error-state">
-        <i class="pi pi-exclamation-triangle" /> {{ error }}
+        <AlertTriangle class="inline h-4 w-4" /> {{ error }}
     </div>
 
     <div v-else class="event-explorer">
         <RouterLink :to="{ name: 'session-detail', params: { id: sessionId } }" class="back-link">
-            <i class="pi pi-arrow-left" /> Back to Session
+            <ArrowLeft class="inline h-4 w-4" /> Back to Session
         </RouterLink>
 
         <h1 class="page-title">Events — Session #{{ sessionId }}</h1>
@@ -48,56 +48,95 @@
 
         <!-- Filters -->
         <div class="filter-bar">
-            <span class="filter-label">Filter by type:</span>
+            <span class="filter-label text-muted-foreground">Filter by type:</span>
             <div class="type-chips">
-                <Tag
+                <button
                     v-for="t in uniqueTypes"
                     :key="t"
-                    :value="t"
-                    :class="{
-                        'tag-active': activeTypes.has(t),
-                        'tag-inactive': !activeTypes.has(t),
-                    }"
-                    class="type-tag"
+                    class="inline-flex cursor-pointer items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors"
+                    :class="
+                        activeTypes.has(t)
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted/50 text-muted-foreground opacity-50'
+                    "
                     @click="toggleType(t)"
-                />
+                >
+                    {{ t }}
+                </button>
             </div>
         </div>
 
         <!-- Event List -->
-        <DataTable :value="filteredEvents" striped-rows :rows="50" paginator>
-            <Column header="Type" style="width: 80px">
-                <template #body="{ data }: { data: EventItem }">
-                    <span
-                        class="event-badge"
-                        :style="{ background: EVENT_COLORS[data.event_type] ?? '#ccc' }"
-                    >
-                        {{ data.event_type }}
-                    </span>
-                </template>
-            </Column>
-            <Column header="Time">
-                <template #body="{ data }: { data: EventItem }">
-                    <a class="time-link" @click="jumpToWaveform(data.offset_seconds)">
-                        {{ formatTimeOffset(data.offset_seconds) }}
-                    </a>
-                </template>
-            </Column>
-            <Column header="Duration" style="width: 100px">
-                <template #body="{ data }: { data: EventItem }">
-                    {{ data.duration_seconds.toFixed(1) }}s
-                </template>
-            </Column>
-        </DataTable>
+        <Table>
+            <TableHeader>
+                <TableRow>
+                    <TableHead style="width: 80px">Type</TableHead>
+                    <TableHead>Time</TableHead>
+                    <TableHead style="width: 100px">Duration</TableHead>
+                </TableRow>
+            </TableHeader>
+            <TableBody>
+                <TableRow v-for="(row, i) in paginatedEvents" :key="i" class="odd:bg-muted/50">
+                    <TableCell>
+                        <span
+                            class="event-badge"
+                            :style="{ background: EVENT_COLORS[row.event_type] ?? '#ccc' }"
+                        >
+                            {{ row.event_type }}
+                        </span>
+                    </TableCell>
+                    <TableCell>
+                        <a
+                            class="time-link text-primary"
+                            @click="jumpToWaveform(row.offset_seconds)"
+                        >
+                            {{ formatTimeOffset(row.offset_seconds) }}
+                        </a>
+                    </TableCell>
+                    <TableCell>{{ row.duration_seconds.toFixed(1) }}s</TableCell>
+                </TableRow>
+            </TableBody>
+        </Table>
+
+        <div v-if="totalPages > 1" class="flex items-center justify-between px-2 py-4">
+            <span class="text-sm text-muted-foreground">
+                Page {{ currentPage + 1 }} of {{ totalPages }}
+            </span>
+            <div class="flex gap-2">
+                <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="currentPage === 0"
+                    @click="currentPage--"
+                >
+                    Previous
+                </Button>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="currentPage >= totalPages - 1"
+                    @click="currentPage++"
+                >
+                    Next
+                </Button>
+            </div>
+        </div>
     </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import Tag from 'primevue/tag'
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table'
+import { Button } from '@/components/ui/button'
+import { Loader2, AlertTriangle, ArrowLeft } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
 import { getSessionEvents, getEventMatch } from '@/api/events'
 import { getSession } from '@/api/sessions'
@@ -110,6 +149,8 @@ const props = defineProps<{ sessionId: number }>()
 const router = useRouter()
 
 const activeTypes = ref<Set<string>>(new Set())
+const currentPage = ref(0)
+const pageSize = 50
 
 const { data, loading, error } = useApiLoad(async () => {
     const [events, session] = await Promise.all([
@@ -136,6 +177,13 @@ const filteredEvents = computed(() => {
     return allEvents.value.filter((e) => activeTypes.value.has(e.event_type))
 })
 
+const paginatedEvents = computed(() => {
+    const start = currentPage.value * pageSize
+    return filteredEvents.value.slice(start, start + pageSize)
+})
+
+const totalPages = computed(() => Math.ceil(filteredEvents.value.length / pageSize))
+
 const eventsPerHour = computed(() => {
     if (!sessionDuration.value) return null
     return filteredEvents.value.length / sessionDuration.value
@@ -144,6 +192,10 @@ const eventsPerHour = computed(() => {
 const sensitivity = computed(() => {
     if (!matchResult.value || matchResult.value.machine_count === 0) return null
     return (matchResult.value.matched / matchResult.value.machine_count) * 100
+})
+
+watch(activeTypes, () => {
+    currentPage.value = 0
 })
 
 function toggleType(type: string): void {
@@ -188,24 +240,10 @@ function jumpToWaveform(offsetSec: number): void {
     flex-wrap: wrap;
 }
 
-.filter-label {
-    font-size: 0.85rem;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
 .type-chips {
     display: flex;
     gap: 0.4rem;
     flex-wrap: wrap;
-}
-
-.type-tag {
-    cursor: pointer;
-    user-select: none;
-}
-
-.tag-inactive {
-    opacity: 0.4;
 }
 
 .event-badge {
@@ -218,7 +256,6 @@ function jumpToWaveform(offsetSec: number): void {
 }
 
 .time-link {
-    color: var(--p-primary-color, #3b82f6);
     cursor: pointer;
     text-decoration: none;
 }

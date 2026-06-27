@@ -1,35 +1,50 @@
 <template>
-    <Dialog
-        :visible="visible"
-        :header="title"
-        modal
-        :style="{ width: '450px' }"
-        @update:visible="$emit('update:visible', $event)"
-    >
-        <div v-if="loading" class="dialog-loading">
-            <i class="pi pi-spin pi-spinner" /> Loading preview...
-        </div>
-        <div v-else>
-            <p class="dialog-message">{{ message }}</p>
-            <slot name="preview" />
-        </div>
-        <template #footer>
-            <Button label="Cancel" severity="secondary" @click="$emit('update:visible', false)" />
-            <Button
-                label="Delete"
-                severity="danger"
-                icon="pi pi-trash"
-                :loading="deleting"
-                :disabled="loading"
-                @click="$emit('confirm')"
-            />
-        </template>
-    </Dialog>
+    <AlertDialog :open="visible" @update:open="$emit('update:visible', $event)">
+        <AlertDialogContent class="max-w-[450px]">
+            <AlertDialogHeader>
+                <AlertDialogTitle>{{ title }}</AlertDialogTitle>
+                <div class="text-sm text-muted-foreground">
+                    <div v-if="loading" class="py-8 text-center">
+                        <Loader2 class="inline h-4 w-4 animate-spin" /> Loading preview...
+                    </div>
+                    <div v-else>
+                        <p class="mb-4 text-foreground">{{ message }}</p>
+                        <slot name="preview" />
+                    </div>
+                </div>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+                <AlertDialogCancel @click="$emit('update:visible', false)"
+                    >Cancel</AlertDialogCancel
+                >
+                <AlertDialogAction as-child>
+                    <Button
+                        variant="destructive"
+                        :disabled="loading || deleting"
+                        @click="$emit('confirm')"
+                    >
+                        <Loader2 v-if="deleting" class="mr-2 h-4 w-4 animate-spin" />
+                        <Trash2 v-else class="mr-2 h-4 w-4" />
+                        Delete
+                    </Button>
+                </AlertDialogAction>
+            </AlertDialogFooter>
+        </AlertDialogContent>
+    </AlertDialog>
 </template>
 
 <script setup lang="ts">
-import Dialog from 'primevue/dialog'
-import Button from 'primevue/button'
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Loader2, Trash2 } from '@lucide/vue'
 
 defineProps<{
     visible: boolean
@@ -44,16 +59,3 @@ defineEmits<{
     confirm: []
 }>()
 </script>
-
-<style scoped>
-.dialog-loading {
-    padding: 2rem;
-    text-align: center;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
-.dialog-message {
-    margin-bottom: 1rem;
-    color: var(--p-text-color, #1a1a1a);
-}
-</style>

@@ -5,29 +5,43 @@
         </div>
         <nav class="sidebar-nav">
             <RouterLink to="/" class="nav-item">
-                <i class="pi pi-chart-bar" />
+                <BarChart3 class="h-4 w-4" />
                 <span>Dashboard</span>
             </RouterLink>
             <RouterLink to="/sessions" class="nav-item">
-                <i class="pi pi-list" />
+                <List class="h-4 w-4" />
                 <span>Sessions</span>
             </RouterLink>
             <RouterLink to="/stats" class="nav-item">
-                <i class="pi pi-chart-line" />
+                <TrendingUp class="h-4 w-4" />
                 <span>Stats</span>
             </RouterLink>
             <RouterLink to="/rx" class="nav-item">
-                <i class="pi pi-cog" />
+                <Settings class="h-4 w-4" />
                 <span>RX History</span>
             </RouterLink>
         </nav>
+        <div class="sidebar-footer">
+            <button class="nav-item" @click="toggleDark">
+                <Sun v-if="isDark" class="h-4 w-4" />
+                <Moon v-else class="h-4 w-4" />
+                <span>{{ isDark ? 'Light Mode' : 'Dark Mode' }}</span>
+            </button>
+        </div>
     </aside>
 </template>
 
+<script setup lang="ts">
+import { BarChart3, List, TrendingUp, Settings, Sun, Moon } from '@lucide/vue'
+import { useDarkMode } from '@/composables/useDarkMode'
+
+const { isDark, toggleDark } = useDarkMode()
+</script>
+
 <style scoped>
 .app-sidebar {
-    background: var(--p-surface-card, #ffffff);
-    border-right: 1px solid var(--p-surface-border, #e2e8f0);
+    background: var(--color-card);
+    border-right: 1px solid var(--color-border);
     display: flex;
     flex-direction: column;
     position: sticky;
@@ -37,14 +51,14 @@
 
 .sidebar-header {
     padding: 1.25rem 1rem;
-    border-bottom: 1px solid var(--p-surface-border, #e2e8f0);
+    border-bottom: 1px solid var(--color-border);
 }
 
 .sidebar-logo {
     font-size: 1.1rem;
     font-weight: 700;
     letter-spacing: 0.05em;
-    color: var(--p-primary-color, #3b82f6);
+    color: var(--color-primary);
 }
 
 .sidebar-nav {
@@ -62,18 +76,28 @@
     border-radius: 6px;
     font-size: 0.9rem;
     text-decoration: none;
-    color: var(--p-text-color, #1a1a1a);
+    color: var(--color-foreground);
     transition: background 0.15s;
     cursor: pointer;
+    background: none;
+    border: none;
+    width: 100%;
+    text-align: left;
 }
 
 .nav-item:hover {
-    background: var(--p-surface-hover, #f1f5f9);
+    background: var(--color-accent);
 }
 
 .router-link-active {
-    background: var(--p-primary-50, #eff6ff);
-    color: var(--p-primary-color, #3b82f6);
+    background: hsl(from var(--color-primary) h s l / 0.1);
+    color: var(--color-primary);
     font-weight: 500;
+}
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: 0.75rem 0.5rem;
+    border-top: 1px solid var(--color-border);
 }
 </style>

@@ -2,48 +2,58 @@
     <div class="waveform-toolbar">
         <Select
             :model-value="modelValue"
-            :options="typeOptions"
-            option-label="label"
-            option-value="value"
-            placeholder="Waveform type"
-            size="small"
-            @update:model-value="(v: string) => $emit('update:modelValue', v)"
-        />
+            @update:model-value="(v) => $emit('update:modelValue', v as string)"
+        >
+            <SelectTrigger class="w-[180px] h-8 text-sm">
+                <SelectValue placeholder="Waveform type" />
+            </SelectTrigger>
+            <SelectContent>
+                <SelectItem v-for="opt in typeOptions" :key="opt.value" :value="opt.value">
+                    {{ opt.label }}
+                </SelectItem>
+            </SelectContent>
+        </Select>
         <div class="toolbar-right">
             <Button
                 v-if="multiWaveform"
-                icon="pi pi-plus"
-                label="Add Chart"
-                size="small"
-                severity="secondary"
+                variant="outline"
+                size="sm"
                 :disabled="chartCount >= 4"
                 @click="$emit('add-chart')"
-            />
-            <ToggleButton
-                :model-value="multiWaveform"
-                on-label="Multi"
-                off-label="Single"
-                on-icon="pi pi-th-large"
-                off-icon="pi pi-stop"
-                size="small"
-                @update:model-value="(v: boolean) => $emit('update:multiWaveform', v)"
-            />
-            <Button
-                icon="pi pi-search-minus"
-                label="Reset Zoom"
-                size="small"
-                severity="secondary"
-                @click="$emit('reset-zoom')"
-            />
+            >
+                <Plus class="mr-2 h-4 w-4" />
+                Add Chart
+            </Button>
+            <Toggle
+                :pressed="multiWaveform"
+                variant="outline"
+                size="sm"
+                @update:pressed="(v: boolean) => $emit('update:multiWaveform', v)"
+            >
+                <LayoutGrid v-if="multiWaveform" class="mr-2 h-4 w-4" />
+                <Square v-else class="mr-2 h-4 w-4" />
+                {{ multiWaveform ? 'Multi' : 'Single' }}
+            </Toggle>
+            <Button variant="outline" size="sm" @click="$emit('reset-zoom')">
+                <ZoomOut class="mr-2 h-4 w-4" />
+                Reset Zoom
+            </Button>
         </div>
     </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import Select from 'primevue/select'
-import Button from 'primevue/button'
-import ToggleButton from 'primevue/togglebutton'
+import { Plus, ZoomOut, LayoutGrid, Square } from '@lucide/vue'
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select'
+import { Button } from '@/components/ui/button'
+import { Toggle } from '@/components/ui/toggle'
 import { WAVEFORM_LABELS } from '@/types'
 
 const props = defineProps<{

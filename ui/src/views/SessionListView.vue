@@ -4,123 +4,154 @@
 
         <!-- Filter Panel -->
         <div class="filter-panel">
-            <DatePicker
-                v-model="fromDate"
-                placeholder="From date"
-                date-format="yy-mm-dd"
-                show-icon
+            <input
+                type="date"
+                :value="fromDate ? formatIso(fromDate) : ''"
+                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                @input="onFromDateChange"
             />
-            <DatePicker v-model="toDate" placeholder="To date" date-format="yy-mm-dd" show-icon />
-            <Select
-                v-model="selectedDevice"
-                :options="deviceOptions"
-                option-label="label"
-                option-value="value"
-                placeholder="All devices"
-                show-clear
+            <input
+                type="date"
+                :value="toDate ? formatIso(toDate) : ''"
+                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                @input="onToDateChange"
             />
-            <ToggleButton
-                v-model="includeDisabled"
-                on-label="Show Disabled"
-                off-label="Active Only"
-                on-icon="pi pi-eye"
-                off-icon="pi pi-eye-slash"
-            />
-            <Button
-                v-if="hasFilters"
-                label="Clear"
-                icon="pi pi-filter-slash"
-                severity="secondary"
-                size="small"
-                @click="clearFilters"
-            />
+            <Select v-model="selectedDeviceStr">
+                <SelectTrigger class="w-[200px]">
+                    <SelectValue placeholder="All devices" />
+                </SelectTrigger>
+                <SelectContent>
+                    <SelectItem value="">All devices</SelectItem>
+                    <SelectItem v-for="opt in deviceOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                    </SelectItem>
+                </SelectContent>
+            </Select>
+            <Toggle v-model:pressed="includeDisabled" variant="outline" size="sm">
+                <Eye v-if="includeDisabled" class="mr-2 h-4 w-4" />
+                <EyeOff v-else class="mr-2 h-4 w-4" />
+                {{ includeDisabled ? 'Show Disabled' : 'Active Only' }}
+            </Toggle>
+            <Button v-if="hasFilters" variant="outline" size="sm" @click="clearFilters">
+                <FilterX class="mr-2 h-4 w-4" />
+                Clear
+            </Button>
         </div>
 
-        <DataTable
-            :value="sessions"
-            :loading="loading"
-            :lazy="true"
-            :rows="pageSize"
-            :total-records="totalRecords"
-            :first="offset"
-            paginator
-            striped-rows
-            class="sessions-table"
-            @page="onPage"
-        >
-            <template #empty>
-                <div class="table-empty">No sessions found.</div>
-            </template>
-            <Column field="start_time" header="Date" style="min-width: 180px">
-                <template #body="{ data }: { data: SessionListItem }">
-                    <RouterLink
-                        :to="{ name: 'session-detail', params: { id: data.id } }"
-                        class="session-link"
-                    >
-                        {{ formatDateTime(data.start_time) }}
-                    </RouterLink>
+        <Table class="sessions-table">
+            <TableHeader>
+                <TableRow>
+                    <TableHead style="min-width: 180px">Date</TableHead>
+                    <TableHead style="width: 100px">Duration</TableHead>
+                    <TableHead style="width: 80px">AHI</TableHead>
+                    <TableHead>Device</TableHead>
+                    <TableHead style="width: 90px">Status</TableHead>
+                    <TableHead style="width: 180px">Actions</TableHead>
+                </TableRow>
+            </TableHeader>
+            <TableBody>
+                <TableRow v-if="loading">
+                    <TableCell :colspan="6" class="py-8 text-center">
+                        <Loader2 class="h-6 w-6 animate-spin mx-auto text-muted-foreground" />
+                    </TableCell>
+                </TableRow>
+                <TableRow v-else-if="!sessions.length">
+                    <TableCell :colspan="6" class="py-8 text-center text-muted-foreground">
+                        No sessions found.
+                    </TableCell>
+                </TableRow>
+                <template v-else>
+                    <TableRow v-for="session in sessions" :key="session.id">
+                        <TableCell>
+                            <RouterLink
+                                :to="{ name: 'session-detail', params: { id: session.id } }"
+                                class="text-primary no-underline hover:underline"
+                            >
+                                {{ formatDateTime(session.start_time) }}
+                            </RouterLink>
+                        </TableCell>
+                        <TableCell>{{ session.duration_hours.toFixed(1) }}h</TableCell>
+                        <TableCell>
+                            <span :class="ahiClass(session.ahi)">
+                                {{ session.ahi?.toFixed(1) ?? '---' }}
+                            </span>
+                        </TableCell>
+                        <TableCell>{{ session.manufacturer }} {{ session.model }}</TableCell>
+                        <TableCell>
+                            <Badge
+                                v-if="session.enabled"
+                                class="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                            >
+                                Active
+                            </Badge>
+                            <Badge v-else variant="secondary">Disabled</Badge>
+                        </TableCell>
+                        <TableCell>
+                            <div class="row-actions">
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    :title="session.enabled ? 'Disable' : 'Enable'"
+                                    @click.stop="toggleEnabled(session)"
+                                >
+                                    <Ban v-if="session.enabled" class="h-4 w-4" />
+                                    <Check v-else class="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    title="Events"
+                                    @click.stop="
+                                        router.push({
+                                            name: 'session-events',
+                                            params: { id: session.id },
+                                        })
+                                    "
+                                >
+                                    <BarChart3 class="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    title="Delete"
+                                    class="text-destructive hover:text-destructive"
+                                    @click.stop="confirmDelete(session)"
+                                >
+                                    <Trash2 class="h-4 w-4" />
+                                </Button>
+                            </div>
+                        </TableCell>
+                    </TableRow>
                 </template>
-            </Column>
-            <Column field="duration_hours" header="Duration" style="width: 100px">
-                <template #body="{ data }: { data: SessionListItem }">
-                    {{ data.duration_hours.toFixed(1) }}h
-                </template>
-            </Column>
-            <Column field="ahi" header="AHI" style="width: 80px">
-                <template #body="{ data }: { data: SessionListItem }">
-                    <span :class="ahiClass(data.ahi)">{{ data.ahi?.toFixed(1) ?? '---' }}</span>
-                </template>
-            </Column>
-            <Column header="Device">
-                <template #body="{ data }: { data: SessionListItem }">
-                    {{ data.manufacturer }} {{ data.model }}
-                </template>
-            </Column>
-            <Column field="enabled" header="Status" style="width: 90px">
-                <template #body="{ data }: { data: SessionListItem }">
-                    <Tag
-                        :value="data.enabled ? 'Active' : 'Disabled'"
-                        :severity="data.enabled ? 'success' : 'secondary'"
-                    />
-                </template>
-            </Column>
-            <Column header="Actions" style="width: 180px">
-                <template #body="{ data }: { data: SessionListItem }">
-                    <div class="row-actions">
-                        <Button
-                            :icon="data.enabled ? 'pi pi-ban' : 'pi pi-check'"
-                            :title="data.enabled ? 'Disable' : 'Enable'"
-                            size="small"
-                            severity="secondary"
-                            text
-                            rounded
-                            @click.stop="toggleEnabled(data)"
-                        />
-                        <Button
-                            icon="pi pi-chart-bar"
-                            title="Events"
-                            size="small"
-                            severity="secondary"
-                            text
-                            rounded
-                            @click.stop="
-                                router.push({ name: 'session-events', params: { id: data.id } })
-                            "
-                        />
-                        <Button
-                            icon="pi pi-trash"
-                            title="Delete"
-                            size="small"
-                            severity="danger"
-                            text
-                            rounded
-                            @click.stop="confirmDelete(data)"
-                        />
-                    </div>
-                </template>
-            </Column>
-        </DataTable>
-        <div v-if="error" class="error-msg">{{ error }}</div>
+            </TableBody>
+        </Table>
+
+        <div v-if="totalRecords > pageSize" class="flex items-center justify-between px-2 py-4">
+            <span class="text-sm text-muted-foreground">
+                {{ offset + 1 }}–{{ Math.min(offset + pageSize, totalRecords) }} of
+                {{ totalRecords }}
+            </span>
+            <div class="flex gap-2">
+                <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="offset === 0"
+                    @click="fetchPage(offset - pageSize)"
+                >
+                    Previous
+                </Button>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="offset + pageSize >= totalRecords"
+                    @click="fetchPage(offset + pageSize)"
+                >
+                    Next
+                </Button>
+            </div>
+        </div>
+
+        <div v-if="error" class="mt-4 text-destructive">{{ error }}</div>
 
         <DeleteConfirmDialog
             v-model:visible="deleteDialogVisible"
@@ -131,7 +162,7 @@
             @confirm="executeDelete"
         >
             <template v-if="deletePreview" #preview>
-                <div class="delete-stats">
+                <div class="flex gap-5 text-sm text-muted-foreground">
                     <span>{{ deletePreview.event_count }} events</span>
                     <span>{{ deletePreview.waveform_count }} waveforms</span>
                     <span>{{ deletePreview.stats_count }} stats records</span>
@@ -144,13 +175,25 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import Tag from 'primevue/tag'
-import Button from 'primevue/button'
-import DatePicker from 'primevue/datepicker'
-import Select from 'primevue/select'
-import ToggleButton from 'primevue/togglebutton'
+import { Eye, EyeOff, Ban, Check, BarChart3, Trash2, FilterX, Loader2 } from '@lucide/vue'
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Toggle } from '@/components/ui/toggle'
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { getSessions, updateSession, deleteSessions, getSessionDeletePreview } from '@/api/sessions'
 import { getDevices } from '@/api/devices'
@@ -174,6 +217,14 @@ const selectedDevice = ref<string | null>(null)
 const includeDisabled = ref(false)
 const devices = ref<DeviceInfo[]>([])
 
+// Bridge between null-based selectedDevice ref and string-based Select v-model
+const selectedDeviceStr = computed({
+    get: () => selectedDevice.value ?? '',
+    set: (v: string) => {
+        selectedDevice.value = v === '' ? null : v
+    },
+})
+
 const deviceOptions = computed(() =>
     devices.value.map((d) => ({
         label: `${d.manufacturer} ${d.model}`,
@@ -192,6 +243,16 @@ const deleting = ref(false)
 const deletePreview = ref<DeletePreview | null>(null)
 const deleteTargetId = ref<number | null>(null)
 const deleteMessage = ref('')
+
+function onFromDateChange(event: Event): void {
+    const input = event.target as HTMLInputElement
+    fromDate.value = input.value ? new Date(input.value + 'T00:00:00') : null
+}
+
+function onToDateChange(event: Event): void {
+    const input = event.target as HTMLInputElement
+    toDate.value = input.value ? new Date(input.value + 'T00:00:00') : null
+}
 
 async function fetchPage(newOffset: number): Promise<void> {
     loading.value = true
@@ -214,10 +275,6 @@ async function fetchPage(newOffset: number): Promise<void> {
     } finally {
         loading.value = false
     }
-}
-
-function onPage(event: { first: number }): void {
-    void fetchPage(event.first)
 }
 
 function clearFilters(): void {
@@ -288,34 +345,8 @@ onMounted(async () => {
     cursor: default;
 }
 
-.session-link {
-    color: var(--p-primary-color, #3b82f6);
-    text-decoration: none;
-}
-.session-link:hover {
-    text-decoration: underline;
-}
-
 .row-actions {
     display: flex;
     gap: 0.25rem;
-}
-
-.table-empty {
-    padding: 2rem;
-    text-align: center;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
-.error-msg {
-    margin-top: 1rem;
-    color: var(--p-red-500, #ef4444);
-}
-
-.delete-stats {
-    display: flex;
-    gap: 1.25rem;
-    font-size: 0.9rem;
-    color: var(--p-text-muted-color, #6b7280);
 }
 </style>
