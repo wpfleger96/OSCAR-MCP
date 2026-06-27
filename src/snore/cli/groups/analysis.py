@@ -439,53 +439,22 @@ def _analyze_batch(
     mode: tuple[str, ...],
     all_modes: bool,
 ) -> None:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
     from snore.analysis.modes import AVAILABLE_CONFIGS
-    from snore.analysis.service import AnalysisService
-    from snore.database import models
-    from snore.database.session import session_scope
+    from snore.services.analysis_facade import AnalysisFacade
 
-    query = session.query(models.Session).join(models.Day)
-
-    if not analyze_all:
-        if start:
-            query = query.filter(models.Day.date >= start.date())
-        if end:
-            query = query.filter(models.Day.date <= end.date())
-
-    session_ids = [s.id for s in query.order_by(models.Day.date).all()]
-
-    if not session_ids:
-        console.print("No sessions found for the specified criteria")
-        return
-
-    modes = None
+    modes: list[str] | None = None
     if all_modes:
         modes = list(AVAILABLE_CONFIGS.keys())
     elif mode:
         modes = list(mode)
 
-    console.print(f"\nAnalyzing {len(session_ids)} sessions...")
-    modes_display = modes if modes else ["aasm"]
-    console.print(f"  Modes: {', '.join(modes_display)}")
+    from_date = None if analyze_all else start
+    to_date = None if analyze_all else end
 
-    errors: list[tuple[int, str]] = []
-    successful = 0
-
-    def analyze_one(sid: int) -> int:
-        with session_scope() as thread_session:
-            svc = AnalysisService(thread_session)
-            svc.analyze_session(
-                session_id=sid,
-                modes=modes,
-                store_results=not no_store,
-            )
-        return sid
-
-    max_workers = min(4, len(session_ids))
+    facade = AnalysisFacade(session)
+    task_holder: list[Any] = []
 
     with Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -493,29 +462,33 @@ def _analyze_batch(
         MofNCompleteColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Analyzing", total=len(session_ids))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}
+        def on_progress(completed: int, total: int) -> None:
+            if not task_holder:
+                task_holder.append(progress.add_task("Analyzing", total=total))
+            progress.update(task_holder[0], advance=1)
 
-            for future in as_completed(futures):
-                sid = futures[future]
-                try:
-                    future.result()
-                    successful += 1
-                except Exception as e:
-                    errors.append((sid, str(e)))
-                    logger.warning(
-                        f"Failed to analyze session {sid}: {e}", exc_info=True
-                    )
-                progress.update(task, advance=1)
+        result = facade.run_batch_analysis(
+            from_date=from_date,
+            to_date=to_date,
+            modes=modes,
+            store_results=not no_store,
+            progress_callback=on_progress,
+        )
 
+    if result.total == 0:
+        console.print("No sessions found for the specified criteria")
+        return
+
+    modes_display = modes if modes else ["aasm"]
+    console.print(f"\nAnalyzed {result.total} sessions (modes: {', '.join(modes_display)})")
     print_success("Analysis complete")
-    print_kv("Successful", str(successful))
-    print_kv("Failed", str(len(errors)))
-    if errors:
-        for sid, msg in errors:
-            print_warning(f"Session {sid}: {msg}", indent=1)
+    print_kv("Successful", str(result.successful))
+    print_kv("Failed", str(result.failed))
+    for r in result.results:
+        if not r.success and r.error:
+            logger.warning(f"Failed to analyze session {r.session_id}: {r.error}")
+            print_warning(f"Session {r.session_id}: {r.error}", indent=1)
 
 
 def _list_sessions(

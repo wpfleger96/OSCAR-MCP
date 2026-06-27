@@ -1,6 +1,7 @@
 """Analysis facade for listing and managing analysis results."""
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import bindparam, func, select, text
@@ -11,6 +12,8 @@ from snore.services.schemas import (
     AnalysisDeletePreview,
     AnalysisListItem,
     AnalysisSessionDetail,
+    BatchAnalysisResult,
+    BatchSessionResult,
 )
 
 __all__ = ["AnalysisFacade"]
@@ -335,3 +338,84 @@ class AnalysisFacade:
 
         svc = AnalysisService(self.db_session)
         return svc.get_analysis_result(session_id)
+
+    def run_batch_analysis(
+        self,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        modes: list[str] | None = None,
+        store_results: bool = True,
+        max_workers: int = 4,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> BatchAnalysisResult:
+        """Run analysis on multiple sessions in parallel.
+
+        Args:
+            from_date: Filter sessions from this datetime (inclusive)
+            to_date: Filter sessions to this datetime (inclusive)
+            modes: Detection modes to run (None = default)
+            store_results: Whether to store results in the database
+            max_workers: Max parallel threads (capped to session count)
+            progress_callback: Called with (completed, total) after each session
+
+        Returns:
+            BatchAnalysisResult with per-session outcomes and aggregate counts
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from snore.analysis.service import AnalysisService
+        from snore.database.session import session_scope
+
+        query = self.db_session.query(models.Session).join(models.Day)
+        if from_date:
+            query = query.filter(models.Day.date >= from_date.date())
+        if to_date:
+            query = query.filter(models.Day.date <= to_date.date())
+
+        sessions = query.order_by(models.Day.date).all()
+        # Build date map before spawning threads to avoid DB access in workers
+        session_dates: dict[int, date | None] = {
+            s.id: s.day.date if s.day else s.start_time.date() for s in sessions
+        }
+        session_ids = [s.id for s in sessions]
+        total = len(session_ids)
+
+        if not session_ids:
+            return BatchAnalysisResult(total=0, successful=0, failed=0, results=[])
+
+        batch_results: list[BatchSessionResult] = []
+        completed = 0
+
+        def analyze_one(sid: int) -> None:
+            with session_scope() as thread_session:
+                svc = AnalysisService(thread_session)
+                svc.analyze_session(session_id=sid, modes=modes, store_results=store_results)
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
+            futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}
+            for future in as_completed(futures):
+                sid = futures[future]
+                try:
+                    future.result()
+                    success, error = True, None
+                except Exception as e:
+                    success, error = False, str(e)
+                batch_results.append(
+                    BatchSessionResult(
+                        session_id=sid,
+                        session_date=session_dates.get(sid),
+                        success=success,
+                        error=error,
+                    )
+                )
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total)
+
+        successful = sum(1 for r in batch_results if r.success)
+        return BatchAnalysisResult(
+            total=total,
+            successful=successful,
+            failed=total - successful,
+            results=batch_results,
+        )
