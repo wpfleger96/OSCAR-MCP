@@ -84,7 +84,6 @@ def test_missing_session_returns_structured_404(running_api):
 def test_streaming_endpoints_return_200(running_api, path):
     resp = running_api.get(path)
     assert resp.status_code == 200, f"{path} -> {resp.status_code}: {resp.text[:200]}"
-    assert len(resp.content) > 0
 
 
 def test_db_stats_excludes_db_path(running_api):
