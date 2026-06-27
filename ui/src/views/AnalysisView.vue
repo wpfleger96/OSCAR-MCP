@@ -3,6 +3,10 @@
         <Loader2 class="inline h-4 w-4 animate-spin" /> Loading analysis...
     </div>
 
+    <div v-else-if="error" class="error-state">
+        <AlertTriangle class="inline h-4 w-4" /> {{ error }}
+    </div>
+
     <div v-else-if="noAnalysis" class="no-analysis">
         <RouterLink :to="{ name: 'session-detail', params: { id: sessionId } }" class="back-link">
             <ArrowLeft class="inline h-4 w-4" /> Back to Session
@@ -16,10 +20,6 @@
                 Run Analysis
             </Button>
         </div>
-    </div>
-
-    <div v-else-if="error" class="error-state">
-        <AlertTriangle class="inline h-4 w-4" /> {{ error }}
     </div>
 
     <div v-else-if="analysis" class="analysis-view">
@@ -84,10 +84,15 @@
         <div class="section-card">
             <h2>Events by Mode</h2>
             <ToggleGroup
-                v-model="selectedMode"
+                :model-value="selectedMode"
                 type="single"
                 variant="outline"
                 class="mode-selector"
+                @update:model-value="
+                    (v) => {
+                        if (v) selectedMode = v as string
+                    }
+                "
             >
                 <ToggleGroupItem v-for="mode in modeOptions" :key="mode" :value="mode">
                     {{ mode }}

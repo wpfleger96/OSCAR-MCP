@@ -4,7 +4,16 @@
 
         <!-- Period Selector -->
         <div class="period-selector">
-            <ToggleGroup v-model="periodType" type="single" variant="outline">
+            <ToggleGroup
+                :model-value="periodType"
+                type="single"
+                variant="outline"
+                @update:model-value="
+                    (v) => {
+                        if (v) periodType = v as string
+                    }
+                "
+            >
                 <ToggleGroupItem v-for="opt in periodOptions" :key="opt.value" :value="opt.value">
                     {{ opt.label }}
                 </ToggleGroupItem>

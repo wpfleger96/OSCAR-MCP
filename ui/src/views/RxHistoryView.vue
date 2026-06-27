@@ -59,10 +59,10 @@
                         <TableRow
                             v-for="row in comparisonRows"
                             :key="row.start_date"
-                            class="even:bg-muted/50"
                             :class="{
-                                'bg-[rgba(34,197,94,0.08)]': row.isBest,
-                                'bg-[rgba(239,68,68,0.08)]': row.isWorst,
+                                'bg-green-500/10': row.isBest,
+                                'bg-destructive/10': row.isWorst,
+                                'even:bg-muted/50': !row.isBest && !row.isWorst,
                             }"
                         >
                             <TableCell>

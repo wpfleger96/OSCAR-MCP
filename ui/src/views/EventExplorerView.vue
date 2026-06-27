@@ -86,12 +86,12 @@
                         </span>
                     </TableCell>
                     <TableCell>
-                        <a
+                        <button
                             class="time-link text-primary"
                             @click="jumpToWaveform(row.offset_seconds)"
                         >
                             {{ formatTimeOffset(row.offset_seconds) }}
-                        </a>
+                        </button>
                     </TableCell>
                     <TableCell>{{ row.duration_seconds.toFixed(1) }}s</TableCell>
                 </TableRow>
@@ -258,6 +258,11 @@ function jumpToWaveform(offsetSec: number): void {
 .time-link {
     cursor: pointer;
     text-decoration: none;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
 }
 .time-link:hover {
     text-decoration: underline;

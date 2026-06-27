@@ -241,7 +241,11 @@ onMounted(async () => {
         // watcher triggers loadData() for the selected type
 
         if (session.value.has_event_data) {
-            events.value = await getSessionEvents(props.sessionId)
+            try {
+                events.value = await getSessionEvents(props.sessionId)
+            } catch {
+                // Events failed — session still renders with empty events panel
+            }
         }
     } catch (err: unknown) {
         error.value = err instanceof Error ? err.message : 'Failed to load session'

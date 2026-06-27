@@ -25,10 +25,10 @@
                 Add Chart
             </Button>
             <Toggle
-                :pressed="multiWaveform"
+                :model-value="multiWaveform"
                 variant="outline"
                 size="sm"
-                @update:pressed="(v: boolean) => $emit('update:multiWaveform', v)"
+                @update:model-value="(v: boolean) => $emit('update:multiWaveform', v)"
             >
                 <LayoutGrid v-if="multiWaveform" class="mr-2 h-4 w-4" />
                 <Square v-else class="mr-2 h-4 w-4" />

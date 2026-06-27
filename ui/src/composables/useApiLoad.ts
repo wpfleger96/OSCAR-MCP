@@ -14,6 +14,7 @@ export interface ApiLoad<T> {
  * The fetcher runs on component mount; call reload() to re-fetch (e.g. from
  * a filter watcher). `data` keeps its previous value while a reload is in
  * flight, and `error` falls back to `errorMessage` for non-Error rejections.
+ * Concurrent calls are serialized by sequence number — only the last response wins.
  */
 export function useApiLoad<T>(
     fetcher: () => Promise<T>,
@@ -22,16 +23,19 @@ export function useApiLoad<T>(
     const data = shallowRef<T | null>(null)
     const loading = ref(true)
     const error = ref<string | null>(null)
+    let seq = 0
 
     async function reload(): Promise<void> {
+        const thisSeq = ++seq
         loading.value = true
         error.value = null
         try {
-            data.value = await fetcher()
+            const result = await fetcher()
+            if (thisSeq === seq) data.value = result
         } catch (err: unknown) {
-            error.value = err instanceof Error ? err.message : errorMessage
+            if (thisSeq === seq) error.value = err instanceof Error ? err.message : errorMessage
         } finally {
-            loading.value = false
+            if (thisSeq === seq) loading.value = false
         }
     }
 

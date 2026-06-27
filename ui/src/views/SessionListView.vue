@@ -300,6 +300,8 @@ async function confirmDelete(session: SessionListItem): Promise<void> {
     deletePreview.value = null
     try {
         deletePreview.value = await getSessionDeletePreview(session.id)
+    } catch {
+        deleteMessage.value += '\n\nCould not load preview — proceed with caution.'
     } finally {
         deletePreviewLoading.value = false
     }
@@ -323,8 +325,12 @@ async function executeDelete(): Promise<void> {
 watch([fromDate, toDate, selectedDevice, includeDisabled], () => void fetchPage(0))
 
 onMounted(async () => {
-    const [, deviceList] = await Promise.all([fetchPage(0), getDevices()])
-    devices.value = deviceList
+    await fetchPage(0)
+    try {
+        devices.value = await getDevices()
+    } catch {
+        // Device filter unavailable — sessions still load
+    }
 })
 </script>
 
