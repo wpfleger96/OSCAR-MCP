@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from snore.database import models
-from snore.services.schemas import DatabaseStats, DeviceInfo
+from snore.services.schemas import DatabaseStats, DeviceInfo, VacuumResult
 
 __all__ = ["DatabaseService"]
 
@@ -130,3 +130,18 @@ class DatabaseService:
             )
             for d in devices
         ]
+
+    def vacuum(self, db_path: str) -> VacuumResult:
+        """Vacuum the database to reclaim space after deletions."""
+        size_before = os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+
+        self.db_session.execute(text("VACUUM"))
+        self.db_session.commit()
+
+        size_after = os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+
+        return VacuumResult(
+            status="success",
+            size_before_mb=size_before,
+            size_after_mb=size_after,
+        )

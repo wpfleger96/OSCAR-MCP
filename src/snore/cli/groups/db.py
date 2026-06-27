@@ -105,15 +105,15 @@ def db_stats(db: str | None) -> None:
 @click.confirmation_option(prompt="Are you sure you want to vacuum the database?")
 def vacuum(db: str | None) -> None:
     """Optimize database (reclaim space after deletions)."""
-    from sqlalchemy import text
+    db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
 
     console.print("Vacuuming database...")
 
     with db_session(db) as session:
-        session.execute(text("VACUUM"))
-        session.commit()
+        service = DatabaseService(session)
+        result = service.vacuum(str(db_path))
 
-    print_success("Database vacuumed successfully")
+    print_success(f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)")
 
 
 @db.command()
