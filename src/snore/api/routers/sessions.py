@@ -53,7 +53,9 @@ def bulk_delete_preview(
     return service.get_delete_preview(
         device=body.device,
         session_ids=body.session_ids,
-        from_date=datetime.combine(body.from_date, time.min) if body.from_date else None,
+        from_date=datetime.combine(body.from_date, time.min)
+        if body.from_date
+        else None,
         to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
         delete_all=body.delete_all,
     )

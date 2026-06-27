@@ -25,6 +25,7 @@ class BatchAnalysisRequest(BaseModel):
     modes: list[str] = Field(default_factory=lambda: ["aasm"])
     store_results: bool = True
 
+
 router = APIRouter()
 
 AnalysisFacadeDep = Annotated[AnalysisFacade, Depends(service_dep(AnalysisFacade))]
@@ -109,7 +110,9 @@ def run_batch_analysis(
     facade: AnalysisFacadeDep,
 ) -> BatchAnalysisResult:
     return facade.run_batch_analysis(
-        from_date=datetime.combine(body.from_date, time.min) if body.from_date else None,
+        from_date=datetime.combine(body.from_date, time.min)
+        if body.from_date
+        else None,
         to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
         modes=body.modes,
         store_results=body.store_results,

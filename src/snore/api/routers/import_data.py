@@ -20,7 +20,9 @@ class DetectRequest(BaseModel):
 
 
 @router.post("/detect", response_model=list[ImportSource])
-def detect_sources(body: DetectRequest, service: ImportServiceDep) -> list[ImportSource]:
+def detect_sources(
+    body: DetectRequest, service: ImportServiceDep
+) -> list[ImportSource]:
     return service.detect_sources(Path(body.path))
 
 
@@ -29,5 +31,5 @@ async def import_files(
     service: ImportServiceDep,
     files: list[UploadFile] = File(...),
 ) -> ImportResult:
-    uploads = [(file.filename, await file.read()) for file in files]
+    uploads = [(file.filename or "unknown", await file.read()) for file in files]
     return service.import_from_upload(uploads)

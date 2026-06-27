@@ -82,9 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(
         import_data.router, prefix=f"{API_V1_PREFIX}/import", tags=["import"]
     )
-    app.include_router(
-        export.router, prefix=f"{API_V1_PREFIX}/export", tags=["export"]
-    )
+    app.include_router(export.router, prefix=f"{API_V1_PREFIX}/export", tags=["export"])
     app.include_router(db.router, prefix=f"{API_V1_PREFIX}/db", tags=["database"])
     app.include_router(
         validation.router, prefix=f"{API_V1_PREFIX}/validate", tags=["validation"]
