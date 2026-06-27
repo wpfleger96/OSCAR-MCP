@@ -10,6 +10,7 @@ from snore.services.database_service import DatabaseService
 from snore.services.day_service import DayService
 from snore.services.event_service import EventService
 from snore.services.export_service import ExportService
+from snore.services.import_service import ImportService
 from snore.services.session_service import SessionService
 from snore.services.stats_service import StatsService
 from snore.services.waveform_service import WaveformService
@@ -21,6 +22,7 @@ __all__ = [
     "DayService",
     "ExportService",
     "EventService",
+    "ImportService",
     "SessionService",
     "StatsService",
     "WaveformService",
