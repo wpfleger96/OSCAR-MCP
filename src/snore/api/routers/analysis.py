@@ -1,6 +1,8 @@
+from datetime import date, datetime, time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
@@ -10,7 +12,18 @@ from snore.api.schemas import (
     PaginatedResponse,
 )
 from snore.services import AnalysisFacade
-from snore.services.schemas import AnalysisDeletePreview, AnalysisListItem
+from snore.services.schemas import (
+    AnalysisDeletePreview,
+    AnalysisListItem,
+    BatchAnalysisResult,
+)
+
+
+class BatchAnalysisRequest(BaseModel):
+    from_date: date | None = None
+    to_date: date | None = None
+    modes: list[str] = Field(default_factory=lambda: ["aasm"])
+    store_results: bool = True
 
 router = APIRouter()
 
@@ -84,3 +97,16 @@ def get_analysis_delete_preview(
             patterns_count=0,
         )
     return facade.get_delete_preview(session_ids, all_versions=all_versions)
+
+
+@router.post("/analysis/batch", status_code=201, response_model=BatchAnalysisResult)
+def run_batch_analysis(
+    body: BatchAnalysisRequest,
+    facade: AnalysisFacadeDep,
+) -> BatchAnalysisResult:
+    return facade.run_batch_analysis(
+        from_date=datetime.combine(body.from_date, time.min) if body.from_date else None,
+        to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
+        modes=body.modes,
+        store_results=body.store_results,
+    )
