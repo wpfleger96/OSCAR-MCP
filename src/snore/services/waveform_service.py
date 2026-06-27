@@ -1,5 +1,6 @@
 """Waveform service for listing and loading waveform data."""
 
+from bisect import bisect_left, bisect_right
 from typing import Any
 
 import numpy as np
@@ -141,10 +142,10 @@ class WaveformService:
         result = AnalysisService(self.db_session).get_analysis_result(session_id)
 
         if result is None:
-            raise NotFoundError(f"No analysis results found for session {session_id}")
+            raise NotFoundError("No analysis results found for this session")
 
         if mode not in result.mode_results:
-            raise NotFoundError(f"Mode {mode} not found in analysis results")
+            raise NotFoundError(f"Mode '{mode}' not found in analysis results")
 
         mode_result = result.mode_results[mode]
 
@@ -160,12 +161,14 @@ class WaveformService:
         false_positives_apnea: list[EventComparisonDetail] = []
         false_positives_hypopnea: list[EventComparisonDetail] = []
 
-        for m_event in all_machine:
-            is_matched = any(
-                abs(p_event.start_time - m_event.start_time) <= tolerance_seconds
-                for p_event in all_prog
-            )
-            if not is_matched:
+        all_machine_sorted = sorted(all_machine, key=lambda e: e.start_time)
+        prog_times = sorted(e.start_time for e in all_prog)
+        machine_times = [e.start_time for e in all_machine_sorted]
+
+        for m_event in all_machine_sorted:
+            lo = bisect_left(prog_times, m_event.start_time - tolerance_seconds)
+            hi = bisect_right(prog_times, m_event.start_time + tolerance_seconds)
+            if lo >= hi:
                 false_negatives.append(
                     EventComparisonDetail(
                         event_type=getattr(m_event, "event_type", "unknown"),
@@ -177,11 +180,9 @@ class WaveformService:
                 )
 
         for apnea_event in prog_apneas:
-            is_matched = any(
-                abs(apnea_event.start_time - m_event.start_time) <= tolerance_seconds
-                for m_event in all_machine
-            )
-            if not is_matched:
+            lo = bisect_left(machine_times, apnea_event.start_time - tolerance_seconds)
+            hi = bisect_right(machine_times, apnea_event.start_time + tolerance_seconds)
+            if lo >= hi:
                 false_positives_apnea.append(
                     EventComparisonDetail(
                         event_type=apnea_event.event_type,
@@ -193,11 +194,13 @@ class WaveformService:
                 )
 
         for hypopnea_event in prog_hypopneas:
-            is_matched = any(
-                abs(hypopnea_event.start_time - m_event.start_time) <= tolerance_seconds
-                for m_event in all_machine
+            lo = bisect_left(
+                machine_times, hypopnea_event.start_time - tolerance_seconds
             )
-            if not is_matched:
+            hi = bisect_right(
+                machine_times, hypopnea_event.start_time + tolerance_seconds
+            )
+            if lo >= hi:
                 false_positives_hypopnea.append(
                     EventComparisonDetail(
                         event_type="H",

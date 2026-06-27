@@ -15,6 +15,7 @@ from snore.database.models import Base
 
 _engine = None
 _SessionFactory = None
+_db_path: str | None = None
 _init_lock = threading.Lock()
 
 
@@ -30,7 +31,7 @@ def init_database(database_path: str | None = None) -> None:
         PermissionError: If directory cannot be created
         ValueError: If database path is invalid
     """
-    global _engine, _SessionFactory
+    global _engine, _SessionFactory, _db_path
 
     with _init_lock:
         if _engine is not None and _SessionFactory is not None:
@@ -41,6 +42,8 @@ def init_database(database_path: str | None = None) -> None:
 
         if not database_path or not isinstance(database_path, str):
             raise ValueError(f"Invalid database path: {database_path}")
+
+        _db_path = database_path
 
         db_dir = os.path.dirname(database_path)
         if db_dir:
@@ -121,6 +124,13 @@ def get_engine() -> Engine:
     return _engine
 
 
+def get_db_path() -> str:
+    """Get the path to the initialized database."""
+    if _db_path is None:
+        raise RuntimeError("Database not initialized. Call init_database() first.")
+    return _db_path
+
+
 def cleanup_database() -> None:
     """
     Clean up database connections and reset global state.
@@ -128,10 +138,11 @@ def cleanup_database() -> None:
     This function should be called during test cleanup to prevent resource warnings.
     It properly disposes of the SQLAlchemy engine and resets global variables.
     """
-    global _engine, _SessionFactory
+    global _engine, _SessionFactory, _db_path
 
     with _init_lock:
         if _engine is not None:
             _engine.dispose()
             _engine = None
         _SessionFactory = None
+        _db_path = None

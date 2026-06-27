@@ -1,18 +1,43 @@
 from __future__ import annotations
 
+# ExportService uses a filesystem-oriented constructor (backup_root, not db_session)
+# and doesn't fit the service_dep() DI pattern. DB sessions are passed per-method call.
+import shutil
 import tempfile
 
+from collections.abc import Generator
 from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from snore.api.deps import get_db
 from snore.services.export_service import ExportService
 
 router = APIRouter()
+
+
+def _stream_file(path: Path, chunk_size: int = 64 * 1024) -> Generator[bytes]:
+    with path.open("rb") as f:
+        while chunk := f.read(chunk_size):
+            yield chunk
+
+
+def _streaming_export(
+    tmpdir: str,
+    output_path: Path,
+    media_type: str,
+    filename: str,
+) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_file(output_path),
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        background=BackgroundTask(shutil.rmtree, tmpdir),
+    )
 
 
 @router.get("/csv")
@@ -24,22 +49,17 @@ def export_csv(
     include_waveforms: bool = Query(default=False),
 ) -> StreamingResponse:
     svc = ExportService()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "export.csv"
-        svc.export_csv(
-            db,
-            output,
-            date_from=from_date,
-            date_to=to_date,
-            device_serial=device,
-            include_waveforms=include_waveforms,
-        )
-        content = output.read_bytes()
-    return StreamingResponse(
-        iter([content]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=snore_export.csv"},
+    tmpdir = tempfile.mkdtemp()
+    output = Path(tmpdir) / "export.csv"
+    svc.export_csv(
+        db,
+        output,
+        date_from=from_date,
+        date_to=to_date,
+        device_serial=device,
+        include_waveforms=include_waveforms,
     )
+    return _streaming_export(tmpdir, output, "text/csv", "snore_export.csv")
 
 
 @router.get("/json")
@@ -50,21 +70,16 @@ def export_json(
     device: str | None = Query(default=None),
 ) -> StreamingResponse:
     svc = ExportService()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "export.json"
-        svc.export_json(
-            db,
-            output,
-            date_from=from_date,
-            date_to=to_date,
-            device_serial=device,
-        )
-        content = output.read_bytes()
-    return StreamingResponse(
-        iter([content]),
-        media_type="application/json",
-        headers={"Content-Disposition": "attachment; filename=snore_export.json"},
+    tmpdir = tempfile.mkdtemp()
+    output = Path(tmpdir) / "export.json"
+    svc.export_json(
+        db,
+        output,
+        date_from=from_date,
+        date_to=to_date,
+        device_serial=device,
     )
+    return _streaming_export(tmpdir, output, "application/json", "snore_export.json")
 
 
 @router.get("/raw")
@@ -76,19 +91,16 @@ def export_raw(
     as_zip: bool = Query(default=True),
 ) -> StreamingResponse:
     svc = ExportService()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "snore_export_raw.zip"
-        result = svc.export_raw(
-            output,
-            date_from=from_date,
-            date_to=to_date,
-            device_serial=device,
-            trim_str=trim_str,
-            as_zip=as_zip,
-        )
-        content = result.output_path.read_bytes()
-    return StreamingResponse(
-        iter([content]),
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=snore_export_raw.zip"},
+    tmpdir = tempfile.mkdtemp()
+    output = Path(tmpdir) / "snore_export_raw.zip"
+    result = svc.export_raw(
+        output,
+        date_from=from_date,
+        date_to=to_date,
+        device_serial=device,
+        trim_str=trim_str,
+        as_zip=as_zip,
+    )
+    return _streaming_export(
+        tmpdir, result.output_path, "application/zip", "snore_export_raw.zip"
     )

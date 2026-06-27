@@ -1,14 +1,14 @@
-from datetime import date, datetime, time
-from typing import Annotated, Any
+from datetime import datetime, time
+from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
 from snore.api.schemas import (
     AnalysisDeleteRequest,
     AnalysisRunRequest,
+    BatchAnalysisRequest,
     PaginatedResponse,
 )
 from snore.services import AnalysisFacade
@@ -17,14 +17,6 @@ from snore.services.schemas import (
     AnalysisListItem,
     BatchAnalysisResult,
 )
-
-
-class BatchAnalysisRequest(BaseModel):
-    from_date: date | None = None
-    to_date: date | None = None
-    modes: list[str] = Field(default_factory=lambda: ["aasm"])
-    store_results: bool = True
-
 
 router = APIRouter()
 
@@ -109,11 +101,16 @@ def run_batch_analysis(
     body: BatchAnalysisRequest,
     facade: AnalysisFacadeDep,
 ) -> BatchAnalysisResult:
+    if body.from_date is None and body.to_date is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of from_date or to_date is required",
+        )
     return facade.run_batch_analysis(
         from_date=datetime.combine(body.from_date, time.min)
         if body.from_date
         else None,
         to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
-        modes=body.modes,
+        modes=cast(list[str], body.modes),
         store_results=body.store_results,
     )

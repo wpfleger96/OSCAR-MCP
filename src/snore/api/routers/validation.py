@@ -1,19 +1,11 @@
-from datetime import date
-
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from snore.api.deps import get_db
+from snore.api.schemas import ValidationRequest
 from snore.validation import BatchValidator, ValidationReport
 
 router = APIRouter()
-
-
-class ValidationRequest(BaseModel):
-    from_date: date
-    to_date: date
-    mode: str = "aasm"
 
 
 @router.post("/", response_model=ValidationReport)

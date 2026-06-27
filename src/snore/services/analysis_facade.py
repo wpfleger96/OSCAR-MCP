@@ -1,6 +1,8 @@
 """Analysis facade for listing and managing analysis results."""
 
-from collections.abc import Callable
+import logging
+
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -17,6 +19,8 @@ from snore.services.schemas import (
 )
 
 __all__ = ["AnalysisFacade"]
+
+logger = logging.getLogger(__name__)
 
 
 class AnalysisFacade:
@@ -115,6 +119,8 @@ class AnalysisFacade:
 
         if limit > 0:
             query = query.limit(limit)
+        else:
+            query = query.limit(10000)
 
         sessions = query.all()
 
@@ -292,28 +298,23 @@ class AnalysisFacade:
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
-            deleted_count = 0
-            for session_id in session_ids:
-                latest_result = self.db_session.execute(
-                    text(
-                        """
-                        SELECT id FROM analysis_results
-                        WHERE session_id = :session_id
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """
-                    ),
-                    {"session_id": session_id},
-                ).fetchone()
-
-                if latest_result:
-                    self.db_session.execute(
-                        text("DELETE FROM analysis_results WHERE id = :analysis_id"),
-                        {"analysis_id": latest_result.id},
+            result = self.db_session.execute(
+                text("""
+                    DELETE FROM analysis_results
+                    WHERE id IN (
+                        SELECT id FROM (
+                            SELECT id, ROW_NUMBER() OVER (
+                                PARTITION BY session_id ORDER BY created_at DESC
+                            ) AS rn
+                            FROM analysis_results
+                            WHERE session_id IN :session_ids
+                        )
+                        WHERE rn = 1
                     )
-                    deleted_count += 1
-
-            return deleted_count
+                """).bindparams(bindparam("session_ids", expanding=True)),
+                {"session_ids": session_ids},
+            )
+            return result.rowcount or 0  # type: ignore[attr-defined]
 
     def run_analysis(
         self,
@@ -343,7 +344,7 @@ class AnalysisFacade:
         self,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
-        modes: list[str] | None = None,
+        modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
         progress_callback: Callable[[int, int], None] | None = None,
@@ -385,12 +386,13 @@ class AnalysisFacade:
 
         batch_results: list[BatchSessionResult] = []
         completed = 0
+        modes_list: list[str] | None = list(modes) if modes is not None else None
 
         def analyze_one(sid: int) -> None:
             with session_scope() as thread_session:
                 svc = AnalysisService(thread_session)
                 svc.analyze_session(
-                    session_id=sid, modes=modes, store_results=store_results
+                    session_id=sid, modes=modes_list, store_results=store_results
                 )
 
         with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
@@ -401,7 +403,10 @@ class AnalysisFacade:
                     future.result()
                     success, error = True, None
                 except Exception as e:
-                    success, error = False, str(e)
+                    logger.warning(
+                        "Failed to analyze session %d: %s", sid, e, exc_info=True
+                    )
+                    success, error = False, f"Analysis failed for session {sid}"
                 batch_results.append(
                     BatchSessionResult(
                         session_id=sid,

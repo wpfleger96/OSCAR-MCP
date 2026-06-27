@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,7 @@ from snore.services.schemas import (
 )
 
 __all__ = [
+    "AnalysisMode",
     "PaginatedResponse",
     "WaveformDataResponse",
     "SessionEnabledRequest",
@@ -19,6 +21,8 @@ __all__ = [
     "BulkDeletePreviewRequest",
     "AnalysisRunRequest",
     "AnalysisDeleteRequest",
+    "BatchAnalysisRequest",
+    "ValidationRequest",
     "EventItem",
     "DayDetail",
     "DayListItem",
@@ -76,3 +80,22 @@ class EventItem(BaseModel):
     start_time: float
     duration_seconds: float
     offset_seconds: float
+
+
+AnalysisMode = Literal["aasm", "aasm_relaxed", "resmed"]
+
+
+class BatchAnalysisRequest(BaseModel):
+    from_date: date | None = None
+    to_date: date | None = None
+    modes: list[AnalysisMode] = Field(
+        default_factory=lambda: cast(list[AnalysisMode], ["aasm"])
+    )
+    store_results: bool = True
+    max_sessions: int = Field(default=1000, le=10000, ge=1)
+
+
+class ValidationRequest(BaseModel):
+    from_date: date
+    to_date: date
+    mode: AnalysisMode = "aasm"

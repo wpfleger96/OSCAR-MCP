@@ -8,9 +8,8 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from sqlalchemy.orm import Session
-
 from snore.database.importers import SessionImporter
+from snore.database.session import session_scope
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
 from snore.services.schemas import ImportResult, ImportSource, ImportSourceResult
@@ -22,9 +21,6 @@ __all__ = ["ImportService"]
 
 class ImportService:
     """Orchestrates the CPAP data import pipeline."""
-
-    def __init__(self, db_session: Session):
-        self.db_session = db_session
 
     def detect_sources(self, path: Path) -> list[ImportSource]:
         """Detect all importable data sources under path."""
@@ -102,19 +98,15 @@ class ImportService:
         total_failed = 0
 
         if not dry_run:
-            orphaned = SessionImporter.cleanup_orphaned_records(self.db_session)
-            if orphaned > 0:
-                emit(f"Cleaned up {orphaned} orphaned records from database")
+            with session_scope() as db_session:
+                orphaned = SessionImporter.cleanup_orphaned_records(db_session)
+                if orphaned > 0:
+                    emit(f"Cleaned up {orphaned} orphaned records from database")
+
+        parser_map = {p.parser_id: p for p in parser_registry.list_parsers()}
 
         for source in sources:
-            parser = next(
-                (
-                    p
-                    for p in parser_registry.list_parsers()
-                    if p.parser_id == source.parser_name
-                ),
-                None,
-            )
+            parser = parser_map.get(source.parser_name)
             if parser is None:
                 logger.warning(
                     "Parser %r not found — skipping source", source.parser_name
@@ -235,7 +227,10 @@ class ImportService:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             for filename, content in files:
-                dest = tmp_path / filename
+                safe_name = Path(filename).name
+                if not safe_name:
+                    safe_name = "unknown"
+                dest = tmp_path / safe_name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(content)
 

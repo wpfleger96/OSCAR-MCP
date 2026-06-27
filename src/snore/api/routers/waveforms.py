@@ -36,7 +36,7 @@ def list_waveforms(session_id: int, service: WaveformServiceDep) -> list[Wavefor
 def compare_waveform_events(
     session_id: int,
     service: WaveformServiceDep,
-    mode: str = Query(default="aasm"),
+    mode: Literal["aasm", "aasm_relaxed", "resmed"] = Query(default="aasm"),
 ) -> EventComparisonResult:
     return service.compare_events(session_id, mode=mode)
 
