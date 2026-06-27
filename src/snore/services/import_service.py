@@ -116,7 +116,9 @@ class ImportService:
                 None,
             )
             if parser is None:
-                logger.warning("Parser %r not found — skipping source", source.parser_name)
+                logger.warning(
+                    "Parser %r not found — skipping source", source.parser_name
+                )
                 source_results.append(
                     ImportSourceResult(
                         source=source,
@@ -153,8 +155,7 @@ class ImportService:
                             parse_root = backup_result.backup_root
                     except Exception as exc:
                         raise RuntimeError(
-                            f"Backup failed: {exc}\n"
-                            "Use backup=False to skip backup."
+                            f"Backup failed: {exc}\nUse backup=False to skip backup."
                         ) from exc
                 else:
                     warnings.append("No device serial — backup skipped")
@@ -191,9 +192,7 @@ class ImportService:
             # Import
             importer = SessionImporter()
             total_batches = (len(sessions) + batch_size - 1) // batch_size
-            emit(
-                f"Importing {len(sessions)} sessions in {total_batches} batch(es)..."
-            )
+            emit(f"Importing {len(sessions)} sessions in {total_batches} batch(es)...")
             imported, skipped, failed = importer.import_sessions_batch(
                 sessions, force=force, batch_size=batch_size
             )

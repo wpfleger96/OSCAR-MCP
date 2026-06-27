@@ -113,7 +113,9 @@ def vacuum(db: str | None) -> None:
         service = DatabaseService(session)
         result = service.vacuum(str(db_path))
 
-    print_success(f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)")
+    print_success(
+        f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)"
+    )
 
 
 @db.command()

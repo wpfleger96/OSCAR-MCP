@@ -389,7 +389,9 @@ class AnalysisFacade:
         def analyze_one(sid: int) -> None:
             with session_scope() as thread_session:
                 svc = AnalysisService(thread_session)
-                svc.analyze_session(session_id=sid, modes=modes, store_results=store_results)
+                svc.analyze_session(
+                    session_id=sid, modes=modes, store_results=store_results
+                )
 
         with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
             futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}

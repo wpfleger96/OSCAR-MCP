@@ -133,12 +133,16 @@ class DatabaseService:
 
     def vacuum(self, db_path: str) -> VacuumResult:
         """Vacuum the database to reclaim space after deletions."""
-        size_before = os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+        size_before = (
+            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+        )
 
         self.db_session.execute(text("VACUUM"))
         self.db_session.commit()
 
-        size_after = os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+        size_after = (
+            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+        )
 
         return VacuumResult(
             status="success",

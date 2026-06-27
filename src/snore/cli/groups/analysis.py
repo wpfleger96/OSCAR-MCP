@@ -481,7 +481,9 @@ def _analyze_batch(
         return
 
     modes_display = modes if modes else ["aasm"]
-    console.print(f"\nAnalyzed {result.total} sessions (modes: {', '.join(modes_display)})")
+    console.print(
+        f"\nAnalyzed {result.total} sessions (modes: {', '.join(modes_display)})"
+    )
     print_success("Analysis complete")
     print_kv("Successful", str(result.successful))
     print_kv("Failed", str(result.failed))

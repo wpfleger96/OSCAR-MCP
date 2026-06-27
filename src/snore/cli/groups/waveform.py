@@ -378,7 +378,9 @@ def compare_events(
 
         if (
             not show_unmatched
-            or len(comparison.false_positives_apnea) + len(comparison.false_positives_hypopnea) > 0
+            or len(comparison.false_positives_apnea)
+            + len(comparison.false_positives_hypopnea)
+            > 0
         ):
             console.print(
                 f"FALSE POSITIVES (programmatic events not in machine): {len(comparison.false_positives_apnea) + len(comparison.false_positives_hypopnea)}"

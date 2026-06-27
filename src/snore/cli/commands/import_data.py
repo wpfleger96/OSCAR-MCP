@@ -164,8 +164,7 @@ def import_data(
                 None,
             )
             source_desc = (
-                source.profile_name
-                or f"S/N {source.device_serial or 'unknown'}"
+                source.profile_name or f"S/N {source.device_serial or 'unknown'}"
             )
 
             if len(selected_sources) > 1:
@@ -306,9 +305,7 @@ def import_data(
                     force=force,
                     batch_size=batch_size,
                     backup=not no_backup,
-                    backup_root=(
-                        Path(backup_dir).expanduser() if backup_dir else None
-                    ),
+                    backup_root=(Path(backup_dir).expanduser() if backup_dir else None),
                     sort_by=sort_by if sort_by != "filesystem" else None,
                     limit=limit,
                     date_from=date_from_str,
