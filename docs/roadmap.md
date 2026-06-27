@@ -111,6 +111,13 @@ Complete project overview showing implemented features and future development pl
 - [x] **BackupService and ExportService** — Service layer modules for backup and export
 - [x] **Import flags** — `--no-backup`, `--backup-dir` options for import command
 
+### Phase 2.1c: Shared Service Layer + CLI Parity Endpoints (2026-06-27)
+- [x] **New `ImportService`** — Source auto-detection, filesystem and file-upload import, backup orchestration
+- [x] **4 new API routers, 11 new endpoints** — import, export, db, validation + batch analysis, waveform compare, bulk delete-preview (12 routers, 35 endpoints total)
+- [x] **CLI refactored to shared services** — import, batch analysis, waveform compare, db vacuum now delegate to service layer
+- [x] **8 new Pydantic schemas** — `ImportSource`, `ImportResult`, `BatchAnalysisResult`, `EventComparisonResult`, `VacuumResult`, and component types
+- [x] **Security hardening** — Path traversal guards, upload size limits, mode validation via Literal types, streaming exports, sanitized error messages
+
 ### Phase 2.0b: Service Layer Extraction (2026-02-14)
 - [x] **8 services extracted from CLI** - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling (1,741 lines moved)
 - [x] **CLI reduced by 7.2%** - From 3,797 to 3,524 lines
@@ -172,7 +179,7 @@ Complete project overview showing implemented features and future development pl
 
 **Sub-phase 2.2-2.4: Vue Frontend** 🚧 IN PROGRESS
 - [x] Project scaffolding (Vue 3 + TypeScript + PrimeVue + Vite)
-- [x] API client layer (8 modules matching backend routers)
+- [x] API client layer (8 modules — backend now has 12 routers; 4 new frontend modules planned for Phases 5-6)
 - [x] 7 views: Dashboard, Session List, Session Detail, Stats, Analysis, Event Explorer, RX History
 - [x] 10+ components: Sidebar, StatCard, TrendChart, CalendarHeatmap, WaveformChart, etc.
 - [x] Waveform rendering with uPlot
