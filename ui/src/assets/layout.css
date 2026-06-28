@@ -5,8 +5,8 @@
 }
 
 .section-card {
-    background: var(--p-surface-card, #fff);
-    border: 1px solid var(--p-surface-border, #e2e8f0);
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 1rem 1.25rem;
     margin-bottom: 1.5rem;
@@ -24,11 +24,11 @@
     align-items: center;
     gap: 0.5rem;
     padding: 2rem;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
 }
 
 .error-state {
-    color: var(--p-red-500, #ef4444);
+    color: var(--color-destructive);
 }
 
 .back-link {
@@ -36,7 +36,7 @@
     align-items: center;
     gap: 0.4rem;
     font-size: 0.875rem;
-    color: var(--p-primary-color, #3b82f6);
+    color: var(--color-primary);
     text-decoration: none;
     margin-bottom: 1rem;
 }

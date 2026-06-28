@@ -1,24 +1,24 @@
 <template>
     <div v-if="loading" class="loading-state">
-        <i class="pi pi-spin pi-spinner" /> Loading session...
+        <Loader2 class="inline h-4 w-4 animate-spin" /> Loading session...
     </div>
 
     <div v-else-if="error" class="error-state">
-        <i class="pi pi-exclamation-triangle" /> {{ error }}
+        <AlertTriangle class="inline h-4 w-4" /> {{ error }}
     </div>
 
     <div v-else-if="session" class="session-detail">
         <!-- Back link -->
         <RouterLink to="/sessions" class="back-link">
-            <i class="pi pi-arrow-left" /> All Sessions
+            <ArrowLeft class="inline h-4 w-4" /> All Sessions
         </RouterLink>
 
         <!-- Session header -->
         <div class="session-header">
             <div>
                 <h1>{{ formatDateWithWeekday(session.start_time) }}</h1>
-                <div class="session-meta">
-                    <Tag v-if="session.therapy_mode" :value="session.therapy_mode" />
+                <div class="session-meta text-muted-foreground">
+                    <Badge v-if="session.therapy_mode">{{ session.therapy_mode }}</Badge>
                     <span>{{ session.device_manufacturer }} {{ session.device_model }}</span>
                     <span>{{ session.duration_hours.toFixed(1) }} hours</span>
                     <span v-if="session.statistics?.ahi != null">
@@ -33,7 +33,7 @@
         </div>
 
         <!-- Waveform section -->
-        <div class="waveform-section">
+        <div class="bg-card border border-border rounded-lg py-4 px-5 mb-6">
             <WaveformToolbar
                 v-model="selectedType"
                 :available-types="session.waveform_types"
@@ -43,10 +43,16 @@
                 @add-chart="handleAddChart"
             />
 
-            <div v-if="waveformLoading && !multiMode" class="chart-loading">
-                <i class="pi pi-spin pi-spinner" /> Loading waveform...
+            <div
+                v-if="waveformLoading && !multiMode"
+                class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
+            >
+                <Loader2 class="h-4 w-4 animate-spin" /> Loading waveform...
             </div>
-            <div v-else-if="waveformError && !multiMode" class="chart-error">
+            <div
+                v-else-if="waveformError && !multiMode"
+                class="h-60 flex items-center justify-center gap-2 text-destructive"
+            >
                 {{ waveformError }}
             </div>
 
@@ -113,28 +119,40 @@
         </div>
 
         <!-- Device settings -->
-        <Panel
+        <Collapsible
             v-if="session.settings?.length"
-            header="Device Settings"
-            :toggleable="true"
-            :collapsed="true"
+            v-model:open="settingsOpen"
             class="settings-panel"
         >
-            <div class="settings-grid">
-                <div v-for="s in session.settings" :key="s.key" class="setting-row">
-                    <span class="setting-key">{{ s.key }}</span>
-                    <span class="setting-value">{{ s.value ?? '---' }}</span>
+            <CollapsibleTrigger as-child>
+                <button
+                    class="flex w-full items-center justify-between rounded-lg border border-border bg-card p-4 text-left font-semibold hover:bg-accent"
+                >
+                    Device Settings
+                    <ChevronDown
+                        class="h-4 w-4 transition-transform"
+                        :class="{ 'rotate-180': settingsOpen }"
+                    />
+                </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent class="px-4 pt-3 pb-4">
+                <div class="settings-grid">
+                    <div v-for="s in session.settings" :key="s.key" class="setting-row">
+                        <span class="setting-key text-muted-foreground">{{ s.key }}</span>
+                        <span class="setting-value">{{ s.value ?? '---' }}</span>
+                    </div>
                 </div>
-            </div>
-        </Panel>
+            </CollapsibleContent>
+        </Collapsible>
     </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import Tag from 'primevue/tag'
-import Panel from 'primevue/panel'
+import { Badge } from '@/components/ui/badge'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Loader2, AlertTriangle, ArrowLeft, ChevronDown } from '@lucide/vue'
 import WaveformChart from '@/components/WaveformChart.vue'
 import WaveformToolbar from '@/components/WaveformToolbar.vue'
 import MultiWaveformView from '@/components/MultiWaveformView.vue'
@@ -156,6 +174,7 @@ const error = ref<string | null>(null)
 
 const selectedType = ref('')
 const multiMode = ref(false)
+const settingsOpen = ref(false)
 
 const sessionIdRef = computed(() => props.sessionId)
 const {
@@ -222,7 +241,11 @@ onMounted(async () => {
         // watcher triggers loadData() for the selected type
 
         if (session.value.has_event_data) {
-            events.value = await getSessionEvents(props.sessionId)
+            try {
+                events.value = await getSessionEvents(props.sessionId)
+            } catch {
+                // Events failed — session still renders with empty events panel
+            }
         }
     } catch (err: unknown) {
         error.value = err instanceof Error ? err.message : 'Failed to load session'
@@ -253,29 +276,6 @@ onMounted(async () => {
     gap: 1rem;
     flex-wrap: wrap;
     font-size: 0.9rem;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
-.waveform-section {
-    background: var(--p-surface-card, #fff);
-    border: 1px solid var(--p-surface-border, #e2e8f0);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-    margin-bottom: 1.5rem;
-}
-
-.chart-loading,
-.chart-error {
-    height: 240px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
-.chart-error {
-    color: var(--p-red-500, #ef4444);
 }
 
 .stats-section {
@@ -309,10 +309,6 @@ onMounted(async () => {
     justify-content: space-between;
     font-size: 0.875rem;
     padding: 0.3rem 0;
-    border-bottom: 1px solid var(--p-surface-border, #e2e8f0);
-}
-
-.setting-key {
-    color: var(--p-text-muted-color, #6b7280);
+    border-bottom: 1px solid var(--color-border);
 }
 </style>

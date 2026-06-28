@@ -106,7 +106,7 @@ const monthLabels = computed(() => {
     grid-template-rows: repeat(7, 14px);
     gap: 2px;
     font-size: 0.65rem;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
     margin-top: 1.25rem;
     text-align: right;
     padding-right: 0.25rem;
@@ -116,7 +116,7 @@ const monthLabels = computed(() => {
     display: grid;
     gap: 2px;
     font-size: 0.65rem;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
     height: 1rem;
     margin-left: 2rem;
 }
@@ -137,7 +137,7 @@ const monthLabels = computed(() => {
 }
 
 .cell--empty {
-    background: var(--p-surface-200, #e5e7eb);
+    background: var(--color-muted);
     cursor: default;
 }
 .cell--good {

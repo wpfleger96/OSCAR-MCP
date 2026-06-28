@@ -1,6 +1,6 @@
 <template>
     <div v-if="loading" class="records-loading">
-        <i class="pi pi-spin pi-spinner" /> Loading records...
+        <Loader2 class="h-4 w-4 animate-spin" /> Loading records...
     </div>
     <div v-else class="records-grid">
         <div v-for="(metric, key) in displayMetrics" :key="key" class="record-card">
@@ -33,6 +33,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Loader2 } from '@lucide/vue'
 import { formatDateMonthDay } from '@/utils/formatting'
 import type { RecordsData } from '@/types'
 
@@ -65,7 +66,7 @@ const displayMetrics = computed(() => {
 .records-loading {
     padding: 2rem;
     text-align: center;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
 }
 
 .records-grid {
@@ -75,8 +76,8 @@ const displayMetrics = computed(() => {
 }
 
 .record-card {
-    background: var(--p-surface-card, #fff);
-    border: 1px solid var(--p-surface-border, #e2e8f0);
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 1rem;
 }
@@ -85,7 +86,7 @@ const displayMetrics = computed(() => {
     font-size: 0.85rem;
     font-weight: 600;
     margin-bottom: 0.75rem;
-    color: var(--p-text-color, #1a1a1a);
+    color: var(--color-foreground);
 }
 
 .record-columns {
@@ -118,7 +119,7 @@ const displayMetrics = computed(() => {
 }
 
 .record-date {
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
 }
 
 .best-value {
@@ -132,6 +133,6 @@ const displayMetrics = computed(() => {
 
 .record-empty {
     font-size: 0.8rem;
-    color: var(--p-text-muted-color, #6b7280);
+    color: var(--color-muted-foreground);
 }
 </style>

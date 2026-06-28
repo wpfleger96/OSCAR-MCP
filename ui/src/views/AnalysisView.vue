@@ -1,31 +1,30 @@
 <template>
     <div v-if="loading" class="loading-state">
-        <i class="pi pi-spin pi-spinner" /> Loading analysis...
+        <Loader2 class="inline h-4 w-4 animate-spin" /> Loading analysis...
+    </div>
+
+    <div v-else-if="error" class="error-state">
+        <AlertTriangle class="inline h-4 w-4" /> {{ error }}
     </div>
 
     <div v-else-if="noAnalysis" class="no-analysis">
         <RouterLink :to="{ name: 'session-detail', params: { id: sessionId } }" class="back-link">
-            <i class="pi pi-arrow-left" /> Back to Session
+            <ArrowLeft class="inline h-4 w-4" /> Back to Session
         </RouterLink>
-        <div class="empty-card">
-            <i class="pi pi-chart-bar empty-icon" />
-            <p>No analysis results for this session.</p>
-            <Button
-                label="Run Analysis"
-                icon="pi pi-play"
-                :loading="running"
-                @click="handleRunAnalysis"
-            />
+        <div class="empty-card border border-border bg-card">
+            <BarChart3 class="empty-icon text-muted-foreground" />
+            <p class="text-muted-foreground">No analysis results for this session.</p>
+            <Button :disabled="running" @click="handleRunAnalysis">
+                <Loader2 v-if="running" class="h-4 w-4 animate-spin" />
+                <Play v-else class="h-4 w-4" />
+                Run Analysis
+            </Button>
         </div>
-    </div>
-
-    <div v-else-if="error" class="error-state">
-        <i class="pi pi-exclamation-triangle" /> {{ error }}
     </div>
 
     <div v-else-if="analysis" class="analysis-view">
         <RouterLink :to="{ name: 'session-detail', params: { id: sessionId } }" class="back-link">
-            <i class="pi pi-arrow-left" /> Back to Session
+            <ArrowLeft class="inline h-4 w-4" /> Back to Session
         </RouterLink>
 
         <h1 class="page-title">Analysis — Session #{{ sessionId }}</h1>
@@ -55,59 +54,108 @@
         <!-- Mode Comparison Table -->
         <div class="section-card">
             <h2>Mode Comparison</h2>
-            <DataTable :value="modeRows" striped-rows>
-                <Column field="mode" header="Mode" />
-                <Column header="AHI" style="width: 80px">
-                    <template #body="{ data }">
-                        <strong>{{ data.ahi.toFixed(1) }}</strong>
-                    </template>
-                </Column>
-                <Column header="RDI" style="width: 80px">
-                    <template #body="{ data }">{{ data.rdi.toFixed(1) }}</template>
-                </Column>
-                <Column field="apneas" header="Apneas" style="width: 80px" />
-                <Column field="hypopneas" header="Hypopneas" style="width: 100px" />
-                <Column field="reras" header="RERAs" style="width: 80px" />
-            </DataTable>
+            <Table>
+                <TableHeader>
+                    <TableRow>
+                        <TableHead>Mode</TableHead>
+                        <TableHead style="width: 80px">AHI</TableHead>
+                        <TableHead style="width: 80px">RDI</TableHead>
+                        <TableHead style="width: 80px">Apneas</TableHead>
+                        <TableHead style="width: 100px">Hypopneas</TableHead>
+                        <TableHead style="width: 80px">RERAs</TableHead>
+                    </TableRow>
+                </TableHeader>
+                <TableBody>
+                    <TableRow v-for="(row, i) in modeRows" :key="i" class="odd:bg-muted/50">
+                        <TableCell>{{ row.mode }}</TableCell>
+                        <TableCell
+                            ><strong>{{ row.ahi.toFixed(1) }}</strong></TableCell
+                        >
+                        <TableCell>{{ row.rdi.toFixed(1) }}</TableCell>
+                        <TableCell>{{ row.apneas }}</TableCell>
+                        <TableCell>{{ row.hypopneas }}</TableCell>
+                        <TableCell>{{ row.reras }}</TableCell>
+                    </TableRow>
+                </TableBody>
+            </Table>
         </div>
 
         <!-- Per-mode Events -->
         <div class="section-card">
             <h2>Events by Mode</h2>
-            <SelectButton v-model="selectedMode" :options="modeOptions" class="mode-selector" />
-
-            <DataTable
-                v-if="selectedModeResult"
-                :value="modeEvents"
-                striped-rows
-                :rows="25"
-                paginator
+            <ToggleGroup
+                :model-value="selectedMode"
+                type="single"
+                variant="outline"
+                class="mode-selector"
+                @update:model-value="
+                    (v) => {
+                        if (v) selectedMode = v as string
+                    }
+                "
             >
-                <Column header="Type" style="width: 80px">
-                    <template #body="{ data }">
-                        <span
-                            class="event-badge"
-                            :style="{ background: EVENT_COLORS[data.type] ?? '#ddd' }"
+                <ToggleGroupItem v-for="mode in modeOptions" :key="mode" :value="mode">
+                    {{ mode }}
+                </ToggleGroupItem>
+            </ToggleGroup>
+
+            <div v-if="selectedModeResult">
+                <Table>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead style="width: 80px">Type</TableHead>
+                            <TableHead>Start Time</TableHead>
+                            <TableHead style="width: 90px">Duration</TableHead>
+                            <TableHead style="width: 100px">Flow Red.</TableHead>
+                            <TableHead style="width: 100px">Confidence</TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                        <TableRow
+                            v-for="(row, i) in paginatedEvents"
+                            :key="i"
+                            class="odd:bg-muted/50"
                         >
-                            {{ data.type }}
-                        </span>
-                    </template>
-                </Column>
-                <Column header="Start Time">
-                    <template #body="{ data }">{{ formatTimeOffset(data.start) }}</template>
-                </Column>
-                <Column header="Duration" style="width: 90px">
-                    <template #body="{ data }">{{ data.duration.toFixed(1) }}s</template>
-                </Column>
-                <Column header="Flow Red." style="width: 100px">
-                    <template #body="{ data }"
-                        >{{ (data.flowReduction * 100).toFixed(0) }}%</template
-                    >
-                </Column>
-                <Column header="Confidence" style="width: 100px">
-                    <template #body="{ data }">{{ (data.confidence * 100).toFixed(0) }}%</template>
-                </Column>
-            </DataTable>
+                            <TableCell>
+                                <span
+                                    class="event-badge"
+                                    :style="{ background: EVENT_COLORS[row.type] ?? '#ddd' }"
+                                >
+                                    {{ row.type }}
+                                </span>
+                            </TableCell>
+                            <TableCell>{{ formatTimeOffset(row.start) }}</TableCell>
+                            <TableCell>{{ row.duration.toFixed(1) }}s</TableCell>
+                            <TableCell>{{ (row.flowReduction * 100).toFixed(0) }}%</TableCell>
+                            <TableCell>{{ (row.confidence * 100).toFixed(0) }}%</TableCell>
+                        </TableRow>
+                    </TableBody>
+                </Table>
+
+                <div v-if="totalEventPages > 1" class="flex items-center justify-between px-2 py-4">
+                    <span class="text-sm text-muted-foreground">
+                        Page {{ eventsPage + 1 }} of {{ totalEventPages }}
+                    </span>
+                    <div class="flex gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            :disabled="eventsPage === 0"
+                            @click="eventsPage--"
+                        >
+                            Previous
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            :disabled="eventsPage >= totalEventPages - 1"
+                            @click="eventsPage++"
+                        >
+                            Next
+                        </Button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- CSR / Periodic Breathing -->
@@ -125,11 +173,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import Button from 'primevue/button'
-import SelectButton from 'primevue/selectbutton'
+import { ref, computed, onMounted, watch } from 'vue'
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table'
+import { Button } from '@/components/ui/button'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Loader2, AlertTriangle, ArrowLeft, BarChart3, Play } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
 import { formatTimeOffset } from '@/utils/formatting'
@@ -144,6 +199,8 @@ const noAnalysis = ref(false)
 const running = ref(false)
 const analysis = ref<AnalysisResult | null>(null)
 const selectedMode = ref('')
+const eventsPage = ref(0)
+const eventsPageSize = 25
 
 const modeOptions = computed(() => Object.keys(analysis.value?.mode_results ?? {}))
 
@@ -216,6 +273,17 @@ const modeEvents = computed<EventRow[]>(() => {
     return events
 })
 
+const paginatedEvents = computed(() => {
+    const start = eventsPage.value * eventsPageSize
+    return modeEvents.value.slice(start, start + eventsPageSize)
+})
+
+const totalEventPages = computed(() => Math.ceil(modeEvents.value.length / eventsPageSize))
+
+watch(selectedMode, () => {
+    eventsPage.value = 0
+})
+
 async function handleRunAnalysis(): Promise<void> {
     running.value = true
     try {
@@ -270,20 +338,18 @@ onMounted(async () => {
 .empty-card {
     text-align: center;
     padding: 3rem;
-    background: var(--p-surface-card, #fff);
-    border: 1px solid var(--p-surface-border, #e2e8f0);
     border-radius: 8px;
 }
 
 .empty-icon {
-    font-size: 2.5rem;
-    color: var(--p-text-muted-color, #6b7280);
-    margin-bottom: 1rem;
+    width: 2.5rem;
+    height: 2.5rem;
+    margin: 0 auto 1rem;
+    display: block;
 }
 
 .empty-card p {
     margin-bottom: 1rem;
-    color: var(--p-text-muted-color, #6b7280);
 }
 
 .event-badge {

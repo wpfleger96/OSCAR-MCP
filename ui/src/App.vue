@@ -20,12 +20,6 @@ import AppSidebar from '@/components/AppSidebar.vue'
     padding: 0;
 }
 
-body {
-    font-family: var(--p-font-family, system-ui, sans-serif);
-    background: var(--p-surface-ground, #f8f9fa);
-    color: var(--p-text-color, #1a1a1a);
-}
-
 .app-layout {
     display: grid;
     grid-template-columns: 220px 1fr;

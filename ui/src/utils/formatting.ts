@@ -45,9 +45,12 @@ export function formatDateMonthDay(iso: string): string {
     return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-/** e.g. "2024-01-05" — ISO calendar date (UTC). */
+/** e.g. "2024-01-05" — ISO calendar date in local time. */
 export function formatIso(d: Date): string {
-    return d.toISOString().slice(0, 10)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
 }
 
 /** e.g. "1:02:03" — clock-style h:mm:ss offset from a duration in seconds. */

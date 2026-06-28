@@ -7,12 +7,13 @@
             <StatCard label="Days with Data" :value="summary.days_with_data" :decimals="0" />
             <div class="stat-card-ahi">
                 <StatCard label="Avg AHI" :value="summary.avg_ahi" :decimals="1" />
-                <Tag
+                <Badge
                     v-if="summary.effectiveness !== 'unknown'"
-                    :value="summary.effectiveness"
-                    :severity="effectivenessSeverity(summary.effectiveness)"
+                    v-bind="effectivenessBadgeAttrs(summary.effectiveness)"
                     class="effectiveness-badge"
-                />
+                >
+                    {{ summary.effectiveness }}
+                </Badge>
             </div>
             <StatCard label="Avg Hours" :value="summary.avg_hours" unit="hrs" :decimals="1" />
             <StatCard label="Avg Leak" :value="summary.avg_leak" unit="L/min" :decimals="1" />
@@ -34,33 +35,31 @@
         <!-- Recent Sessions -->
         <div v-if="recentSessions.length" class="section-card">
             <h2>Recent Sessions</h2>
-            <DataTable
-                :value="recentSessions"
-                striped-rows
-                selection-mode="single"
-                class="cursor-pointer"
-                @row-click="navigateToSession"
-            >
-                <Column header="Date">
-                    <template #body="{ data }: { data: SessionListItem }">
-                        {{ formatDateShort(data.start_time) }}
-                    </template>
-                </Column>
-                <Column header="Duration" style="width: 90px">
-                    <template #body="{ data }: { data: SessionListItem }">
-                        {{ data.duration_hours.toFixed(1) }}h
-                    </template>
-                </Column>
-                <Column header="AHI" style="width: 80px">
-                    <template #body="{ data }: { data: SessionListItem }">
-                        {{ data.ahi?.toFixed(1) ?? '---' }}
-                    </template>
-                </Column>
-            </DataTable>
+            <Table>
+                <TableHeader>
+                    <TableRow>
+                        <TableHead>Date</TableHead>
+                        <TableHead class="w-[90px]">Duration</TableHead>
+                        <TableHead class="w-[80px]">AHI</TableHead>
+                    </TableRow>
+                </TableHeader>
+                <TableBody>
+                    <TableRow
+                        v-for="session in recentSessions"
+                        :key="session.id"
+                        class="cursor-pointer even:bg-muted/50 hover:bg-muted/50"
+                        @click="navigateToSession(session)"
+                    >
+                        <TableCell>{{ formatDateShort(session.start_time) }}</TableCell>
+                        <TableCell>{{ session.duration_hours.toFixed(1) }}h</TableCell>
+                        <TableCell>{{ session.ahi?.toFixed(1) ?? '---' }}</TableCell>
+                    </TableRow>
+                </TableBody>
+            </Table>
         </div>
 
         <div v-if="loading" class="loading-state">
-            <i class="pi pi-spin pi-spinner" /> Loading dashboard...
+            <Loader2 class="h-4 w-4 animate-spin" /> Loading dashboard...
         </div>
     </div>
 </template>
@@ -68,9 +67,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import Tag from 'primevue/tag'
+import { Loader2 } from '@lucide/vue'
+import { Badge } from '@/components/ui/badge'
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table'
 import StatCard from '@/components/StatCard.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import CalendarHeatmap from '@/components/CalendarHeatmap.vue'
@@ -108,18 +114,17 @@ const trendDatasets = computed(() => {
     ]
 })
 
-function effectivenessSeverity(e: string): string {
-    const map: Record<string, string> = {
-        excellent: 'success',
-        good: 'success',
-        fair: 'warn',
-        poor: 'danger',
-    }
-    return map[e] ?? 'secondary'
+function effectivenessBadgeAttrs(e: string): Record<string, string> {
+    if (e === 'excellent' || e === 'good')
+        return { class: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' }
+    if (e === 'fair')
+        return { class: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' }
+    if (e === 'poor') return { variant: 'destructive' }
+    return { variant: 'secondary' }
 }
 
-function navigateToSession(event: { data: SessionListItem }): void {
-    void router.push({ name: 'session-detail', params: { id: event.data.id } })
+function navigateToSession(session: SessionListItem): void {
+    void router.push({ name: 'session-detail', params: { id: session.id } })
 }
 
 function onDayClick(date: string): void {
@@ -152,10 +157,6 @@ function onDayClick(date: string): void {
 .no-data {
     padding: 2rem;
     text-align: center;
-    color: var(--p-text-muted-color, #6b7280);
-}
-
-.cursor-pointer {
-    cursor: pointer;
+    color: var(--color-muted-foreground);
 }
 </style>
