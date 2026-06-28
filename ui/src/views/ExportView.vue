@@ -25,19 +25,11 @@
             <div class="filter-grid">
                 <div class="filter-field">
                     <label>From Date</label>
-                    <input
-                        v-model="fromDate"
-                        type="date"
-                        class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    />
+                    <input v-model="fromDate" type="date" class="date-input" />
                 </div>
                 <div class="filter-field">
                     <label>To Date</label>
-                    <input
-                        v-model="toDate"
-                        type="date"
-                        class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    />
+                    <input v-model="toDate" type="date" class="date-input" />
                 </div>
                 <div class="filter-field">
                     <label>Device</label>
@@ -144,6 +136,10 @@ const error = ref<string | null>(null)
 const { data: devices } = useApiLoad(() => getDevices())
 
 async function handleExport(): Promise<void> {
+    if (fromDate.value && toDate.value && fromDate.value > toDate.value) {
+        error.value = 'From date must be before To date'
+        return
+    }
     exporting.value = true
     error.value = null
     exportResult.value = null
@@ -229,16 +225,16 @@ function formatSize(bytes: number): string {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    border-color: #16a34a;
+    border-color: var(--color-success, #16a34a);
 }
 
 .success-icon {
-    color: #16a34a;
+    color: var(--color-success, #16a34a);
 }
 
 .success-title {
     font-weight: 600;
-    color: #16a34a;
+    color: var(--color-success, #16a34a);
 }
 
 .success-size {

@@ -281,13 +281,13 @@
                 </CollapsibleContent>
             </Collapsible>
 
-            <Collapsible v-model:open="respOpen" class="stats-collapsible">
+            <Collapsible v-model:open="ventilationOpen" class="stats-collapsible">
                 <CollapsibleTrigger as-child>
                     <button class="collapsible-header">
-                        Respiratory
+                        Ventilation
                         <ChevronDown
                             class="h-4 w-4 transition-transform"
-                            :class="{ 'rotate-180': respOpen }"
+                            :class="{ 'rotate-180': ventilationOpen }"
                         />
                     </button>
                 </CollapsibleTrigger>
@@ -346,7 +346,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { ref, watch, nextTick, onMounted, toRef } from 'vue'
 import { useRoute } from 'vue-router'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -377,9 +377,9 @@ const respiratoryOpen = ref(true)
 const pressureOpen = ref(false)
 const leakOpen = ref(false)
 const oximetryOpen = ref(false)
-const respOpen = ref(false)
+const ventilationOpen = ref(false)
 
-const sessionIdRef = computed(() => props.sessionId)
+const sessionIdRef = toRef(props, 'sessionId')
 const {
     data: waveformData,
     loading: waveformLoading,
@@ -390,7 +390,8 @@ const {
 const singleChartRef = ref<InstanceType<typeof WaveformChart>>()
 const multiViewRef = ref<InstanceType<typeof MultiWaveformView>>()
 
-const jumpToTime = route.query.t ? Number(route.query.t) : null
+const rawT = route.query.t ? Number(route.query.t) : null
+const jumpToTime = rawT != null && Number.isFinite(rawT) ? rawT : null
 
 // Jump to timestamp from ?t= query param after first waveform load
 if (jumpToTime != null) {

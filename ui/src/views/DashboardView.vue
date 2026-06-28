@@ -49,8 +49,8 @@
                         {{ ec.event_type }}
                     </Badge>
                     <span class="event-count">{{ ec.count }}</span>
-                    <span class="text-muted-foreground text-sm"
-                        >({{ ec.percentage?.toFixed(1) }}%)</span
+                    <span v-if="ec.percentage != null" class="text-muted-foreground text-sm"
+                        >({{ ec.percentage.toFixed(1) }}%)</span
                     >
                 </div>
             </div>
@@ -128,13 +128,18 @@ const router = useRouter()
 
 // Dashboard gracefully shows empty sections on error, so `error` is unused.
 const { data, loading } = useApiLoad(async () => {
-    const [summary, trends, daysResult, sessionsResult] = await Promise.all([
+    const [summaryRes, trendsRes, daysRes, sessionsRes] = await Promise.allSettled([
         getSummary(),
         getTrends('week'),
         getDays({ limit: 365 }),
         getSessions({ limit: 5, sort_by: 'date-desc' }),
     ])
-    return { summary, trends, days: daysResult.items, recentSessions: sessionsResult.items }
+    return {
+        summary: summaryRes.status === 'fulfilled' ? summaryRes.value : null,
+        trends: trendsRes.status === 'fulfilled' ? trendsRes.value : null,
+        days: daysRes.status === 'fulfilled' ? daysRes.value.items : null,
+        recentSessions: sessionsRes.status === 'fulfilled' ? sessionsRes.value.items : null,
+    }
 })
 
 const summary = computed(() => data.value?.summary ?? null)

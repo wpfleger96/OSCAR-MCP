@@ -5,7 +5,7 @@
         <!-- Step indicator -->
         <div class="step-indicator">
             <div
-                v-for="n in 4"
+                v-for="n in 3"
                 :key="n"
                 class="step-dot"
                 :class="{ active: step === n, done: step > n }"
@@ -57,6 +57,7 @@
                     type="file"
                     webkitdirectory
                     multiple
+                    accept=".edf,.xml,.csv,.dat,.crc,.gz"
                     class="hidden"
                     @change="onFileChange"
                 />
@@ -73,69 +74,23 @@
                         Drop SD card folder here or click to browse
                     </p>
                     <p v-else class="drop-text">{{ selectedFiles.length }} files selected</p>
+                    <p class="drop-warning">
+                        For best results, use the folder picker. Drag-and-drop may not preserve
+                        directory structure.
+                    </p>
                 </div>
             </div>
 
             <div class="step-actions">
-                <Button :disabled="!canProceed" @click="step = 2">
-                    Next
-                    <ArrowRight class="ml-2 h-4 w-4" />
-                </Button>
-            </div>
-        </div>
-
-        <!-- Step 2: Options -->
-        <div v-if="step === 2" class="step-content">
-            <h2 class="step-title">Import Options</h2>
-
-            <div class="option-row">
-                <Toggle
-                    :model-value="forceReimport"
-                    variant="outline"
-                    @update:model-value="
-                        (v) => {
-                            forceReimport = !!v
-                        }
-                    "
-                >
-                    Force re-import (overwrite existing sessions)
-                </Toggle>
-            </div>
-
-            <div class="option-row">
-                <label class="option-label">Sort order</label>
-                <ToggleGroup
-                    type="single"
-                    variant="outline"
-                    :model-value="sortOrder"
-                    @update:model-value="
-                        (v) => {
-                            if (v) sortOrder = v as string
-                        }
-                    "
-                >
-                    <ToggleGroupItem value="date-asc">Date ↑</ToggleGroupItem>
-                    <ToggleGroupItem value="date-desc">Date ↓</ToggleGroupItem>
-                    <ToggleGroupItem value="filesystem">Filesystem</ToggleGroupItem>
-                </ToggleGroup>
-            </div>
-
-            <p v-if="importError" class="error-text">{{ importError }}</p>
-
-            <div class="step-actions">
-                <Button variant="outline" @click="step = 1">
-                    <ArrowLeft class="mr-2 h-4 w-4" />
-                    Back
-                </Button>
-                <Button @click="handleImport">
+                <Button :disabled="!canProceed" @click="handleImport">
                     <Upload class="mr-2 h-4 w-4" />
                     Import
                 </Button>
             </div>
         </div>
 
-        <!-- Step 3: Progress -->
-        <div v-if="step === 3" class="step-content">
+        <!-- Step 2: Progress -->
+        <div v-if="step === 2" class="step-content">
             <h2 class="step-title">Importing…</h2>
 
             <div v-if="selectedFiles && uploadProgress < 100" class="progress-section">
@@ -153,15 +108,15 @@
             <p v-if="importError" class="error-text">{{ importError }}</p>
 
             <div v-if="importError" class="step-actions">
-                <Button variant="outline" @click="step = 2">
+                <Button variant="outline" @click="step = 1">
                     <ArrowLeft class="mr-2 h-4 w-4" />
                     Back
                 </Button>
             </div>
         </div>
 
-        <!-- Step 4: Results -->
-        <div v-if="step === 4 && importResult" class="step-content">
+        <!-- Step 3: Results -->
+        <div v-if="step === 3 && importResult" class="step-content">
             <h2 class="step-title">Import Complete</h2>
 
             <div class="stats-grid">
@@ -227,16 +182,15 @@ import type { AxiosProgressEvent } from 'axios'
 import type { ImportSource, ImportResult } from '@/types'
 import { detectSources, importFiles } from '@/api/import'
 import { Button } from '@/components/ui/button'
-import { Toggle } from '@/components/ui/toggle'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import StatCard from '@/components/StatCard.vue'
-import { Loader2, Upload, Check, AlertTriangle, ArrowLeft, ArrowRight } from '@lucide/vue'
+import { Loader2, Upload, Check, AlertTriangle, ArrowLeft } from '@lucide/vue'
 
 const router = useRouter()
 
-const stepLabels = ['Source', 'Options', 'Progress', 'Results']
+const stepLabels = ['Source', 'Import', 'Results']
 
 const step = ref(1)
+// UI-only gate — not a security boundary
 const isLocalhost =
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
 
@@ -250,18 +204,14 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const isDragging = ref(false)
 
 // Step 2 state
-const forceReimport = ref(false)
-const sortOrder = ref('date-asc')
-
-// Step 3 state
 const importing = ref(false)
 const uploadProgress = ref(0)
 const importError = ref<string | null>(null)
 
-// Step 4 state
+// Step 3 state
 const importResult = ref<ImportResult | null>(null)
 
-const canProceed = computed(() => detectedSources.value.length > 0 || selectedFiles.value !== null)
+const canProceed = computed(() => selectedFiles.value !== null)
 
 async function handleDetect() {
     if (!sourcePath.value) return
@@ -288,11 +238,7 @@ function onDrop(event: DragEvent) {
 }
 
 async function handleImport() {
-    if (!selectedFiles.value) {
-        importError.value = 'Please select files to upload before importing.'
-        return
-    }
-    step.value = 3
+    step.value = 2
     importing.value = true
     importError.value = null
     uploadProgress.value = 0
@@ -302,8 +248,8 @@ async function handleImport() {
                 uploadProgress.value = Math.round((event.loaded / event.total) * 100)
             }
         }
-        importResult.value = await importFiles(selectedFiles.value, onProgress)
-        step.value = 4
+        importResult.value = await importFiles(selectedFiles.value!, onProgress)
+        step.value = 3
     } catch (e: unknown) {
         importError.value = e instanceof Error ? e.message : 'Import failed'
     } finally {
@@ -317,8 +263,6 @@ function resetState() {
     detectedSources.value = []
     detectError.value = null
     selectedFiles.value = null
-    forceReimport.value = false
-    sortOrder.value = 'date-asc'
     uploadProgress.value = 0
     importError.value = null
     importResult.value = null
@@ -331,12 +275,6 @@ function resetState() {
     max-width: 800px;
     margin: 0 auto;
     padding: 1.5rem;
-}
-
-.page-title {
-    font-size: 1.5rem;
-    font-weight: 600;
-    margin-bottom: 1.5rem;
 }
 
 .step-indicator {
@@ -504,23 +442,18 @@ function resetState() {
     text-align: center;
 }
 
+.drop-warning {
+    font-size: 0.75rem;
+    color: var(--color-muted-foreground);
+    text-align: center;
+    font-style: italic;
+}
+
 .step-actions {
     display: flex;
     gap: 0.75rem;
     justify-content: flex-end;
     padding-top: 0.5rem;
-}
-
-.option-row {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-}
-
-.option-label {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: var(--color-foreground);
 }
 
 .progress-section {
@@ -582,14 +515,14 @@ function resetState() {
     gap: 0.4rem;
     font-size: 0.85rem;
     font-weight: 600;
-    color: #92400e;
+    color: var(--color-destructive);
 }
 
 .warnings-list {
     margin: 0;
     padding-left: 1rem;
     font-size: 0.8rem;
-    color: #92400e;
+    color: var(--color-destructive);
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
@@ -651,7 +584,7 @@ function resetState() {
     align-items: center;
     gap: 0.35rem;
     font-size: 0.75rem;
-    color: #92400e;
+    color: var(--color-destructive);
 }
 
 .error-text {
