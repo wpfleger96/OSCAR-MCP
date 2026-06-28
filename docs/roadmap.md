@@ -140,6 +140,13 @@ Complete project overview showing implemented features and future development pl
 - [x] **Analysis View enhancement** — Event comparison section (false negatives/positives tables, time-offset deep links)
 - [x] **Session List enhancement** — Checkbox column, select-all, bulk delete with ID snapshot for race safety, `PaginationBar` component
 
+### Phase 2.2d: Polish (2026-06-28)
+- [x] **Column sorting** — SessionListView Date/Duration headers drive server-side `sort_by` param; manual `sortBy` ref with `ArrowUp`/`ArrowDown`/`ArrowUpDown` indicators
+- [x] **uPlot dark mode** — `WaveformChart` and `TrendChart` watch `isDark` and rebuild with dark axis/grid/series palette (destroy+recreate, no `setOptions()` API)
+- [x] **Responsive sidebar** — Collapses to hamburger below `md:` breakpoint; Sheet overlay with `SheetTitle sr-only` for a11y; route path watcher auto-closes on navigation
+- [x] **Skeleton loading states** — Shaped `Skeleton` placeholders in Dashboard, SessionListView, and SessionDetailView replacing `Loader2` spinners
+- [x] **OpenAPI type audit** — `AnalysisResult` added as `response_model`; `AnalysisFacade` properly typed; ~70 lines of hand-maintained TS interfaces replaced with generated type aliases
+
 ### Phase 2.0b: Service Layer Extraction (2026-02-14)
 - [x] **8 services extracted from CLI** - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling (1,741 lines moved)
 - [x] **CLI reduced by 7.2%** - From 3,797 to 3,524 lines
@@ -199,7 +206,7 @@ Complete project overview showing implemented features and future development pl
 
 ### Phase 2: Web UI
 
-**Sub-phase 2.2: Vue Frontend** 🚧 IN PROGRESS
+**Sub-phase 2.2: Vue Frontend** ✅ COMPLETE
 - [x] Project scaffolding (Vue 3 + TypeScript + Vite)
 - [x] Design system: shadcn-vue + Tailwind CSS v4 with dark mode (replaced PrimeVue)
 - [x] API client layer (12 modules matching all backend routers)
@@ -207,17 +214,17 @@ Complete project overview showing implemented features and future development pl
 - [x] 15+ components: Sidebar, StatCard, TrendChart, CalendarHeatmap, WaveformChart, PaginationBar, DeleteConfirmDialog, etc.
 - [x] Waveform rendering with uPlot
 - [x] Full CLI parity: Import, Export, Batch Analysis, Validation, Database Management, Waveform Compare, Bulk Delete
-- [ ] Column sorting on DataTables (TanStack Table)
-- [ ] uPlot dark mode theming (axis/grid colors)
-- [ ] Mobile-responsive layout (sidebar → hamburger)
-- [ ] Skeleton loading states (shadcn-vue Skeleton)
-- [ ] OpenAPI type audit (hand-maintained types: `AnalysisResult`, `TrendData`, `RecordsData`)
+- [x] Column sorting on SessionListView (server-side via `sort_by` param)
+- [x] uPlot dark mode theming (axis/grid colors rebuild on theme toggle)
+- [x] Mobile-responsive layout (sidebar → hamburger via Sheet overlay)
+- [x] Skeleton loading states (Dashboard, SessionList, SessionDetail)
+- [x] OpenAPI type audit (`AnalysisResult` now generated; `TrendData`/`RecordsData` kept hand-maintained)
 
 ---
 
 ## Planned Features 📋
 
-_(Phase 2: Web UI moved to "In Progress" section above)_
+_(Phase 2: Web UI moved to "Recently Completed" section above)_
 
 ---
 
