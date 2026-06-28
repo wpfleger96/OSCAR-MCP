@@ -92,11 +92,17 @@
                 </TableRow>
             </TableHeader>
             <TableBody>
-                <TableRow v-if="loading">
-                    <TableCell :colspan="7" class="py-8 text-center">
-                        <Loader2 class="h-6 w-6 animate-spin mx-auto text-muted-foreground" />
-                    </TableCell>
-                </TableRow>
+                <template v-if="loading">
+                    <TableRow v-for="i in 8" :key="'skel-' + i">
+                        <TableCell><Skeleton class="h-4 w-4" /></TableCell>
+                        <TableCell><Skeleton class="h-4 w-36" /></TableCell>
+                        <TableCell><Skeleton class="h-4 w-12" /></TableCell>
+                        <TableCell><Skeleton class="h-4 w-10" /></TableCell>
+                        <TableCell><Skeleton class="h-4 w-32" /></TableCell>
+                        <TableCell><Skeleton class="h-5 w-16 rounded-full" /></TableCell>
+                        <TableCell><Skeleton class="h-6 w-20" /></TableCell>
+                    </TableRow>
+                </template>
                 <TableRow v-else-if="!sessions.length">
                     <TableCell :colspan="7" class="py-8 text-center text-muted-foreground">
                         No sessions found.
@@ -217,12 +223,12 @@ import {
     BarChart3,
     Trash2,
     FilterX,
-    Loader2,
     AlertTriangle,
     ArrowUp,
     ArrowDown,
     ArrowUpDown,
 } from '@lucide/vue'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
     Table,
     TableBody,

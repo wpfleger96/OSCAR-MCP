@@ -2,8 +2,25 @@
     <div class="dashboard">
         <h1 class="page-title">Dashboard</h1>
 
+        <template v-if="loading">
+            <div class="summary-row">
+                <Skeleton v-for="i in 4" :key="'a' + i" class="h-[88px] rounded-lg" />
+            </div>
+            <div class="summary-row">
+                <Skeleton v-for="i in 4" :key="'b' + i" class="h-[88px] rounded-lg" />
+            </div>
+            <div class="section-card">
+                <Skeleton class="h-5 w-40 mb-4" />
+                <Skeleton class="h-[280px] w-full rounded-lg" />
+            </div>
+            <div class="section-card">
+                <Skeleton class="h-5 w-36 mb-4" />
+                <Skeleton class="h-[120px] w-full rounded-lg" />
+            </div>
+        </template>
+
         <!-- Summary Cards -->
-        <div v-if="summary" class="summary-row">
+        <div v-if="summary && !loading" class="summary-row">
             <StatCard label="Days with Data" :value="summary.days_with_data" :decimals="0" />
             <div class="stat-card-ahi">
                 <StatCard label="Avg AHI" :value="summary.avg_ahi" :decimals="1" />
@@ -18,7 +35,7 @@
             <StatCard label="Avg Hours" :value="summary.avg_hours" unit="hrs" :decimals="1" />
             <StatCard label="Avg Leak" :value="summary.avg_leak" unit="L/min" :decimals="1" />
         </div>
-        <div v-if="summary" class="summary-row">
+        <div v-if="summary && !loading" class="summary-row">
             <StatCard label="Avg SpO₂" :value="summary.avg_spo2" unit="%" :decimals="1" />
             <StatCard label="Avg Pulse" :value="summary.avg_pulse" unit="bpm" :decimals="0" />
             <StatCard
@@ -93,18 +110,14 @@
                 </TableBody>
             </Table>
         </div>
-
-        <div v-if="loading" class="loading-state">
-            <Loader2 class="h-4 w-4 animate-spin" /> Loading dashboard...
-        </div>
     </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { Loader2 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
     Table,
     TableBody,
