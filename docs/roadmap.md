@@ -118,6 +118,28 @@ Complete project overview showing implemented features and future development pl
 - [x] **8 new Pydantic schemas** — `ImportSource`, `ImportResult`, `BatchAnalysisResult`, `EventComparisonResult`, `VacuumResult`, and component types
 - [x] **Security hardening** — Path traversal guards, upload size limits, mode validation via Literal types, streaming exports, sanitized error messages
 
+### Phase 2.2a: Design System Swap (2026-06-27)
+- [x] **PrimeVue → shadcn-vue + Tailwind CSS v4** — 108 shadcn-vue SFC components (source ownership), oklch design tokens, dark mode
+- [x] **All 11 PrimeVue components replaced** — Button, DataTable, Column, Tag, DatePicker, Select, ToggleButton, Dialog, Panel + config
+- [x] **Icon migration** — PrimeIcons → `@lucide/vue` (21 unique icons)
+- [x] **Dark mode composable** — `useDarkMode()` with localStorage persistence, `initDarkMode()` for FOUC prevention
+- [x] **PrimeVue fully removed** — `primevue`, `@primevue/themes`, `primeicons` uninstalled
+
+### Phase 2.2b: High-Impact UI Features (2026-06-28)
+- [x] **Import View** — 3-step wizard (Source → Import → Results) with localhost source detection, file upload with progress, drag-and-drop
+- [x] **Export View** — Format selector (CSV/JSON/Raw) with date/device filters, blob download, format-specific options
+- [x] **Dashboard enhancement** — 8 stat cards, event breakdown badges, SpO₂/Leak trend series, `Promise.allSettled` for resilience
+- [x] **Session Detail enhancement** — All 32 `SessionStatistics` fields in 5 collapsible sections (Respiratory Events, Pressure, Leak, Oximetry, Ventilation)
+- [x] **Shared infrastructure** — 4 new API client modules, `.date-input`/`.filter-bar` global CSS, sidebar grouped into Data/Analysis/Tools/Settings sections
+
+### Phase 2.2c: CLI Parity Views (2026-06-28)
+- [x] **Analysis Management View** — Paginated sessions table, batch analysis dialog, per-session analysis delete with preview
+- [x] **Database View** — Stats overview, record counts grid, coverage percentages, vacuum with error handling and size display
+- [x] **Validation View** — Date range + mode form, aggregate summary cards, per-session results table with low-sensitivity highlighting
+- [x] **Day Detail View** — Day summary stats, additional metrics, session ID links
+- [x] **Analysis View enhancement** — Event comparison section (false negatives/positives tables, time-offset deep links)
+- [x] **Session List enhancement** — Checkbox column, select-all, bulk delete with ID snapshot for race safety, `PaginationBar` component
+
 ### Phase 2.0b: Service Layer Extraction (2026-02-14)
 - [x] **8 services extracted from CLI** - DatabaseService, SessionService, StatsService, WaveformService, EventService, AnalysisFacade, DeviceService, LTTB downsampling (1,741 lines moved)
 - [x] **CLI reduced by 7.2%** - From 3,797 to 3,524 lines
@@ -177,15 +199,19 @@ Complete project overview showing implemented features and future development pl
 
 ### Phase 2: Web UI
 
-**Sub-phase 2.2-2.4: Vue Frontend** 🚧 IN PROGRESS
-- [x] Project scaffolding (Vue 3 + TypeScript + PrimeVue + Vite)
-- [x] API client layer (8 modules — backend now has 12 routers; 4 new frontend modules planned for Phases 5-6)
-- [x] 7 views: Dashboard, Session List, Session Detail, Stats, Analysis, Event Explorer, RX History
-- [x] 10+ components: Sidebar, StatCard, TrendChart, CalendarHeatmap, WaveformChart, etc.
+**Sub-phase 2.2: Vue Frontend** 🚧 IN PROGRESS
+- [x] Project scaffolding (Vue 3 + TypeScript + Vite)
+- [x] Design system: shadcn-vue + Tailwind CSS v4 with dark mode (replaced PrimeVue)
+- [x] API client layer (12 modules matching all backend routers)
+- [x] 13 views: Dashboard, Session List, Session Detail, Stats, Analysis, Event Explorer, RX History, Import, Export, Analysis Management, Database, Validation, Day Detail
+- [x] 15+ components: Sidebar, StatCard, TrendChart, CalendarHeatmap, WaveformChart, PaginationBar, DeleteConfirmDialog, etc.
 - [x] Waveform rendering with uPlot
-- [ ] Interactive waveform viewer with zoom/pan
-- [ ] Event explorer comparison tools
-- [ ] Mobile-responsive layout
+- [x] Full CLI parity: Import, Export, Batch Analysis, Validation, Database Management, Waveform Compare, Bulk Delete
+- [ ] Column sorting on DataTables (TanStack Table)
+- [ ] uPlot dark mode theming (axis/grid colors)
+- [ ] Mobile-responsive layout (sidebar → hamburger)
+- [ ] Skeleton loading states (shadcn-vue Skeleton)
+- [ ] OpenAPI type audit (hand-maintained types: `AnalysisResult`, `TrendData`, `RecordsData`)
 
 ---
 
