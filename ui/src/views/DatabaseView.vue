@@ -1,6 +1,401 @@
 <template>
-    <div>
-        <h1 class="page-title">Coming Soon</h1>
-        <p class="text-muted-foreground">This view is under construction.</p>
+    <div class="database-view">
+        <h1 class="page-title">Database</h1>
+
+        <div v-if="loading && !data" class="loading-row">
+            <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
+            <span class="loading-text">Loading…</span>
+        </div>
+
+        <div v-else-if="error" class="error-row">
+            <AlertTriangle class="h-4 w-4" />
+            {{ error }}
+        </div>
+
+        <template v-else-if="data">
+            <!-- Overview -->
+            <section class="section">
+                <h2 class="section-heading">Overview</h2>
+                <div class="overview-card">
+                    <div class="overview-row">
+                        <HardDrive class="overview-icon" />
+                        <div class="overview-detail">
+                            <span class="overview-label">File size</span>
+                            <span class="overview-value">{{ data.size_mb.toFixed(1) }} MB</span>
+                        </div>
+                    </div>
+                    <div class="overview-row">
+                        <Database class="overview-icon" />
+                        <div class="overview-detail">
+                            <span class="overview-label">Date range</span>
+                            <span class="overview-value">
+                                <template v-if="data.first_session && data.last_session">
+                                    {{ formatDateShort(data.first_session) }} –
+                                    {{ formatDateShort(data.last_session) }}
+                                </template>
+                                <template v-else>—</template>
+                            </span>
+                        </div>
+                    </div>
+                    <div class="overview-row">
+                        <div class="overview-detail">
+                            <span class="overview-label">Devices</span>
+                            <span class="overview-value">{{ data.device_count }}</span>
+                        </div>
+                    </div>
+                    <div class="overview-row">
+                        <div class="overview-detail">
+                            <span class="overview-label">Profiles</span>
+                            <span class="overview-value">{{ data.profile_count }}</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Counts -->
+            <section class="section">
+                <h2 class="section-heading">Record Counts</h2>
+                <div class="counts-grid">
+                    <StatCard label="Sessions" :value="data.session_count" />
+                    <StatCard label="Days" :value="data.day_count" />
+                    <StatCard label="Events" :value="data.event_count" />
+                    <StatCard label="Waveforms" :value="data.waveform_count" />
+                    <StatCard label="Analysis Results" :value="data.analysis_count" />
+                    <StatCard label="Patterns" :value="data.pattern_count" />
+                </div>
+            </section>
+
+            <!-- Coverage -->
+            <section class="section">
+                <h2 class="section-heading">Session Coverage</h2>
+                <div class="coverage-list">
+                    <div class="coverage-item">
+                        <div class="coverage-header">
+                            <span class="coverage-label">Waveforms</span>
+                            <Badge variant="secondary">
+                                {{ data.waveform_coverage_pct.toFixed(1) }}%
+                            </Badge>
+                        </div>
+                        <div class="coverage-track">
+                            <div
+                                class="coverage-fill"
+                                :style="{ width: data.waveform_coverage_pct + '%' }"
+                            />
+                        </div>
+                    </div>
+                    <div class="coverage-item">
+                        <div class="coverage-header">
+                            <span class="coverage-label">Events</span>
+                            <Badge variant="secondary">
+                                {{ data.event_coverage_pct.toFixed(1) }}%
+                            </Badge>
+                        </div>
+                        <div class="coverage-track">
+                            <div
+                                class="coverage-fill"
+                                :style="{ width: data.event_coverage_pct + '%' }"
+                            />
+                        </div>
+                    </div>
+                    <div class="coverage-item">
+                        <div class="coverage-header">
+                            <span class="coverage-label">Analysis</span>
+                            <Badge variant="secondary">
+                                {{ data.analysis_coverage_pct.toFixed(1) }}%
+                            </Badge>
+                        </div>
+                        <div class="coverage-track">
+                            <div
+                                class="coverage-fill"
+                                :style="{ width: data.analysis_coverage_pct + '%' }"
+                            />
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vacuum -->
+            <section class="section">
+                <h2 class="section-heading">Maintenance</h2>
+                <div class="vacuum-card">
+                    <div class="vacuum-description">
+                        <p class="vacuum-title">Optimize Database</p>
+                        <p class="vacuum-subtitle">
+                            Runs VACUUM to reclaim unused space and defragment the database file.
+                        </p>
+                    </div>
+                    <Button
+                        variant="outline"
+                        :disabled="vacuuming"
+                        @click="vacuumDialogOpen = true"
+                    >
+                        <Loader2 v-if="vacuuming" class="mr-2 h-4 w-4 animate-spin" />
+                        Optimize
+                    </Button>
+                </div>
+
+                <div v-if="vacuumResult" class="vacuum-result">
+                    <span class="vacuum-result-label">Last optimization:</span>
+                    <span class="vacuum-result-value">
+                        {{ vacuumResult.size_before_mb.toFixed(1) }} MB →
+                        {{ vacuumResult.size_after_mb.toFixed(1) }} MB
+                        <span class="vacuum-savings">
+                            (saved
+                            {{
+                                (vacuumResult.size_before_mb - vacuumResult.size_after_mb).toFixed(
+                                    1,
+                                )
+                            }}
+                            MB)
+                        </span>
+                    </span>
+                </div>
+            </section>
+        </template>
+
+        <!-- Vacuum confirmation dialog -->
+        <AlertDialog :open="vacuumDialogOpen" @update:open="vacuumDialogOpen = $event">
+            <AlertDialogContent>
+                <AlertDialogHeader>
+                    <AlertDialogTitle>Optimize Database?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                        This will run VACUUM on the database. The operation may take a few seconds
+                        for large databases and will rebuild the file in place.
+                    </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <Button :disabled="vacuuming" @click="handleVacuum">
+                        <Loader2 v-if="vacuuming" class="mr-2 h-4 w-4 animate-spin" />
+                        Optimize
+                    </Button>
+                </AlertDialogFooter>
+            </AlertDialogContent>
+        </AlertDialog>
     </div>
 </template>
+
+<script setup lang="ts">
+import { ref } from 'vue'
+import StatCard from '@/components/StatCard.vue'
+import { Button } from '@/components/ui/button'
+import {
+    AlertDialog,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Loader2, AlertTriangle, Database, HardDrive } from '@lucide/vue'
+import { useApiLoad } from '@/composables/useApiLoad'
+import { getDbStats, vacuumDb } from '@/api/db'
+import { formatDateShort } from '@/utils/formatting'
+import type { VacuumResult } from '@/types'
+
+const { data, loading, error, reload } = useApiLoad(() => getDbStats())
+
+const vacuumDialogOpen = ref(false)
+const vacuuming = ref(false)
+const vacuumResult = ref<VacuumResult | null>(null)
+
+async function handleVacuum() {
+    vacuuming.value = true
+    vacuumDialogOpen.value = false
+    try {
+        vacuumResult.value = await vacuumDb()
+        await reload()
+    } finally {
+        vacuuming.value = false
+    }
+}
+</script>
+
+<style scoped>
+.database-view {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+.page-title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 0;
+}
+
+.loading-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 2rem 0;
+}
+
+.loading-text {
+    font-size: 0.875rem;
+    color: var(--color-muted-foreground);
+}
+
+.error-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+    color: var(--color-destructive);
+    padding: 1rem 0;
+}
+
+.section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.section-heading {
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-muted-foreground);
+}
+
+.overview-card {
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-card);
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem 2.5rem;
+}
+
+.overview-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.overview-icon {
+    width: 1.1rem;
+    height: 1.1rem;
+    color: var(--color-muted-foreground);
+    flex-shrink: 0;
+}
+
+.overview-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.overview-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-muted-foreground);
+}
+
+.overview-value {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-foreground);
+}
+
+.counts-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+}
+
+.coverage-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.coverage-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.coverage-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.coverage-label {
+    font-size: 0.875rem;
+    color: var(--color-foreground);
+}
+
+.coverage-track {
+    height: 0.4rem;
+    border-radius: 9999px;
+    background: var(--color-muted);
+    overflow: hidden;
+}
+
+.coverage-fill {
+    height: 100%;
+    border-radius: 9999px;
+    background: var(--color-primary);
+    transition: width 0.3s ease;
+}
+
+.vacuum-card {
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-card);
+    padding: 1rem 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.vacuum-description {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.vacuum-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--color-foreground);
+}
+
+.vacuum-subtitle {
+    font-size: 0.8rem;
+    color: var(--color-muted-foreground);
+}
+
+.vacuum-result {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    padding: 0.5rem 0;
+}
+
+.vacuum-result-label {
+    color: var(--color-muted-foreground);
+}
+
+.vacuum-result-value {
+    font-weight: 500;
+    color: var(--color-foreground);
+}
+
+.vacuum-savings {
+    color: var(--color-muted-foreground);
+    font-weight: 400;
+}
+</style>

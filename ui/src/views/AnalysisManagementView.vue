@@ -1,6 +1,373 @@
 <template>
-    <div>
-        <h1 class="page-title">Coming Soon</h1>
-        <p class="text-muted-foreground">This view is under construction.</p>
+    <div class="analysis-mgmt">
+        <h1 class="page-title">Analysis Management</h1>
+
+        <!-- Filter bar -->
+        <div class="filter-bar">
+            <input
+                v-model="fromDate"
+                type="date"
+                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            <input
+                v-model="toDate"
+                type="date"
+                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            <Toggle
+                :model-value="analyzedOnly"
+                variant="outline"
+                @update:model-value="
+                    (v) => {
+                        analyzedOnly = !!v
+                    }
+                "
+            >
+                Analyzed Only
+            </Toggle>
+            <Button variant="outline" size="sm" @click="batchDialogOpen = true">
+                <Play class="mr-2 h-4 w-4" />
+                Run Batch
+            </Button>
+        </div>
+
+        <!-- Sessions table -->
+        <Table>
+            <TableHeader>
+                <TableRow>
+                    <TableHead style="min-width: 160px">Session Date</TableHead>
+                    <TableHead style="width: 100px">Duration</TableHead>
+                    <TableHead style="width: 120px">Status</TableHead>
+                    <TableHead style="width: 100px">Actions</TableHead>
+                </TableRow>
+            </TableHeader>
+            <TableBody>
+                <TableRow v-if="loading">
+                    <TableCell :colspan="4" class="py-8 text-center">
+                        <Loader2 class="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
+                    </TableCell>
+                </TableRow>
+                <TableRow v-else-if="!sessions.length">
+                    <TableCell :colspan="4" class="py-8 text-center text-muted-foreground">
+                        No sessions found.
+                    </TableCell>
+                </TableRow>
+                <template v-else>
+                    <TableRow v-for="s in sessions" :key="s.session_id" class="even:bg-muted/50">
+                        <TableCell>
+                            <RouterLink
+                                :to="{
+                                    name: 'session-analysis',
+                                    params: { id: s.session_id },
+                                }"
+                                class="text-primary hover:underline"
+                            >
+                                {{ formatDateShort(s.session_date) }}
+                            </RouterLink>
+                        </TableCell>
+                        <TableCell>{{
+                            s.duration_hours != null ? s.duration_hours.toFixed(1) + 'h' : '---'
+                        }}</TableCell>
+                        <TableCell>
+                            <Badge
+                                v-if="s.has_analysis"
+                                class="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                            >
+                                Analyzed
+                            </Badge>
+                            <Badge v-else variant="secondary">Not Analyzed</Badge>
+                        </TableCell>
+                        <TableCell>
+                            <Button
+                                v-if="s.has_analysis"
+                                variant="ghost"
+                                size="icon"
+                                title="Delete analysis"
+                                class="text-destructive hover:text-destructive"
+                                @click="confirmDelete(s.session_id)"
+                            >
+                                <Trash2 class="h-4 w-4" />
+                            </Button>
+                        </TableCell>
+                    </TableRow>
+                </template>
+            </TableBody>
+        </Table>
+
+        <!-- Pagination -->
+        <div v-if="totalRecords > pageSize" class="flex items-center justify-between px-2 py-4">
+            <span class="text-sm text-muted-foreground">
+                {{ offset + 1 }}–{{ Math.min(offset + pageSize, totalRecords) }} of
+                {{ totalRecords }}
+            </span>
+            <div class="flex gap-2">
+                <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="offset === 0"
+                    @click="fetchPage(offset - pageSize)"
+                >
+                    Previous
+                </Button>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="offset + pageSize >= totalRecords"
+                    @click="fetchPage(offset + pageSize)"
+                >
+                    Next
+                </Button>
+            </div>
+        </div>
+
+        <div v-if="error" class="mt-4 text-destructive">
+            <AlertTriangle class="inline h-4 w-4" /> {{ error }}
+        </div>
+
+        <!-- Batch result -->
+        <div v-if="batchResult" class="section-card batch-result">
+            <h2>Batch Analysis Result</h2>
+            <div class="batch-stats">
+                <StatCard label="Total" :value="batchResult.total" :decimals="0" />
+                <StatCard label="Successful" :value="batchResult.successful" :decimals="0" />
+                <StatCard label="Failed" :value="batchResult.failed" :decimals="0" />
+            </div>
+        </div>
+
+        <!-- Batch dialog -->
+        <AlertDialog :open="batchDialogOpen" @update:open="batchDialogOpen = $event">
+            <AlertDialogContent class="max-w-[450px]">
+                <AlertDialogHeader>
+                    <AlertDialogTitle>Run Batch Analysis</AlertDialogTitle>
+                    <AlertDialogDescription as-template>
+                        <div class="space-y-4">
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="text-sm font-medium">From</label>
+                                    <input
+                                        v-model="batchFrom"
+                                        type="date"
+                                        class="mt-1 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                                    />
+                                </div>
+                                <div>
+                                    <label class="text-sm font-medium">To</label>
+                                    <input
+                                        v-model="batchTo"
+                                        type="date"
+                                        class="mt-1 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                                    />
+                                </div>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium">Mode</label>
+                                <ToggleGroup
+                                    type="single"
+                                    variant="outline"
+                                    class="mt-1"
+                                    :model-value="batchMode"
+                                    @update:model-value="
+                                        (v) => {
+                                            if (v) batchMode = v as string
+                                        }
+                                    "
+                                >
+                                    <ToggleGroupItem value="aasm">AASM</ToggleGroupItem>
+                                    <ToggleGroupItem value="resmed">ResMed</ToggleGroupItem>
+                                </ToggleGroup>
+                            </div>
+                        </div>
+                    </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <Button
+                        :disabled="!batchFrom || !batchTo || batchRunning"
+                        @click="handleBatchRun"
+                    >
+                        <Loader2 v-if="batchRunning" class="mr-2 h-4 w-4 animate-spin" />
+                        <Play v-else class="mr-2 h-4 w-4" />
+                        Run
+                    </Button>
+                </AlertDialogFooter>
+            </AlertDialogContent>
+        </AlertDialog>
+
+        <!-- Delete dialog -->
+        <DeleteConfirmDialog
+            v-model:visible="deleteDialogVisible"
+            title="Delete Analysis"
+            :message="deleteMessage"
+            :loading="deletePreviewLoading"
+            :deleting="deleting"
+            @confirm="executeDelete"
+        >
+            <template v-if="deletePreviewData" #preview>
+                <div class="flex gap-5 text-sm text-muted-foreground">
+                    <span>{{ deletePreviewData.records_to_delete }} records</span>
+                    <span>{{ deletePreviewData.patterns_count }} patterns</span>
+                </div>
+            </template>
+        </DeleteConfirmDialog>
     </div>
 </template>
+
+<script setup lang="ts">
+import { ref, watch, onMounted } from 'vue'
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Toggle } from '@/components/ui/toggle'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import {
+    AlertDialog,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import StatCard from '@/components/StatCard.vue'
+import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
+import { Loader2, AlertTriangle, Play, Trash2 } from '@lucide/vue'
+import {
+    getAnalysisSessions,
+    runBatchAnalysis,
+    deleteAnalysis,
+    getAnalysisDeletePreview,
+} from '@/api/analysis'
+import { formatDateShort } from '@/utils/formatting'
+import type { AnalysisListItem, BatchAnalysisResult, AnalysisDeletePreview } from '@/types'
+
+const sessions = ref<AnalysisListItem[]>([])
+const loading = ref(true)
+const error = ref<string | null>(null)
+const totalRecords = ref(0)
+const offset = ref(0)
+const pageSize = 25
+
+const fromDate = ref('')
+const toDate = ref('')
+const analyzedOnly = ref(false)
+
+const batchDialogOpen = ref(false)
+const batchFrom = ref('')
+const batchTo = ref('')
+const batchMode = ref('aasm')
+const batchRunning = ref(false)
+const batchResult = ref<BatchAnalysisResult | null>(null)
+
+const deleteDialogVisible = ref(false)
+const deletePreviewLoading = ref(false)
+const deleting = ref(false)
+const deletePreviewData = ref<AnalysisDeletePreview | null>(null)
+const deleteTargetId = ref<number | null>(null)
+const deleteMessage = ref('')
+
+async function fetchPage(newOffset: number): Promise<void> {
+    loading.value = true
+    error.value = null
+    try {
+        const result = await getAnalysisSessions({
+            limit: pageSize,
+            offset: newOffset,
+            from_date: fromDate.value || undefined,
+            to_date: toDate.value || undefined,
+            analyzed_only: analyzedOnly.value || undefined,
+            sort_by: 'date-desc',
+        })
+        sessions.value = result.items
+        totalRecords.value = result.total
+        offset.value = newOffset
+    } catch (err: unknown) {
+        error.value = err instanceof Error ? err.message : 'Failed to load sessions'
+    } finally {
+        loading.value = false
+    }
+}
+
+async function handleBatchRun(): Promise<void> {
+    batchRunning.value = true
+    try {
+        batchResult.value = await runBatchAnalysis({
+            from_date: batchFrom.value,
+            to_date: batchTo.value,
+            modes: [batchMode.value],
+            store_results: true,
+        })
+        batchDialogOpen.value = false
+        void fetchPage(0)
+    } catch (err: unknown) {
+        error.value = err instanceof Error ? err.message : 'Batch analysis failed'
+    } finally {
+        batchRunning.value = false
+    }
+}
+
+async function confirmDelete(sessionId: number): Promise<void> {
+    deleteTargetId.value = sessionId
+    deleteMessage.value = 'Delete analysis for this session? This cannot be undone.'
+    deleteDialogVisible.value = true
+    deletePreviewLoading.value = true
+    deletePreviewData.value = null
+    try {
+        deletePreviewData.value = await getAnalysisDeletePreview({
+            session_ids: [sessionId],
+        })
+    } catch {
+        deleteMessage.value += '\n\nCould not load preview — proceed with caution.'
+    } finally {
+        deletePreviewLoading.value = false
+    }
+}
+
+async function executeDelete(): Promise<void> {
+    if (deleteTargetId.value == null) return
+    deleting.value = true
+    try {
+        await deleteAnalysis({ session_ids: [deleteTargetId.value] })
+        deleteDialogVisible.value = false
+        void fetchPage(offset.value)
+    } catch (err: unknown) {
+        error.value = err instanceof Error ? err.message : 'Failed to delete analysis'
+    } finally {
+        deleting.value = false
+    }
+}
+
+watch([fromDate, toDate, analyzedOnly], () => void fetchPage(0))
+
+onMounted(() => void fetchPage(0))
+</script>
+
+<style scoped>
+.analysis-mgmt {
+    max-width: 1200px;
+}
+
+.filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.batch-result {
+    margin-top: 1rem;
+}
+
+.batch-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.75rem;
+}
+</style>
