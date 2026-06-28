@@ -86,6 +86,7 @@ const { isDark, toggleDark } = useDarkMode()
     position: sticky;
     top: 0;
     height: 100vh;
+    overflow-y: auto;
 }
 
 .sidebar-header {
