@@ -8,6 +8,9 @@ import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { EVENT_COLORS } from '@/types'
 import type { EventItem } from '@/types'
+import { useDarkMode } from '@/composables/useDarkMode'
+
+const { isDark } = useDarkMode()
 
 const props = defineProps<{
     timestamps: number[]
@@ -65,12 +68,19 @@ function formatTime(secs: number): string {
     return `${h}:${String(m).padStart(2, '0')}`
 }
 
+function chartColors() {
+    return isDark.value
+        ? { axis: '#a1a1aa', grid: '#27272a', series: '#60a5fa', fill: 'rgba(96, 165, 250, 0.06)' }
+        : { axis: '#888', grid: '#eee', series: '#2563eb', fill: 'rgba(37, 99, 235, 0.05)' }
+}
+
 function createChart(): void {
     if (!containerRef.value || !props.timestamps.length) return
 
     chart?.destroy()
     isInitialRender = true
 
+    const colors = chartColors()
     const width = containerRef.value.clientWidth || 800
     const height = 240
 
@@ -90,19 +100,25 @@ function createChart(): void {
                 // x-axis: show H:MM labels
                 values: (_u: uPlot, vals: number[]) => vals.map(formatTime),
                 space: 80,
+                stroke: colors.axis,
+                grid: { stroke: colors.grid },
+                ticks: { stroke: colors.axis },
             },
             {
                 label: `${props.label} (${props.unit})`,
                 size: 70,
+                stroke: colors.axis,
+                grid: { stroke: colors.grid },
+                ticks: { stroke: colors.axis },
             },
         ],
         series: [
             {},
             {
                 label: props.label,
-                stroke: '#2563eb',
+                stroke: colors.series,
                 width: 1,
-                fill: 'rgba(37, 99, 235, 0.05)',
+                fill: colors.fill,
             },
         ],
         hooks: {
@@ -172,6 +188,8 @@ watch(
     () => chart?.redraw(),
     { deep: false },
 )
+
+watch(isDark, () => createChart())
 
 defineExpose({
     resetZoom() {

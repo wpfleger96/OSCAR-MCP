@@ -59,8 +59,32 @@
                             @change="toggleSelectAll"
                         />
                     </TableHead>
-                    <TableHead style="min-width: 180px">Date</TableHead>
-                    <TableHead style="width: 100px">Duration</TableHead>
+                    <TableHead
+                        style="min-width: 180px"
+                        class="cursor-pointer select-none"
+                        @click="toggleSort('date')"
+                    >
+                        <span class="inline-flex items-center gap-1">
+                            Date
+                            <ArrowDown v-if="sortBy === 'date-desc'" class="h-3 w-3 text-primary" />
+                            <ArrowUp
+                                v-else-if="sortBy === 'date-asc'"
+                                class="h-3 w-3 text-primary"
+                            />
+                            <ArrowUpDown v-else class="h-3 w-3 opacity-30" />
+                        </span>
+                    </TableHead>
+                    <TableHead
+                        style="width: 100px"
+                        class="cursor-pointer select-none"
+                        @click="toggleSort('duration')"
+                    >
+                        <span class="inline-flex items-center gap-1">
+                            Duration
+                            <ArrowUp v-if="sortBy === 'duration'" class="h-3 w-3 text-primary" />
+                            <ArrowUpDown v-else class="h-3 w-3 opacity-30" />
+                        </span>
+                    </TableHead>
                     <TableHead style="width: 80px">AHI</TableHead>
                     <TableHead>Device</TableHead>
                     <TableHead style="width: 90px">Status</TableHead>
@@ -195,6 +219,9 @@ import {
     FilterX,
     Loader2,
     AlertTriangle,
+    ArrowUp,
+    ArrowDown,
+    ArrowUpDown,
 } from '@lucide/vue'
 import {
     Table,
@@ -243,6 +270,8 @@ const fromDate = ref<Date | null>(route.query.from ? new Date(route.query.from a
 const toDate = ref<Date | null>(route.query.to ? new Date(route.query.to as string) : null)
 const selectedDevice = ref<string | null>(null)
 const includeDisabled = ref(false)
+type SessionSortBy = 'date-asc' | 'date-desc' | 'session-id' | 'duration'
+const sortBy = ref<SessionSortBy>('date-desc')
 const devices = ref<DeviceInfo[]>([])
 
 // Bridge between null-based selectedDevice ref and string-based Select v-model
@@ -310,7 +339,7 @@ async function fetchPage(newOffset: number): Promise<void> {
         const result = await getSessions({
             limit: pageSize,
             offset: newOffset,
-            sort_by: 'date-desc',
+            sort_by: sortBy.value,
             include_disabled: includeDisabled.value || undefined,
             from_date: fromDate.value ? formatIso(fromDate.value) : undefined,
             to_date: toDate.value ? formatIso(toDate.value) : undefined,
@@ -331,6 +360,14 @@ function clearFilters(): void {
     fromDate.value = null
     toDate.value = null
     selectedDevice.value = null
+}
+
+function toggleSort(col: 'date' | 'duration'): void {
+    if (col === 'date') {
+        sortBy.value = sortBy.value === 'date-desc' ? 'date-asc' : 'date-desc'
+    } else {
+        sortBy.value = sortBy.value === 'duration' ? 'date-desc' : 'duration'
+    }
 }
 
 async function toggleEnabled(session: SessionListItem): Promise<void> {
@@ -390,7 +427,7 @@ async function executeDelete(): Promise<void> {
 }
 
 // Re-fetch when filters change
-watch([fromDate, toDate, selectedDevice, includeDisabled], () => void fetchPage(0))
+watch([fromDate, toDate, selectedDevice, includeDisabled, sortBy], () => void fetchPage(0))
 
 onMounted(async () => {
     await fetchPage(0)
