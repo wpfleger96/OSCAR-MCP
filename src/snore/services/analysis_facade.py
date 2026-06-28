@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.orm import Query, Session
 
+from snore.analysis.types import AnalysisResult
 from snore.database import models
 from snore.services.schemas import (
     AnalysisDeletePreview,
@@ -321,14 +322,14 @@ class AnalysisFacade:
         session_id: int,
         modes: list[str] | None = None,
         store_results: bool = True,
-    ) -> Any:
+    ) -> AnalysisResult:
         """Run analysis on a session. Returns AnalysisResult (Pydantic model)."""
         from snore.analysis.service import AnalysisService
 
         svc = AnalysisService(self.db_session)
         return svc.analyze_session(session_id, modes=modes, store_results=store_results)
 
-    def get_analysis_result(self, session_id: int) -> Any:
+    def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
 
         Intentionally returns None (rather than raising NotFoundError like the

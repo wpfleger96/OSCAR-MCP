@@ -1,8 +1,9 @@
 from datetime import datetime, time
-from typing import Annotated, Any, cast
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from snore.analysis.types import AnalysisResult
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
 from snore.api.schemas import (
@@ -47,24 +48,22 @@ def list_analysis_sessions(
     )
 
 
-@router.get("/sessions/{session_id}/analysis")
-# response_model omitted intentionally: AnalysisResult is a complex internal Pydantic
-# model whose schema changes across analysis modes. Exposing it via response_model would
-# tightly couple the OpenAPI spec to internal analysis model structure.
-def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> Any:
+@router.get("/sessions/{session_id}/analysis", response_model=AnalysisResult)
+def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> AnalysisResult:
     result = facade.get_analysis_result(session_id)
     if result is None:
         raise NotFoundError(f"No analysis found for session {session_id}")
     return result
 
 
-@router.post("/sessions/{session_id}/analysis", status_code=201)
-# response_model omitted intentionally: same reason as get_analysis above.
+@router.post(
+    "/sessions/{session_id}/analysis", status_code=201, response_model=AnalysisResult
+)
 def run_analysis(
     session_id: int,
     body: AnalysisRunRequest,
     facade: AnalysisFacadeDep,
-) -> Any:
+) -> AnalysisResult:
     return facade.run_analysis(
         session_id, modes=body.modes, store_results=body.store_results
     )
