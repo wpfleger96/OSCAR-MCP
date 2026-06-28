@@ -356,7 +356,7 @@ const modeRows = computed<ModeRow[]>(() => {
         rdi: r.rdi,
         apneas: r.apneas.length,
         hypopneas: r.hypopneas.length,
-        reras: r.reras.length,
+        reras: r.reras?.length ?? 0,
     }))
 })
 

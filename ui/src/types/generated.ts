@@ -638,6 +638,56 @@ export interface components {
             session_ids?: number[]
         }
         /**
+         * AnalysisEvent
+         * @description Respiratory event structure for analysis processing.
+         *
+         *     Note: This is distinct from models.unified.RespiratoryEvent which is the
+         *     canonical storage format. AnalysisEvent uses float timestamps for performance
+         *     and includes analysis-specific metadata (source, confidence).
+         */
+        AnalysisEvent: {
+            /**
+             * Baseline Flow
+             * @description Baseline flow (L/min)
+             */
+            baseline_flow?: number | null
+            /**
+             * Confidence
+             * @description Detection confidence
+             */
+            confidence?: number | null
+            /**
+             * Duration
+             * @description Event duration (seconds)
+             */
+            duration: number
+            /**
+             * Event Type
+             * @description Event type
+             */
+            event_type: string
+            /**
+             * Flow Reduction
+             * @description Flow reduction (0-1)
+             */
+            flow_reduction?: number | null
+            /**
+             * Has Desaturation
+             * @description Has SpO2 desaturation
+             */
+            has_desaturation?: boolean | null
+            /**
+             * Source
+             * @description Event source (machine/programmatic)
+             */
+            source: string
+            /**
+             * Start Time
+             * @description Session offset (seconds from session start)
+             */
+            start_time: number
+        }
+        /**
          * AnalysisListItem
          * @description Session with analysis status for listing.
          */
@@ -655,6 +705,100 @@ export interface components {
             session_date: string
             /** Session Id */
             session_id: number
+        }
+        /**
+         * AnalysisResult
+         * @description Results from session analysis.
+         */
+        AnalysisResult: {
+            /**
+             * Csr Detection
+             * @description Cheyne-Stokes Respiration detection (summary)
+             */
+            csr_detection?: {
+                [key: string]: unknown
+            } | null
+            /**
+             * Csr Episodes
+             * @description Time-localized CSR episodes
+             */
+            csr_episodes?:
+                | {
+                      [key: string]: unknown
+                  }[]
+                | null
+            /**
+             * Flow Analysis
+             * @description Flow limitation analysis
+             */
+            flow_analysis?: {
+                [key: string]: unknown
+            } | null
+            /**
+             * Machine Events
+             * @description Machine-flagged events
+             */
+            machine_events: components['schemas']['AnalysisEvent'][]
+            /**
+             * Mode Results
+             * @description Results by detection mode
+             */
+            mode_results: {
+                [key: string]: components['schemas']['ModeResult']
+            }
+            /**
+             * Periodic Breathing
+             * @description Periodic breathing detection (summary)
+             */
+            periodic_breathing?: {
+                [key: string]: unknown
+            } | null
+            /**
+             * Periodic Breathing Episodes
+             * @description Time-localized periodic breathing episodes
+             */
+            periodic_breathing_episodes?:
+                | {
+                      [key: string]: unknown
+                  }[]
+                | null
+            /**
+             * Pulse Change Count
+             * @description Total pulse change events detected
+             */
+            pulse_change_count?: number | null
+            /**
+             * Pulse Change Index
+             * @description Pulse changes per hour
+             */
+            pulse_change_index?: number | null
+            /**
+             * Session Duration Hours
+             * @description Session duration (hours)
+             */
+            session_duration_hours: number
+            /**
+             * Session Id
+             * @description Database session ID
+             */
+            session_id: number
+            /**
+             * Timestamp End
+             * @description Session end timestamp
+             * @default 0
+             */
+            timestamp_end: number
+            /**
+             * Timestamp Start
+             * @description Session start timestamp
+             * @default 0
+             */
+            timestamp_start: number
+            /**
+             * Total Breaths
+             * @description Total breaths segmented
+             */
+            total_breaths: number
         }
         /** AnalysisRunRequest */
         AnalysisRunRequest: {
@@ -685,6 +829,69 @@ export interface components {
             /** Version Count */
             version_count: number
         }
+        /**
+         * ApneaEvent
+         * @description Detected apnea event.
+         *
+         *     Attributes:
+         *         start_time: Event start timestamp (seconds)
+         *         end_time: Event end timestamp (seconds)
+         *         duration: Event duration (seconds)
+         *         event_type: OA (obstructive), CA (central), UA (unclassified), or MA (mixed)
+         *         flow_reduction: Percentage flow reduction (0-1)
+         *         confidence: Detection confidence (0-1)
+         *         classification_confidence: Confidence in OA vs CA vs MA classification (0-1)
+         *         baseline_flow: Baseline flow before event (L/min)
+         *         detection_method: Method used to detect event (amplitude, gap, near_zero_flow)
+         */
+        ApneaEvent: {
+            /**
+             * Baseline Flow
+             * @description Baseline flow before event (L/min)
+             */
+            baseline_flow: number
+            /**
+             * Classification Confidence
+             * @description Confidence in OA/CA/MA classification (0-1)
+             * @default 0.5
+             */
+            classification_confidence: number
+            /**
+             * Confidence
+             * @description Detection confidence (0-1)
+             */
+            confidence: number
+            /**
+             * Detection Method
+             * @description Detection method (amplitude, gap, near_zero_flow)
+             * @default amplitude
+             */
+            detection_method: string
+            /**
+             * Duration
+             * @description Event duration (seconds)
+             */
+            duration: number
+            /**
+             * End Time
+             * @description Event end timestamp (seconds)
+             */
+            end_time: number
+            /** @description Apnea type */
+            event_type: components['schemas']['ApneaEventType']
+            /**
+             * Flow Reduction
+             * @description Flow reduction (0-1)
+             */
+            flow_reduction: number
+            /**
+             * Start Time
+             * @description Event start timestamp (seconds)
+             */
+            start_time: number
+        }
+        /** @enum {string} */
+        ApneaEventType: 'OA' | 'CA' | 'MA' | 'UA'
         /** BatchAnalysisRequest */
         BatchAnalysisRequest: {
             /** From Date */
@@ -1078,6 +1285,62 @@ export interface components {
             detail?: components['schemas']['ValidationError'][]
         }
         /**
+         * HypopneaEvent
+         * @description Detected hypopnea event.
+         *
+         *     Attributes:
+         *         start_time: Event start timestamp (seconds)
+         *         end_time: Event end timestamp (seconds)
+         *         duration: Event duration (seconds)
+         *         flow_reduction: Percentage flow reduction (0-1)
+         *         confidence: Detection confidence (0-1)
+         *         baseline_flow: Baseline flow before event (L/min)
+         *         has_arousal: Whether arousal was detected (if available)
+         *         has_desaturation: Whether SpO2 desaturation occurred (if available)
+         */
+        HypopneaEvent: {
+            /**
+             * Baseline Flow
+             * @description Baseline flow before event (L/min)
+             */
+            baseline_flow: number
+            /**
+             * Confidence
+             * @description Detection confidence (0-1)
+             */
+            confidence: number
+            /**
+             * Duration
+             * @description Event duration (seconds)
+             */
+            duration: number
+            /**
+             * End Time
+             * @description Event end timestamp (seconds)
+             */
+            end_time: number
+            /**
+             * Flow Reduction
+             * @description Flow reduction (0-1)
+             */
+            flow_reduction: number
+            /**
+             * Has Arousal
+             * @description Arousal detected
+             */
+            has_arousal?: boolean | null
+            /**
+             * Has Desaturation
+             * @description SpO2 desaturation ≥3%
+             */
+            has_desaturation?: boolean | null
+            /**
+             * Start Time
+             * @description Event start timestamp (seconds)
+             */
+            start_time: number
+        }
+        /**
          * ImportResult
          * @description Aggregate result of an import operation across all sources.
          */
@@ -1177,6 +1440,49 @@ export interface components {
              * @description Non-fatal warnings
              */
             warnings?: string[]
+        }
+        /**
+         * ModeResult
+         * @description Result from a single detection mode.
+         */
+        ModeResult: {
+            /**
+             * Ahi
+             * @description Apnea-Hypopnea Index
+             */
+            ahi: number
+            /**
+             * Apneas
+             * @description Detected apnea events
+             */
+            apneas: components['schemas']['ApneaEvent'][]
+            /**
+             * Hypopneas
+             * @description Detected hypopnea events
+             */
+            hypopneas: components['schemas']['HypopneaEvent'][]
+            /**
+             * Metadata
+             * @description Mode-specific debug info
+             */
+            metadata?: {
+                [key: string]: unknown
+            }
+            /**
+             * Mode Name
+             * @description Mode name
+             */
+            mode_name: string
+            /**
+             * Rdi
+             * @description Respiratory Disturbance Index (AHI + RERAs/hour)
+             */
+            rdi: number
+            /**
+             * Reras
+             * @description Detected RERA events
+             */
+            reras?: components['schemas']['RERAEvent'][]
         }
         /** PaginatedResponse[AnalysisListItem] */
         PaginatedResponse_AnalysisListItem_: {
@@ -1292,6 +1598,59 @@ export interface components {
              * @description Type: daily, weekly, monthly, yearly
              */
             period_type: string
+        }
+        /**
+         * RERAEvent
+         * @description Detected RERA (Respiratory Effort-Related Arousal) event.
+         *
+         *     Detected from flow patterns (FLOW event algorithm) without EEG.
+         *     Represents sequences of flow-limited breaths ending with a recovery breath.
+         *
+         *     Attributes:
+         *         start_time: Event start timestamp (seconds)
+         *         end_time: Event end timestamp (seconds)
+         *         duration: Event duration (seconds)
+         *         obstructed_breath_count: Number of breaths showing flow limitation
+         *         recovery_amplitude_increase_pct: Recovery breath amplitude increase (% vs baseline)
+         *         confidence: Detection confidence (0-1, lower without EEG)
+         *         baseline_flow: Baseline flow before event (L/min)
+         */
+        RERAEvent: {
+            /**
+             * Baseline Flow
+             * @description Baseline flow before event (L/min)
+             */
+            baseline_flow: number
+            /**
+             * Confidence
+             * @description Detection confidence (0-1, lower without EEG)
+             */
+            confidence: number
+            /**
+             * Duration
+             * @description Event duration (seconds)
+             */
+            duration: number
+            /**
+             * End Time
+             * @description Event end timestamp (seconds)
+             */
+            end_time: number
+            /**
+             * Obstructed Breath Count
+             * @description Breaths showing flow limitation
+             */
+            obstructed_breath_count: number
+            /**
+             * Recovery Amplitude Increase Pct
+             * @description Recovery breath amplitude increase (%)
+             */
+            recovery_amplitude_increase_pct: number
+            /**
+             * Start Time
+             * @description Event start timestamp (seconds)
+             */
+            start_time: number
         }
         /**
          * RxComparisonResponse
@@ -2479,7 +2838,7 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': unknown
+                    'application/json': components['schemas']['AnalysisResult']
                 }
             }
             /** @description Validation Error */
@@ -2514,7 +2873,7 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': unknown
+                    'application/json': components['schemas']['AnalysisResult']
                 }
             }
             /** @description Validation Error */

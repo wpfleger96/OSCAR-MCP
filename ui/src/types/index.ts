@@ -48,6 +48,12 @@ export type RxComparisonResponse = Schemas['RxComparisonResponse']
 export type AnalysisListItem = Schemas['AnalysisListItem']
 export type AnalysisSessionDetail = Schemas['AnalysisSessionDetail']
 export type AnalysisDeletePreview = Schemas['AnalysisDeletePreview']
+export type AnalysisResult = Schemas['AnalysisResult']
+export type AnalysisEvent = Schemas['AnalysisEvent']
+export type ModeResult = Schemas['ModeResult']
+export type ApneaEvent = Schemas['ApneaEvent']
+export type HypopneaEvent = Schemas['HypopneaEvent']
+export type RERAEvent = Schemas['RERAEvent']
 
 // Import
 export type ImportSource = Schemas['ImportSource']
@@ -77,9 +83,9 @@ export type EventComparisonDetail = Schemas['EventComparisonDetail']
 export type BulkDeletePreviewRequest = Schemas['BulkDeletePreviewRequest']
 
 // ---------------------------------------------------------------------------
-// UI-only types below: no backend response model exists for these endpoints
-// (/stats/trends, /stats/records and /sessions/{id}/analysis return untyped
-// payloads), so they are maintained by hand.
+// UI-only types below: /stats/trends and /stats/records return loose dict
+// schemas that generate less useful TypeScript than hand-written types.
+// WaveformType, WAVEFORM_LABELS, EVENT_COLORS are pure UI constants.
 // ---------------------------------------------------------------------------
 
 // Waveform type and display labels
@@ -122,78 +128,6 @@ export interface TrendData {
 
 export interface RecordsData {
     [metric: string]: { best: [string, number][]; worst: [string, number][] }
-}
-
-// Analysis result payloads (untyped on the backend)
-export interface ApneaEvent {
-    start_time: number
-    end_time: number
-    duration: number
-    event_type: string
-    flow_reduction: number
-    confidence: number
-    classification_confidence: number
-    baseline_flow: number
-    detection_method: string
-}
-
-export interface HypopneaEvent {
-    start_time: number
-    end_time: number
-    duration: number
-    flow_reduction: number
-    confidence: number
-    baseline_flow: number
-    has_arousal: boolean | null
-    has_desaturation: boolean | null
-}
-
-export interface RERAEvent {
-    start_time: number
-    end_time: number
-    duration: number
-    obstructed_breath_count: number
-    recovery_amplitude_increase_pct: number
-    confidence: number
-    baseline_flow: number
-}
-
-export interface AnalysisEvent {
-    event_type: string
-    start_time: number
-    duration: number
-    source: string
-    confidence: number | null
-    flow_reduction: number | null
-    has_desaturation: boolean | null
-    baseline_flow: number | null
-}
-
-export interface ModeResult {
-    mode_name: string
-    apneas: ApneaEvent[]
-    hypopneas: HypopneaEvent[]
-    reras: RERAEvent[]
-    ahi: number
-    rdi: number
-    metadata: Record<string, unknown>
-}
-
-export interface AnalysisResult {
-    session_id: number
-    session_duration_hours: number
-    total_breaths: number
-    machine_events: AnalysisEvent[]
-    mode_results: Record<string, ModeResult>
-    flow_analysis: Record<string, unknown> | null
-    csr_detection: Record<string, unknown> | null
-    periodic_breathing: Record<string, unknown> | null
-    csr_episodes: Record<string, unknown>[] | null
-    periodic_breathing_episodes: Record<string, unknown>[] | null
-    pulse_change_count: number | null
-    pulse_change_index: number | null
-    timestamp_start: number
-    timestamp_end: number
 }
 
 // Event colors for waveform overlay
