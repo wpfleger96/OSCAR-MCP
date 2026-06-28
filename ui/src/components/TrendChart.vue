@@ -6,6 +6,9 @@
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
+import { useDarkMode } from '@/composables/useDarkMode'
+
+const { isDark } = useDarkMode()
 
 const props = defineProps<{
     labels: string[]
@@ -15,11 +18,16 @@ const props = defineProps<{
 const containerRef = ref<HTMLDivElement>()
 let chart: uPlot | null = null
 
+function axisColors() {
+    return isDark.value ? { axis: '#a1a1aa', grid: '#27272a' } : { axis: '#888', grid: '#eee' }
+}
+
 function createChart(): void {
     if (!containerRef.value || !props.labels.length) return
 
     chart?.destroy()
 
+    const colors = axisColors()
     const timestamps = props.labels.map((d) => new Date(d).getTime() / 1000)
     const width = containerRef.value.clientWidth || 800
 
@@ -28,7 +36,20 @@ function createChart(): void {
         height: 280,
         cursor: { drag: { x: true, y: false, setScale: true } },
         scales: { x: { time: true } },
-        axes: [{ space: 80 }, { size: 60 }],
+        axes: [
+            {
+                space: 80,
+                stroke: colors.axis,
+                grid: { stroke: colors.grid },
+                ticks: { stroke: colors.axis },
+            },
+            {
+                size: 60,
+                stroke: colors.axis,
+                grid: { stroke: colors.grid },
+                ticks: { stroke: colors.axis },
+            },
+        ],
         series: [
             {},
             ...props.datasets.map((ds) => ({
@@ -75,6 +96,8 @@ watch(
     () => createChart(),
     { deep: true },
 )
+
+watch(isDark, () => createChart())
 </script>
 
 <style scoped>
