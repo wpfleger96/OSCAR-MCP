@@ -4,27 +4,9 @@
 
         <!-- Filter bar -->
         <div class="filter-bar">
-            <input
-                v-model="fromDate"
-                type="date"
-                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            />
-            <input
-                v-model="toDate"
-                type="date"
-                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            />
-            <Toggle
-                :model-value="analyzedOnly"
-                variant="outline"
-                @update:model-value="
-                    (v) => {
-                        analyzedOnly = !!v
-                    }
-                "
-            >
-                Analyzed Only
-            </Toggle>
+            <input v-model="fromDate" type="date" class="date-input" />
+            <input v-model="toDate" type="date" class="date-input" />
+            <Toggle v-model:pressed="analyzedOnly" variant="outline"> Analyzed Only </Toggle>
             <Button variant="outline" size="sm" @click="batchDialogOpen = true">
                 <Play class="mr-2 h-4 w-4" />
                 Run Batch
@@ -94,33 +76,14 @@
             </TableBody>
         </Table>
 
-        <!-- Pagination -->
-        <div v-if="totalRecords > pageSize" class="flex items-center justify-between px-2 py-4">
-            <span class="text-sm text-muted-foreground">
-                {{ offset + 1 }}–{{ Math.min(offset + pageSize, totalRecords) }} of
-                {{ totalRecords }}
-            </span>
-            <div class="flex gap-2">
-                <Button
-                    variant="outline"
-                    size="sm"
-                    :disabled="offset === 0"
-                    @click="fetchPage(offset - pageSize)"
-                >
-                    Previous
-                </Button>
-                <Button
-                    variant="outline"
-                    size="sm"
-                    :disabled="offset + pageSize >= totalRecords"
-                    @click="fetchPage(offset + pageSize)"
-                >
-                    Next
-                </Button>
-            </div>
-        </div>
+        <PaginationBar
+            :offset="offset"
+            :page-size="pageSize"
+            :total="totalRecords"
+            @page="fetchPage"
+        />
 
-        <div v-if="error" class="mt-4 text-destructive">
+        <div v-if="error" class="error-state">
             <AlertTriangle class="inline h-4 w-4" /> {{ error }}
         </div>
 
@@ -236,6 +199,7 @@ import {
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import StatCard from '@/components/StatCard.vue'
+import PaginationBar from '@/components/PaginationBar.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { Loader2, AlertTriangle, Play, Trash2 } from '@lucide/vue'
 import {
@@ -295,6 +259,11 @@ async function fetchPage(newOffset: number): Promise<void> {
 }
 
 async function handleBatchRun(): Promise<void> {
+    if (batchFrom.value && batchTo.value && batchFrom.value > batchTo.value) {
+        error.value = 'From date must be before To date'
+        batchDialogOpen.value = false
+        return
+    }
     batchRunning.value = true
     try {
         batchResult.value = await runBatchAnalysis({
@@ -306,6 +275,7 @@ async function handleBatchRun(): Promise<void> {
         batchDialogOpen.value = false
         void fetchPage(0)
     } catch (err: unknown) {
+        batchDialogOpen.value = false
         error.value = err instanceof Error ? err.message : 'Batch analysis failed'
     } finally {
         batchRunning.value = false
@@ -351,14 +321,6 @@ onMounted(() => void fetchPage(0))
 <style scoped>
 .analysis-mgmt {
     max-width: 1200px;
-}
-
-.filter-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-    margin-bottom: 1rem;
 }
 
 .batch-result {

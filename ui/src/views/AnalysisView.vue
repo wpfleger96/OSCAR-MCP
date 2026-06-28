@@ -40,7 +40,7 @@
             <StatCard label="Total Breaths" :value="analysis.total_breaths" :decimals="0" />
             <StatCard
                 label="Machine Events"
-                :value="analysis.machine_events.length"
+                :value="analysis.machine_events?.length ?? 0"
                 :decimals="0"
             />
             <StatCard
@@ -350,7 +350,7 @@ interface ModeRow {
 
 const modeRows = computed<ModeRow[]>(() => {
     if (!analysis.value) return []
-    return Object.entries(analysis.value.mode_results).map(([name, r]) => ({
+    return Object.entries(analysis.value.mode_results ?? {}).map(([name, r]) => ({
         mode: name,
         ahi: r.ahi,
         rdi: r.rdi,
@@ -372,7 +372,7 @@ const modeEvents = computed<EventRow[]>(() => {
     const r = selectedModeResult.value
     if (!r) return []
     const events: EventRow[] = []
-    for (const a of r.apneas) {
+    for (const a of r.apneas ?? []) {
         events.push({
             type: a.event_type,
             start: a.start_time,
@@ -381,7 +381,7 @@ const modeEvents = computed<EventRow[]>(() => {
             confidence: a.confidence,
         })
     }
-    for (const h of r.hypopneas) {
+    for (const h of r.hypopneas ?? []) {
         events.push({
             type: 'H',
             start: h.start_time,
@@ -390,7 +390,7 @@ const modeEvents = computed<EventRow[]>(() => {
             confidence: h.confidence,
         })
     }
-    for (const re of r.reras) {
+    for (const re of r.reras ?? []) {
         events.push({
             type: 'RE',
             start: re.start_time,
@@ -436,6 +436,7 @@ async function handleRunAnalysis(): Promise<void> {
     }
 }
 
+// useApiLoad skipped — 404 routes to noAnalysis state, not generic error
 onMounted(async () => {
     try {
         analysis.value = await getAnalysis(props.sessionId)

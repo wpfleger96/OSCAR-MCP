@@ -5,21 +5,11 @@
         <div v-if="!result" class="space-y-4 max-w-md">
             <div class="space-y-2">
                 <label class="text-sm font-medium">From Date</label>
-                <input
-                    v-model="fromDate"
-                    type="date"
-                    required
-                    class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                />
+                <input v-model="fromDate" type="date" required class="date-input" />
             </div>
             <div class="space-y-2">
                 <label class="text-sm font-medium">To Date</label>
-                <input
-                    v-model="toDate"
-                    type="date"
-                    required
-                    class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                />
+                <input v-model="toDate" type="date" required class="date-input" />
             </div>
             <div class="space-y-2">
                 <label class="text-sm font-medium">Mode</label>
@@ -110,7 +100,13 @@
                         </TableRow>
                     </TableHeader>
                     <TableBody>
+                        <TableRow v-if="result.sessions.length === 0">
+                            <TableCell :colspan="8" class="py-8 text-center text-muted-foreground">
+                                No validated sessions found in the selected date range.
+                            </TableCell>
+                        </TableRow>
                         <TableRow
+                            v-else
                             v-for="session in result.sessions"
                             :key="session.session_id"
                             :class="{
@@ -175,15 +171,19 @@ const running = ref(false)
 const result = ref<ValidationReport | null>(null)
 const error = ref<string | null>(null)
 
-function pct(value: number): string {
-    return `${(value * 100).toFixed(1)}%`
+function pct(value: number | null | undefined): string {
+    return value != null ? `${(value * 100).toFixed(1)}%` : '---'
 }
 
 function isLowSensitivity(session: SessionValidation): boolean {
     return session.apnea_sensitivity < 0.7 || session.hypopnea_sensitivity < 0.7
 }
 
-async function handleRun() {
+async function handleRun(): Promise<void> {
+    if (fromDate.value && toDate.value && fromDate.value > toDate.value) {
+        error.value = 'From date must be before To date'
+        return
+    }
     running.value = true
     error.value = null
     try {

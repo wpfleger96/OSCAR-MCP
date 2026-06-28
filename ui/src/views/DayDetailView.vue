@@ -121,10 +121,6 @@ const { data, loading, error } = useApiLoad(() => getDay(props.dayDate))
     gap: 0.75rem;
 }
 
-.mb-6 {
-    margin-bottom: 1.5rem;
-}
-
 .sessions-section h2 {
     font-size: 1.1rem;
     font-weight: 600;

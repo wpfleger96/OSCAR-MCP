@@ -3,7 +3,7 @@
         <h1 class="page-title">Sessions</h1>
 
         <!-- Filter Panel -->
-        <div class="filter-panel">
+        <div class="filter-bar">
             <input
                 type="date"
                 :value="fromDate ? formatIso(fromDate) : ''"
@@ -152,32 +152,16 @@
             </TableBody>
         </Table>
 
-        <div v-if="totalRecords > pageSize" class="flex items-center justify-between px-2 py-4">
-            <span class="text-sm text-muted-foreground">
-                {{ offset + 1 }}–{{ Math.min(offset + pageSize, totalRecords) }} of
-                {{ totalRecords }}
-            </span>
-            <div class="flex gap-2">
-                <Button
-                    variant="outline"
-                    size="sm"
-                    :disabled="offset === 0"
-                    @click="fetchPage(offset - pageSize)"
-                >
-                    Previous
-                </Button>
-                <Button
-                    variant="outline"
-                    size="sm"
-                    :disabled="offset + pageSize >= totalRecords"
-                    @click="fetchPage(offset + pageSize)"
-                >
-                    Next
-                </Button>
-            </div>
-        </div>
+        <PaginationBar
+            :offset="offset"
+            :page-size="pageSize"
+            :total="totalRecords"
+            @page="fetchPage"
+        />
 
-        <div v-if="error" class="mt-4 text-destructive">{{ error }}</div>
+        <div v-if="error" class="error-state">
+            <AlertTriangle class="inline h-4 w-4" /> {{ error }}
+        </div>
 
         <DeleteConfirmDialog
             v-model:visible="deleteDialogVisible"
@@ -201,7 +185,17 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { Eye, EyeOff, Ban, Check, BarChart3, Trash2, FilterX, Loader2 } from '@lucide/vue'
+import {
+    Eye,
+    EyeOff,
+    Ban,
+    Check,
+    BarChart3,
+    Trash2,
+    FilterX,
+    Loader2,
+    AlertTriangle,
+} from '@lucide/vue'
 import {
     Table,
     TableBody,
@@ -220,6 +214,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select'
+import PaginationBar from '@/components/PaginationBar.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import {
     getSessions,
@@ -295,6 +290,7 @@ const deletePreviewLoading = ref(false)
 const deleting = ref(false)
 const deletePreview = ref<DeletePreview | null>(null)
 const deleteTargetId = ref<number | null>(null)
+const bulkDeleteIds = ref<number[]>([])
 const deleteMessage = ref('')
 
 function onFromDateChange(event: Event): void {
@@ -364,12 +360,13 @@ async function confirmDelete(session: SessionListItem): Promise<void> {
 async function confirmBulkDelete(): Promise<void> {
     if (selectedIds.value.size === 0) return
     deleteMessage.value = `Delete ${selectedIds.value.size} selected session(s)? This cannot be undone.`
+    bulkDeleteIds.value = [...selectedIds.value]
     deleteDialogVisible.value = true
     deletePreviewLoading.value = true
     deletePreview.value = null
     deleteTargetId.value = null
     try {
-        deletePreview.value = await getBulkDeletePreview({ session_ids: [...selectedIds.value] })
+        deletePreview.value = await getBulkDeletePreview({ session_ids: bulkDeleteIds.value })
     } catch {
         deleteMessage.value += '\n\nCould not load preview — proceed with caution.'
     } finally {
@@ -380,7 +377,7 @@ async function confirmBulkDelete(): Promise<void> {
 async function executeDelete(): Promise<void> {
     deleting.value = true
     try {
-        const ids = deleteTargetId.value != null ? [deleteTargetId.value] : [...selectedIds.value]
+        const ids = deleteTargetId.value != null ? [deleteTargetId.value] : bulkDeleteIds.value
         await deleteSessions({ session_ids: ids })
         deleteDialogVisible.value = false
         selectedIds.value.clear()
@@ -408,14 +405,6 @@ onMounted(async () => {
 <style scoped>
 .session-list {
     max-width: 1200px;
-}
-
-.filter-panel {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-    margin-bottom: 1rem;
 }
 
 .sessions-table {

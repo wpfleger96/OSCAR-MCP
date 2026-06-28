@@ -1,6 +1,6 @@
 <template>
     <div class="database-view">
-        <h1 class="page-title">Database</h1>
+        <h1 class="page-title !mb-0">Database</h1>
 
         <div v-if="loading && !data" class="loading-row">
             <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
@@ -150,6 +150,11 @@
                         </span>
                     </span>
                 </div>
+
+                <div v-if="vacuumError" class="error-state">
+                    <AlertTriangle class="h-4 w-4" />
+                    {{ vacuumError }}
+                </div>
             </section>
         </template>
 
@@ -200,13 +205,17 @@ const { data, loading, error, reload } = useApiLoad(() => getDbStats())
 const vacuumDialogOpen = ref(false)
 const vacuuming = ref(false)
 const vacuumResult = ref<VacuumResult | null>(null)
+const vacuumError = ref<string | null>(null)
 
-async function handleVacuum() {
+async function handleVacuum(): Promise<void> {
     vacuuming.value = true
     vacuumDialogOpen.value = false
+    vacuumError.value = null
     try {
         vacuumResult.value = await vacuumDb()
         await reload()
+    } catch (err: unknown) {
+        vacuumError.value = err instanceof Error ? err.message : 'Vacuum failed'
     } finally {
         vacuuming.value = false
     }
@@ -221,12 +230,6 @@ async function handleVacuum() {
     display: flex;
     flex-direction: column;
     gap: 2rem;
-}
-
-.page-title {
-    font-size: 1.5rem;
-    font-weight: 600;
-    margin-bottom: 0;
 }
 
 .loading-row {
@@ -248,6 +251,15 @@ async function handleVacuum() {
     font-size: 0.875rem;
     color: var(--color-destructive);
     padding: 1rem 0;
+}
+
+.error-state {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+    color: var(--color-destructive);
+    padding: 0.5rem 0;
 }
 
 .section {
