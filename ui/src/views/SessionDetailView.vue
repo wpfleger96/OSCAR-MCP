@@ -1,6 +1,18 @@
 <template>
-    <div v-if="loading" class="loading-state">
-        <Loader2 class="inline h-4 w-4 animate-spin" /> Loading session...
+    <div v-if="loading" class="session-detail">
+        <Skeleton class="h-4 w-24 mb-4" />
+        <Skeleton class="h-8 w-72 mb-2" />
+        <div class="flex gap-2 mb-6">
+            <Skeleton class="h-5 w-16 rounded-full" />
+            <Skeleton class="h-5 w-32" />
+            <Skeleton class="h-5 w-20" />
+            <Skeleton class="h-5 w-16" />
+        </div>
+        <Skeleton class="h-[280px] w-full rounded-lg mb-6" />
+        <Skeleton class="h-6 w-24 mb-3" />
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Skeleton v-for="i in 8" :key="i" class="h-[88px] rounded-lg" />
+        </div>
     </div>
 
     <div v-else-if="error" class="error-state">
@@ -350,6 +362,7 @@ import { ref, watch, nextTick, onMounted, toRef } from 'vue'
 import { useRoute } from 'vue-router'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Loader2, AlertTriangle, ArrowLeft, ChevronDown } from '@lucide/vue'
 import WaveformChart from '@/components/WaveformChart.vue'
 import WaveformToolbar from '@/components/WaveformToolbar.vue'
