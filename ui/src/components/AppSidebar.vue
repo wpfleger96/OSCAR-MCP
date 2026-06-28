@@ -4,6 +4,7 @@
             <span class="sidebar-logo">SNORE</span>
         </div>
         <nav class="sidebar-nav">
+            <span class="nav-group-label">Data</span>
             <RouterLink to="/" class="nav-item">
                 <BarChart3 class="h-4 w-4" />
                 <span>Dashboard</span>
@@ -12,12 +13,38 @@
                 <List class="h-4 w-4" />
                 <span>Sessions</span>
             </RouterLink>
+
+            <span class="nav-group-label">Analysis</span>
+            <RouterLink to="/analysis" class="nav-item">
+                <Brain class="h-4 w-4" />
+                <span>Analysis</span>
+            </RouterLink>
+            <RouterLink to="/validation" class="nav-item">
+                <CheckCircle class="h-4 w-4" />
+                <span>Validation</span>
+            </RouterLink>
+
+            <span class="nav-group-label">Tools</span>
+            <RouterLink to="/import" class="nav-item">
+                <Upload class="h-4 w-4" />
+                <span>Import</span>
+            </RouterLink>
+            <RouterLink to="/export" class="nav-item">
+                <Download class="h-4 w-4" />
+                <span>Export</span>
+            </RouterLink>
+            <RouterLink to="/database" class="nav-item">
+                <Database class="h-4 w-4" />
+                <span>Database</span>
+            </RouterLink>
+
+            <span class="nav-group-label">Settings</span>
             <RouterLink to="/stats" class="nav-item">
                 <TrendingUp class="h-4 w-4" />
                 <span>Stats</span>
             </RouterLink>
             <RouterLink to="/rx" class="nav-item">
-                <Settings class="h-4 w-4" />
+                <Pill class="h-4 w-4" />
                 <span>RX History</span>
             </RouterLink>
         </nav>
@@ -32,7 +59,19 @@
 </template>
 
 <script setup lang="ts">
-import { BarChart3, List, TrendingUp, Settings, Sun, Moon } from '@lucide/vue'
+import {
+    BarChart3,
+    Brain,
+    CheckCircle,
+    Database,
+    Download,
+    List,
+    Moon,
+    Pill,
+    Sun,
+    TrendingUp,
+    Upload,
+} from '@lucide/vue'
 import { useDarkMode } from '@/composables/useDarkMode'
 
 const { isDark, toggleDark } = useDarkMode()
@@ -99,5 +138,18 @@ const { isDark, toggleDark } = useDarkMode()
     margin-top: auto;
     padding: 0.75rem 0.5rem;
     border-top: 1px solid var(--color-border);
+}
+
+.nav-group-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-muted-foreground);
+    padding: 0.75rem 0.75rem 0.25rem;
+}
+
+.nav-group-label:first-child {
+    padding-top: 0;
 }
 </style>
