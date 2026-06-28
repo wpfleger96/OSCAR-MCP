@@ -1,4 +1,4 @@
-import { apiGet, apiPatch, apiDelete } from './client'
+import { apiGet, apiPost, apiPatch, apiDelete } from './client'
 import type { PaginatedResponse, SessionListItem, SessionDetail, DeletePreview } from '@/types'
 
 export interface SessionsParams {
@@ -34,3 +34,16 @@ export const deleteSessions = apiDelete<
 export const getSessionDeletePreview = apiGet<DeletePreview, [sessionId: number]>(
     (sessionId) => `/sessions/${sessionId}/delete-preview`,
 )
+
+export const getBulkDeletePreview = apiPost<
+    DeletePreview,
+    [
+        body: {
+            session_ids?: number[]
+            device?: string
+            from_date?: string
+            to_date?: string
+            delete_all?: boolean
+        },
+    ]
+>('/sessions/delete-preview', (body) => ({ data: body }))

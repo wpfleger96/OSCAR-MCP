@@ -4,6 +4,7 @@ import type {
     AnalysisListItem,
     AnalysisResult,
     AnalysisDeletePreview,
+    BatchAnalysisResult,
 } from '@/types'
 
 export interface AnalysisSessionsParams {
@@ -41,3 +42,16 @@ export const getAnalysisDeletePreview = apiGet<
     AnalysisDeletePreview,
     [params?: { session_ids?: number[]; all_versions?: boolean }]
 >('/analysis/delete-preview', (params = {}) => ({ params }))
+
+export const runBatchAnalysis = apiPost<
+    BatchAnalysisResult,
+    [
+        body: {
+            from_date: string
+            to_date: string
+            modes?: string[]
+            store_results?: boolean
+            max_sessions?: number
+        },
+    ]
+>('/analysis/batch', (body) => ({ data: body }))

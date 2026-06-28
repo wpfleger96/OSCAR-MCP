@@ -18,7 +18,43 @@
             <StatCard label="Avg Hours" :value="summary.avg_hours" unit="hrs" :decimals="1" />
             <StatCard label="Avg Leak" :value="summary.avg_leak" unit="L/min" :decimals="1" />
         </div>
+        <div v-if="summary" class="summary-row">
+            <StatCard label="Avg SpO₂" :value="summary.avg_spo2" unit="%" :decimals="1" />
+            <StatCard label="Avg Pulse" :value="summary.avg_pulse" unit="bpm" :decimals="0" />
+            <StatCard
+                label="Avg Pressure"
+                :value="summary.avg_pressure"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                label="Avg Resp Rate"
+                :value="summary.avg_respiratory_rate"
+                unit="br/min"
+                :decimals="1"
+            />
+        </div>
         <div v-else-if="!loading" class="no-data">No therapy data available.</div>
+
+        <div v-if="summary?.event_counts?.length" class="section-card">
+            <h2>Event Breakdown</h2>
+            <div class="event-breakdown">
+                <div v-for="ec in summary.event_counts" :key="ec.event_type" class="event-item">
+                    <Badge
+                        :style="{
+                            backgroundColor: eventColor(ec.event_type),
+                            color: eventTextColor(ec.event_type),
+                        }"
+                    >
+                        {{ ec.event_type }}
+                    </Badge>
+                    <span class="event-count">{{ ec.count }}</span>
+                    <span v-if="ec.percentage != null" class="text-muted-foreground text-sm"
+                        >({{ ec.percentage.toFixed(1) }}%)</span
+                    >
+                </div>
+            </div>
+        </div>
 
         <!-- AHI Trend Chart -->
         <div v-if="trendLabels.length" class="section-card">
@@ -85,19 +121,25 @@ import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateShort } from '@/utils/formatting'
+import { EVENT_COLORS } from '@/types'
 import type { SessionListItem } from '@/types'
 
 const router = useRouter()
 
 // Dashboard gracefully shows empty sections on error, so `error` is unused.
 const { data, loading } = useApiLoad(async () => {
-    const [summary, trends, daysResult, sessionsResult] = await Promise.all([
+    const [summaryRes, trendsRes, daysRes, sessionsRes] = await Promise.allSettled([
         getSummary(),
         getTrends('week'),
         getDays({ limit: 365 }),
         getSessions({ limit: 5, sort_by: 'date-desc' }),
     ])
-    return { summary, trends, days: daysResult.items, recentSessions: sessionsResult.items }
+    return {
+        summary: summaryRes.status === 'fulfilled' ? summaryRes.value : null,
+        trends: trendsRes.status === 'fulfilled' ? trendsRes.value : null,
+        days: daysRes.status === 'fulfilled' ? daysRes.value.items : null,
+        recentSessions: sessionsRes.status === 'fulfilled' ? sessionsRes.value.items : null,
+    }
 })
 
 const summary = computed(() => data.value?.summary ?? null)
@@ -111,6 +153,8 @@ const trendDatasets = computed(() => {
     return [
         { label: 'AHI', values: trends.value.ahi.map((t) => t[1]), color: '#2563eb' },
         { label: 'Usage (hrs)', values: trends.value.usage.map((t) => t[1]), color: '#16a34a' },
+        { label: 'SpO₂ (%)', values: trends.value.spo2.map((t) => t[1]), color: '#f59e0b' },
+        { label: 'Leak (L/min)', values: trends.value.leak.map((t) => t[1]), color: '#ef4444' },
     ]
 })
 
@@ -128,7 +172,15 @@ function navigateToSession(session: SessionListItem): void {
 }
 
 function onDayClick(date: string): void {
-    void router.push({ name: 'sessions', query: { from: date, to: date } })
+    void router.push({ name: 'day-detail', params: { date } })
+}
+
+function eventColor(type: string): string {
+    return EVENT_COLORS[type] ?? 'rgba(156, 163, 175, 0.25)'
+}
+
+function eventTextColor(type: string): string {
+    return EVENT_COLORS[type] ? 'inherit' : 'var(--color-muted-foreground)'
 }
 </script>
 
@@ -158,5 +210,21 @@ function onDayClick(date: string): void {
     padding: 2rem;
     text-align: center;
     color: var(--color-muted-foreground);
+}
+
+.event-breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.event-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.event-count {
+    font-weight: 600;
 }
 </style>

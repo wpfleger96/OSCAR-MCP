@@ -1,5 +1,5 @@
 import { apiGet } from './client'
-import type { WaveformInfo, WaveformDataResponse } from '@/types'
+import type { WaveformInfo, WaveformDataResponse, EventComparisonResult } from '@/types'
 
 export interface WaveformDataParams {
     max_points?: number
@@ -20,4 +20,12 @@ export const getWaveformData = apiGet<
         params: { max_points: 2000, ...params },
         signal,
     }),
+)
+
+export const getWaveformCompare = apiGet<
+    EventComparisonResult,
+    [sessionId: number, params?: { mode?: string }]
+>(
+    (sessionId) => `/sessions/${sessionId}/waveforms/compare`,
+    (_sessionId, params = {}) => ({ params }),
 )

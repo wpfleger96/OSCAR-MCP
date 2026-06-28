@@ -40,7 +40,7 @@
             <StatCard label="Total Breaths" :value="analysis.total_breaths" :decimals="0" />
             <StatCard
                 label="Machine Events"
-                :value="analysis.machine_events.length"
+                :value="analysis.machine_events?.length ?? 0"
                 :decimals="0"
             />
             <StatCard
@@ -169,6 +169,134 @@
                 {{ analysis.periodic_breathing_episodes.length }}
             </div>
         </div>
+
+        <!-- Event Comparison -->
+        <div v-if="comparison" class="section-card">
+            <h2>Event Comparison</h2>
+            <div class="summary-row" style="margin-bottom: 1rem">
+                <StatCard
+                    label="Machine Events"
+                    :value="comparison.machine_event_count"
+                    :decimals="0"
+                />
+                <StatCard
+                    label="Programmatic Events"
+                    :value="comparison.programmatic_event_count"
+                    :decimals="0"
+                />
+                <StatCard
+                    label="False Negatives"
+                    :value="comparison.false_negatives?.length ?? 0"
+                    :decimals="0"
+                />
+                <StatCard
+                    label="False Positives"
+                    :value="
+                        (comparison.false_positives_apnea?.length ?? 0) +
+                        (comparison.false_positives_hypopnea?.length ?? 0)
+                    "
+                    :decimals="0"
+                />
+            </div>
+
+            <div v-if="comparison.false_negatives?.length" class="compare-table-section">
+                <h3>False Negatives (machine events missed by programmatic)</h3>
+                <Table>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead style="width: 80px">Type</TableHead>
+                            <TableHead>Time</TableHead>
+                            <TableHead style="width: 90px">Duration</TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                        <TableRow
+                            v-for="(e, i) in comparison.false_negatives"
+                            :key="'fn-' + i"
+                            class="odd:bg-muted/50"
+                        >
+                            <TableCell>
+                                <span
+                                    class="event-badge"
+                                    :style="{ background: EVENT_COLORS[e.event_type] ?? '#ddd' }"
+                                    >{{ e.event_type }}</span
+                                >
+                            </TableCell>
+                            <TableCell>
+                                <RouterLink
+                                    :to="{
+                                        name: 'session-detail',
+                                        params: { id: sessionId },
+                                        query: { t: e.start_time },
+                                    }"
+                                    class="text-primary hover:underline"
+                                >
+                                    {{ formatTimeOffset(e.start_time) }}
+                                </RouterLink>
+                            </TableCell>
+                            <TableCell>{{ e.duration.toFixed(1) }}s</TableCell>
+                        </TableRow>
+                    </TableBody>
+                </Table>
+            </div>
+
+            <div
+                v-if="
+                    comparison.false_positives_apnea?.length ||
+                    comparison.false_positives_hypopnea?.length
+                "
+                class="compare-table-section"
+            >
+                <h3>False Positives (programmatic events not in machine)</h3>
+                <Table>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead style="width: 80px">Type</TableHead>
+                            <TableHead>Time</TableHead>
+                            <TableHead style="width: 90px">Duration</TableHead>
+                            <TableHead style="width: 100px">Confidence</TableHead>
+                            <TableHead style="width: 100px">Flow Red.</TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                        <TableRow
+                            v-for="(e, i) in allFalsePositives"
+                            :key="'fp-' + i"
+                            class="odd:bg-muted/50"
+                        >
+                            <TableCell>
+                                <span
+                                    class="event-badge"
+                                    :style="{ background: EVENT_COLORS[e.event_type] ?? '#ddd' }"
+                                    >{{ e.event_type }}</span
+                                >
+                            </TableCell>
+                            <TableCell>
+                                <RouterLink
+                                    :to="{
+                                        name: 'session-detail',
+                                        params: { id: sessionId },
+                                        query: { t: e.start_time },
+                                    }"
+                                    class="text-primary hover:underline"
+                                >
+                                    {{ formatTimeOffset(e.start_time) }}
+                                </RouterLink>
+                            </TableCell>
+                            <TableCell>{{ e.duration.toFixed(1) }}s</TableCell>
+                            <TableCell>{{
+                                e.confidence != null ? (e.confidence * 100).toFixed(0) + '%' : '---'
+                            }}</TableCell>
+                            <TableCell>{{
+                                e.flow_reduction != null
+                                    ? (e.flow_reduction * 100).toFixed(0) + '%'
+                                    : '---'
+                            }}</TableCell>
+                        </TableRow>
+                    </TableBody>
+                </Table>
+            </div>
+        </div>
     </div>
 </template>
 
@@ -187,9 +315,10 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Loader2, AlertTriangle, ArrowLeft, BarChart3, Play } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
+import { getWaveformCompare } from '@/api/waveforms'
 import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
-import type { AnalysisResult } from '@/types'
+import type { AnalysisResult, EventComparisonResult } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
 
@@ -198,6 +327,7 @@ const error = ref<string | null>(null)
 const noAnalysis = ref(false)
 const running = ref(false)
 const analysis = ref<AnalysisResult | null>(null)
+const comparison = ref<EventComparisonResult | null>(null)
 const selectedMode = ref('')
 const eventsPage = ref(0)
 const eventsPageSize = 25
@@ -220,7 +350,7 @@ interface ModeRow {
 
 const modeRows = computed<ModeRow[]>(() => {
     if (!analysis.value) return []
-    return Object.entries(analysis.value.mode_results).map(([name, r]) => ({
+    return Object.entries(analysis.value.mode_results ?? {}).map(([name, r]) => ({
         mode: name,
         ahi: r.ahi,
         rdi: r.rdi,
@@ -242,7 +372,7 @@ const modeEvents = computed<EventRow[]>(() => {
     const r = selectedModeResult.value
     if (!r) return []
     const events: EventRow[] = []
-    for (const a of r.apneas) {
+    for (const a of r.apneas ?? []) {
         events.push({
             type: a.event_type,
             start: a.start_time,
@@ -251,7 +381,7 @@ const modeEvents = computed<EventRow[]>(() => {
             confidence: a.confidence,
         })
     }
-    for (const h of r.hypopneas) {
+    for (const h of r.hypopneas ?? []) {
         events.push({
             type: 'H',
             start: h.start_time,
@@ -260,7 +390,7 @@ const modeEvents = computed<EventRow[]>(() => {
             confidence: h.confidence,
         })
     }
-    for (const re of r.reras) {
+    for (const re of r.reras ?? []) {
         events.push({
             type: 'RE',
             start: re.start_time,
@@ -279,6 +409,13 @@ const paginatedEvents = computed(() => {
 })
 
 const totalEventPages = computed(() => Math.ceil(modeEvents.value.length / eventsPageSize))
+
+const allFalsePositives = computed(() =>
+    [
+        ...(comparison.value?.false_positives_apnea ?? []),
+        ...(comparison.value?.false_positives_hypopnea ?? []),
+    ].sort((a, b) => a.start_time - b.start_time),
+)
 
 watch(selectedMode, () => {
     eventsPage.value = 0
@@ -299,6 +436,7 @@ async function handleRunAnalysis(): Promise<void> {
     }
 }
 
+// useApiLoad skipped — 404 routes to noAnalysis state, not generic error
 onMounted(async () => {
     try {
         analysis.value = await getAnalysis(props.sessionId)
@@ -314,6 +452,12 @@ onMounted(async () => {
         }
     } finally {
         loading.value = false
+    }
+
+    try {
+        comparison.value = await getWaveformCompare(props.sessionId)
+    } catch {
+        // Comparison data not available — section won't render
     }
 })
 </script>
@@ -363,5 +507,15 @@ onMounted(async () => {
 .pattern-info {
     font-size: 0.9rem;
     padding: 0.4rem 0;
+}
+
+.compare-table-section {
+    margin-top: 1rem;
+}
+
+.compare-table-section h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
 }
 </style>

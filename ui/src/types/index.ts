@@ -49,6 +49,33 @@ export type AnalysisListItem = Schemas['AnalysisListItem']
 export type AnalysisSessionDetail = Schemas['AnalysisSessionDetail']
 export type AnalysisDeletePreview = Schemas['AnalysisDeletePreview']
 
+// Import
+export type ImportSource = Schemas['ImportSource']
+export type ImportSourceResult = Schemas['ImportSourceResult']
+export type ImportResult = Schemas['ImportResult']
+export type DetectRequest = Schemas['DetectRequest']
+
+// Database
+export type DatabaseStatsPublic = Schemas['DatabaseStatsPublic']
+export type VacuumResult = Schemas['VacuumResult']
+
+// Validation
+export type ValidationReport = Schemas['ValidationReport']
+export type AggregateMetrics = Schemas['AggregateMetrics']
+export type SessionValidation = Schemas['SessionValidation']
+
+// Batch analysis
+export type BatchAnalysisRequest = Schemas['BatchAnalysisRequest']
+export type BatchAnalysisResult = Schemas['BatchAnalysisResult']
+export type BatchSessionResult = Schemas['BatchSessionResult']
+
+// Waveform compare
+export type EventComparisonResult = Schemas['EventComparisonResult']
+export type EventComparisonDetail = Schemas['EventComparisonDetail']
+
+// Bulk delete
+export type BulkDeletePreviewRequest = Schemas['BulkDeletePreviewRequest']
+
 // ---------------------------------------------------------------------------
 // UI-only types below: no backend response model exists for these endpoints
 // (/stats/trends, /stats/records and /sessions/{id}/analysis return untyped

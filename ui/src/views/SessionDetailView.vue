@@ -80,42 +80,240 @@
             />
         </div>
 
-        <!-- Statistics grid -->
+        <!-- Statistics -->
         <div v-if="session.statistics" class="stats-section">
             <h2>Statistics</h2>
-            <div class="stats-grid">
-                <StatCard label="AHI" :value="session.statistics.ahi" :decimals="1" />
-                <StatCard
-                    label="Usage"
-                    :value="session.statistics.usage_hours"
-                    unit="hrs"
-                    :decimals="1"
-                />
-                <StatCard
-                    label="Pressure 95th"
-                    :value="session.statistics.pressure_95th"
-                    unit="cmH₂O"
-                    :decimals="1"
-                />
-                <StatCard
-                    label="Leak 95th"
-                    :value="session.statistics.leak_95th"
-                    unit="L/min"
-                    :decimals="1"
-                />
-                <StatCard
-                    label="SpO₂ Mean"
-                    :value="session.statistics.spo2_mean"
-                    unit="%"
-                    :decimals="1"
-                />
-                <StatCard
-                    label="Pulse Mean"
-                    :value="session.statistics.pulse_mean"
-                    unit="bpm"
-                    :decimals="0"
-                />
-            </div>
+
+            <Collapsible v-model:open="respiratoryOpen" class="stats-collapsible">
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Respiratory Events
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': respiratoryOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard label="AHI" :value="session.statistics.ahi" :decimals="1" />
+                        <StatCard label="REI" :value="session.statistics.rei" :decimals="1" />
+                        <StatCard label="OAI" :value="session.statistics.oai" :decimals="2" />
+                        <StatCard label="CAI" :value="session.statistics.cai" :decimals="2" />
+                        <StatCard label="HI" :value="session.statistics.hi" :decimals="2" />
+                        <StatCard
+                            label="Obstructive Apneas"
+                            :value="session.statistics.obstructive_apneas"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Central Apneas"
+                            :value="session.statistics.central_apneas"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Mixed Apneas"
+                            :value="session.statistics.mixed_apneas"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Hypopneas"
+                            :value="session.statistics.hypopneas"
+                            :decimals="0"
+                        />
+                        <StatCard label="RERAs" :value="session.statistics.reras" :decimals="0" />
+                        <StatCard
+                            label="Flow Limitations"
+                            :value="session.statistics.flow_limitations"
+                            :decimals="0"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <Collapsible v-model:open="pressureOpen" class="stats-collapsible">
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Pressure
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': pressureOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            label="Pressure Mean"
+                            :value="session.statistics.pressure_mean"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Pressure Min"
+                            :value="session.statistics.pressure_min"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Pressure Max"
+                            :value="session.statistics.pressure_max"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Pressure 95th"
+                            :value="session.statistics.pressure_95th"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="EPAP Mean"
+                            :value="session.statistics.epap_mean"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="EPAP Min"
+                            :value="session.statistics.epap_min"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="EPAP Max"
+                            :value="session.statistics.epap_max"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="EPAP 95th"
+                            :value="session.statistics.epap_95th"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <Collapsible v-model:open="leakOpen" class="stats-collapsible">
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Leak
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': leakOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            label="Leak Mean"
+                            :value="session.statistics.leak_mean"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Leak 70th"
+                            :value="session.statistics.leak_percentile_70"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Leak 95th"
+                            :value="session.statistics.leak_95th"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <Collapsible v-model:open="oximetryOpen" class="stats-collapsible">
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Oximetry
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': oximetryOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            label="SpO₂ Mean"
+                            :value="session.statistics.spo2_mean"
+                            unit="%"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="SpO₂ Min"
+                            :value="session.statistics.spo2_min"
+                            unit="%"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="SpO₂ Below 90%"
+                            :value="session.statistics.spo2_time_below_90"
+                            unit="s"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Pulse Mean"
+                            :value="session.statistics.pulse_mean"
+                            unit="bpm"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Pulse Min"
+                            :value="session.statistics.pulse_min"
+                            unit="bpm"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Pulse Max"
+                            :value="session.statistics.pulse_max"
+                            unit="bpm"
+                            :decimals="0"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <Collapsible v-model:open="ventilationOpen" class="stats-collapsible">
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Ventilation
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': ventilationOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            label="Respiratory Rate"
+                            :value="session.statistics.respiratory_rate_mean"
+                            unit="br/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Tidal Volume"
+                            :value="session.statistics.tidal_volume_mean"
+                            unit="mL"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Minute Ventilation"
+                            :value="session.statistics.minute_ventilation_mean"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
         </div>
 
         <!-- Device settings -->
@@ -148,7 +346,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { ref, watch, nextTick, onMounted, toRef } from 'vue'
 import { useRoute } from 'vue-router'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -175,8 +373,13 @@ const error = ref<string | null>(null)
 const selectedType = ref('')
 const multiMode = ref(false)
 const settingsOpen = ref(false)
+const respiratoryOpen = ref(true)
+const pressureOpen = ref(false)
+const leakOpen = ref(false)
+const oximetryOpen = ref(false)
+const ventilationOpen = ref(false)
 
-const sessionIdRef = computed(() => props.sessionId)
+const sessionIdRef = toRef(props, 'sessionId')
 const {
     data: waveformData,
     loading: waveformLoading,
@@ -187,7 +390,8 @@ const {
 const singleChartRef = ref<InstanceType<typeof WaveformChart>>()
 const multiViewRef = ref<InstanceType<typeof MultiWaveformView>>()
 
-const jumpToTime = route.query.t ? Number(route.query.t) : null
+const rawT = route.query.t ? Number(route.query.t) : null
+const jumpToTime = rawT != null && Number.isFinite(rawT) ? rawT : null
 
 // Jump to timestamp from ?t= query param after first waveform load
 if (jumpToTime != null) {
@@ -292,6 +496,29 @@ onMounted(async () => {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 0.75rem;
+}
+
+.stats-collapsible {
+    margin-bottom: 0.5rem;
+}
+
+.collapsible-header {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    border-radius: 0.5rem;
+    border: 1px solid var(--color-border);
+    background: var(--color-card);
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.95rem;
+    cursor: pointer;
+}
+
+.collapsible-header:hover {
+    background: var(--color-accent);
 }
 
 .settings-panel {

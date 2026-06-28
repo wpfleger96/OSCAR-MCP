@@ -46,6 +46,41 @@ const router = createRouter({
             name: 'rx-history',
             component: () => import('@/views/RxHistoryView.vue'),
         },
+        {
+            path: '/import',
+            name: 'import',
+            component: () => import('@/views/ImportView.vue'),
+        },
+        {
+            path: '/export',
+            name: 'export',
+            component: () => import('@/views/ExportView.vue'),
+        },
+        {
+            path: '/analysis',
+            name: 'analysis-management',
+            component: () => import('@/views/AnalysisManagementView.vue'),
+        },
+        {
+            path: '/database',
+            name: 'database',
+            component: () => import('@/views/DatabaseView.vue'),
+        },
+        {
+            path: '/validation',
+            name: 'validation',
+            component: () => import('@/views/ValidationView.vue'),
+        },
+        {
+            path: '/days/:date',
+            name: 'day-detail',
+            component: () => import('@/views/DayDetailView.vue'),
+            props: (route: { params: { date: string | string[] } }) => ({
+                dayDate: Array.isArray(route.params.date)
+                    ? route.params.date[0]
+                    : route.params.date,
+            }),
+        },
     ],
 })
 
