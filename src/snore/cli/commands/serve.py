@@ -1,4 +1,4 @@
-"""serve command — start the SNORE REST API server."""
+"""serve command — start the SNORE API server and web UI."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ import uvicorn
 @click.option("--reload", is_flag=True, help="Enable auto-reload for development")
 @click.option("--db", default=None, help="Path to SQLite database file")
 def serve(host: str, port: int, reload: bool, db: str | None) -> None:
-    """Start the SNORE REST API server."""
+    """Start the SNORE API server and web UI.
+
+    Serves the REST API at /api/v1/. If the web UI has been built
+    (ui/dist/ exists), it is served at all other paths.
+    """
     if db:
         # uvicorn spawns the app via factory; env var is the only cross-process
         # channel available at this point
