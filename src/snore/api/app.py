@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import importlib.resources
 import os
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from snore.api.errors import NotFoundError, not_found_handler, server_error_handler
 from snore.api.middleware import AuthMiddleware, RateLimitMiddleware
@@ -88,4 +92,30 @@ def create_app() -> FastAPI:
         validation.router, prefix=f"{API_V1_PREFIX}/validate", tags=["validation"]
     )
 
+    _mount_spa(app)
+
     return app
+
+
+def _resolve_spa_dist() -> Path | None:
+    dist = Path(str(importlib.resources.files("snore"))) / "ui" / "dist"
+    if dist.is_dir():
+        return dist
+    project_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
+    if project_dist.is_dir():
+        return project_dist
+    return None
+
+
+def _mount_spa(app: FastAPI) -> None:
+    dist = _resolve_spa_dist()
+    if dist is None:
+        return
+    app.mount("/assets", StaticFiles(directory=dist / "assets"), name="spa-assets")
+
+    @app.middleware("http")
+    async def spa_fallback(request: Request, call_next: object) -> Response:
+        response: Response = await call_next(request)  # type: ignore[operator]
+        if response.status_code == 404 and not request.url.path.startswith("/api/"):
+            return FileResponse(dist / "index.html")
+        return response

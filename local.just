@@ -42,6 +42,13 @@ dev-api:
 dev-ui:
     cd ui && npm run dev
 
+# Build UI and start the server
+serve: ui-build
+    uv run snore serve
+
+# Build frontend + backend package
+build-all: ui-build build
+
 # Screenshots
 
 # Install Playwright Chromium browser for screenshot tests

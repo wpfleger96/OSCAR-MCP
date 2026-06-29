@@ -240,13 +240,17 @@ uv run snore export json --from 2024-01-01 --to 2024-12-31 # JSON export
 uv run snore validate --from 2024-01-01 --to 2024-12-31
 ```
 
-### 8. REST API
+### 8. Web UI & REST API
 
 ```bash
-# Start the REST API server
+# Build UI and start the server (single command)
+just serve
+
+# Or start the API server directly (serves UI if already built)
 uv run snore serve                                    # Default: localhost:8000
 uv run snore serve --host 0.0.0.0 --port 5000 --reload  # binds to all interfaces — auth not yet implemented
-# API docs available at http://localhost:8000/docs
+
+# Web UI at http://localhost:8000, API docs at http://localhost:8000/docs
 ```
 
 ### 9. Shell Completions
@@ -281,10 +285,13 @@ just pre-commit
 # CI workflow (type-check, lint, format, test)
 just ci
 
+# Build UI and start the server
+just serve
+
 # Start REST API dev server (with reload)
 just dev-api
 
-# Start Vue UI dev server
+# Start Vue UI dev server (HMR, proxies API to dev-api)
 just dev-ui
 
 # Install UI npm dependencies
