@@ -361,14 +361,14 @@ class ExportService:
                         f"{s['start_time']:%H%M%S}_{w.waveform_type}.csv"
                     )
                     wpath = waveforms_dir / fname
-                    data = np.frombuffer(w.data_blob, dtype=np.float32)
-                    if len(data) % 2 != 0:
+                    flat = np.frombuffer(w.data_blob, dtype=np.float32)
+                    if len(flat) % 2 != 0:
                         continue
-                    data = data.reshape(-1, 2)
+                    rows = flat.reshape(-1, 2)
                     with open(wpath, "w", newline="") as f:
                         writer = csv.writer(f)
                         writer.writerow(["offset_seconds", "value"])
-                        for row in data:
+                        for row in rows:
                             writer.writerow([f"{row[0]:.3f}", f"{row[1]:.3f}"])
                     files_written += 1
 

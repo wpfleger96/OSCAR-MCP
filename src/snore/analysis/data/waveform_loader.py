@@ -413,7 +413,7 @@ def handle_discontinuities(
     start_idx = 0
 
     for gap_idx in gap_indices:
-        end_idx = gap_idx + 1
+        end_idx = int(gap_idx) + 1
         segments.append((timestamps[start_idx:end_idx], values[start_idx:end_idx]))
         start_idx = end_idx
 
