@@ -29,6 +29,9 @@ dev-api:
 dev-ui:
     cd ui && npm run dev
 
+# Build frontend + backend package
+build-all: ui-build build
+
 # Screenshots
 ui-playwright-install:
     cd ui && npx playwright install chromium
