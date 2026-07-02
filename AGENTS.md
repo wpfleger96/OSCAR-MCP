@@ -17,7 +17,7 @@ just format         # Ruff format
 just sync           # Install dependencies (uv sync)
 just dev-api        # Start REST API dev server (with reload)
 just dev-ui         # Start Vue UI dev server
-just ui-install     # Install UI npm dependencies
+just ui-install     # Install UI pnpm dependencies
 just ui-build       # Build UI for production
 
 # CLI (local development - always use `uv run snore`)

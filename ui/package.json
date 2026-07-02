@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --build && vite build",
@@ -16,6 +17,7 @@
     "test:screenshot": "playwright test screenshot.spec.ts"
   },
   "dependencies": {
+    "@internationalized/date": "^3.12.2",
     "@lucide/vue": "^1.21.0",
     "@tanstack/vue-table": "^8.21.3",
     "@vueuse/core": "^14.3.0",
@@ -29,11 +31,6 @@
     "uplot": "^1.6.0",
     "vue": "^3.5.34",
     "vue-router": "^5.0.6"
-  },
-  "overrides": {
-    "openapi-typescript": {
-      "typescript": "$typescript"
-    }
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -49,7 +46,7 @@
     "openapi-typescript": "^7.13.0",
     "prettier": "^3.8.3",
     "tailwindcss": "^4.3.1",
-    "typescript": "~6.0.3",
+    "typescript": "catalog:",
     "vite": "^8.0.11",
     "vue-tsc": "^3.2.8"
   }

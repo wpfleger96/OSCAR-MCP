@@ -11,7 +11,7 @@ After making changes to any file in `ui/src/`, to visually demonstrate UI change
 ## Prerequisites
 
 - A PR must exist for the current branch
-- UI npm dependencies installed (`just ui-install`)
+- UI pnpm dependencies installed (`just ui-install`)
 - Playwright browser installed (`just ui-playwright-install`) — one-time setup
 
 ## Invocation

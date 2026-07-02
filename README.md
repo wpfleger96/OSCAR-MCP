@@ -294,7 +294,7 @@ just dev-api
 # Start Vue UI dev server (HMR, proxies API to dev-api)
 just dev-ui
 
-# Install UI npm dependencies
+# Install UI pnpm dependencies
 just ui-install
 
 # Build UI for production

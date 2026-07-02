@@ -62,12 +62,17 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: "lts/*"
-          cache: "npm"
-          cache-dependency-path: ui/package-lock.json
+          cache: "pnpm"
+          cache-dependency-path: ui/pnpm-lock.yaml
 
       - name: Install UI dependencies
         run: just ui-install
