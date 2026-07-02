@@ -1,0 +1,6 @@
+allowBuilds:
+  vue-demi: false
+catalog:
+  typescript: "~6.0.3"
+overrides:
+  "openapi-typescript>typescript": "catalog:"
