@@ -33,6 +33,10 @@
                 <Download class="h-4 w-4" />
                 <span>Export</span>
             </RouterLink>
+            <RouterLink to="/reports" class="nav-item">
+                <FileText class="h-4 w-4" />
+                <span>Reports</span>
+            </RouterLink>
             <RouterLink to="/database" class="nav-item">
                 <Database class="h-4 w-4" />
                 <span>Database</span>
@@ -65,6 +69,7 @@ import {
     CheckCircle,
     Database,
     Download,
+    FileText,
     List,
     Moon,
     Pill,
