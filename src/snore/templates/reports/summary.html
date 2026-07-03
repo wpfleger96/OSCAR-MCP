@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+
+{% block title %}SNORE Therapy Report — {{ from_date }} to {{ to_date }}{% endblock %}
+
+{% block body %}
+<div class="report-header">
+  <h1>SNORE &mdash; Therapy Summary Report</h1>
+  <div class="subtitle">{{ from_date }} &mdash; {{ to_date }}</div>
+  <div class="meta">Generated {{ generated_on }}</div>
+</div>
+
+{% if device %}
+<div class="device-block">
+  <strong>{{ device.manufacturer }} {{ device.model }}</strong>
+  &nbsp;&middot;&nbsp; S/N: {{ device.serial_number }}
+  {% if device.firmware_version %}&nbsp;&middot;&nbsp; FW: {{ device.firmware_version }}{% endif %}
+</div>
+{% endif %}
+
+{% if not summary %}
+<div class="no-data">No therapy data available for this date range.</div>
+{% else %}
+
+<h2>Usage &amp; Efficacy</h2>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label">Days Tracked</div>
+    <div class="value">{{ summary.days_with_data }}</div>
+    <div class="unit">days</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Avg Usage</div>
+    <div class="value">{{ summary.avg_hours | fmt_f }}</div>
+    <div class="unit">hours/night</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Total Usage</div>
+    <div class="value">{{ summary.total_hours | fmt_f }}</div>
+    <div class="unit">hours</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Avg AHI</div>
+    <div class="value">{{ summary.avg_ahi | fmt_f }}</div>
+    <div class="unit">events/hr</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Effectiveness</div>
+    <div class="value" style="font-size:1rem;">{{ summary.effectiveness | title }}</div>
+  </div>
+</div>
+
+<h2>Pressure</h2>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label">Avg Pressure</div>
+    <div class="value">{{ summary.avg_pressure | fmt_f }}</div>
+    <div class="unit">cmH&#x2082;O</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Range</div>
+    <div class="value" style="font-size:1rem;">{{ summary.min_pressure | fmt_f }} &ndash; {{ summary.max_pressure | fmt_f }}</div>
+    <div class="unit">cmH&#x2082;O</div>
+  </div>
+  {% if summary.avg_epap is not none %}
+  <div class="stat-card">
+    <div class="label">Avg EPAP</div>
+    <div class="value">{{ summary.avg_epap | fmt_f }}</div>
+    <div class="unit">cmH&#x2082;O</div>
+  </div>
+  {% endif %}
+</div>
+
+<h2>Leak &amp; Oxygen</h2>
+<div class="stat-grid">
+  {% if summary.avg_leak is not none %}
+  <div class="stat-card">
+    <div class="label">Avg Leak</div>
+    <div class="value">{{ summary.avg_leak | fmt_f }}</div>
+    <div class="unit">L/min</div>
+  </div>
+  {% endif %}
+  {% if summary.avg_spo2 is not none %}
+  <div class="stat-card">
+    <div class="label">Avg SpO&#x2082;</div>
+    <div class="value">{{ summary.avg_spo2 | fmt_f }}</div>
+    <div class="unit">%</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Min SpO&#x2082;</div>
+    <div class="value">{{ summary.min_spo2 | fmt_f }}</div>
+    <div class="unit">%</div>
+  </div>
+  {% if summary.total_spo2_time_below_90 %}
+  <div class="stat-card">
+    <div class="label">SpO&#x2082; &lt;90%</div>
+    <div class="value">{{ summary.total_spo2_time_below_90 | fmt_i }}</div>
+    <div class="unit">seconds</div>
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+
+{% if summary.avg_respiratory_rate is not none or summary.avg_pulse is not none %}
+<h2>Respiratory &amp; Pulse</h2>
+<div class="stat-grid">
+  {% if summary.avg_respiratory_rate is not none %}
+  <div class="stat-card">
+    <div class="label">Avg Resp Rate</div>
+    <div class="value">{{ summary.avg_respiratory_rate | fmt_f }}</div>
+    <div class="unit">breaths/min</div>
+  </div>
+  {% endif %}
+  {% if summary.avg_pulse is not none %}
+  <div class="stat-card">
+    <div class="label">Avg Pulse</div>
+    <div class="value">{{ summary.avg_pulse | fmt_f }}</div>
+    <div class="unit">bpm</div>
+  </div>
+  {% endif %}
+  {% if summary.avg_minute_ventilation is not none %}
+  <div class="stat-card">
+    <div class="label">Avg Min Vent</div>
+    <div class="value">{{ summary.avg_minute_ventilation | fmt_f }}</div>
+    <div class="unit">L/min</div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if summary.event_counts %}
+<h2>Event Counts</h2>
+<table>
+  <thead>
+    <tr><th>Event Type</th><th>Count</th><th>%</th></tr>
+  </thead>
+  <tbody>
+    {% for ec in summary.event_counts %}
+    <tr>
+      <td>{{ ec.event_type }}</td>
+      <td>{{ ec.count | fmt_i }}</td>
+      <td>{{ ec.percentage | fmt_f }}%</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if monthly %}
+<h2>Monthly Breakdown</h2>
+<div style="overflow-x:auto;">
+<table>
+  <thead>
+    <tr>
+      <th>Month</th>
+      <th>Days</th>
+      <th>Avg Hrs</th>
+      <th>Avg AHI</th>
+      <th>Avg OAI</th>
+      <th>Avg CAI</th>
+      <th>Avg HI</th>
+      <th>Avg RERA</th>
+      <th>Avg Pressure</th>
+      <th>Avg Leak</th>
+      <th>Avg SpO&#x2082;</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in monthly %}
+    <tr>
+      <td>{{ p.period_start.strftime("%b %Y") }}</td>
+      <td>{{ p.days_used }}/{{ p.days_in_period }}</td>
+      <td>{{ p.avg_hours_per_day | fmt_f }}</td>
+      <td>{{ p.avg_ahi | fmt_f }}</td>
+      <td>{{ p.avg_oai | fmt_f }}</td>
+      <td>{{ p.avg_cai | fmt_f }}</td>
+      <td>{{ p.avg_hi | fmt_f }}</td>
+      <td>{{ p.avg_rera | fmt_f }}</td>
+      <td>{{ p.avg_pressure | fmt_f }}</td>
+      <td>{{ p.avg_leak | fmt_f }}</td>
+      <td>{{ p.avg_spo2 | fmt_f }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>Trends (Weekly)</h2>
+<div class="chart-wrap">
+  <div class="chart-label">AHI (events/hour)</div>
+  {{ ahi_chart | safe }}
+</div>
+<div class="chart-wrap">
+  <div class="chart-label">Usage (hours/night)</div>
+  {{ usage_chart | safe }}
+</div>
+
+{% endif %}{# end if summary #}
+{% endblock %}

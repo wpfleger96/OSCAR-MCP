@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}SNORE Therapy Report{% endblock %}</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #111827;
+    background: #f9fafb;
+  }
+
+  .report {
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 2rem;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+  }
+
+  /* ---- Header ---- */
+  .report-header {
+    border-bottom: 2px solid #e5e7eb;
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .report-header h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #111827;
+    letter-spacing: -0.01em;
+  }
+  .report-header .subtitle {
+    font-size: 0.85rem;
+    color: #6b7280;
+    margin-top: 0.25rem;
+  }
+  .report-header .meta {
+    font-size: 0.8rem;
+    color: #9ca3af;
+    margin-top: 0.25rem;
+  }
+
+  /* ---- Section headings ---- */
+  h2 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #6b7280;
+    margin: 1.75rem 0 0.75rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  /* ---- Stat card grid ---- */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .stat-card {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 5px;
+    padding: 0.75rem 1rem;
+  }
+  .stat-card .label {
+    font-size: 0.75rem;
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .stat-card .value {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: #111827;
+    line-height: 1.2;
+    margin-top: 0.15rem;
+  }
+  .stat-card .unit {
+    font-size: 0.75rem;
+    color: #6b7280;
+  }
+
+  /* ---- Tables ---- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    margin-bottom: 1rem;
+  }
+  th {
+    text-align: left;
+    font-weight: 600;
+    padding: 0.4rem 0.5rem;
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    color: #374151;
+  }
+  td {
+    padding: 0.4rem 0.5rem;
+    border: 1px solid #e5e7eb;
+    color: #374151;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td { background: #f9fafb; }
+
+  /* ---- Device block ---- */
+  .device-block {
+    font-size: 0.85rem;
+    color: #374151;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 5px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+  }
+  .device-block strong { color: #111827; }
+
+  /* ---- Charts ---- */
+  .chart-wrap {
+    margin: 0.5rem 0 1rem;
+    overflow-x: auto;
+  }
+  .chart-label {
+    font-size: 0.75rem;
+    color: #6b7280;
+    margin-bottom: 0.25rem;
+  }
+
+  /* ---- No-data notice ---- */
+  .no-data {
+    padding: 1.5rem;
+    text-align: center;
+    color: #6b7280;
+    background: #f9fafb;
+    border: 1px dashed #d1d5db;
+    border-radius: 5px;
+    margin: 1rem 0;
+  }
+
+  /* ---- Comparison columns ---- */
+  .cmp-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  .cmp-panel {
+    border: 1px solid #e5e7eb;
+    border-radius: 5px;
+    padding: 1rem;
+    background: #f9fafb;
+  }
+  .cmp-panel h3 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 0.5rem;
+  }
+
+  @media print {
+    body { background: #fff; }
+    .report {
+      margin: 0;
+      border: none;
+      border-radius: 0;
+      padding: 1.5cm 2cm;
+      max-width: none;
+    }
+    h2 { page-break-after: avoid; }
+    .stat-card, table, .device-block, .chart-wrap { page-break-inside: avoid; }
+    .stat-grid { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="report">
+{% block body %}{% endblock %}
+</div>
+</body>
+</html>

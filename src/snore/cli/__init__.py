@@ -65,6 +65,7 @@ def _register_commands() -> None:
     from snore.cli.groups.db import db
     from snore.cli.groups.export import export
     from snore.cli.groups.logs import logs
+    from snore.cli.groups.report import report
     from snore.cli.groups.rx import rx
     from snore.cli.groups.session import session
     from snore.cli.groups.waveform import waveform
@@ -81,6 +82,7 @@ def _register_commands() -> None:
     cli.add_command(analysis)
     cli.add_command(completions)
     cli.add_command(logs)
+    cli.add_command(report)
     cli.add_command(waveform)
     cli.add_command(rx)
     cli.add_command(export)
