@@ -242,6 +242,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/import/path': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Import From Path */
+        post: operations['import_from_path_api_v1_import_path_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/rx/compare': {
         parameters: {
             query?: never
@@ -965,11 +982,6 @@ export interface components {
              */
             success: boolean
         }
-        /** Body_import_files_api_v1_import__post */
-        Body_import_files_api_v1_import__post: {
-            /** Files */
-            files: string[]
-        }
         /** BulkDeletePreviewRequest */
         BulkDeletePreviewRequest: {
             /**
@@ -1339,6 +1351,11 @@ export interface components {
              * @description Event start timestamp (seconds)
              */
             start_time: number
+        }
+        /** ImportPathRequest */
+        ImportPathRequest: {
+            /** Sources */
+            sources: components['schemas']['ImportSource'][]
         }
         /**
          * ImportResult
@@ -2513,7 +2530,9 @@ export interface operations {
         }
         requestBody: {
             content: {
-                'multipart/form-data': components['schemas']['Body_import_files_api_v1_import__post']
+                'multipart/form-data': {
+                    files: string[]
+                }
             }
         }
         responses: {
@@ -2524,15 +2543,6 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ImportResult']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
                 }
             }
         }
@@ -2557,6 +2567,39 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ImportSource'][]
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    import_from_path_api_v1_import_path_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['ImportPathRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ImportResult']
                 }
             }
             /** @description Validation Error */
