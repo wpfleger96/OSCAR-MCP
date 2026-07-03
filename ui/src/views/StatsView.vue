@@ -23,11 +23,12 @@
         <!-- Period Stats Table -->
         <div class="section-card">
             <h2>Period Breakdown</h2>
-            <PeriodStatsTable :periods="periods" :loading="periodsLoading" />
+            <ErrorState v-if="periodsError" :message="periodsError" :retry="reloadPeriods" />
+            <PeriodStatsTable v-else :periods="periods" :loading="periodsLoading" />
         </div>
 
         <!-- Trend Chart -->
-        <div v-if="trendLabels.length" class="section-card">
+        <div v-if="!periodsError && trendLabels.length" class="section-card">
             <h2>Trends</h2>
             <TrendChart :labels="trendLabels" :datasets="trendDatasets" />
         </div>
@@ -35,7 +36,8 @@
         <!-- Records -->
         <div class="section-card">
             <h2>Records</h2>
-            <RecordsPanel :records="records" :loading="recordsLoading" />
+            <ErrorState v-if="recordsError" :message="recordsError" :retry="reloadRecords" />
+            <RecordsPanel v-else :records="records" :loading="recordsLoading" />
         </div>
     </div>
 </template>
@@ -46,6 +48,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import RecordsPanel from '@/components/RecordsPanel.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import { getPeriods, getTrends, getRecords } from '@/api/stats'
 import { useApiLoad } from '@/composables/useApiLoad'
 import type { PeriodStatistics } from '@/types'
@@ -62,6 +65,7 @@ const periodType = ref('month')
 const {
     data: periodData,
     loading: periodsLoading,
+    error: periodsError,
     reload: reloadPeriods,
 } = useApiLoad(async () => {
     const [periods, trends] = await Promise.all([
@@ -71,7 +75,12 @@ const {
     return { periods, trends }
 })
 
-const { data: records, loading: recordsLoading } = useApiLoad(() => getRecords())
+const {
+    data: records,
+    loading: recordsLoading,
+    error: recordsError,
+    reload: reloadRecords,
+} = useApiLoad(() => getRecords())
 
 const periods = computed<PeriodStatistics[]>(() => periodData.value?.periods ?? [])
 const trends = computed(() => periodData.value?.trends ?? null)

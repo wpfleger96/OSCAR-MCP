@@ -57,7 +57,7 @@ test('dashboard', async ({ page }) => {
 
 test('sessions', async ({ page }) => {
     await page.goto('/sessions')
-    await page.waitForSelector('.sessions-table .p-datatable-tbody tr')
+    await page.waitForSelector('.sessions-table tbody tr')
     await page.screenshot({ path: 'screenshots/sessions.png' })
 })
 
@@ -66,6 +66,20 @@ test('stats', async ({ page }) => {
     await page.waitForSelector('.records-grid')
     await page.waitForTimeout(800)
     await page.screenshot({ path: 'screenshots/stats.png' })
+})
+
+test('stats error state', async ({ page }) => {
+    await page.route('**/api/v1/stats/**', (route) =>
+        route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({ detail: 'Internal Server Error' }),
+        }),
+    )
+    await page.goto('/stats')
+    await page.waitForSelector('.error-state')
+    await page.waitForTimeout(800)
+    await page.screenshot({ path: 'screenshots/stats-error.png' })
 })
 
 test('rx-history', async ({ page }) => {

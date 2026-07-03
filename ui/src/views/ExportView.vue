@@ -50,6 +50,7 @@
                     </Select>
                 </div>
             </div>
+            <ErrorState v-if="devicesError" :message="devicesError" :retry="reloadDevices" />
         </div>
 
         <div v-if="format === 'csv' || format === 'raw'" class="section-card">
@@ -122,6 +123,7 @@ import { getDevices } from '@/api/devices'
 import { exportCsv, exportJson, exportRaw, downloadBlob } from '@/api/export'
 import type { CsvExportParams, RawExportParams, ExportParams } from '@/api/export'
 import { useApiLoad } from '@/composables/useApiLoad'
+import ErrorState from '@/components/ErrorState.vue'
 
 const format = ref('csv')
 const fromDate = ref('')
@@ -133,7 +135,11 @@ const exporting = ref(false)
 const exportResult = ref<{ size: number } | null>(null)
 const error = ref<string | null>(null)
 
-const { data: devices } = useApiLoad(() => getDevices())
+const {
+    data: devices,
+    error: devicesError,
+    reload: reloadDevices,
+} = useApiLoad(() => getDevices(), 'Failed to load devices')
 
 async function handleExport(): Promise<void> {
     if (fromDate.value && toDate.value && fromDate.value > toDate.value) {

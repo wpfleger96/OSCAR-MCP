@@ -3,9 +3,7 @@
         <Loader2 class="inline h-4 w-4 animate-spin" /> Loading events...
     </div>
 
-    <div v-else-if="error" class="error-state">
-        <AlertTriangle class="inline h-4 w-4" /> {{ error }}
-    </div>
+    <ErrorState v-else-if="error" :message="error" :retry="reload" />
 
     <div v-else class="event-explorer">
         <RouterLink :to="{ name: 'session-detail', params: { id: sessionId } }" class="back-link">
@@ -136,7 +134,7 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
-import { Loader2, AlertTriangle, ArrowLeft } from '@lucide/vue'
+import { Loader2, ArrowLeft } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
 import { getSessionEvents, getEventMatch } from '@/api/events'
 import { getSession } from '@/api/sessions'
@@ -144,6 +142,7 @@ import { useApiLoad } from '@/composables/useApiLoad'
 import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
 import type { EventItem, EventMatchResult } from '@/types'
+import ErrorState from '@/components/ErrorState.vue'
 
 const props = defineProps<{ sessionId: number }>()
 const router = useRouter()
@@ -152,7 +151,7 @@ const activeTypes = ref<Set<string>>(new Set())
 const currentPage = ref(0)
 const pageSize = 50
 
-const { data, loading, error } = useApiLoad(async () => {
+const { data, loading, error, reload } = useApiLoad(async () => {
     const [events, session] = await Promise.all([
         getSessionEvents(props.sessionId),
         getSession(props.sessionId, false),
