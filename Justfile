@@ -85,6 +85,39 @@ clean-build:
 # Clean and rebuild the package
 rebuild: clean-build build
 
+# Web UI
+
+# Install web UI dependencies
+web-install:
+    cd ui && pnpm install
+
+# Run web UI type checks
+web-type-check:
+    cd ui && pnpm run type-check
+
+# Run web UI linter in check mode (no fixes)
+web-lint-check:
+    cd ui && pnpm run lint-check
+
+# Run web UI formatter in check mode (no changes)
+web-format-check:
+    cd ui && pnpm run format-check
+
+# Run web UI linter and auto-fix issues
+web-lint:
+    cd ui && pnpm run lint
+
+# Run web UI formatter and auto-fix style
+web-format:
+    cd ui && pnpm run format
+
+# Build the web UI
+web-build:
+    cd ui && pnpm run build
+
+# Run all web UI quality checks
+web-check: web-type-check web-lint-check web-format-check
+
 # Run the full CI pipeline locally
 ci: sync type-check lint-check format-check test
     @echo "CI checks passed"
