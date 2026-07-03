@@ -13,6 +13,8 @@ const { isDark } = useDarkMode()
 const props = defineProps<{
     labels: string[]
     datasets: { label: string; values: (number | null)[]; color: string }[]
+    height?: number
+    syncKey?: uPlot.SyncPubSub
 }>()
 
 const containerRef = ref<HTMLDivElement>()
@@ -33,8 +35,11 @@ function createChart(): void {
 
     const opts: uPlot.Options = {
         width,
-        height: 280,
-        cursor: { drag: { x: true, y: false, setScale: true } },
+        height: props.height ?? 280,
+        cursor: {
+            sync: props.syncKey ? { key: props.syncKey.key } : undefined,
+            drag: { x: true, y: false, setScale: true },
+        },
         scales: { x: { time: true } },
         axes: [
             {
@@ -92,7 +97,7 @@ onBeforeUnmount(() => {
 })
 
 watch(
-    () => [props.labels, props.datasets] as const,
+    () => [props.labels, props.datasets, props.height, props.syncKey] as const,
     () => createChart(),
     { deep: true },
 )

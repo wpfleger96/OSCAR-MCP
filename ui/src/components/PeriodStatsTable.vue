@@ -27,8 +27,13 @@
                         class="even:bg-muted/50"
                     >
                         <TableCell>
-                            {{ formatDateMonthDay(row.period_start) }} –
-                            {{ formatDateMonthDay(row.period_end) }}
+                            <template v-if="row.period_start === row.period_end">
+                                {{ formatDateMonthDay(row.period_start) }}
+                            </template>
+                            <template v-else>
+                                {{ formatDateMonthDay(row.period_start) }} –
+                                {{ formatDateMonthDay(row.period_end) }}
+                            </template>
                         </TableCell>
                         <TableCell>{{ row.days_used }}</TableCell>
                         <TableCell>{{ row.avg_hours_per_day?.toFixed(1) ?? '---' }}</TableCell>

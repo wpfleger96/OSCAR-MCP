@@ -64,6 +64,7 @@ test('sessions', async ({ page }) => {
 test('stats', async ({ page }) => {
     await page.goto('/stats')
     await page.waitForSelector('.records-grid')
+    await page.waitForSelector('.trend-chart canvas')
     await page.waitForTimeout(800)
     await page.screenshot({ path: 'screenshots/stats.png' })
 })
@@ -92,4 +93,12 @@ test('session-detail', async ({ page }) => {
     await page.goto('/sessions/1470')
     await page.waitForSelector('.session-detail .stats-section')
     await page.screenshot({ path: 'screenshots/session-detail.png' })
+})
+
+test('reports', async ({ page }) => {
+    await page.goto('/reports')
+    await page.waitForSelector('.reports-view')
+    await page.getByText('Comparison').click()
+    await page.waitForSelector('.rx-select')
+    await page.screenshot({ path: 'screenshots/reports.png' })
 })

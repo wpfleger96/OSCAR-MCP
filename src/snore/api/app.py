@@ -22,6 +22,7 @@ from snore.api.routers import (
     events,
     export,
     import_data,
+    reports,
     rx,
     sessions,
     stats,
@@ -85,6 +86,9 @@ def create_app() -> FastAPI:
 
     app.include_router(
         import_data.router, prefix=f"{API_V1_PREFIX}/import", tags=["import"]
+    )
+    app.include_router(
+        reports.router, prefix=f"{API_V1_PREFIX}/reports", tags=["reports"]
     )
     app.include_router(export.router, prefix=f"{API_V1_PREFIX}/export", tags=["export"])
     app.include_router(db.router, prefix=f"{API_V1_PREFIX}/db", tags=["database"])

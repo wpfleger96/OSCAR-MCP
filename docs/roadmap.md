@@ -232,7 +232,7 @@ _(Phase 2: Web UI moved to "Recently Completed" section above)_
 
 **Goal:** Generate reports and manage data lifecycle
 
-- [ ] **HTML statistics report** - Multi-period reports with charts and tables
+- [x] **HTML statistics report** - Self-contained summary + comparison reports with inline-SVG charts (`snore report`, `/reports`); print-to-PDF via browser
 - [ ] **CSV export enhancements:**
   - Summary mode: Per-day aggregated statistics
   - Sessions mode: Per-session data
