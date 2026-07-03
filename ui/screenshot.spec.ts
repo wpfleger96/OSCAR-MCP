@@ -64,6 +64,7 @@ test('sessions', async ({ page }) => {
 test('stats', async ({ page }) => {
     await page.goto('/stats')
     await page.waitForSelector('.records-grid')
+    await page.waitForSelector('.trend-chart canvas')
     await page.waitForTimeout(800)
     await page.screenshot({ path: 'screenshots/stats.png' })
 })

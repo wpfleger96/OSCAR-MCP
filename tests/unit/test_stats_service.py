@@ -3,6 +3,8 @@
 from datetime import date, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from sqlalchemy.orm import Session as SASession
 
 from snore.database.models import Day, Device, Event, Session, Statistics
@@ -324,3 +326,267 @@ class TestStatsService:
         assert summary.avg_spo2 is not None
         assert abs(summary.avg_spo2 - 95.5) < 0.1
         assert summary.min_spo2 == 88
+
+
+class TestQueryDaysFiltering:
+    """Test _query_days with from_date and to_date parameters."""
+
+    def test_from_date_excludes_earlier_days(self, db_session, test_device):
+        """from_date filters out Day records before the cutoff."""
+        _create_day_with_session(
+            db_session, test_device, date(2024, 1, 1), duration_hours=8.0
+        )
+        _create_day_with_session(
+            db_session, test_device, date(2024, 6, 1), duration_hours=8.0
+        )
+        db_session.commit()
+
+        service = StatsService(db_session)
+        result = service._query_days(from_date=date(2024, 3, 1))
+
+        assert len(result) == 1
+        assert result[0].date == date(2024, 6, 1)
+
+    def test_to_date_excludes_later_days(self, db_session, test_device):
+        """to_date filters out Day records after the cutoff."""
+        _create_day_with_session(
+            db_session, test_device, date(2024, 1, 1), duration_hours=8.0
+        )
+        _create_day_with_session(
+            db_session, test_device, date(2024, 6, 1), duration_hours=8.0
+        )
+        db_session.commit()
+
+        service = StatsService(db_session)
+        result = service._query_days(to_date=date(2024, 3, 1))
+
+        assert len(result) == 1
+        assert result[0].date == date(2024, 1, 1)
+
+    def test_from_date_and_to_date_combined(self, db_session, test_device):
+        """Both from_date and to_date can be applied simultaneously."""
+        for month in [1, 4, 7, 10]:
+            _create_day_with_session(
+                db_session, test_device, date(2024, month, 15), duration_hours=8.0
+            )
+        db_session.commit()
+
+        service = StatsService(db_session)
+        result = service._query_days(
+            from_date=date(2024, 3, 1), to_date=date(2024, 8, 1)
+        )
+
+        result_dates = {d.date for d in result}
+        assert result_dates == {date(2024, 4, 15), date(2024, 7, 15)}
+
+    def test_days_limit_and_from_date_stack(self, db_session, test_device):
+        """days_limit and from_date both apply as AND conditions."""
+        today = date.today()
+        _create_day_with_session(
+            db_session, test_device, today - timedelta(days=100), duration_hours=8.0
+        )
+        _create_day_with_session(
+            db_session, test_device, today - timedelta(days=5), duration_hours=8.0
+        )
+        _create_day_with_session(
+            db_session, test_device, today - timedelta(days=2), duration_hours=8.0
+        )
+        db_session.commit()
+
+        service = StatsService(db_session)
+        # days_limit=30 excludes the oldest day; from_date also excludes days before 4 days ago
+        result = service._query_days(days_limit=30, from_date=today - timedelta(days=4))
+
+        assert len(result) == 1
+        assert result[0].date == today - timedelta(days=2)
+
+
+class TestAggregateSessionStatsPerPeriod:
+    """Test _aggregate_session_stats_per_period with hand-computed weighted means."""
+
+    def test_weighted_means_per_period(self, db_session, test_device):
+        """Usage-weighted epap/rr/pulse/mv are computed correctly per period bucket."""
+        # Jan: two sessions with different usage_hours
+        jan_day, jan_sess1 = _create_day_with_session(
+            db_session, test_device, date(2024, 1, 10), duration_hours=8.0
+        )
+        # Unique session_id by using a different day_id approach
+        jan_day2 = Day(
+            device_id=test_device.id,
+            date=date(2024, 1, 20),
+            total_therapy_hours=4.0,
+        )
+        db_session.add(jan_day2)
+        db_session.flush()
+        jan_sess2 = Session(
+            device_id=test_device.id,
+            day_id=jan_day2.id,
+            device_session_id="test_jan20",
+            start_time=datetime(2024, 1, 20, 22, 0),
+            end_time=datetime(2024, 1, 21, 2, 0),
+            duration_seconds=4 * 3600,
+        )
+        db_session.add(jan_sess2)
+        db_session.flush()
+
+        stats1 = Statistics(
+            session_id=jan_sess1.id,
+            usage_hours=8.0,
+            epap_mean=5.0,
+            respiratory_rate_mean=14.0,
+            pulse_mean=60.0,
+            minute_ventilation_mean=7.0,
+        )
+        stats2 = Statistics(
+            session_id=jan_sess2.id,
+            usage_hours=4.0,
+            epap_mean=7.0,
+            respiratory_rate_mean=16.0,
+            pulse_mean=72.0,
+            minute_ventilation_mean=9.0,
+        )
+        db_session.add(stats1)
+        db_session.add(stats2)
+        db_session.commit()
+
+        day_records = (
+            db_session.query(Day).filter(Day.device_id == test_device.id).all()
+        )
+        period_stats = StatsService(db_session).get_period_statistics("month")
+
+        service = StatsService(db_session)
+        extras = service._aggregate_session_stats_per_period(day_records, period_stats)
+
+        jan_start = date(2024, 1, 1)
+        assert jan_start in extras
+
+        # hand-computed: weighted mean = (5.0*8 + 7.0*4) / (8+4) = (40+28)/12 = 68/12 ≈ 5.667
+        assert extras[jan_start]["epap"] == pytest.approx(68.0 / 12.0, abs=0.01)
+        # rr: (14*8 + 16*4) / 12 = (112 + 64)/12 = 176/12 ≈ 14.667
+        assert extras[jan_start]["rr"] == pytest.approx(176.0 / 12.0, abs=0.01)
+        # pulse: (60*8 + 72*4) / 12 = (480 + 288)/12 = 768/12 = 64.0
+        assert extras[jan_start]["pulse"] == pytest.approx(64.0, abs=0.01)
+
+    def test_missing_usage_hours_skipped(self, db_session, test_device):
+        """Statistics rows with None or 0 usage_hours are excluded from weighting."""
+        day, sess = _create_day_with_session(
+            db_session, test_device, date(2024, 2, 10), duration_hours=8.0
+        )
+        # usage_hours = 0: should be excluded
+        stats = Statistics(
+            session_id=sess.id,
+            usage_hours=0.0,
+            epap_mean=99.0,
+        )
+        db_session.add(stats)
+        db_session.commit()
+
+        day_records = (
+            db_session.query(Day).filter(Day.device_id == test_device.id).all()
+        )
+        period_stats = StatsService(db_session).get_period_statistics("month")
+
+        service = StatsService(db_session)
+        extras = service._aggregate_session_stats_per_period(day_records, period_stats)
+
+        feb_start = date(2024, 2, 1)
+        assert extras[feb_start]["epap"] is None
+
+    def test_empty_day_records_returns_none_dict(self, db_session, test_device):
+        """Empty day_records yields None values for all periods."""
+        from snore.services.schemas import PeriodStatistics
+
+        ps = PeriodStatistics(
+            period_type="month",
+            period_start=date(2024, 3, 1),
+            period_end=date(2024, 3, 31),
+        )
+        service = StatsService(db_session)
+        extras = service._aggregate_session_stats_per_period([], [ps])
+
+        assert extras[date(2024, 3, 1)] == {
+            "epap": None,
+            "rr": None,
+            "pulse": None,
+            "mv": None,
+        }
+
+
+class TestGetTrends:
+    """Test StatsService.get_trends with the new (period_type, days_limit) signature."""
+
+    def test_get_trends_returns_13_keys(self, db_session, test_device):
+        """get_trends returns all 13 metric keys."""
+        today = date.today()
+        _create_day_with_session(
+            db_session,
+            test_device,
+            today - timedelta(days=3),
+            duration_hours=8.0,
+            ahi=2.5,
+        )
+        db_session.commit()
+
+        service = StatsService(db_session)
+        result = service.get_trends("week")
+
+        expected = {
+            "ahi",
+            "usage",
+            "spo2",
+            "leak",
+            "pressure",
+            "oai",
+            "cai",
+            "hi",
+            "rera",
+            "epap",
+            "rr",
+            "pulse",
+            "mv",
+        }
+        assert set(result.keys()) == expected
+
+    def test_get_trends_day_granularity(self, db_session, test_device):
+        """get_trends with period_type='day' produces one entry per therapy day."""
+        base = date.today() - timedelta(days=5)
+        for i in range(3):
+            _create_day_with_session(
+                db_session,
+                test_device,
+                base + timedelta(days=i),
+                duration_hours=7.0,
+                ahi=float(i + 1),
+            )
+        db_session.commit()
+
+        service = StatsService(db_session)
+        result = service.get_trends("day")
+
+        assert len(result["ahi"]) == 3
+
+    def test_get_trends_days_limit_filters(self, db_session, test_device):
+        """days_limit parameter passed to get_trends restricts the Day records used."""
+        today = date.today()
+        _create_day_with_session(
+            db_session, test_device, today - timedelta(days=60), duration_hours=8.0
+        )
+        _create_day_with_session(
+            db_session, test_device, today - timedelta(days=2), duration_hours=8.0
+        )
+        db_session.commit()
+
+        service = StatsService(db_session)
+        result = service.get_trends("month", days_limit=30)
+
+        # Only the recent day should appear
+        assert len(result["ahi"]) == 1
+
+    def test_get_trends_empty_returns_13_empty_lists(self, db_session):
+        """Empty database returns 13-key dict with empty lists."""
+        service = StatsService(db_session)
+        result = service.get_trends("week")
+
+        assert len(result) == 13
+        for v in result.values():
+            assert v == []

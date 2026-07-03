@@ -2,22 +2,67 @@
     <div class="stats-view">
         <h1 class="page-title">Statistics</h1>
 
-        <!-- Period Selector -->
-        <div class="period-selector">
-            <ToggleGroup
-                :model-value="periodType"
-                type="single"
-                variant="outline"
-                @update:model-value="
-                    (v) => {
-                        if (v) periodType = v as string
-                    }
-                "
-            >
-                <ToggleGroupItem v-for="opt in periodOptions" :key="opt.value" :value="opt.value">
-                    {{ opt.label }}
-                </ToggleGroupItem>
-            </ToggleGroup>
+        <!-- Controls -->
+        <div class="controls">
+            <div class="control-group">
+                <span class="control-label">Granularity</span>
+                <ToggleGroup
+                    :model-value="granularity"
+                    type="single"
+                    variant="outline"
+                    @update:model-value="
+                        (v) => {
+                            if (v) setGranularity(v as string)
+                        }
+                    "
+                >
+                    <ToggleGroupItem
+                        v-for="opt in granularityOptions"
+                        :key="opt.value"
+                        :value="opt.value"
+                    >
+                        {{ opt.label }}
+                    </ToggleGroupItem>
+                </ToggleGroup>
+            </div>
+
+            <div class="control-group">
+                <span class="control-label">Range</span>
+                <ToggleGroup
+                    :model-value="daysRange"
+                    type="single"
+                    variant="outline"
+                    @update:model-value="
+                        (v) => {
+                            if (v) daysRange = v as string
+                        }
+                    "
+                >
+                    <ToggleGroupItem
+                        v-for="opt in rangeOptions"
+                        :key="opt.value"
+                        :value="opt.value"
+                        :disabled="opt.value === 'all' && granularity === 'day'"
+                    >
+                        {{ opt.label }}
+                    </ToggleGroupItem>
+                </ToggleGroup>
+            </div>
+
+            <div class="control-group">
+                <span class="control-label">Metrics</span>
+                <ToggleGroup
+                    :model-value="selectedMetrics"
+                    type="multiple"
+                    variant="outline"
+                    class="metrics-toggle"
+                    @update:model-value="(v) => setSelectedMetrics(v as string[])"
+                >
+                    <ToggleGroupItem v-for="(cfg, key) in METRIC_CONFIG" :key="key" :value="key">
+                        {{ cfg.label }}
+                    </ToggleGroupItem>
+                </ToggleGroup>
+            </div>
         </div>
 
         <!-- Period Stats Table -->
@@ -27,10 +72,23 @@
             <PeriodStatsTable v-else :periods="periods" :loading="periodsLoading" />
         </div>
 
-        <!-- Trend Chart -->
+        <!-- Trend Charts (one per selected metric) -->
         <div v-if="!periodsError && trendLabels.length" class="section-card">
             <h2>Trends</h2>
-            <TrendChart :labels="trendLabels" :datasets="trendDatasets" />
+            <template v-for="key in selectedMetrics" :key="key">
+                <div v-if="hasData(key)" class="trend-metric">
+                    <p class="trend-metric-label">{{ METRIC_CONFIG[key].label }}</p>
+                    <TrendChart
+                        :labels="trendLabels"
+                        :datasets="[metricDataset(key)]"
+                        :height="200"
+                        :sync-key="trendSync"
+                    />
+                </div>
+            </template>
+            <p v-if="!anyVisibleChart" class="no-data-hint">
+                No data available for the selected metrics.
+            </p>
         </div>
 
         <!-- Records -->
@@ -44,6 +102,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import uPlot from 'uplot'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
@@ -51,16 +110,100 @@ import RecordsPanel from '@/components/RecordsPanel.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import { getPeriods, getTrends, getRecords } from '@/api/stats'
 import { useApiLoad } from '@/composables/useApiLoad'
-import type { PeriodStatistics } from '@/types'
+import type { PeriodStatistics, TrendData } from '@/types'
 
-const periodOptions = [
+// ────────────────────────────── Metric config ──────────────────────────────
+
+const METRIC_CONFIG: Record<string, { label: string; key: keyof TrendData; color: string }> = {
+    ahi: { label: 'AHI (events/hr)', key: 'ahi', color: '#2563eb' },
+    usage: { label: 'Usage (hrs)', key: 'usage', color: '#16a34a' },
+    spo2: { label: 'SpO₂ (%)', key: 'spo2', color: '#f97316' },
+    leak: { label: 'Leak (L/min)', key: 'leak', color: '#dc2626' },
+    pressure: { label: 'Pressure (cmH₂O)', key: 'pressure', color: '#7c3aed' },
+    epap: { label: 'EPAP (cmH₂O)', key: 'epap', color: '#06b6d4' },
+    rr: { label: 'Resp Rate (br/min)', key: 'rr', color: '#db2777' },
+    pulse: { label: 'Pulse (BPM)', key: 'pulse', color: '#d97706' },
+    mv: { label: 'Minute Vent (L/min)', key: 'mv', color: '#059669' },
+    oai: { label: 'OAI (events/hr)', key: 'oai', color: '#be123c' },
+    cai: { label: 'CAI (events/hr)', key: 'cai', color: '#0284c7' },
+    hi: { label: 'HI (events/hr)', key: 'hi', color: '#ca8a04' },
+    rera: { label: 'RERA (events/hr)', key: 'rera', color: '#ea580c' },
+}
+
+const VALID_METRICS = new Set(Object.keys(METRIC_CONFIG))
+const DEFAULT_METRICS = ['ahi', 'usage', 'spo2', 'leak']
+const STORAGE_KEY = 'snore:trend-metrics'
+
+// ────────────────────────────── Options ──────────────────────────────
+
+const granularityOptions = [
+    { label: 'Day', value: 'day' },
     { label: 'Week', value: 'week' },
     { label: 'Month', value: 'month' },
     { label: '6 Month', value: '6month' },
     { label: 'Year', value: 'year' },
 ]
 
-const periodType = ref('month')
+const rangeOptions = [
+    { label: '30d', value: '30d' },
+    { label: '90d', value: '90d' },
+    { label: '180d', value: '180d' },
+    { label: '1yr', value: '1yr' },
+    { label: 'All', value: 'all' },
+]
+
+const rangeDaysMap: Record<string, number | undefined> = {
+    '30d': 30,
+    '90d': 90,
+    '180d': 180,
+    '1yr': 365,
+    all: undefined,
+}
+
+// ────────────────────────────── State ──────────────────────────────
+
+const granularity = ref('month')
+const daysRange = ref('90d')
+
+// When switching to day granularity, deselect 'All' to avoid unbounded day-level fetch.
+// 'All' is also visually disabled in the Range toggle while day is active.
+function setGranularity(v: string): void {
+    granularity.value = v
+    if (v === 'day' && daysRange.value === 'all') {
+        daysRange.value = '180d'
+    }
+}
+
+const effectiveDaysLimit = computed<number | undefined>(() => rangeDaysMap[daysRange.value])
+
+// ────────────────────────────── Metric selection + persistence ──────────────────────────────
+
+function loadStoredMetrics(): string[] {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY)
+        if (!raw) return DEFAULT_METRICS
+        const parsed: unknown = JSON.parse(raw)
+        if (!Array.isArray(parsed)) return DEFAULT_METRICS
+        const valid = parsed.filter(
+            (k): k is string => typeof k === 'string' && VALID_METRICS.has(k),
+        )
+        return valid.length ? valid : DEFAULT_METRICS
+    } catch {
+        return DEFAULT_METRICS
+    }
+}
+
+const selectedMetrics = ref<string[]>(loadStoredMetrics())
+
+function setSelectedMetrics(v: string[]): void {
+    if (v.length === 0) return
+    selectedMetrics.value = v
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(v))
+}
+
+// ────────────────────────────── Data fetching ──────────────────────────────
+
+const trendSync = uPlot.sync('trend-charts')
 
 const {
     data: periodData,
@@ -69,8 +212,8 @@ const {
     reload: reloadPeriods,
 } = useApiLoad(async () => {
     const [periods, trends] = await Promise.all([
-        getPeriods(periodType.value),
-        getTrends(periodType.value),
+        getPeriods(granularity.value, effectiveDaysLimit.value),
+        getTrends(granularity.value, effectiveDaysLimit.value),
     ])
     return { periods, trends }
 })
@@ -80,23 +223,38 @@ const {
     loading: recordsLoading,
     error: recordsError,
     reload: reloadRecords,
-} = useApiLoad(() => getRecords())
+} = useApiLoad(() => getRecords(effectiveDaysLimit.value))
 
 const periods = computed<PeriodStatistics[]>(() => periodData.value?.periods ?? [])
 const trends = computed(() => periodData.value?.trends ?? null)
 
-watch(periodType, () => void reloadPeriods())
-
-const trendLabels = computed(() => trends.value?.ahi.map((t) => t[0]) ?? [])
-const trendDatasets = computed(() => {
-    if (!trends.value) return []
-    return [
-        { label: 'AHI', values: trends.value.ahi.map((t) => t[1]), color: '#2563eb' },
-        { label: 'Usage (hrs)', values: trends.value.usage.map((t) => t[1]), color: '#16a34a' },
-        { label: 'SpO₂ (%)', values: trends.value.spo2.map((t) => t[1]), color: '#f97316' },
-        { label: 'Leak (L/min)', values: trends.value.leak.map((t) => t[1]), color: '#dc2626' },
-    ]
+watch([granularity, daysRange], () => {
+    void reloadPeriods()
+    void reloadRecords()
 })
+
+// ────────────────────────────── Chart helpers ──────────────────────────────
+
+const trendLabels = computed(() => trends.value?.ahi?.map((t) => t[0]) ?? [])
+
+function hasData(key: string): boolean {
+    const cfg = METRIC_CONFIG[key]
+    if (!cfg || !trends.value) return false
+    const series = trends.value[cfg.key]
+    return Array.isArray(series) && series.length > 0 && series.some((t) => t[1] !== null)
+}
+
+function metricDataset(key: string): { label: string; values: (number | null)[]; color: string } {
+    const cfg = METRIC_CONFIG[key]
+    const series = trends.value?.[cfg.key] ?? []
+    return {
+        label: cfg.label,
+        values: series.map((t) => t[1]),
+        color: cfg.color,
+    }
+}
+
+const anyVisibleChart = computed(() => selectedMetrics.value.some((key) => hasData(key)))
 </script>
 
 <style scoped>
@@ -104,7 +262,50 @@ const trendDatasets = computed(() => {
     max-width: 1200px;
 }
 
-.period-selector {
+.controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
     margin-bottom: 1.25rem;
+}
+
+.control-group {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+
+.control-label {
+    flex-shrink: 0;
+    width: 6rem;
+    padding-top: 0.5rem;
+    font-size: 0.875rem;
+    color: var(--muted-foreground);
+}
+
+.metrics-toggle {
+    flex-wrap: wrap;
+}
+
+.trend-metric {
+    margin-bottom: 1rem;
+}
+
+.trend-metric:last-child {
+    margin-bottom: 0;
+}
+
+.trend-metric-label {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--muted-foreground);
+    margin-bottom: 0.25rem;
+}
+
+.no-data-hint {
+    font-size: 0.875rem;
+    color: var(--muted-foreground);
+    text-align: center;
+    padding: 1.5rem 0;
 }
 </style>

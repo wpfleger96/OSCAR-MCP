@@ -7,6 +7,8 @@ from typing import Literal
 from snore.database import models
 from snore.services.schemas import PeriodStatistics
 
+PeriodType = Literal["day", "week", "month", "6month", "year"]
+
 
 def calculate_average_ahi(days: list[models.Day]) -> float | None:
     """
@@ -89,7 +91,7 @@ def calculate_median_ahi(days: list[models.Day]) -> float | None:
 
 
 def _get_period_boundaries(
-    period_type: Literal["week", "month", "6month", "year"],
+    period_type: PeriodType,
     start_date: date,
     end_date: date,
 ) -> list[tuple[date, date]]:
@@ -97,7 +99,7 @@ def _get_period_boundaries(
     Generate period boundaries for bucketing days.
 
     Args:
-        period_type: One of 'week', 'month', '6month', 'year'
+        period_type: One of 'day', 'week', 'month', '6month', 'year'
         start_date: Start of date range
         end_date: End of date range
 
@@ -107,7 +109,12 @@ def _get_period_boundaries(
     periods = []
     current = start_date
 
-    if period_type == "week":
+    if period_type == "day":
+        while current <= end_date:
+            periods.append((current, current))
+            current += timedelta(days=1)
+
+    elif period_type == "week":
         current = current - timedelta(days=current.weekday())
 
         while current <= end_date:
@@ -168,14 +175,14 @@ def _field_avg(days: list[models.Day], field: str) -> float | None:
 
 def calculate_period_statistics(
     day_records: list[models.Day],
-    period_type: Literal["week", "month", "6month", "year"],
+    period_type: PeriodType,
 ) -> list[PeriodStatistics]:
     """
     Calculate statistics grouped by time periods.
 
     Args:
         day_records: List of Day records
-        period_type: One of 'week', 'month', '6month', 'year'
+        period_type: One of 'day', 'week', 'month', '6month', 'year'
 
     Returns:
         List of PeriodStatistics for each period
@@ -190,10 +197,20 @@ def calculate_period_statistics(
     periods = _get_period_boundaries(period_type, start_date, end_date)
     results = []
 
+    # For "day" granularity, pre-bucket by date to avoid O(N×P) scan.
+    # With multi-year histories, P can exceed 1000 period boundaries.
+    _by_date: dict[date, list[models.Day]] = {}
+    if period_type == "day":
+        for day in day_records:
+            _by_date.setdefault(day.date, []).append(day)
+
     for period_start, period_end in periods:
-        days_in_period = [
-            day for day in day_records if period_start <= day.date <= period_end
-        ]
+        if period_type == "day":
+            days_in_period = _by_date.get(period_start, [])
+        else:
+            days_in_period = [
+                day for day in day_records if period_start <= day.date <= period_end
+            ]
 
         if not days_in_period:
             continue
@@ -212,6 +229,17 @@ def calculate_period_statistics(
         spo2_mins = [day.spo2_min for day in days_in_period if day.spo2_min is not None]
         min_spo2 = min(spo2_mins) if spo2_mins else None
 
+        avg_oai = _field_avg(days_in_period, "oai")
+        avg_cai = _field_avg(days_in_period, "cai")
+        avg_hi = _field_avg(days_in_period, "hi")
+
+        rera_rates = [
+            day.reras / day.total_therapy_hours
+            for day in days_in_period
+            if day.total_therapy_hours > 0
+        ]
+        avg_rera = sum(rera_rates) / len(rera_rates) if rera_rates else None
+
         results.append(
             PeriodStatistics(
                 period_type=period_type,
@@ -226,10 +254,68 @@ def calculate_period_statistics(
                 avg_leak=avg_leak,
                 avg_spo2=avg_spo2,
                 min_spo2=min_spo2,
+                avg_oai=avg_oai,
+                avg_cai=avg_cai,
+                avg_hi=avg_hi,
+                avg_rera=avg_rera,
             )
         )
 
     return results
+
+
+_TREND_KEYS = [
+    "ahi",
+    "usage",
+    "spo2",
+    "leak",
+    "pressure",
+    "oai",
+    "cai",
+    "hi",
+    "rera",
+    "epap",
+    "rr",
+    "pulse",
+    "mv",
+]
+
+
+def calculate_trends_extended(
+    period_stats: list[PeriodStatistics],
+    session_extras: dict[date, dict[str, float | None]],
+) -> dict[str, list[tuple[date, float | None]]]:
+    """
+    Extract extended trend data from period statistics and session-level aggregates.
+
+    Args:
+        period_stats: List of PeriodStatistics
+        session_extras: Per-period session-weighted means keyed by period_start;
+            expected sub-keys: epap, rr, pulse, mv (absent → None)
+
+    Returns:
+        Dictionary with 13 metric keys, each mapping to a list of (date, value) tuples:
+        ahi, usage, spo2, leak, pressure, oai, cai, hi, rera, epap, rr, pulse, mv
+    """
+    trends: dict[str, list[tuple[date, float | None]]] = {k: [] for k in _TREND_KEYS}
+
+    for stat in period_stats:
+        extras = session_extras.get(stat.period_start, {})
+        trends["ahi"].append((stat.period_start, stat.avg_ahi))
+        trends["usage"].append((stat.period_start, stat.avg_hours_per_day))
+        trends["spo2"].append((stat.period_start, stat.avg_spo2))
+        trends["leak"].append((stat.period_start, stat.avg_leak))
+        trends["pressure"].append((stat.period_start, stat.avg_pressure))
+        trends["oai"].append((stat.period_start, stat.avg_oai))
+        trends["cai"].append((stat.period_start, stat.avg_cai))
+        trends["hi"].append((stat.period_start, stat.avg_hi))
+        trends["rera"].append((stat.period_start, stat.avg_rera))
+        trends["epap"].append((stat.period_start, extras.get("epap")))
+        trends["rr"].append((stat.period_start, extras.get("rr")))
+        trends["pulse"].append((stat.period_start, extras.get("pulse")))
+        trends["mv"].append((stat.period_start, extras.get("mv")))
+
+    return trends
 
 
 def calculate_trends(
@@ -238,27 +324,17 @@ def calculate_trends(
     """
     Extract trend data from period statistics.
 
+    Delegates to calculate_trends_extended with no session extras.
+    Returns all 13 metric keys; callers that only need the original 4
+    (ahi, usage, spo2, leak) can index by key as before.
+
     Args:
         period_stats: List of PeriodStatistics
 
     Returns:
         Dictionary mapping metric names to lists of (date, value) tuples.
-        Metrics include: ahi, usage, spo2, leak
     """
-    trends: dict[str, list[tuple[date, float | None]]] = {
-        "ahi": [],
-        "usage": [],
-        "spo2": [],
-        "leak": [],
-    }
-
-    for stat in period_stats:
-        trends["ahi"].append((stat.period_start, stat.avg_ahi))
-        trends["usage"].append((stat.period_start, stat.avg_hours_per_day))
-        trends["spo2"].append((stat.period_start, stat.avg_spo2))
-        trends["leak"].append((stat.period_start, stat.avg_leak))
-
-    return trends
+    return calculate_trends_extended(period_stats, {})
 
 
 def calculate_records(

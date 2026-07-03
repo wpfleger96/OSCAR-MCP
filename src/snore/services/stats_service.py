@@ -1,17 +1,18 @@
 """Statistics service for therapy data aggregation and analysis."""
 
+from bisect import bisect_right
 from datetime import date, timedelta
-from typing import Literal
 
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from snore.analysis.calculations import (
+    PeriodType,
     assess_therapy_effectiveness,
     calculate_average_ahi,
     calculate_period_statistics,
     calculate_records,
-    calculate_trends,
+    calculate_trends_extended,
 )
 from snore.database import models
 from snore.services.schemas import EventTypeCount, PeriodStatistics, TherapySummary
@@ -31,12 +32,19 @@ class StatsService:
         """
         self.db_session = db_session
 
-    def _query_days(self, days_limit: int | None = None) -> list[models.Day]:
+    def _query_days(
+        self,
+        days_limit: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> list[models.Day]:
         """
-        Query Day records, optionally filtered by cutoff date.
+        Query Day records, optionally filtered by date range or rolling window.
 
         Args:
             days_limit: Only include days within the last N days from today
+            from_date: Only include days on or after this date
+            to_date: Only include days on or before this date
 
         Returns:
             List of Day records
@@ -45,6 +53,10 @@ class StatsService:
         if days_limit:
             cutoff_date = date.today() - timedelta(days=days_limit)
             query = query.filter(models.Day.date >= cutoff_date)
+        if from_date is not None:
+            query = query.filter(models.Day.date >= from_date)
+        if to_date is not None:
+            query = query.filter(models.Day.date <= to_date)
         return query.all()
 
     def get_summary(self, days_limit: int | None = None) -> TherapySummary | None:
@@ -200,14 +212,14 @@ class StatsService:
 
     def get_period_statistics(
         self,
-        period_type: Literal["week", "month", "6month", "year"],
+        period_type: PeriodType,
         days_limit: int | None = None,
     ) -> list[PeriodStatistics]:
         """
         Calculate statistics grouped by time periods.
 
         Args:
-            period_type: One of 'week', 'month', '6month', 'year'
+            period_type: One of 'day', 'week', 'month', '6month', 'year'
             days_limit: Only include days within the last N days from today
 
         Returns:
@@ -216,19 +228,118 @@ class StatsService:
         day_records = self._query_days(days_limit)
         return calculate_period_statistics(day_records, period_type)
 
-    def get_trends(
-        self, period_stats: list[PeriodStatistics]
-    ) -> dict[str, list[tuple[date, float | None]]]:
+    def _aggregate_session_stats_per_period(
+        self,
+        day_records: list[models.Day],
+        period_stats: list[PeriodStatistics],
+    ) -> dict[date, dict[str, float | None]]:
         """
-        Extract trend data from period statistics.
+        Compute usage-weighted session-level means per period.
+
+        Issues one Statistics query joined through Session→Day, then buckets each
+        row into its period using the passed period_stats boundaries.  The returned
+        dict is keyed by period_start and contains sub-keys epap, rr, pulse, mv.
 
         Args:
-            period_stats: List of PeriodStatistics
+            day_records: Day records already queried for this request
+            period_stats: Period statistics whose period_start values become dict keys
 
         Returns:
-            Dictionary mapping metric names to lists of (date, value) tuples
+            Dict mapping period_start → {epap, rr, pulse, mv} (None when no data)
         """
-        return calculate_trends(period_stats)
+        if not day_records or not period_stats:
+            return {
+                ps.period_start: {"epap": None, "rr": None, "pulse": None, "mv": None}
+                for ps in period_stats
+            }
+
+        # Sort period boundaries for O(log P) lookup per Statistics row.
+        sorted_starts = sorted(ps.period_start for ps in period_stats)
+        period_end_by_start: dict[date, date] = {
+            ps.period_start: ps.period_end for ps in period_stats
+        }
+
+        day_ids = [d.id for d in day_records]
+        rows = (
+            self.db_session.query(models.Statistics, models.Day.date)
+            .join(models.Session, models.Statistics.session_id == models.Session.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .filter(models.Day.id.in_(day_ids))
+            .all()
+        )
+
+        _KEYS = ["epap", "rr", "pulse", "mv"]
+        _FIELD_MAP = {
+            "epap": "epap_mean",
+            "rr": "respiratory_rate_mean",
+            "pulse": "pulse_mean",
+            "mv": "minute_ventilation_mean",
+        }
+
+        weighted_sums: dict[date, dict[str, float]] = {}
+        total_hours: dict[date, dict[str, float]] = {}
+
+        for stat, day_date in rows:
+            if not stat.usage_hours or stat.usage_hours <= 0:
+                continue
+
+            idx = bisect_right(sorted_starts, day_date) - 1
+            if idx < 0:
+                continue
+            period_start = sorted_starts[idx]
+            if day_date > period_end_by_start[period_start]:
+                continue
+
+            if period_start not in weighted_sums:
+                weighted_sums[period_start] = {k: 0.0 for k in _KEYS}
+                total_hours[period_start] = {k: 0.0 for k in _KEYS}
+
+            hours = stat.usage_hours
+            for key in _KEYS:
+                val: float | None = getattr(stat, _FIELD_MAP[key])
+                if val is not None:
+                    weighted_sums[period_start][key] += val * hours
+                    total_hours[period_start][key] += hours
+
+        result: dict[date, dict[str, float | None]] = {}
+        for ps in period_stats:
+            pstart = ps.period_start
+            if pstart not in weighted_sums:
+                result[pstart] = {k: None for k in _KEYS}
+            else:
+                result[pstart] = {
+                    k: (
+                        weighted_sums[pstart][k] / total_hours[pstart][k]
+                        if total_hours[pstart][k] > 0
+                        else None
+                    )
+                    for k in _KEYS
+                }
+
+        return result
+
+    def get_trends(
+        self,
+        period_type: PeriodType,
+        days_limit: int | None = None,
+    ) -> dict[str, list[tuple[date, float | None]]]:
+        """
+        Compute extended trend data for the requested period granularity.
+
+        Args:
+            period_type: One of 'day', 'week', 'month', '6month', 'year'
+            days_limit: Only include days within the last N days from today
+
+        Returns:
+            Dictionary with 13 metric keys, each a list of (date, value) tuples:
+            ahi, usage, spo2, leak, pressure, oai, cai, hi, rera, epap, rr, pulse, mv
+        """
+        day_records = self._query_days(days_limit)
+        period_stats = calculate_period_statistics(day_records, period_type)
+        session_extras = self._aggregate_session_stats_per_period(
+            day_records, period_stats
+        )
+        return calculate_trends_extended(period_stats, session_extras)
 
     def get_records(
         self, days_limit: int | None = None, top_n: int = 5

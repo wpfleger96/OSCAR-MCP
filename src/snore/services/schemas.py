@@ -70,6 +70,13 @@ class PeriodStatistics(BaseModel):
     avg_spo2: float | None = Field(default=None, description="Average SpO₂ (%)")
     min_spo2: float | None = Field(default=None, description="Minimum SpO₂ (%)")
 
+    avg_oai: float | None = Field(default=None, description="Average OAI (events/hour)")
+    avg_cai: float | None = Field(default=None, description="Average CAI (events/hour)")
+    avg_hi: float | None = Field(default=None, description="Average HI (events/hour)")
+    avg_rera: float | None = Field(
+        default=None, description="Average RERA index (events/hour)"
+    )
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {

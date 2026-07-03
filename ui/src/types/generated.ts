@@ -1559,6 +1559,16 @@ export interface components {
              */
             avg_ahi?: number | null
             /**
+             * Avg Cai
+             * @description Average CAI (events/hour)
+             */
+            avg_cai?: number | null
+            /**
+             * Avg Hi
+             * @description Average HI (events/hour)
+             */
+            avg_hi?: number | null
+            /**
              * Avg Hours Per Day
              * @description Average hours per day used
              */
@@ -1569,10 +1579,20 @@ export interface components {
              */
             avg_leak?: number | null
             /**
+             * Avg Oai
+             * @description Average OAI (events/hour)
+             */
+            avg_oai?: number | null
+            /**
              * Avg Pressure
              * @description Average pressure (cmH₂O)
              */
             avg_pressure?: number | null
+            /**
+             * Avg Rera
+             * @description Average RERA index (events/hour)
+             */
+            avg_rera?: number | null
             /**
              * Avg Spo2
              * @description Average SpO₂ (%)
@@ -3142,7 +3162,7 @@ export interface operations {
     get_periods_api_v1_stats_periods_get: {
         parameters: {
             query?: {
-                period_type?: 'week' | 'month' | '6month' | 'year'
+                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
                 days_limit?: number | null
             }
             header?: never
@@ -3248,7 +3268,8 @@ export interface operations {
     get_trends_api_v1_stats_trends_get: {
         parameters: {
             query?: {
-                period_type?: 'week' | 'month' | '6month' | 'year'
+                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
+                /** @description Limit to last N days. For period_type=day, defaults to 180 when omitted to keep the response size reasonable. */
                 days_limit?: number | null
             }
             header?: never
