@@ -60,6 +60,7 @@ export type ImportSource = Schemas['ImportSource']
 export type ImportSourceResult = Schemas['ImportSourceResult']
 export type ImportResult = Schemas['ImportResult']
 export type DetectRequest = Schemas['DetectRequest']
+export type ImportPathRequest = Schemas['ImportPathRequest']
 
 // Database
 export type DatabaseStatsPublic = Schemas['DatabaseStatsPublic']

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import tempfile
 
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
@@ -17,6 +19,20 @@ from snore.services.schemas import ImportResult, ImportSource, ImportSourceResul
 logger = logging.getLogger(__name__)
 
 __all__ = ["ImportService"]
+
+
+def _safe_relative_path(filename: str) -> str | None:
+    """Sanitize a multipart filename, preserving relative directory structure."""
+    parts = PurePosixPath(filename.replace("\\", "/")).parts
+    safe = [
+        clean
+        for p in parts
+        if (clean := p.replace("\x00", ""))
+        and clean not in (".", "..")
+        and not clean.startswith("/")
+        and not (len(clean) == 2 and clean[1] == ":")
+    ]
+    return "/".join(safe) or None
 
 
 class ImportService:
@@ -213,26 +229,30 @@ class ImportService:
 
     def import_from_upload(
         self,
-        files: list[tuple[str, bytes]],
+        files: list[tuple[str, BinaryIO]],
         *,
         force: bool = False,
         batch_size: int = 50,
         progress_callback: Callable[[str], None] | None = None,
     ) -> ImportResult:
-        """Import from uploaded file bytes.
+        """Import from uploaded file streams, preserving relative paths.
 
         Writes files to a temp directory preserving relative paths, then detects
         and imports. Backup is disabled (there is no SD card to protect).
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            for filename, content in files:
-                safe_name = Path(filename).name
-                if not safe_name:
-                    safe_name = "unknown"
-                dest = tmp_path / safe_name
+            tmp_root = tmp_path.resolve()
+            for filename, fileobj in files:
+                rel = _safe_relative_path(filename) or "unknown"
+                dest = tmp_path / rel
+                if not dest.resolve().is_relative_to(tmp_root):
+                    logger.warning("Skipping file with unsafe path: %r", filename)
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(content)
+                fileobj.seek(0)
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(fileobj, out, 1024 * 1024)
 
             sources = self.detect_sources(tmp_path)
             return self.import_sources(

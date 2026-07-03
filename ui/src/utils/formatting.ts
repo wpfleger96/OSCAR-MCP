@@ -1,4 +1,4 @@
-/** Shared date/time formatting helpers. */
+/** Shared date/time and quantity formatting helpers. */
 
 /** e.g. "Jan 5, 03:12 AM" — short date with time, no year. */
 export function formatDateShort(iso: string): string {
@@ -59,4 +59,12 @@ export function formatTimeOffset(secs: number): string {
     const m = Math.floor((secs % 3600) / 60)
     const s = Math.floor(secs % 60)
     return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+/** e.g. "325.5 KB", "1.2 GB" — human-readable byte count. */
+export function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }

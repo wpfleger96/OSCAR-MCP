@@ -1,16 +1,29 @@
 import axios from 'axios'
-import type { AxiosRequestConfig } from 'axios'
+import type { AxiosError, AxiosRequestConfig } from 'axios'
 
+// No default Content-Type: axios infers it per request (JSON for plain objects,
+// multipart with boundary for FormData). A global application/json default makes
+// axios JSON-serialize FormData bodies, breaking file uploads.
 const api = axios.create({
     baseURL: '/api/v1',
-    headers: { 'Content-Type': 'application/json' },
 })
 
 api.interceptors.response.use(
     (response) => response,
-    (error) => {
-        if (error.response?.data?.message) {
-            error.message = error.response.data.message
+    (error: AxiosError<{ message?: string; detail?: string | Array<{ msg: string }> }>) => {
+        const data = error.response?.data
+        if (data) {
+            if (typeof data.message === 'string') {
+                error.message = data.message
+            } else if (typeof data.detail === 'string') {
+                error.message = data.detail
+            } else if (Array.isArray(data.detail)) {
+                const msgs = data.detail
+                    .map((d) => d.msg)
+                    .filter(Boolean)
+                    .join('; ')
+                if (msgs) error.message = msgs
+            }
         }
         return Promise.reject(error)
     },
