@@ -259,6 +259,40 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/reports/comparison': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Comparison Report */
+        get: operations['get_comparison_report_api_v1_reports_comparison_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/reports/summary': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Summary Report */
+        get: operations['get_summary_report_api_v1_reports_summary_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/rx/compare': {
         parameters: {
             query?: never
@@ -1559,6 +1593,16 @@ export interface components {
              */
             avg_ahi?: number | null
             /**
+             * Avg Cai
+             * @description Average CAI (events/hour)
+             */
+            avg_cai?: number | null
+            /**
+             * Avg Hi
+             * @description Average HI (events/hour)
+             */
+            avg_hi?: number | null
+            /**
              * Avg Hours Per Day
              * @description Average hours per day used
              */
@@ -1569,10 +1613,20 @@ export interface components {
              */
             avg_leak?: number | null
             /**
+             * Avg Oai
+             * @description Average OAI (events/hour)
+             */
+            avg_oai?: number | null
+            /**
              * Avg Pressure
              * @description Average pressure (cmH₂O)
              */
             avg_pressure?: number | null
+            /**
+             * Avg Rera
+             * @description Average RERA index (events/hour)
+             */
+            avg_rera?: number | null
             /**
              * Avg Spo2
              * @description Average SpO₂ (%)
@@ -2613,6 +2667,72 @@ export interface operations {
             }
         }
     }
+    get_comparison_report_api_v1_reports_comparison_get: {
+        parameters: {
+            query: {
+                from_a: string
+                to_a: string
+                from_b: string
+                to_b: string
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_summary_report_api_v1_reports_summary_get: {
+        parameters: {
+            query: {
+                from_date: string
+                to_date: string
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
     compare_rx_api_v1_rx_compare_get: {
         parameters: {
             query?: {
@@ -3142,7 +3262,7 @@ export interface operations {
     get_periods_api_v1_stats_periods_get: {
         parameters: {
             query?: {
-                period_type?: 'week' | 'month' | '6month' | 'year'
+                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
                 days_limit?: number | null
             }
             header?: never
@@ -3248,7 +3368,8 @@ export interface operations {
     get_trends_api_v1_stats_trends_get: {
         parameters: {
             query?: {
-                period_type?: 'week' | 'month' | '6month' | 'year'
+                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
+                /** @description Limit to last N days. For period_type=day, defaults to 180 when omitted to keep the response size reasonable. */
                 days_limit?: number | null
             }
             header?: never

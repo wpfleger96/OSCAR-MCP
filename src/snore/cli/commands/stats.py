@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import cast
 
 import click
 
@@ -23,7 +23,7 @@ from snore.cli.display import (
 @click.option("--days", type=int, help="Limit to last N days")
 @click.option(
     "--period",
-    type=click.Choice(["week", "month", "6month", "year"]),
+    type=click.Choice(["day", "week", "month", "6month", "year"]),
     help="Show statistics broken down by period",
 )
 @click.option("--trend", is_flag=True, help="Show trend analysis chart")
@@ -135,13 +135,16 @@ def stats(
                 print_kv(ec.event_type, f"{ec.count:,} ({ec.percentage:.1f}%)")
 
         if period:
-            period_literal = cast(Literal["week", "month", "6month", "year"], period)
+            from snore.analysis.calculations import PeriodType
+
+            period_literal = cast(PeriodType, period)
             period_stats: list[PeriodStatistics] = service.get_period_statistics(
                 period_literal, days
             )
 
             if period_stats:
                 period_names = {
+                    "day": "Daily",
                     "week": "Weekly",
                     "month": "Monthly",
                     "6month": "6-Month",
@@ -152,7 +155,9 @@ def stats(
 
                 period_rows = []
                 for period_stat in period_stats:  # type: PeriodStatistics
-                    if period == "week":
+                    if period == "day":
+                        period_label = str(period_stat.period_start)
+                    elif period == "week":
                         period_label = f"{period_stat.period_start.strftime('%Y-W%U')}"
                     elif period == "month":
                         period_label = period_stat.period_start.strftime("%b %Y")
@@ -202,7 +207,7 @@ def stats(
                 if trend:
                     import plotext as plt
 
-                    trends = service.get_trends(period_stats)
+                    trends = service.get_trends(period_literal, days)
                     ahi_trend = trends["ahi"]
 
                     ahi_values = [v for _, v in ahi_trend if v is not None]

@@ -3,9 +3,7 @@
         <Loader2 class="inline h-4 w-4 animate-spin" /> Loading day...
     </div>
 
-    <div v-else-if="error" class="error-state">
-        <AlertTriangle class="inline h-4 w-4" /> {{ error }}
-    </div>
+    <ErrorState v-else-if="error" :message="error" :retry="reload" />
 
     <div v-else-if="data" class="day-detail">
         <RouterLink to="/" class="back-link">
@@ -91,14 +89,15 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
-import { Loader2, AlertTriangle, ArrowLeft } from '@lucide/vue'
+import { Loader2, ArrowLeft } from '@lucide/vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { getDay } from '@/api/days'
 import { formatDateWithWeekday } from '@/utils/formatting'
+import ErrorState from '@/components/ErrorState.vue'
 
 const props = defineProps<{ dayDate: string }>()
 
-const { data, loading, error } = useApiLoad(() => getDay(props.dayDate))
+const { data, loading, error, reload } = useApiLoad(() => getDay(props.dayDate))
 </script>
 
 <style scoped>

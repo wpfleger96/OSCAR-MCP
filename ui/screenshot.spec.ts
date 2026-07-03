@@ -57,15 +57,30 @@ test('dashboard', async ({ page }) => {
 
 test('sessions', async ({ page }) => {
     await page.goto('/sessions')
-    await page.waitForSelector('.sessions-table .p-datatable-tbody tr')
+    await page.waitForSelector('.sessions-table tbody tr')
     await page.screenshot({ path: 'screenshots/sessions.png' })
 })
 
 test('stats', async ({ page }) => {
     await page.goto('/stats')
     await page.waitForSelector('.records-grid')
+    await page.waitForSelector('.trend-chart canvas')
     await page.waitForTimeout(800)
     await page.screenshot({ path: 'screenshots/stats.png' })
+})
+
+test('stats error state', async ({ page }) => {
+    await page.route('**/api/v1/stats/**', (route) =>
+        route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({ detail: 'Internal Server Error' }),
+        }),
+    )
+    await page.goto('/stats')
+    await page.waitForSelector('.error-state')
+    await page.waitForTimeout(800)
+    await page.screenshot({ path: 'screenshots/stats-error.png' })
 })
 
 test('rx-history', async ({ page }) => {
@@ -78,4 +93,12 @@ test('session-detail', async ({ page }) => {
     await page.goto('/sessions/1470')
     await page.waitForSelector('.session-detail .stats-section')
     await page.screenshot({ path: 'screenshots/session-detail.png' })
+})
+
+test('reports', async ({ page }) => {
+    await page.goto('/reports')
+    await page.waitForSelector('.reports-view')
+    await page.getByText('Comparison').click()
+    await page.waitForSelector('.rx-select')
+    await page.screenshot({ path: 'screenshots/reports.png' })
 })

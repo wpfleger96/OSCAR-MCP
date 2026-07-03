@@ -125,6 +125,15 @@ export interface TrendData {
     usage: [string, number | null][]
     spo2: [string, number | null][]
     leak: [string, number | null][]
+    pressure?: [string, number | null][]
+    epap?: [string, number | null][]
+    rr?: [string, number | null][]
+    pulse?: [string, number | null][]
+    mv?: [string, number | null][]
+    oai?: [string, number | null][]
+    cai?: [string, number | null][]
+    hi?: [string, number | null][]
+    rera?: [string, number | null][]
 }
 
 export interface RecordsData {

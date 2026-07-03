@@ -6,9 +6,7 @@
             <Loader2 class="h-4 w-4 animate-spin" /> Loading RX data...
         </div>
 
-        <div v-else-if="error" class="error-state">
-            <AlertTriangle class="h-4 w-4" /> {{ error }}
-        </div>
+        <ErrorState v-else-if="error" :message="error" :retry="reload" />
 
         <template v-else-if="history.length">
             <!-- Current Settings -->
@@ -95,7 +93,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Loader2, AlertTriangle, Info } from '@lucide/vue'
+import { Loader2, Info } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import {
     Table,
@@ -109,8 +107,9 @@ import { getRxHistory, getRxCurrent, getRxCompare } from '@/api/rx'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
 import type { RxPeriodResponse } from '@/types'
+import ErrorState from '@/components/ErrorState.vue'
 
-const { data, loading, error } = useApiLoad(async () => {
+const { data, loading, error, reload } = useApiLoad(async () => {
     const [history, current, comparison] = await Promise.all([
         getRxHistory(),
         getRxCurrent(),
