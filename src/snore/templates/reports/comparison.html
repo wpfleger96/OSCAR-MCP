@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}SNORE Therapy Comparison — {{ range_a[0] }} vs {{ range_b[0] }}{% endblock %}
+
+{% macro summary_panel(s) %}
+{% if not s %}
+<div class="no-data">No therapy data in this range.</div>
+{% else %}
+<table>
+  <tbody>
+    <tr><td>Days Tracked</td><td>{{ s.days_with_data }}</td></tr>
+    <tr><td>Avg Usage (hr)</td><td>{{ s.avg_hours | fmt_f }}</td></tr>
+    <tr><td>Total Hours</td><td>{{ s.total_hours | fmt_f }}</td></tr>
+    <tr><td>Avg AHI</td><td>{{ s.avg_ahi | fmt_f }}</td></tr>
+    <tr><td>Effectiveness</td><td>{{ s.effectiveness | title }}</td></tr>
+    <tr><td>Avg Pressure</td><td>{{ s.avg_pressure | fmt_f }}</td></tr>
+    <tr><td>Avg EPAP</td><td>{{ s.avg_epap | fmt_f }}</td></tr>
+    <tr><td>Avg Leak</td><td>{{ s.avg_leak | fmt_f }}</td></tr>
+    <tr><td>Avg SpO&#x2082;</td><td>{{ s.avg_spo2 | fmt_f }}</td></tr>
+    <tr><td>Min SpO&#x2082;</td><td>{{ s.min_spo2 | fmt_f }}</td></tr>
+    <tr><td>Avg Pulse</td><td>{{ s.avg_pulse | fmt_f }}</td></tr>
+    <tr><td>Avg Resp Rate</td><td>{{ s.avg_respiratory_rate | fmt_f }}</td></tr>
+  </tbody>
+</table>
+{% endif %}
+{% endmacro %}
+
+{% block body %}
+<div class="report-header">
+  <h1>SNORE &mdash; Therapy Comparison Report</h1>
+  <div class="subtitle">
+    Range A: {{ range_a[0] }} &mdash; {{ range_a[1] }}
+    &nbsp;&nbsp;&nbsp;
+    Range B: {{ range_b[0] }} &mdash; {{ range_b[1] }}
+  </div>
+  <div class="meta">Generated {{ generated_on }}</div>
+</div>
+
+{% if device %}
+<div class="device-block">
+  <strong>{{ device.manufacturer }} {{ device.model }}</strong>
+  &nbsp;&middot;&nbsp; S/N: {{ device.serial_number }}
+  {% if device.firmware_version %}&nbsp;&middot;&nbsp; FW: {{ device.firmware_version }}{% endif %}
+</div>
+{% endif %}
+
+<h2>Side-by-Side Summary</h2>
+<div class="cmp-grid">
+  <div class="cmp-panel">
+    <h3>Range A &mdash; {{ range_a[0] }} to {{ range_a[1] }}</h3>
+    {{ summary_panel(summary_a) }}
+  </div>
+  <div class="cmp-panel">
+    <h3>Range B &mdash; {{ range_b[0] }} to {{ range_b[1] }}</h3>
+    {{ summary_panel(summary_b) }}
+  </div>
+</div>
+
+<h2>Delta (B &minus; A)</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Metric</th>
+      <th>Range A</th>
+      <th>Range B</th>
+      <th>Delta</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in deltas %}
+    <tr>
+      <td>{{ row.label }}</td>
+      <td>{{ row.a_str }}</td>
+      <td>{{ row.b_str }}</td>
+      <td{% if row.color %} style="color:{{ row.color }};font-weight:600"{% endif %}>{{ row.delta_str }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

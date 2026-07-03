@@ -59,17 +59,24 @@ class StatsService:
             query = query.filter(models.Day.date <= to_date)
         return query.all()
 
-    def get_summary(self, days_limit: int | None = None) -> TherapySummary | None:
+    def get_summary(
+        self,
+        days_limit: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> TherapySummary | None:
         """
         Compute aggregated therapy summary statistics.
 
         Args:
             days_limit: Only include days within the last N days from today
+            from_date: Only include days on or after this date
+            to_date: Only include days on or before this date
 
         Returns:
             TherapySummary with all computed metrics, or None if no data
         """
-        day_records = self._query_days(days_limit)
+        day_records = self._query_days(days_limit, from_date=from_date, to_date=to_date)
 
         if not day_records:
             return None
@@ -214,6 +221,8 @@ class StatsService:
         self,
         period_type: PeriodType,
         days_limit: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> list[PeriodStatistics]:
         """
         Calculate statistics grouped by time periods.
@@ -221,11 +230,13 @@ class StatsService:
         Args:
             period_type: One of 'day', 'week', 'month', '6month', 'year'
             days_limit: Only include days within the last N days from today
+            from_date: Only include days on or after this date
+            to_date: Only include days on or before this date
 
         Returns:
             List of PeriodStatistics for each period
         """
-        day_records = self._query_days(days_limit)
+        day_records = self._query_days(days_limit, from_date=from_date, to_date=to_date)
         return calculate_period_statistics(day_records, period_type)
 
     def _aggregate_session_stats_per_period(
@@ -322,6 +333,8 @@ class StatsService:
         self,
         period_type: PeriodType,
         days_limit: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> dict[str, list[tuple[date, float | None]]]:
         """
         Compute extended trend data for the requested period granularity.
@@ -329,12 +342,14 @@ class StatsService:
         Args:
             period_type: One of 'day', 'week', 'month', '6month', 'year'
             days_limit: Only include days within the last N days from today
+            from_date: Only include days on or after this date
+            to_date: Only include days on or before this date
 
         Returns:
             Dictionary with 13 metric keys, each a list of (date, value) tuples:
             ahi, usage, spo2, leak, pressure, oai, cai, hi, rera, epap, rr, pulse, mv
         """
-        day_records = self._query_days(days_limit)
+        day_records = self._query_days(days_limit, from_date=from_date, to_date=to_date)
         period_stats = calculate_period_statistics(day_records, period_type)
         session_extras = self._aggregate_session_stats_per_period(
             day_records, period_stats

@@ -105,7 +105,7 @@
             <Check class="h-5 w-5 success-icon" />
             <div>
                 <p class="success-title">Report ready</p>
-                <p class="success-size">{{ formatSize(result.size) }}</p>
+                <p class="success-size">{{ formatBytes(result.size) }}</p>
             </div>
         </div>
 
@@ -128,6 +128,7 @@ import { Check, Download, Loader2 } from '@lucide/vue'
 import { getSummaryReport, getComparisonReport } from '@/api/reports'
 import { downloadBlob } from '@/api/export'
 import { getRxHistory } from '@/api/rx'
+import { formatBytes } from '@/utils/formatting'
 import type { RxPeriodResponse } from '@/types'
 import ErrorState from '@/components/ErrorState.vue'
 
@@ -224,12 +225,6 @@ async function handleGenerate(): Promise<void> {
     } finally {
         generating.value = false
     }
-}
-
-function formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 </script>
 

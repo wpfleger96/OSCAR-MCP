@@ -259,6 +259,40 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/reports/comparison': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Comparison Report */
+        get: operations['get_comparison_report_api_v1_reports_comparison_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/reports/summary': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Summary Report */
+        get: operations['get_summary_report_api_v1_reports_summary_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/rx/compare': {
         parameters: {
             query?: never
@@ -2620,6 +2654,72 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ImportResult']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_comparison_report_api_v1_reports_comparison_get: {
+        parameters: {
+            query: {
+                from_a: string
+                to_a: string
+                from_b: string
+                to_b: string
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_summary_report_api_v1_reports_summary_get: {
+        parameters: {
+            query: {
+                from_date: string
+                to_date: string
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
                 }
             }
             /** @description Validation Error */
