@@ -1,36 +1,4 @@
-# UI Code Quality - Check variants
-
-# Run TypeScript type checking
-ui-type-check:
-    cd ui && pnpm run type-check
-
-# Run UI linter in check mode (no fixes)
-ui-lint-check:
-    cd ui && pnpm run lint-check
-
-# Run UI formatter in check mode (no changes)
-ui-format-check:
-    cd ui && pnpm run format-check
-
-# UI Code Quality - Fix variants
-
-# Run UI linter and auto-fix issues
-ui-lint:
-    cd ui && pnpm run lint
-
-# Run UI formatter and auto-fix style
-ui-format:
-    cd ui && pnpm run format
-
-# UI dependencies & build
-
-# Install UI dependencies
-ui-install:
-    cd ui && pnpm install
-
-# Build the UI for production
-ui-build:
-    cd ui && pnpm run build
+# SNORE-local recipes — not managed by github-config.
 
 # Dev servers
 
@@ -43,11 +11,11 @@ dev-ui:
     cd ui && pnpm run dev
 
 # Build UI and start the server
-serve: ui-build
+serve: web-build
     uv run snore serve
 
 # Build frontend + backend package
-build-all: ui-build build
+build-all: web-build build
 
 # Screenshots
 
@@ -57,7 +25,7 @@ ui-playwright-install:
 
 # Build UI and capture screenshots with Playwright
 screenshot:
-    just ui-build
+    just web-build
     cd ui && pnpm exec playwright test screenshot.spec.ts
 
 # Post captured screenshots to a GitHub PR
