@@ -12,6 +12,7 @@ from snore.cli.display import (
     print_header,
     print_kv,
     print_subsection,
+    print_table,
 )
 
 
@@ -242,3 +243,51 @@ def rx_compare(db: str | None, min_days: int) -> None:
                 f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({worst.days_count} days)"
             )
             console.print(f"  Settings: {worst.settings}")
+
+
+@rx.command("changes")
+@db_option
+def rx_changes(db: str | None) -> None:
+    """
+    Show day-level prescription settings changes across all devices.
+
+    Displays each per-key settings change with old and new values,
+    sorted most-recent-first. Useful for reviewing the titration trail
+    without opening the web UI.
+
+    Example:
+        snore rx changes
+    """
+    from snore.analysis.rx_tracker import RxTracker
+
+    with open_db_session(db) as db_session:
+        response = RxTracker().get_changes(db_session)
+        changes = list(reversed(response.changes))
+
+        if not changes:
+            console.print("No RX settings changes found")
+            return
+
+        def _fmt(val: str | None) -> str:
+            return val if val is not None else "—"
+
+        print_header("RX Settings Changes", wide=True)
+        print_table(
+            columns=[
+                ("Date", 12),
+                ("Device", 24),
+                ("Setting", 16),
+                ("Change", 0),
+            ],
+            rows=[
+                (
+                    c.date.strftime("%Y-%m-%d"),
+                    c.device_name,
+                    c.key,
+                    f"{_fmt(c.old_value)} → {_fmt(c.new_value)}",
+                )
+                for c in changes
+            ],
+            wide=True,
+        )
+        print_footer(wide=True)
