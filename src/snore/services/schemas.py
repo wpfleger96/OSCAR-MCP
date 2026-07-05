@@ -209,6 +209,9 @@ class SessionStatistics(BaseModel):
     epap_min: float | None = None
     epap_max: float | None = None
     epap_95th: float | None = None
+    ipap_median: float | None = None
+    ipap_95th: float | None = None
+    ipap_max: float | None = None
     leak_mean: float | None = None
     leak_percentile_70: float | None = None
     leak_95th: float | None = None

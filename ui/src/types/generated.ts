@@ -1915,6 +1915,12 @@ export interface components {
             hi?: number | null
             /** Hypopneas */
             hypopneas?: number | null
+            /** Ipap 95Th */
+            ipap_95th?: number | null
+            /** Ipap Max */
+            ipap_max?: number | null
+            /** Ipap Median */
+            ipap_median?: number | null
             /** Leak 95Th */
             leak_95th?: number | null
             /** Leak Mean */
