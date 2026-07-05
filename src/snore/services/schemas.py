@@ -513,6 +513,15 @@ class RxChangesResponse(BaseModel):
     changes: list[RxSettingChange]
 
 
+class RxAllResponse(BaseModel):
+    """Combined RX data derived from a single database query."""
+
+    history: list[RxPeriodResponse]
+    current: RxPeriodResponse | None = None
+    comparison: RxComparisonResponse
+    changes: RxChangesResponse
+
+
 class ImportSource(BaseModel):
     """Detected data source for import."""
 

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 from snore.database.models import Day
 from snore.database.models import Session as SessionModel
 from snore.services.schemas import (
+    RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
     RxPeriodResponse,
@@ -128,6 +129,59 @@ class RxTracker:
 
         all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
         return RxChangesResponse(changes=all_changes)
+
+    def get_all(self, db_session: Session, min_days: int = 7) -> RxAllResponse:
+        """Return all RX data from a single database query."""
+        device_groups = self._days_by_device(db_session)
+
+        all_periods: list[RxPeriod] = []
+        for device_id, device_name, device_days in device_groups:
+            all_periods.extend(
+                self._compute_device_periods(device_days, device_id, device_name)
+            )
+        all_periods.sort(key=lambda p: (p.start_date, p.device_id))
+
+        stats = self._compute_period_stats(all_periods)
+        history = [self._to_response(p) for p in stats]
+        current = history[-1] if history else None
+
+        best, worst = self._best_worst(stats, min_days)
+        comparison = RxComparisonResponse(
+            periods=history,
+            best_index=stats.index(best) if best is not None else None,
+            worst_index=stats.index(worst) if worst is not None else None,
+        )
+
+        all_changes: list[RxSettingChange] = []
+        for device_id, device_name, device_days in device_groups:
+            prev_settings: dict[str, str] | None = None
+            for day in device_days:
+                curr_settings = self._get_day_settings(day)
+                if curr_settings is None:
+                    continue
+                if prev_settings is not None:
+                    for key, old_val, new_val in _diff_settings(
+                        prev_settings, curr_settings
+                    ):
+                        all_changes.append(
+                            RxSettingChange(
+                                date=day.date,
+                                device_id=device_id,
+                                device_name=device_name,
+                                key=key,
+                                old_value=old_val,
+                                new_value=new_val,
+                            )
+                        )
+                prev_settings = curr_settings
+        all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
+
+        return RxAllResponse(
+            history=history,
+            current=current,
+            comparison=comparison,
+            changes=RxChangesResponse(changes=all_changes),
+        )
 
     def _to_response(self, period: RxPeriodStats) -> RxPeriodResponse:
         """Convert RxPeriodStats dataclass to RxPeriodResponse Pydantic model."""
