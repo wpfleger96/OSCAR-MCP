@@ -39,7 +39,7 @@
             </div>
 
             <!-- Comparison Table -->
-            <div v-if="comparison" class="section-card">
+            <div v-if="history.length > 1" class="section-card">
                 <h2>Period Comparison</h2>
                 <div class="overflow-x-auto">
                     <Table>
@@ -174,7 +174,6 @@ const { data, loading, error, reload } = useApiLoad(() => getRxAll(), 'Failed to
 
 const history = computed(() => data.value?.history ?? [])
 const current = computed(() => data.value?.current ?? null)
-const comparison = computed(() => data.value?.comparison ?? null)
 const changes = computed<RxSettingChange[]>(() =>
     [...(data.value?.changes?.changes ?? [])].reverse(),
 )
@@ -184,14 +183,13 @@ interface ComparisonRow extends RxPeriodResponse {
     isWorst: boolean
 }
 
-const comparisonRows = computed<ComparisonRow[]>(() => {
-    if (!comparison.value) return []
-    return comparison.value.periods.map((p, i) => ({
+const comparisonRows = computed<ComparisonRow[]>(() =>
+    history.value.map((p, i) => ({
         ...p,
-        isBest: comparison.value!.best_index === i,
-        isWorst: comparison.value!.worst_index === i,
-    }))
-})
+        isBest: data.value?.best_index === i,
+        isWorst: data.value?.worst_index === i,
+    })),
+)
 
 function summarizeSettings(settings: Record<string, string>): string {
     const priorityKeys = [

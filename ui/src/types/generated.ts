@@ -1903,11 +1903,14 @@ export interface components {
          * @description Combined RX data derived from a single database query.
          */
         RxAllResponse: {
+            /** Best Index */
+            best_index?: number | null
             changes: components['schemas']['RxChangesResponse']
-            comparison: components['schemas']['RxComparisonResponse']
             current?: components['schemas']['RxPeriodResponse'] | null
             /** History */
             history: components['schemas']['RxPeriodResponse'][]
+            /** Worst Index */
+            worst_index?: number | null
         }
         /**
          * RxChangesResponse

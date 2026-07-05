@@ -86,12 +86,11 @@ class RxTracker:
         """Return all periods with best/worst indices."""
         periods = self._compute_periods(db_session)
         stats = self._compute_period_stats(periods)
-        best, worst = self._best_worst(stats, min_days)
-        responses = [self._to_response(p) for p in stats]
-        best_index = stats.index(best) if best is not None else None
-        worst_index = stats.index(worst) if worst is not None else None
+        best_index, worst_index = self._best_worst_indices(stats, min_days)
         return RxComparisonResponse(
-            periods=responses, best_index=best_index, worst_index=worst_index
+            periods=[self._to_response(p) for p in stats],
+            best_index=best_index,
+            worst_index=worst_index,
         )
 
     def get_changes(self, db_session: Session) -> RxChangesResponse:
@@ -103,84 +102,24 @@ class RxTracker:
         every setting the clinician or patient touched.  Do not narrow this to
         _get_day_rx_settings; use _get_day_settings (no key filter).
         """
-        all_changes: list[RxSettingChange] = []
-
-        for device_id, device_name, device_days in self._days_by_device(db_session):
-            prev_settings: dict[str, str] | None = None
-            for day in device_days:
-                curr_settings = self._get_day_settings(day)
-                if curr_settings is None:
-                    continue
-                if prev_settings is not None:
-                    for key, old_val, new_val in _diff_settings(
-                        prev_settings, curr_settings
-                    ):
-                        all_changes.append(
-                            RxSettingChange(
-                                date=day.date,
-                                device_id=device_id,
-                                device_name=device_name,
-                                key=key,
-                                old_value=old_val,
-                                new_value=new_val,
-                            )
-                        )
-                prev_settings = curr_settings
-
-        all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
-        return RxChangesResponse(changes=all_changes)
+        return self._compute_changes(self._days_by_device(db_session))
 
     def get_all(self, db_session: Session, min_days: int = 7) -> RxAllResponse:
         """Return all RX data from a single database query."""
         device_groups = self._days_by_device(db_session)
 
-        all_periods: list[RxPeriod] = []
-        for device_id, device_name, device_days in device_groups:
-            all_periods.extend(
-                self._compute_device_periods(device_days, device_id, device_name)
-            )
-        all_periods.sort(key=lambda p: (p.start_date, p.device_id))
-
-        stats = self._compute_period_stats(all_periods)
+        periods = self._compute_periods_from_groups(device_groups)
+        stats = self._compute_period_stats(periods)
         history = [self._to_response(p) for p in stats]
-        current = history[-1] if history else None
 
-        best, worst = self._best_worst(stats, min_days)
-        comparison = RxComparisonResponse(
-            periods=history,
-            best_index=stats.index(best) if best is not None else None,
-            worst_index=stats.index(worst) if worst is not None else None,
-        )
-
-        all_changes: list[RxSettingChange] = []
-        for device_id, device_name, device_days in device_groups:
-            prev_settings: dict[str, str] | None = None
-            for day in device_days:
-                curr_settings = self._get_day_settings(day)
-                if curr_settings is None:
-                    continue
-                if prev_settings is not None:
-                    for key, old_val, new_val in _diff_settings(
-                        prev_settings, curr_settings
-                    ):
-                        all_changes.append(
-                            RxSettingChange(
-                                date=day.date,
-                                device_id=device_id,
-                                device_name=device_name,
-                                key=key,
-                                old_value=old_val,
-                                new_value=new_val,
-                            )
-                        )
-                prev_settings = curr_settings
-        all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
+        best_index, worst_index = self._best_worst_indices(stats, min_days)
 
         return RxAllResponse(
             history=history,
-            current=current,
-            comparison=comparison,
-            changes=RxChangesResponse(changes=all_changes),
+            current=history[-1] if history else None,
+            best_index=best_index,
+            worst_index=worst_index,
+            changes=self._compute_changes(device_groups),
         )
 
     def _to_response(self, period: RxPeriodStats) -> RxPeriodResponse:
@@ -200,23 +139,49 @@ class RxTracker:
         )
 
     def _compute_periods(self, db_session: Session) -> list[RxPeriod]:
-        """
-        Group consecutive days per device by therapy settings into RX periods.
+        """Query all days and group into RX periods."""
+        return self._compute_periods_from_groups(self._days_by_device(db_session))
 
-        Algorithm:
-        1. Query days ordered by (device_id, date), join sessions→settings and device
-        2. Group by device_id with itertools.groupby (via _days_by_device)
-        3. For each device, run the fingerprint loop via _compute_device_periods
-        4. Sort combined list by (start_date, device_id) for stable ordering
-        """
+    def _compute_periods_from_groups(
+        self, device_groups: list[tuple[int, str, list[Day]]]
+    ) -> list[RxPeriod]:
+        """Group consecutive days per device by therapy settings into RX periods."""
         all_periods: list[RxPeriod] = []
-        for device_id, device_name, device_days in self._days_by_device(db_session):
+        for device_id, device_name, device_days in device_groups:
             all_periods.extend(
                 self._compute_device_periods(device_days, device_id, device_name)
             )
-
         all_periods.sort(key=lambda p: (p.start_date, p.device_id))
         return all_periods
+
+    def _compute_changes(
+        self, device_groups: list[tuple[int, str, list[Day]]]
+    ) -> RxChangesResponse:
+        """Diff ALL settings keys day-over-day per device."""
+        all_changes: list[RxSettingChange] = []
+        for device_id, device_name, device_days in device_groups:
+            prev_settings: dict[str, str] | None = None
+            for day in device_days:
+                curr_settings = self._get_day_settings(day)
+                if curr_settings is None:
+                    continue
+                if prev_settings is not None:
+                    for key, old_val, new_val in _diff_settings(
+                        prev_settings, curr_settings
+                    ):
+                        all_changes.append(
+                            RxSettingChange(
+                                date=day.date,
+                                device_id=device_id,
+                                device_name=device_name,
+                                key=key,
+                                old_value=old_val,
+                                new_value=new_val,
+                            )
+                        )
+                prev_settings = curr_settings
+        all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
+        return RxChangesResponse(changes=all_changes)
 
     def _days_by_device(self, db_session: Session) -> list[tuple[int, str, list[Day]]]:
         """Query all days grouped by device, ordered by (device_id, date).
@@ -319,9 +284,7 @@ class RxTracker:
             avg_ahi = None
             median_ahi = None
             if valid_ahi_days:
-                ahi_values = sorted(
-                    [d.ahi for d in valid_ahi_days if d.ahi is not None]
-                )
+                ahi_values = sorted(d.ahi for d in valid_ahi_days if d.ahi is not None)
                 avg_ahi = sum(ahi_values) / len(ahi_values)
                 mid = len(ahi_values) // 2
                 if len(ahi_values) % 2 == 0:
@@ -357,36 +320,21 @@ class RxTracker:
 
         return stats_periods
 
-    def _best_worst(
+    def _best_worst_indices(
         self, periods: list[RxPeriodStats], min_days: int = 7
-    ) -> tuple[RxPeriodStats | None, RxPeriodStats | None]:
-        """
-        Identify best and worst RX periods by average AHI.
-
-        Args:
-            periods: List of RX periods with statistics
-            min_days: Minimum number of days for a period to be considered
-
-        Returns:
-            Tuple of (best_period, worst_period), either may be None
-        """
-        eligible_periods = [
-            p for p in periods if len(p.days) >= min_days and p.avg_ahi is not None
+    ) -> tuple[int | None, int | None]:
+        """Return (best_index, worst_index) by average AHI among eligible periods."""
+        eligible = [
+            (i, p)
+            for i, p in enumerate(periods)
+            if len(p.days) >= min_days and p.avg_ahi is not None
         ]
-
-        if not eligible_periods:
+        if not eligible:
             return (None, None)
 
-        best = min(
-            eligible_periods,
-            key=lambda p: p.avg_ahi if p.avg_ahi is not None else float("inf"),
-        )
-        worst = max(
-            eligible_periods,
-            key=lambda p: p.avg_ahi if p.avg_ahi is not None else float("-inf"),
-        )
-
-        return (best, worst)
+        best_idx = min(eligible, key=lambda t: t[1].avg_ahi or float("inf"))[0]
+        worst_idx = max(eligible, key=lambda t: t[1].avg_ahi or float("-inf"))[0]
+        return (best_idx, worst_idx)
 
     def _get_day_settings(
         self, day: Day, key_filter: tuple[str, ...] | None = None

@@ -35,7 +35,7 @@ def get_rx_current(db: Session = Depends(get_db)) -> RxPeriodResponse | Response
 
 @router.get("/compare", response_model=RxComparisonResponse)
 def compare_rx(
-    min_days: int = Query(default=7),
+    min_days: int = Query(default=7, ge=1),
     db: Session = Depends(get_db),
 ) -> RxComparisonResponse:
     return RxTracker().get_comparison(db, min_days)
@@ -43,7 +43,7 @@ def compare_rx(
 
 @router.get("/all", response_model=RxAllResponse)
 def get_rx_all(
-    min_days: int = Query(default=7),
+    min_days: int = Query(default=7, ge=1),
     db: Session = Depends(get_db),
 ) -> RxAllResponse:
     return RxTracker().get_all(db, min_days)

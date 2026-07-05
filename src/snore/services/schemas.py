@@ -36,6 +36,7 @@ __all__ = [
     "RxComparisonResponse",
     "RxSettingChange",
     "RxChangesResponse",
+    "RxAllResponse",
     # Import schemas
     "ImportSource",
     "ImportSourceResult",
@@ -518,7 +519,8 @@ class RxAllResponse(BaseModel):
 
     history: list[RxPeriodResponse]
     current: RxPeriodResponse | None = None
-    comparison: RxComparisonResponse
+    best_index: int | None = None
+    worst_index: int | None = None
     changes: RxChangesResponse
 
 
