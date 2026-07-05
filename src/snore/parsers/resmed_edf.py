@@ -13,6 +13,7 @@ File Types:
 - CSL.edf: Compliance/Summary Log
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -859,6 +860,10 @@ class ResmedEDFParser(DeviceParser):
                 if not snapshot_path.exists():
                     self._safe_copy(dest_str, snapshot_path)
                     logger.debug(f"Archived STR.edf → STR_Backup/{snapshot_name}")
+                else:
+                    logger.debug(
+                        f"Duplicate STR snapshot skipped: STR_Backup/{snapshot_name} already exists"
+                    )
             self._safe_copy(src_str, dest_str)
             device_files_copied.append(dest_str)
 
@@ -964,12 +969,22 @@ class ResmedEDFParser(DeviceParser):
 
     @staticmethod
     def _str_snapshot_name(str_path: Path) -> str:
-        """Derive STR_Backup snapshot filename from the EDF header start date."""
+        """Derive STR_Backup snapshot filename from the EDF header start date.
+
+        Falls back to ``STR-unknown-<hash>.edf`` (SHA-256 prefix) when the
+        header is too short or cannot be decoded, so distinct unparseable files
+        get distinct snapshot names and re-importing the same file stays
+        idempotent.
+        """
         try:
             with open(str_path, "rb") as f:
                 header = f.read(256)
             if len(header) < 184:
-                return "STR-unknown.edf"
+                logger.warning(
+                    f"STR header too short ({len(header)} bytes) in {str_path}; "
+                    "falling back to content-hash snapshot name"
+                )
+                return f"STR-unknown-{ResmedEDFParser._file_content_hash(str_path)}.edf"
             date_str = header[168:176].decode("ascii", errors="ignore").strip()
             time_str = header[176:184].decode("ascii", errors="ignore").strip()
             day = int(date_str[0:2])
@@ -984,7 +999,20 @@ class ResmedEDFParser(DeviceParser):
             logger.warning(
                 f"Could not read EDF header from {str_path} for snapshot naming"
             )
-            return "STR-unknown.edf"
+            return f"STR-unknown-{ResmedEDFParser._file_content_hash(str_path)}.edf"
+
+    @staticmethod
+    def _file_content_hash(path: Path, length: int = 12) -> str:
+        """Return the first ``length`` hex chars of the SHA-256 of the file at ``path``.
+
+        Returns the literal string ``"unreadable"`` if the file cannot be read,
+        so callers remain non-raising even when the filesystem is inaccessible.
+        """
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            return digest[:length]
+        except OSError:
+            return "unreadable"
 
     def trim_device_summary(
         self,
