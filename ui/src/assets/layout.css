@@ -74,16 +74,16 @@
 }
 
 .ahi-good {
-    color: #16a34a;
+    color: var(--color-success);
     font-weight: 600;
 }
 
 .ahi-mild {
-    color: #ca8a04;
+    color: var(--color-warning);
     font-weight: 600;
 }
 
 .ahi-severe {
-    color: #dc2626;
+    color: var(--color-destructive);
     font-weight: 600;
 }

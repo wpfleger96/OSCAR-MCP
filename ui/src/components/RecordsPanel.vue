@@ -105,10 +105,10 @@ const displayMetrics = computed(() => {
 }
 
 .best-header {
-    color: #16a34a;
+    color: var(--color-success);
 }
 .worst-header {
-    color: #dc2626;
+    color: var(--color-destructive);
 }
 
 .record-entry {
@@ -123,11 +123,11 @@ const displayMetrics = computed(() => {
 }
 
 .best-value {
-    color: #16a34a;
+    color: var(--color-success);
     font-weight: 600;
 }
 .worst-value {
-    color: #dc2626;
+    color: var(--color-destructive);
     font-weight: 600;
 }
 

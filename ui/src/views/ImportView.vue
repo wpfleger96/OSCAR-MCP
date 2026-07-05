@@ -515,7 +515,7 @@ function resetPath() {
     align-items: center;
     gap: 0.4rem;
     font-size: 0.85rem;
-    color: var(--color-success, #16a34a);
+    color: var(--color-success);
     margin: 0;
 }
 
@@ -524,7 +524,7 @@ function resetPath() {
     align-items: center;
     gap: 0.4rem;
     font-size: 0.85rem;
-    color: color-mix(in srgb, var(--color-warning, #f59e0b) 80%, var(--color-foreground));
+    color: color-mix(in srgb, var(--color-warning) 80%, var(--color-foreground));
     margin: 0;
 }
 
