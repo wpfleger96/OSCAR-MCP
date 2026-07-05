@@ -239,7 +239,7 @@ function eventTextColor(type: string): string {
 }
 
 .trend-improving {
-    color: var(--success, #16a34a);
+    color: var(--color-success);
 }
 
 .trend-worsening {

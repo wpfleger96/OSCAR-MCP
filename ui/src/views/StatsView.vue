@@ -294,7 +294,7 @@ const anyVisibleChart = computed(() => selectedMetrics.value.some((key) => hasDa
 }
 
 .trend-improving {
-    color: var(--success, #16a34a);
+    color: var(--color-success);
 }
 
 .trend-worsening {

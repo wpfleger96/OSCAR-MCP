@@ -713,9 +713,9 @@ onMounted(async () => {
     padding: 0.2rem 0.6rem;
     border-radius: 0.25rem;
     font-size: 0.8rem;
-    color: var(--warning, #d97706);
-    border: 1px solid var(--warning, #d97706);
-    background: color-mix(in srgb, var(--warning, #d97706) 10%, transparent);
+    color: var(--color-warning);
+    border: 1px solid var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
 }
 
 .setting-row {
