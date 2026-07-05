@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 from datetime import datetime
 from pathlib import Path
@@ -277,14 +278,21 @@ def import_data(
 
         # Real import — delegate backup + parse + import to service
         def _progress(msg: str) -> None:
-            if msg.startswith("Backing up"):
+            if msg.startswith("Backing up night"):
+                sys.stdout.write(f"\r{ICON_BACKUP} {msg}   ")
+                sys.stdout.flush()
+            elif msg.startswith("Backing up"):
                 console.print(f"\n{ICON_BACKUP} {msg}")
             elif msg.startswith("Backed up to") or msg.startswith("Found "):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
                 print_success(msg)
-            elif msg.startswith("Parsing sessions"):
-                console.print(f"\n{ICON_SCAN} {msg}")
-            elif msg.startswith("Importing "):
-                console.print(f"{ICON_IMPORT} {msg}")
+            elif msg.startswith("Parsing session"):
+                sys.stdout.write(f"\r{ICON_SCAN} {msg}   ")
+                sys.stdout.flush()
+            elif msg.startswith("Importing session"):
+                sys.stdout.write(f"\r{ICON_IMPORT} {msg}   ")
+                sys.stdout.flush()
             elif "orphaned" in msg or "skipping backup" in msg.lower():
                 print_warning(msg)
             else:

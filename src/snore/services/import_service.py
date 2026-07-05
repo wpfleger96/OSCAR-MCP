@@ -167,7 +167,6 @@ class ImportService:
                     emit("No device serial found — skipping backup")
 
             # Parse sessions
-            emit("Parsing sessions...")
             sessions = list(
                 parser.parse_sessions(
                     parse_root,
@@ -176,6 +175,7 @@ class ImportService:
                     limit=limit,
                     sort_by=sort_by,
                     parallel=parallel,
+                    progress_callback=emit,
                 )
             )
             emit(f"Found {len(sessions)} sessions")
