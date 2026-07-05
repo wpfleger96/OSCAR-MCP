@@ -254,19 +254,9 @@ class TestReset:
     def test_includes_all_tables(self, db_session, temp_db):
         service = DatabaseService(db_session)
         result = service.reset(str(temp_db))
-        expected = {
-            "detected_patterns",
-            "analysis_results",
-            "settings",
-            "statistics",
-            "waveforms",
-            "events",
-            "sessions",
-            "days",
-            "devices",
-            "profiles",
-        }
-        assert set(result.tables_cleared.keys()) == expected
+        from snore.database.models import Base
+
+        assert set(result.tables_cleared.keys()) == set(Base.metadata.tables.keys())
 
     def test_deletes_data(self, db_session, test_device, temp_db):
         from datetime import datetime, timedelta

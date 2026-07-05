@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from snore.database import models
+from snore.database.models import Base
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 
 __all__ = ["DatabaseService"]
@@ -141,25 +142,12 @@ class DatabaseService:
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
         )
 
-        table_names = [
-            "detected_patterns",
-            "analysis_results",
-            "settings",
-            "statistics",
-            "waveforms",
-            "events",
-            "sessions",
-            "days",
-            "devices",
-            "profiles",
-        ]
-
         tables_cleared: dict[str, int] = {}
         total = 0
-        for table in table_names:
-            cursor = self.db_session.execute(text(f"DELETE FROM {table}"))  # noqa: S608
+        for table in reversed(Base.metadata.sorted_tables):
+            cursor = self.db_session.execute(table.delete())
             count = cursor.rowcount or 0  # type: ignore[attr-defined]
-            tables_cleared[table] = count
+            tables_cleared[table.name] = count
             total += count
 
         self.db_session.commit()  # commit deletes before VACUUM — SQLite forbids VACUUM in a transaction
