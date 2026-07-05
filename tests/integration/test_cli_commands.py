@@ -1165,3 +1165,125 @@ class TestStatsTrend:
         )
 
         assert result.exit_code == 0
+
+
+@pytest.fixture
+def db_with_rx_settings_changes(temp_db):
+    """DB with three days showing two distinct settings-change dates.
+
+    Day 1 (2025-06-01): mode=CPAP, pressure_fixed=8.0  (baseline, no diff)
+    Day 2 (2025-06-02): mode=APAP, pressure_min=6.0    (change date A)
+    Day 3 (2025-06-03): mode=APAP, pressure_min=8.0    (change date B, most recent)
+    """
+    init_database(str(temp_db))
+
+    with session_scope() as session:
+        device = models.Device(
+            manufacturer="ResMed",
+            model="AirSense 10",
+            serial_number="RX_CHG_TEST",
+        )
+        session.add(device)
+        session.flush()
+
+        days_settings = [
+            (datetime(2025, 6, 1, 22, 0, 0), {"mode": "CPAP", "pressure_fixed": "8.0"}),
+            (datetime(2025, 6, 2, 22, 0, 0), {"mode": "APAP", "pressure_min": "6.0"}),
+            (datetime(2025, 6, 3, 22, 0, 0), {"mode": "APAP", "pressure_min": "8.0"}),
+        ]
+
+        for start_time, settings in days_settings:
+            sess = models.Session(
+                device_id=device.id,
+                device_session_id=f"rx_chg_{start_time.date().isoformat()}",
+                start_time=start_time,
+                end_time=start_time + timedelta(hours=8),
+                duration_seconds=8 * 3600,
+                enabled=True,
+            )
+            session.add(sess)
+            session.flush()
+
+            day = DayManager.create_or_update_day(
+                device.id, DayManager.get_day_for_session(start_time), session
+            )
+            sess.day_id = day.id
+
+            for key, value in settings.items():
+                session.add(models.Setting(session_id=sess.id, key=key, value=value))
+
+        session.commit()
+
+    return temp_db
+
+
+class TestRxChangesCommand:
+    """Test rx changes command."""
+
+    def test_changes_renders_most_recent_first_with_old_arrow_new(
+        self, cli_runner, db_with_rx_settings_changes
+    ):
+        """Changes are shown most-recent-first; each row uses 'old → new' format."""
+        result = cli_runner.invoke(
+            cli, ["rx", "changes", "--db", str(db_with_rx_settings_changes)]
+        )
+
+        assert result.exit_code == 0
+        assert "RX Settings Changes" in result.output
+        assert "→" in result.output
+
+        # Both change dates must appear
+        assert "2025-06-03" in result.output
+        assert "2025-06-02" in result.output
+
+        # Most-recent-first: 2025-06-03 row must appear before 2025-06-02 row
+        idx_recent = result.output.index("2025-06-03")
+        idx_older = result.output.index("2025-06-02")
+        assert idx_recent < idx_older
+
+        # pressure_min change on day 3: 6.0 → 8.0
+        assert "pressure_min" in result.output
+        assert "6.0 → 8.0" in result.output
+
+        # mode change on day 2: CPAP → APAP
+        assert "mode" in result.output
+        assert "CPAP → APAP" in result.output
+
+    def test_changes_none_value_rendered_as_dash(
+        self, cli_runner, db_with_rx_settings_changes
+    ):
+        """A key absent in the previous day's settings renders old_value as '—'."""
+        result = cli_runner.invoke(
+            cli, ["rx", "changes", "--db", str(db_with_rx_settings_changes)]
+        )
+
+        assert result.exit_code == 0
+        # pressure_fixed disappears on day 2 (old=8.0, new=None) → "8.0 → —"
+        assert "8.0 → —" in result.output
+        # pressure_min appears on day 2 (old=None, new=6.0) → "— → 6.0"
+        assert "— → 6.0" in result.output
+
+    def test_changes_within_date_order_is_ascending_by_key(
+        self, cli_runner, db_with_rx_settings_changes
+    ):
+        """Same-date rows appear in ascending key order (service's within-date sort)."""
+        result = cli_runner.invoke(
+            cli, ["rx", "changes", "--db", str(db_with_rx_settings_changes)]
+        )
+
+        assert result.exit_code == 0
+        # Day 2 (2025-06-02) produces three changes with keys: mode, pressure_fixed,
+        # pressure_min.  Ascending alphabetical order means mode < pressure_min, so
+        # the unique text for the mode row must appear before the pressure_min row.
+        idx_mode = result.output.index("CPAP → APAP")
+        idx_pressure_min = result.output.index("— → 6.0")
+        assert idx_mode < idx_pressure_min
+
+    def test_changes_empty_db_shows_no_changes_message(self, cli_runner, temp_db):
+        """Empty database produces a friendly no-changes message, not an error."""
+        init_database(str(temp_db))
+
+        result = cli_runner.invoke(cli, ["rx", "changes", "--db", str(temp_db)])
+
+        assert result.exit_code == 0
+        assert "No RX settings changes found" in result.output
