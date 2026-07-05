@@ -304,6 +304,10 @@ class Statistics(Base):
     epap_mean: Mapped[float | None] = mapped_column(Float)
     epap_95th: Mapped[float | None] = mapped_column(Float)
 
+    ipap_median: Mapped[float | None] = mapped_column(Float)
+    ipap_95th: Mapped[float | None] = mapped_column(Float)
+    ipap_max: Mapped[float | None] = mapped_column(Float)
+
     leak_min: Mapped[float | None] = mapped_column(Float)
     leak_max: Mapped[float | None] = mapped_column(Float)
     leak_median: Mapped[float | None] = mapped_column(Float)

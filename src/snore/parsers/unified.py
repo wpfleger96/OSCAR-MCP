@@ -166,6 +166,10 @@ class SessionStatistics(BaseModel):
     epap_mean: float | None = Field(default=None, description="Mean EPAP")
     epap_95th: float | None = Field(default=None, description="95th percentile EPAP")
 
+    ipap_median: float | None = Field(default=None, description="Median IPAP")
+    ipap_95th: float | None = Field(default=None, description="95th percentile IPAP")
+    ipap_max: float | None = Field(default=None, description="Maximum IPAP")
+
     leak_min: float | None = Field(default=None, description="Minimum leak")
     leak_max: float | None = Field(default=None, description="Maximum leak")
     leak_median: float | None = Field(default=None, description="Median leak")
