@@ -508,6 +508,15 @@ class ResmedEDFParser(DeviceParser):
                 }
 
                 completed = 0
+
+                def emit_progress() -> None:
+                    nonlocal completed
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(
+                            f"Parsing session {completed}/{total_nights}..."
+                        )
+
                 for future in as_completed(futures):
                     night_date = futures[future]
 
@@ -524,18 +533,10 @@ class ResmedEDFParser(DeviceParser):
                         session = future.result()
                     except Exception as e:
                         logger.error(f"Failed to parse night {night_date}: {e}")
-                        completed += 1
-                        if progress_callback:
-                            progress_callback(
-                                f"Parsing session {completed}/{total_nights}..."
-                            )
+                        emit_progress()
                         continue
 
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(
-                            f"Parsing session {completed}/{total_nights}..."
-                        )
+                    emit_progress()
 
                     if session is None:
                         continue
@@ -544,6 +545,13 @@ class ResmedEDFParser(DeviceParser):
                     sessions_yielded += 1
         else:
             completed = 0
+
+            def emit_progress() -> None:
+                nonlocal completed
+                completed += 1
+                if progress_callback:
+                    progress_callback(f"Parsing session {completed}/{total_nights}...")
+
             for night_date, segments in night_items:
                 if limit is not None and sessions_yielded >= limit:
                     logger.debug(f"Reached session limit of {limit}, stopping")
@@ -562,16 +570,10 @@ class ResmedEDFParser(DeviceParser):
                     )
                 except Exception as e:
                     logger.error(f"Failed to parse night {night_date}: {e}")
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(
-                            f"Parsing session {completed}/{total_nights}..."
-                        )
+                    emit_progress()
                     continue
 
-                completed += 1
-                if progress_callback:
-                    progress_callback(f"Parsing session {completed}/{total_nights}...")
+                emit_progress()
 
                 if session is None:
                     continue

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 
 from datetime import datetime
 from pathlib import Path
@@ -187,6 +186,42 @@ def import_data(
             if date_to:
                 print_info(f"• To: {date_to:%Y-%m-%d}", indent=1)
 
+        cr_active = False
+
+        def _progress(msg: str) -> None:
+            nonlocal cr_active
+
+            def overwrite(icon: str) -> None:
+                console.print(f"\r{icon} {msg}   ", end="", highlight=False)
+
+            def finish_cr() -> None:
+                nonlocal cr_active
+                if cr_active:
+                    console.print()
+                    cr_active = False
+
+            if msg.startswith("Backing up night"):
+                overwrite(ICON_BACKUP)
+                cr_active = True
+            elif msg.startswith("Backing up"):
+                finish_cr()
+                console.print(f"\n{ICON_BACKUP} {msg}")
+            elif msg.startswith("Backed up to") or msg.startswith("Found "):
+                finish_cr()
+                print_success(msg)
+            elif msg.startswith("Parsing session"):
+                overwrite(ICON_SCAN)
+                cr_active = True
+            elif msg.startswith("Importing session"):
+                overwrite(ICON_IMPORT)
+                cr_active = True
+            elif "orphaned" in msg or "skipping backup" in msg.lower():
+                finish_cr()
+                print_warning(msg)
+            else:
+                finish_cr()
+                print_info(msg, indent=1)
+
         if dry_run:
             # Dry-run: parse sessions in CLI for detailed per-session display
             if parser is None:
@@ -194,7 +229,6 @@ def import_data(
                 continue
 
             parse_root = Path(source.root_path)
-            console.print(f"\n{ICON_SCAN} Parsing sessions...")
             try:
                 sessions = list(
                     parser.parse_sessions(
@@ -204,6 +238,7 @@ def import_data(
                         limit=limit,
                         sort_by=sort_by if sort_by != "filesystem" else None,
                         parallel=not no_parallel,
+                        progress_callback=_progress,
                     )
                 )
             except Exception as e:
@@ -277,27 +312,6 @@ def import_data(
             continue
 
         # Real import — delegate backup + parse + import to service
-        def _progress(msg: str) -> None:
-            if msg.startswith("Backing up night"):
-                sys.stdout.write(f"\r{ICON_BACKUP} {msg}   ")
-                sys.stdout.flush()
-            elif msg.startswith("Backing up"):
-                console.print(f"\n{ICON_BACKUP} {msg}")
-            elif msg.startswith("Backed up to") or msg.startswith("Found "):
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-                print_success(msg)
-            elif msg.startswith("Parsing session"):
-                sys.stdout.write(f"\r{ICON_SCAN} {msg}   ")
-                sys.stdout.flush()
-            elif msg.startswith("Importing session"):
-                sys.stdout.write(f"\r{ICON_IMPORT} {msg}   ")
-                sys.stdout.flush()
-            elif "orphaned" in msg or "skipping backup" in msg.lower():
-                print_warning(msg)
-            else:
-                print_info(msg, indent=1)
-
         try:
             result = service.import_sources(
                 [source],
