@@ -185,7 +185,7 @@ class TestConvertStrToTherapySettings:
             "pressure_fixed": 10.0,
             "epr_level": 2.0,
             "epr_type_raw": 1.0,  # S10 raw+1 → code 2 → "Full Time"
-            "climate_control": 0.0,  # S10: 0=Manual
+            "climate_control": 0.0,  # S10: 0=Auto (OSCAR :233-234)
             "humidity_enabled": 1.0,  # S10: 1=on
             "humidity_level": 4.0,
             "smart_start": 1.0,  # S10: 1=on
@@ -199,7 +199,7 @@ class TestConvertStrToTherapySettings:
         assert settings.pressure_fixed == 10.0
         assert settings.epr_level == 2
         assert settings.epr_mode == "Full Time"
-        assert settings.climate_control == "Manual"
+        assert settings.climate_control == "Auto"
         assert settings.humidity_enabled is True
         assert settings.humidity_level == 4
         assert settings.smart_start is True
@@ -215,7 +215,7 @@ class TestConvertStrToTherapySettings:
             "pressure_fixed": 9.0,
             "epr_level": 1.0,
             "epr_type_raw": 2.0,  # S11 raw, unchanged (+1−1=0) → code 2 → "Full Time"
-            "climate_control": 1.0,  # S11 raw 1 → norm 0 = Manual
+            "climate_control": 1.0,  # S11 raw 1 → norm 0 = Auto (OSCAR :233-234)
             "humidity_enabled": 2.0,  # S11 raw 2 → norm 1 = on
             "humidity_level": 3.0,
             "smart_start": 2.0,  # S11 raw 2 → norm 1 = on
@@ -229,7 +229,7 @@ class TestConvertStrToTherapySettings:
         assert settings.pressure_fixed == 9.0
         assert settings.epr_level == 1
         assert settings.epr_mode == "Full Time"
-        assert settings.climate_control == "Manual"
+        assert settings.climate_control == "Auto"
         assert settings.humidity_enabled is True
         assert settings.humidity_level == 3
         assert settings.smart_start is True
@@ -298,8 +298,8 @@ class TestConvertStrToTherapySettings:
         assert settings is not None
         assert settings.other_settings["ti_max"] == "2.5"
         assert settings.other_settings["ti_min"] == "0.3"
-        assert settings.other_settings["trigger"] == "3"
-        assert settings.other_settings["cycle"] == "1"
+        assert settings.other_settings["trigger"] == "High"
+        assert settings.other_settings["cycle"] == "Low"
 
     def test_series11_mode3_cpap_has_pressure_fixed_and_epr(self, parser):
         """S11 mode 3 → CPAP with pressure_fixed and EPR; no bilevel fields."""
@@ -463,8 +463,8 @@ class TestS10BilevelSignals:
         assert settings is not None
         assert settings.other_settings.get("ti_max") == "2.0"
         assert settings.other_settings.get("ti_min") == "0.3"
-        assert settings.other_settings.get("trigger") == "2"
-        assert settings.other_settings.get("cycle") == "1"
+        assert settings.other_settings.get("trigger") == "Med"
+        assert settings.other_settings.get("cycle") == "Low"
 
     def test_s10_bilevel_bl_fallback_when_bare_absent(self, parser):
         """S10 BIPAP falls back to S.BL.* timing keys when bare S.* keys are absent."""
@@ -482,8 +482,8 @@ class TestS10BilevelSignals:
         assert settings is not None
         assert settings.other_settings.get("ti_max") == "2.0"
         assert settings.other_settings.get("ti_min") == "0.3"
-        assert settings.other_settings.get("trigger") == "2"
-        assert settings.other_settings.get("cycle") == "1"
+        assert settings.other_settings.get("trigger") == "Med"
+        assert settings.other_settings.get("cycle") == "Low"
 
     def test_s11_bipap_still_uses_smode_signals(self, parser):
         """S11 BIPAP (raw mode 4) still uses S.S.* (STR_SMODE_SIGNALS)."""
@@ -531,8 +531,8 @@ class TestS10VAutoTimingSignals:
         assert settings is not None
         assert settings.other_settings.get("ti_max") == "1.8"
         assert settings.other_settings.get("ti_min") == "0.3"
-        assert settings.other_settings.get("trigger") == "2"
-        assert settings.other_settings.get("cycle") == "1"
+        assert settings.other_settings.get("trigger") == "Med"
+        assert settings.other_settings.get("cycle") == "Low"
 
     def test_s11_vauto_timing_uses_va_signals(self, parser):
         """S11 VAuto timing comes from va_cycle/va_trigger/va_ti_max/va_ti_min."""
@@ -566,10 +566,10 @@ class TestEnumNormalization:
     @pytest.mark.parametrize(
         "series11, raw, expected",
         [
-            (False, 0.0, "Manual"),  # S10 raw 0 = Manual
-            (False, 1.0, "Auto"),  # S10 raw 1 = Auto
-            (True, 1.0, "Manual"),  # S11 raw 1 → norm 0 = Manual
-            (True, 2.0, "Auto"),  # S11 raw 2 → norm 1 = Auto
+            (False, 0.0, "Auto"),  # S10 raw 0 = Auto
+            (False, 1.0, "Manual"),  # S10 raw 1 = Manual
+            (True, 1.0, "Auto"),  # S11 raw 1 → norm 0 = Auto
+            (True, 2.0, "Manual"),  # S11 raw 2 → norm 1 = Manual
         ],
     )
     def test_climate_control(self, parser, series11, raw, expected):
@@ -889,12 +889,45 @@ class TestSmartStopTubePtAccess:
         assert settings.other_settings.get("tube") == "3"
 
     def test_pt_access_stored(self, parser):
-        """PtAccess stored in other_settings; S11 normalized -1."""
+        """S11 PtAccess emits pt_view (normalized -1); pt_access key must be absent."""
         parser._str_series11 = True
-        record = {"mode": 3.0, "pt_access_raw": 2.0}  # S11 raw 2→norm 1
+        record = {"mode": 3.0, "pt_access_raw": 2.0}  # S11 raw 2→norm 1 = "Simple"
         settings = parser._convert_str_to_therapy_settings(record)
         assert settings is not None
-        assert settings.other_settings.get("pt_access") == "1"
+        assert settings.other_settings.get("pt_view") == "Simple"
+        assert "pt_access" not in settings.other_settings
+
+    @pytest.mark.parametrize(
+        "raw, expected_label",
+        [
+            (0.0, "Plus"),  # S10 raw 0 = Plus
+            (1.0, "On"),  # S10 raw 1 = On
+        ],
+    )
+    def test_s10_pt_access_stores_plus_on_labels(self, parser, raw, expected_label):
+        """S10 PtAccess emits pt_access with PT_ACCESS_MAP labels; pt_view must be absent."""
+        parser._str_series11 = False
+        record = {"mode": 0.0, "pt_access_raw": raw}
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.other_settings.get("pt_access") == expected_label
+        assert "pt_view" not in settings.other_settings
+
+    @pytest.mark.parametrize(
+        "raw, expected_label",
+        [
+            (15.0, "SlimLine"),
+            (19.0, "Standard"),
+            (3.0, "3"),  # unmapped raw passes through as str(int)
+        ],
+    )
+    def test_tube_type_mapped(self, parser, raw, expected_label):
+        """Tube type uses TUBE_TYPE_MAP; unmapped values pass through as strings."""
+        parser._str_series11 = False
+        record = {"mode": 0.0, "tube_raw": raw}
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.other_settings.get("tube") == expected_label
 
 
 # ---------------------------------------------------------------------------
@@ -985,10 +1018,26 @@ class TestResponseField:
     def test_s11_response_normalized(self, parser):
         """S11 S.AS.Comfort raw normalized -1 (OSCAR :2180-2183)."""
         parser._str_series11 = True
-        record = {"mode": 1.0, "comfort_raw": 3.0}  # S11 raw 3→norm 2
+        record = {"mode": 1.0, "comfort_raw": 3.0}  # S11 raw 3→norm 2 → "2" (unmapped)
         settings = parser._convert_str_to_therapy_settings(record)
         assert settings is not None
         assert settings.other_settings.get("response") == "2"
+
+    @pytest.mark.parametrize(
+        "raw, expected_label",
+        [
+            (0.0, "Standard"),  # RESPONSE_MAP[0]
+            (1.0, "Soft"),  # RESPONSE_MAP[1]
+            (2.0, "2"),  # unmapped → passthrough
+        ],
+    )
+    def test_response_known_codes_mapped(self, parser, raw, expected_label):
+        """RESPONSE_MAP labels codes 0 and 1; unmapped codes pass through as strings."""
+        parser._str_series11 = False
+        record = {"mode": 1.0, "comfort_raw": raw}
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.other_settings.get("response") == expected_label
 
 
 # ---------------------------------------------------------------------------
@@ -1292,3 +1341,48 @@ class TestNanModeValue:
         record = {"mode": float("nan"), "pressure_fixed": 10.0}
         result = parser._convert_str_to_therapy_settings(record)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Trigger/Cycle label coverage
+# ---------------------------------------------------------------------------
+
+
+class TestTriggerCycleLabels:
+    """All five TRIGGER_MAP / CYCLE_MAP labels are produced correctly."""
+
+    @pytest.fixture
+    def parser(self):
+        p = ResmedEDFParser()
+        p._str_series11 = True
+        return p
+
+    @pytest.mark.parametrize(
+        "s10_code, expected_label",
+        [
+            (0, "Very Low"),
+            (1, "Low"),
+            (2, "Med"),
+            (3, "High"),
+            (4, "Very High"),
+        ],
+    )
+    def test_trigger_cycle_all_five_levels(self, parser, s10_code, expected_label):
+        """S11 VAuto: raw = s10_code + 1 (S11 offset); _norm subtracts 1 back.
+
+        Both trigger and cycle use the same five-level map, so one parametrized
+        test exercises both paths simultaneously.
+        """
+        s11_raw = float(s10_code + 1)
+        record = {
+            "mode": 8.0,  # S11 raw 8 = VAuto
+            "va_min_epap": 5.0,
+            "va_max_ipap": 14.0,
+            "va_ps": 3.0,
+            "va_trigger": s11_raw,
+            "va_cycle": s11_raw,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.other_settings.get("trigger") == expected_label
+        assert settings.other_settings.get("cycle") == expected_label
