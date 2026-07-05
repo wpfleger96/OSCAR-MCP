@@ -174,6 +174,11 @@ tests/
 
 **OSCAR parsers:** `parsers/oscar_device.py` (main), `oscar_summary.py`, `oscar_events.py`, `qdatastream.py`
 
+**Golden reference for ResMed STR decoding:** local OSCAR clone at `/home/will/Development/OSCAR-code`,
+file `oscar/SleepLib/loader_plugins/resmed_loader.cpp`. Comments in `resmed_edf.py` cite it as
+`OSCAR :NNNN` (line numbers in that file). When changing STR decode logic, verify against the OSCAR
+source first and keep the citations current.
+
 ## Tech Stack
 
 - Python 3.13+ with UV package manager
@@ -253,6 +258,26 @@ get composite decorators in `cli/decorators.py` (e.g. `device_option`).
 `ResmedEDFParser._read_waveform` (valid-range masking, unit conversion, stats);
 basic min/max/mean via `extract_basic_stats`; unit strings come from the `UNIT_*`
 constants in `constants.py`; annotation labels map via `parsers/event_labels.py`.
+
+**ResMed STR settings decoding** (`parsers/resmed_edf.py`, verified against OSCAR — see OSCAR Relationship):
+- Series detection is ProductCode-only: `_detect_series11` reads `Identification.json`
+  (`ProductCode >= 39000` → Series 11; values can be JSON floats, hence `int(float(str(code)))`)
+  with `Identification.tgt` key=value fallback for S9. The model-name regex `_is_eleven_series`
+  has no production callers — do not reintroduce model-string series checks.
+- Mode decode is two-step: S11 raw → S10 basis via `_S11_MODE_TO_S10`, then the shared `_MODE_MAP`.
+  Unknown modes warn + skip the record (S11 raw 0/5; S10 raw 10 "PAC").
+- S11 emits enum-valued signals one higher than S10 ("−1 family"): normalize via `_norm()`
+  (subtracts 1 on S11; NaN → `None` so booleans read unknown, not False). All downstream lookup
+  maps are keyed on the S10 basis — never add an S11-keyed map.
+- Signal rosters are per-mode maps merged into `ALL_STR_SIGNAL_MAPS`: APAP `S.A.*`/`S.AFH.*`,
+  S11 vAuto `S.VA.*` / S11 bilevel `S.S.*`, S10 bilevel pressures `S.BL.*` with timing/comfort from
+  bare `S.*` signals (`S.Cycle`, `S.Trigger`, `S.TiMax`, `S.TiMin`, `S.RiseEnable`, `S.EasyBreathe`),
+  ASV `S.AV.*`/`S.AA.*`, iVAPS `S.i.*`. Add new signals to the per-mode map, not the merged map.
+- `STR.edf` pre-allocates ~a year of daily record slots (unused days are all-NaN rows), and the
+  device periodically rolls it into `STR_Backup/STR-YYYYMMDD.edf` snapshots (~183-day cadence
+  observed). `_load_str_caches` merges primary + backups longer-file-wins per start-date, probing
+  EDF headers before full loads (`_preload_str_file`) and falling back to the next candidate when
+  a winner is corrupt.
 
 **Event matching tolerance** is single-sourced:
 `EVENT_MATCH_TOLERANCE_SECONDS` in `analysis/modes/postprocess.py`. Never hardcode 5.0.
@@ -377,6 +402,9 @@ gh api -X DELETE repos/<owner>/<repo>/issues/comments/<stale-comment-id>
 10. **Apnea classification confidence:** OA vs CA vs MA classification from flow-only data is approximation (true classification needs thoracic/abdominal effort bands). All apneas include `classification_confidence` field (0-1) based on effort score distinctiveness.
 11. **SpO2/Flow timestamp alignment:** `_detect_hypopneas()` validates SpO2 and flow signal lengths match before indexing. Mismatch logs warning and skips desaturation check to prevent IndexError with external oximeters at different sample rates.
 12. **Documentation citations:** Use Vancouver-style numbered citations [1], [2] in `docs/apnea_detection_reference.md`. Add PDF to `docs/references/` and update both inline citation and References section. See existing format: author list, journal, year, volume, pages, DOI, PMCID, local path, URL.
+13. **Parser parity verification:** import real data into a scratch DB via the global `--db` option (`uv run snore import --all --no-backup --db <path> "<folder>"`), dump `RxTracker().get_changes()` rows, and diff against a known-good baseline before/after parser changes. Put large scratch DBs on real disk — `/tmp` is a 16G tmpfs.
+14. **Never add unlayered global CSS resets in `App.vue`** (e.g. a bare `* { margin: 0 }`): unlayered styles outrank every Tailwind v4 layered utility and silently break component styling.
+15. **Fresh worktree setup:** run `uv sync` and `just web-install` once per new worktree — the managed pre-commit hook (`.hooks/pre-commit` → `just pre-commit`) auto-fixes and re-stages lint/format issues including the web legs, and `just check-all` runs the check-mode web variants.
 
 ## Key Files by Task
 
@@ -384,6 +412,8 @@ gh api -X DELETE repos/<owner>/<repo>/issues/comments/<stale-comment-id>
 |------|-------|
 | Add CLI command | `src/snore/cli/groups/` (subcommand group) or `cli/commands/` (standalone); helpers in `cli/decorators.py`, `cli/display/` |
 | Add device parser | `src/snore/parsers/base.py`, `src/snore/parsers/register_all.py`, create new parser file |
+| Modify ResMed STR settings decoding | `src/snore/parsers/resmed_edf.py` (per-mode signal maps, `_parse_str_settings`), `tests/unit/test_resmed_str_converter.py`, `tests/unit/test_resmed_str_backup.py` |
+| Prescription (rx) history | `src/snore/analysis/rx_tracker.py`, `src/snore/cli/groups/rx.py`, UI labels in `ui/src/utils/deviceSettings.ts` |
 | Add analysis algorithm | `src/snore/analysis/shared/` (breath/feature algorithms) or `modes/` (event detection) |
 | Add detection mode | `src/snore/analysis/modes/config.py` (add `DetectionModeConfig`), update `detector.py` |
 | Modify event detection | `src/snore/analysis/modes/detector.py` (detection core); `baseline.py`/`postprocess.py`/`classification.py` (supporting algorithms) |
