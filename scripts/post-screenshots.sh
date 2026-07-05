@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <pr-number> [png-dir] [comment-body-file]" >&2
+if [[ $# -lt 2 ]]; then
+  echo "Usage: $0 <pr-number> <png-dir> [comment-body-file]" >&2
   exit 1
 fi
 
 PR="$1"
-PNG_DIR="${2:-ui/screenshots}"
+PNG_DIR="$2"
 BODY_FILE="${3:-}"
 
 if ! [[ "$PR" =~ ^[0-9]+$ ]]; then

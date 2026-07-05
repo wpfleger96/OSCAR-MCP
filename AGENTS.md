@@ -304,6 +304,60 @@ Markers: `unit`, `integration`, `parser`, `recorded`, `real_data`, `slow`
 
 Key fixtures: `db_session`, `test_device`, `test_session_factory`, `recorded_session("YYYYMMDD")`
 
+## PR Screenshots
+
+PR screenshots are **ad hoc**: capture only what demonstrates THIS PR's UI changes — one
+focused shot per change, each with a caption. Never post the regression battery
+(`ui/screenshot.spec.ts` via `just screenshot`) to a PR; that suite is for local
+regression eyeballing only.
+
+**Capture:** the UI renders against a route-mocked API (no backend needed). Write a
+throwaway Playwright spec patterned on `ui/screenshot.spec.ts` — import the fixtures
+from `ui/tests/fixtures/api-fixtures`, spread-and-override them inline so every new
+field/state in your diff is exercised, and use `locator.screenshot()` to crop to the
+relevant section when a full page would bury the change. Gotcha:
+`ui/playwright.config.ts` pins `testMatch: 'screenshot.spec.ts'`, so pair your spec
+with a throwaway config (same `webServer`/`baseURL`/viewport, `testMatch` pointing at
+your spec):
+
+```bash
+just web-build
+cd ui && pnpm exec playwright test --config=pr-shots.config.ts
+```
+
+Delete the throwaway spec/config before committing. Dark mode: click the sidebar
+toggle (`page.getByText('Dark Mode').click()`); include dark variants only where the
+change is theme-sensitive. Name files with numeric prefixes to control order
+(`01-devices-overview.png`).
+
+**Post:** `scripts/post-screenshots.sh` hosts PNGs on a per-developer branch
+(`agent-screenshots/<github-username>`) and comments on the PR with immutable
+commit-SHA image URLs:
+
+```bash
+bash scripts/post-screenshots.sh <pr-number> <png-dir> body.md
+```
+
+`body.md` uses `{{filename}}` placeholders (without `.png`); images not referenced by
+a placeholder are appended at the end. One section per change:
+
+```markdown
+## Screenshots
+
+### Settings history
+Consecutive-session diff; added keys show "(new)", removed keys "(removed)".
+
+{{03-settings-history}}
+```
+
+**Re-posting:** the script appends a new comment — it never edits or deletes old ones.
+After re-posting, delete the superseded comment so reviewers only see the current set:
+
+```bash
+gh pr view <pr> --json comments --jq '.comments[] | select(.body | test("pr-<pr>--")) | {id, url}'
+gh api -X DELETE repos/<owner>/<repo>/issues/comments/<stale-comment-id>
+```
+
 ## Common Gotchas
 
 1. **OSCAR day-splitting logic:** Sessions before noon belong to previous day (e.g., 01:50 AM Dec 8 = Dec 7's sleep). Use `Day.date` for display/queries, not `session.start_time.date()`. See `DayManager.get_day_for_session()` in `src/snore/database/day_manager.py` and the `session.day.date` fallback in `src/snore/services/analysis_facade.py`
