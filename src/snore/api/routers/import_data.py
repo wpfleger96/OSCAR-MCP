@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from snore.api.import_jobs import ImportJob, JobType, create_job, get_job, remove_job
-from snore.services.import_service import ImportService, _safe_relative_path
+from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ async def import_files(request: Request) -> JobResponse:
         tmp_root = tmp_path.resolve()
         for upload in uploads:
             filename = upload.filename or "unknown"
-            rel = _safe_relative_path(filename) or "unknown"
+            rel = safe_relative_path(filename) or "unknown"
             dest = tmp_path / rel
             if not dest.resolve().is_relative_to(tmp_root):
                 logger.warning("Skipping file with unsafe path: %r", filename)

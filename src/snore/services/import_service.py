@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import logging
-import shutil
-import tempfile
 
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
 
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
@@ -18,10 +15,10 @@ from snore.services.schemas import ImportResult, ImportSource, ImportSourceResul
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ImportService"]
+__all__ = ["ImportService", "safe_relative_path"]
 
 
-def _safe_relative_path(filename: str) -> str | None:
+def safe_relative_path(filename: str) -> str | None:
     """Sanitize a multipart filename, preserving relative directory structure."""
     parts = PurePosixPath(filename.replace("\\", "/")).parts
     safe = [
@@ -229,47 +226,3 @@ class ImportService:
             sources=source_results,
             warnings=[],
         )
-
-    def import_from_upload(
-        self,
-        files: list[tuple[str, BinaryIO]],
-        *,
-        force: bool = False,
-        batch_size: int = 50,
-        progress_callback: Callable[[str], None] | None = None,
-    ) -> ImportResult:
-        """Import from uploaded file streams, preserving relative paths.
-
-        Writes files to a temp directory preserving relative paths, then detects
-        and imports. Backup is disabled (there is no SD card to protect).
-        """
-
-        def emit(msg: str) -> None:
-            if progress_callback:
-                progress_callback(msg)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            tmp_root = tmp_path.resolve()
-            emit(f"Writing {len(files)} files...")
-            for filename, fileobj in files:
-                rel = _safe_relative_path(filename) or "unknown"
-                dest = tmp_path / rel
-                if not dest.resolve().is_relative_to(tmp_root):
-                    logger.warning("Skipping file with unsafe path: %r", filename)
-                    continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                fileobj.seek(0)
-                with open(dest, "wb") as out:
-                    shutil.copyfileobj(fileobj, out, 1024 * 1024)
-
-            emit("Detecting data sources...")
-            sources = self.detect_sources(tmp_path)
-            emit(f"Detected {len(sources)} source(s)")
-            return self.import_sources(
-                sources,
-                force=force,
-                batch_size=batch_size,
-                backup=False,
-                progress_callback=progress_callback,
-            )

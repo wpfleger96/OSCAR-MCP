@@ -55,6 +55,8 @@ def remove_job(job_id: str) -> None:
 
 
 def _purge_stale() -> None:
+    import shutil
+
     now = time.monotonic()
     with _lock:
         stale = [
@@ -63,4 +65,6 @@ def _purge_stale() -> None:
             if now - job.created_at > _JOB_TIMEOUT_SECONDS
         ]
         for jid in stale:
-            _jobs.pop(jid, None)
+            job = _jobs.pop(jid, None)
+            if job is not None and job.temp_dir is not None:
+                shutil.rmtree(job.temp_dir, ignore_errors=True)

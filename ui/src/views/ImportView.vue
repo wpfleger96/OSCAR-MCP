@@ -323,10 +323,7 @@ async function handleImport() {
             uploadLoaded.value = event.loaded
             uploadTotal.value = event.total
             uploadProgress.value = Math.round((event.loaded / event.total) * 100)
-            if (event.loaded >= event.total) {
-                uploadPhase.value = 'processing'
-                processingMessage.value = 'Starting import...'
-            }
+            if (event.loaded >= event.total) uploadPhase.value = 'processing'
         }
     }
 
