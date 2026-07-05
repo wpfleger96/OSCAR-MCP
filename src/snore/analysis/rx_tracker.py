@@ -6,9 +6,9 @@ import logging
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
-from snore.database.models import Day
+from snore.database.models import Day, Device
 from snore.database.models import Session as SessionModel
 from snore.services.schemas import (
     RxChangesResponse,
@@ -30,6 +30,8 @@ RX_KEYS = (
     "epap",
     "ps",
 )
+
+_TAIL_WALK_BATCH_SIZE = 90
 
 
 def _diff_settings(
@@ -75,9 +77,26 @@ class RxTracker:
         return [self._to_response(p) for p in stats]
 
     def get_current(self, db_session: Session) -> RxPeriodResponse | None:
-        """Return the current (most recent) RX period, or None if no data."""
-        history = self.get_history(db_session)
-        return history[-1] if history else None
+        """Return the current (most recent) RX period, or None if no data.
+
+        Invariant: for any DB state, result equals get_history()[-1] when
+        non-empty — the period with max (start_date, device_id) across all
+        devices.  Empty DB / no periods → None.
+        """
+        candidates: list[RxPeriod] = []
+        for device_id, device_name in self._get_devices(db_session):
+            period = self._find_last_period_for_device(
+                db_session, device_id, device_name
+            )
+            if period is not None:
+                candidates.append(period)
+
+        if not candidates:
+            return None
+
+        best = max(candidates, key=lambda p: (p.start_date, p.device_id))
+        stats = self._compute_period_stats([best])[0]
+        return self._to_response(stats)
 
     def get_comparison(
         self, db_session: Session, min_days: int = 7
@@ -372,3 +391,109 @@ class RxTracker:
         """Build a fingerprint string from RX settings for comparison."""
         sorted_items = sorted(settings.items())
         return "|".join(f"{k}={v}" for k, v in sorted_items)
+
+    def _get_devices(self, db_session: Session) -> list[tuple[int, str]]:
+        """Return (device_id, device_name) for all devices that have Day rows.
+
+        Uses an inner join so Day rows with no matching Device are naturally
+        excluded — same outcome as the missing-device guard in _days_by_device.
+        """
+        rows = (
+            db_session.query(Day.device_id, Device.manufacturer, Device.model)
+            .join(Device, Day.device_id == Device.id)
+            .distinct()
+            .all()
+        )
+        return [
+            (device_id, f"{manufacturer} {model}")
+            for device_id, manufacturer, model in rows
+        ]
+
+    def _query_device_days_desc(
+        self,
+        db_session: Session,
+        device_id: int,
+        *,
+        before: date | None,
+        limit: int,
+    ) -> list[Day]:
+        """Return up to `limit` days for `device_id` ordered newest-first.
+
+        If `before` is given, only days strictly older than that date are
+        included (keyset pagination cursor).
+        """
+        q = (
+            db_session.query(Day)
+            .filter(Day.device_id == device_id)
+            .order_by(Day.date.desc())
+        )
+        if before is not None:
+            q = q.filter(Day.date < before)
+        return (
+            q.options(
+                selectinload(Day.sessions).selectinload(SessionModel.settings),
+                joinedload(Day.device),
+            )
+            .limit(limit)
+            .all()
+        )
+
+    def _find_last_period_for_device(
+        self,
+        db_session: Session,
+        device_id: int,
+        device_name: str,
+    ) -> RxPeriod | None:
+        """Walk batches newest→oldest to find the last RX period for a device.
+
+        Returns the most recent contiguous run of days sharing the same RX
+        fingerprint, skipping days with no valid settings.  Stops as soon as
+        a day with a different fingerprint (a period boundary) is encountered.
+        If all batches exhaust without finding a boundary, the entire device
+        history is one period.
+        """
+        current_fingerprint: str | None = None
+        current_settings: dict[str, str] | None = None
+        collected_days: list[Day] = []  # accumulated newest-first
+        cursor: date | None = None
+        done = False
+
+        while not done:
+            batch = self._query_device_days_desc(
+                db_session, device_id, before=cursor, limit=_TAIL_WALK_BATCH_SIZE
+            )
+            if not batch:
+                break
+
+            for day in batch:
+                day_settings = self._get_day_rx_settings(day)
+                if day_settings is None:
+                    continue
+
+                fingerprint = self._build_fingerprint(day_settings)
+
+                if current_fingerprint is None:
+                    current_fingerprint = fingerprint
+                    current_settings = day_settings
+
+                if fingerprint != current_fingerprint:
+                    done = True
+                    break
+
+                collected_days.append(day)
+
+            if not done:
+                cursor = batch[-1].date
+
+        if not collected_days or current_settings is None:
+            return None
+
+        collected_days.reverse()
+        return RxPeriod(
+            settings=current_settings,
+            start_date=collected_days[0].date,
+            end_date=collected_days[-1].date,
+            days=collected_days,
+            device_id=device_id,
+            device_name=device_name,
+        )

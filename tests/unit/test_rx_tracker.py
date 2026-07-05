@@ -351,6 +351,176 @@ class TestRxTrackerCurrent:
         assert result.end_date == base + timedelta(days=9)
 
 
+class TestRxTrackerCurrentTailWalk:
+    def test_current_empty_db_returns_none(self, db_session: DbSession) -> None:
+        """Empty database returns None."""
+        assert RxTracker().get_current(db_session) is None
+
+    def test_current_equals_history_last_single_device(
+        self, db_session: DbSession, test_device: Device
+    ) -> None:
+        """Single device with multiple periods: get_current equals get_history()[-1]."""
+        base = date(2025, 1, 1)
+        settings_a = {"mode": "CPAP", "pressure_fixed": "8.0"}
+        settings_b = {"mode": "APAP", "pressure_min": "6.0", "pressure_max": "20.0"}
+        for i in range(5):
+            _create_day_with_session(
+                db_session, test_device, base + timedelta(days=i), settings=settings_a
+            )
+        for i in range(5, 10):
+            _create_day_with_session(
+                db_session, test_device, base + timedelta(days=i), settings=settings_b
+            )
+        db_session.flush()
+
+        tracker = RxTracker()
+        assert tracker.get_current(db_session) == tracker.get_history(db_session)[-1]
+
+    def test_current_equals_history_last_multi_device(
+        self, db_session: DbSession
+    ) -> None:
+        """Two devices with interleaved dates: get_current equals get_history()[-1]."""
+        device_a = _create_device(
+            db_session, manufacturer="ResMed", model="AirSense 10"
+        )
+        device_b = _create_device(
+            db_session, manufacturer="ResMed", model="AirCurve 10"
+        )
+        base = date(2025, 3, 1)
+        settings_a = {"mode": "CPAP", "pressure_fixed": "10.0"}
+        settings_b = {"mode": "APAP", "pressure_min": "5.0", "pressure_max": "20.0"}
+
+        for i in range(7):
+            _create_day_with_session(
+                db_session, device_a, base + timedelta(days=i), settings=settings_a
+            )
+        # device_b starts later, so its period will have the higher start_date
+        for i in range(14, 21):
+            _create_day_with_session(
+                db_session, device_b, base + timedelta(days=i), settings=settings_b
+            )
+        db_session.flush()
+
+        tracker = RxTracker()
+        assert tracker.get_current(db_session) == tracker.get_history(db_session)[-1]
+
+    def test_current_later_start_on_lower_device_id_wins(
+        self, db_session: DbSession
+    ) -> None:
+        """A later start_date wins over a higher device_id with an earlier start."""
+        device_low = _create_device(
+            db_session, manufacturer="ResMed", model="AirSense 10"
+        )
+        device_high = _create_device(
+            db_session, manufacturer="ResMed", model="AirCurve 10"
+        )
+        assert device_low.id < device_high.id
+
+        base = date(2025, 5, 1)
+        settings_low = {"mode": "CPAP", "pressure_fixed": "8.0"}
+        settings_high = {"mode": "APAP", "pressure_min": "4.0", "pressure_max": "20.0"}
+
+        # device_high starts at base (earlier), device_low starts 10 days later
+        for i in range(5):
+            _create_day_with_session(
+                db_session,
+                device_high,
+                base + timedelta(days=i),
+                settings=settings_high,
+            )
+        for i in range(10, 15):
+            _create_day_with_session(
+                db_session, device_low, base + timedelta(days=i), settings=settings_low
+            )
+        db_session.flush()
+
+        result = RxTracker().get_current(db_session)
+        assert result is not None
+        assert result.device_id == device_low.id
+        assert result.start_date == base + timedelta(days=10)
+
+    def test_current_skips_none_settings_days_at_tail(
+        self, db_session: DbSession, test_device: Device
+    ) -> None:
+        """Newest days with no valid settings are skipped; real period below is returned."""
+        base = date(2025, 6, 1)
+        real_settings = {"mode": "CPAP", "pressure_fixed": "8.0"}
+
+        # Days 0–4: real period with valid settings
+        for i in range(5):
+            _create_day_with_session(
+                db_session,
+                test_device,
+                base + timedelta(days=i),
+                settings=real_settings,
+            )
+        # Days 5–7: disabled sessions → _get_day_rx_settings returns None
+        for i in range(5, 8):
+            _create_day_with_session(
+                db_session,
+                test_device,
+                base + timedelta(days=i),
+                settings=real_settings,
+                enabled=False,
+            )
+        db_session.flush()
+
+        result = RxTracker().get_current(db_session)
+        assert result is not None
+        assert result.settings == real_settings
+        assert result.days_count == 5
+        assert result.end_date == base + timedelta(days=4)
+
+    def test_current_all_days_same_settings_single_period(
+        self, db_session: DbSession, test_device: Device
+    ) -> None:
+        """When fingerprint never changes, all batches exhaust and whole history is one period."""
+        base = date(2025, 2, 1)
+        settings = {"mode": "CPAP", "pressure_fixed": "10.0"}
+        for i in range(30):
+            _create_day_with_session(
+                db_session, test_device, base + timedelta(days=i), settings=settings
+            )
+        db_session.flush()
+
+        tracker = RxTracker()
+        result = tracker.get_current(db_session)
+        assert result is not None
+        assert result.days_count == 30
+        assert result == tracker.get_history(db_session)[-1]
+
+    def test_current_period_spanning_batch_boundary(
+        self, db_session: DbSession, test_device: Device
+    ) -> None:
+        """Current period >90 days spans a batch boundary; result equals get_history()[-1]."""
+        base = date(2024, 1, 1)
+        settings_old = {"mode": "CPAP", "pressure_fixed": "6.0"}
+        settings_new = {"mode": "APAP", "pressure_min": "4.0", "pressure_max": "20.0"}
+
+        # 10 older days with different settings
+        for i in range(10):
+            _create_day_with_session(
+                db_session, test_device, base + timedelta(days=i), settings=settings_old
+            )
+        # 95 consecutive days with current settings (crosses the 90-day batch boundary)
+        new_start = base + timedelta(days=10)
+        for i in range(95):
+            _create_day_with_session(
+                db_session,
+                test_device,
+                new_start + timedelta(days=i),
+                settings=settings_new,
+            )
+        db_session.flush()
+
+        tracker = RxTracker()
+        result = tracker.get_current(db_session)
+        assert result is not None
+        assert result.start_date == new_start
+        assert result.days_count == 95
+        assert result == tracker.get_history(db_session)[-1]
+
+
 class TestRxTrackerComparison:
     def test_comparison_empty_db(self, db_session):
         """Empty database returns empty comparison."""
