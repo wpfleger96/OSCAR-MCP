@@ -21,6 +21,11 @@ export const SETTING_CATEGORIES: SettingsCategory[] = [
             'ipap',
             'epap',
             'ps',
+            'min_epap',
+            'max_epap',
+            'min_ps',
+            'max_ps',
+            'epap_auto',
             'ramp_start_pressure',
             'epr_level',
             'epr_mode',
@@ -29,8 +34,10 @@ export const SETTING_CATEGORIES: SettingsCategory[] = [
     {
         label: 'Comfort',
         keys: [
+            'response',
             'ramp_enabled',
             'ramp_time',
+            'smart_ramp',
             'ti_min',
             'ti_max',
             'rise_time',
@@ -45,7 +52,15 @@ export const SETTING_CATEGORIES: SettingsCategory[] = [
     },
     {
         label: 'Other',
-        keys: ['smart_start', 'ab_filter', 'mask_type', 'easy_breathe'],
+        keys: [
+            'smart_start',
+            'smart_stop',
+            'ab_filter',
+            'mask_type',
+            'easy_breathe',
+            'tube',
+            'pt_access',
+        ],
     },
 ]
 
@@ -59,11 +74,18 @@ const SETTING_LABELS: Record<string, string> = {
     ipap: 'IPAP',
     epap: 'EPAP',
     ps: 'Pressure Support',
+    min_epap: 'Min EPAP',
+    max_epap: 'Max EPAP',
+    min_ps: 'Min PS',
+    max_ps: 'Max PS',
+    epap_auto: 'EPAP Auto',
     ramp_start_pressure: 'Ramp Start Pressure',
     epr_level: 'EPR Level',
     epr_mode: 'EPR Mode',
+    response: 'Response',
     ramp_enabled: 'Ramp',
     ramp_time: 'Ramp Time',
+    smart_ramp: 'Smart Ramp',
     ti_min: 'Ti Min',
     ti_max: 'Ti Max',
     rise_time: 'Rise Time',
@@ -75,9 +97,12 @@ const SETTING_LABELS: Record<string, string> = {
     tube_temp_enabled: 'Heated Tube',
     tube_temp: 'Tube Temperature',
     smart_start: 'Smart Start',
+    smart_stop: 'Smart Stop',
     ab_filter: 'Filter Type',
     mask_type: 'Mask Type',
     easy_breathe: 'Easy-Breathe',
+    tube: 'Tube',
+    pt_access: 'Patient Access',
 }
 
 const BOOLEAN_KEYS = new Set([
@@ -85,6 +110,10 @@ const BOOLEAN_KEYS = new Set([
     'humidity_enabled',
     'tube_temp_enabled',
     'smart_start',
+    'smart_stop',
+    'smart_ramp',
+    'epap_auto',
+    'easy_breathe',
 ])
 
 const PRESSURE_KEYS = new Set([
@@ -95,6 +124,10 @@ const PRESSURE_KEYS = new Set([
     'ipap',
     'epap',
     'ps',
+    'min_epap',
+    'max_epap',
+    'min_ps',
+    'max_ps',
 ])
 
 /** Human-readable label for a setting key. */

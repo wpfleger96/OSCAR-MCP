@@ -87,8 +87,12 @@ class ResmedEDFParser(DeviceParser):
         "S.A.MaxPress": "pressure_max",
         "S.C.StartPress": "ramp_start_pressure",
         "S.A.StartPress": "ramp_start_pressure",
+        # S.AS.StartPress is the first-choice ramp pressure for APAP on S10 (OSCAR :1938)
+        "S.AS.StartPress": "as_start_press",
         "S.EPR.Level": "epr_level",
-        "S.EPR.EPRType": "epr_mode",
+        "S.EPR.EPRType": "epr_type_raw",
+        "S.EPR.EPREnable": "epr_enable_raw",  # EPR on/off gate (OSCAR :2202-2215)
+        "S.EPR.ClinEnable": "epr_clin_enable_raw",  # clinician override gate
         "S.RampEnable": "ramp_enabled",
         "S.RampTime": "ramp_time",
         "S.ClimateControl": "climate_control",
@@ -97,8 +101,23 @@ class ResmedEDFParser(DeviceParser):
         "S.TempEnable": "tube_temp_enabled",
         "S.Temp": "tube_temp",
         "S.SmartStart": "smart_start",
+        "S.SmartStop": "smart_stop_raw",  # OSCAR :2324-2327
         "S.ABFilter": "ab_filter",
         "S.Mask": "mask_type",
+        "S.Tube": "tube_raw",  # tube type (OSCAR :2343)
+        "S.PtAccess": "pt_access_raw",  # patient access level (OSCAR :2311-2317)
+        "S.AS.Comfort": "comfort_raw",  # Response/comfort setting (OSCAR :2180-2183)
+        # S10 bare timing/control signals shared by vAuto and bilevel modes.
+        # OSCAR uses sigprefix "S." for S10 (vAuto :2390-2411; bilevel :2347-2392);
+        # S11 uses "S.VA." / "S.S." respectively.
+        "S.Cycle": "s10_cycle",
+        "S.Trigger": "s10_trigger",
+        "S.TiMax": "s10_ti_max",
+        "S.TiMin": "s10_ti_min",
+        # S10 bilevel-only bare signals (OSCAR bilevel :2347-2392).
+        "S.RiseEnable": "s10_rise_enable",
+        "S.EasyBreathe": "s10_easy_breathe",
+        "S.RiseTime": "s10_rise_time",
     }
 
     STR_SUMMARY_SIGNALS = {
@@ -123,31 +142,49 @@ class ResmedEDFParser(DeviceParser):
         ("HI", "HI"): "hi",
     }
 
+    # S9/10-basis EPR type map — keyed on the post-normalization value that both
+    # families resolve to: S10 raw+1 and S11 raw+1−1 = raw (OSCAR :2195-2215).
     EPR_TYPE_MAP = {0: "Off", 1: "Ramp Only", 2: "Full Time"}
     # S9/10-series mask codes per OSCAR resmed_loader.cpp (S.Mask signal).
-    # 11-series devices emit raw 2–4; callers normalize by subtracting 2 before lookup.
+    # 11-series devices emit raw 2–4; normalize by −2 before lookup.
     MASK_TYPE_MAP = {0: "Pillows", 1: "Full Face", 2: "Nasal"}
-    CLIMATE_CONTROL_MAP = {1: "Manual", 2: "Auto"}
+    # Shared climate control and AB-filter maps on the S10 basis.
+    # S11 raw values are normalized by −1 before lookup (OSCAR :2292-2299).
+    CLIMATE_CONTROL_MAP = {0: "Manual", 1: "Auto"}
     AB_FILTER_MAP = {0: "Standard", 1: "Antibacterial"}
-    # Series 11 native STR mode encoding; OSCAR rule: modelnumber >= 39000
-    MODE_MAP_SERIES11 = {
-        1: TherapyMode.APAP,  # AutoSet
-        2: TherapyMode.APAP,  # AutoSet for Her
-        3: TherapyMode.CPAP,
-        7: TherapyMode.ASV,  # ASVauto (variable EPAP); OSCAR MODE_ASV_VARIABLE_EPAP — mapped to TherapyMode.ASV (closest available)
-        8: TherapyMode.BIPAP_AUTO,  # VAuto
+
+    # These two tables are underscore-private because they are internals of the
+    # two-step mode decode (translate S11 raw → S10 basis, then map to TherapyMode).
+    # The per-signal lookup tables (EPR_TYPE_MAP, MASK_TYPE_MAP, etc.) are public
+    # because they are referenced independently of the mode decode path.
+
+    # S11 raw mode → S10-basis rms9_mode (OSCAR :1857-1888).
+    # Values absent from this table (0, 5, and any unknown) → warn + skip.
+    _S11_MODE_TO_S10 = {
+        1: 1,  # AutoSet → APAP
+        2: 11,  # AutoSet for Her → A4Her APAP
+        3: 0,  # CPAP → CPAP
+        4: 3,  # BiLevel-S → BILEVEL_FIXED
+        6: 7,  # ASV → ASV
+        7: 8,  # ASVAuto → ASV_VARIABLE_EPAP (ASV_AUTO)
+        8: 6,  # VAuto → BILEVEL_AUTO_FIXED_PS (BIPAP_AUTO)
     }
-    # Series 9/10 native STR mode encoding
-    MODE_MAP_SERIES10 = {
+
+    # Unified S9/S10-basis mode map used for both families after S11 translation.
+    _MODE_MAP = {
         0: TherapyMode.CPAP,
         1: TherapyMode.APAP,
         2: TherapyMode.BIPAP,
-        3: TherapyMode.BIPAP,  # VPAP S
-        4: TherapyMode.BIPAP_ST,  # OSCAR collapses S10 modes 3/4/5 to BILEVEL_FIXED; 4/5 are S/T variants — BIPAP_ST is a deliberate local deviation
-        5: TherapyMode.BIPAP_ST,  # OSCAR collapses S10 modes 3/4/5 to BILEVEL_FIXED; 4/5 are S/T variants — BIPAP_ST is a deliberate local deviation
+        3: TherapyMode.BIPAP,  # VPAP S (BILEVEL_FIXED)
+        # OSCAR collapses S10 modes 3/4/5 all to BILEVEL_FIXED; 4/5 are S/T
+        # variants — BIPAP_ST here is a deliberate local deviation.
+        4: TherapyMode.BIPAP_ST,
+        5: TherapyMode.BIPAP_ST,
         6: TherapyMode.BIPAP_AUTO,  # VAuto
         7: TherapyMode.ASV,
-        8: TherapyMode.ASV,  # ASV Auto / variable EPAP (MODE_ASV_VARIABLE_EPAP in OSCAR)
+        8: TherapyMode.ASV_AUTO,  # ASV variable-EPAP (OSCAR MODE_ASV_VARIABLE_EPAP)
+        9: TherapyMode.IVAPS,
+        # 10 → PAC: warn+skip (absent)
         11: TherapyMode.APAP,  # APAP for Her
     }
 
@@ -178,6 +215,48 @@ class ResmedEDFParser(DeviceParser):
         "S.AFH.MaxPress": "afh_max_press",
         "S.AFH.MinPress": "afh_min_press",
     }
+    # S10 bilevel pressure signals (S.BL.*); timing/rise/easybreathe use bare "S.*"
+    # and are loaded via STR_SETTINGS_MAP into s10_* keys (OSCAR :2347-2392).
+    # S.BL.* timing entries here are kept as defensive fallbacks only — real S10
+    # devices emit bare S.Cycle/S.Trigger/S.TiMax/S.TiMin/S.RiseEnable/S.EasyBreathe.
+    # S11 bilevel uses S.S.* already covered by STR_SMODE_SIGNALS.
+    STR_BILEVEL_S10_SIGNALS = {
+        "S.BL.IPAP": "bl_ipap",
+        "S.BL.EPAP": "bl_epap",
+        "S.BL.StartPress": "bl_start_press",
+        "S.BL.EasyBreathe": "bl_easy_breathe",
+        "S.BL.RiseEnable": "bl_rise_enable",
+        "S.BL.RiseTime": "bl_rise_time",
+        "S.BL.Cycle": "bl_cycle",
+        "S.BL.Trigger": "bl_trigger",
+        "S.BL.TiMax": "bl_ti_max",
+        "S.BL.TiMin": "bl_ti_min",
+    }
+    # ASV fixed-EPAP pressures (OSCAR :2093-2108); same signals for both families.
+    STR_ASV_SIGNALS = {
+        "S.AV.StartPress": "av_start_press",
+        "S.AV.EPAP": "av_epap",
+        "S.AV.MinPS": "av_min_ps",
+        "S.AV.MaxPS": "av_max_ps",
+    }
+    # ASV variable-EPAP pressures (OSCAR :2109-2127); same signals for both families.
+    STR_ASV_AUTO_SIGNALS = {
+        "S.AA.StartPress": "aa_start_press",
+        "S.AA.MinEPAP": "aa_min_epap",
+        "S.AA.MaxEPAP": "aa_max_epap",
+        "S.AA.MinPS": "aa_min_ps",
+        "S.AA.MaxPS": "aa_max_ps",
+    }
+    # iVAPS pressures (OSCAR :2049-2092); same signals for both families.
+    STR_IVAPS_SIGNALS = {
+        "S.i.StartPress": "iv_start_press",
+        "S.i.EPAP": "iv_epap",
+        "S.i.EPAPAuto": "iv_epap_auto",
+        "S.i.MinPS": "iv_min_ps",
+        "S.i.MaxPS": "iv_max_ps",
+        "S.i.MinEPAP": "iv_min_epap",
+        "S.i.MaxEPAP": "iv_max_epap",
+    }
 
     # Merged view of all STR signal groups — invariant across files, built once.
     ALL_STR_SIGNAL_MAPS = {
@@ -185,6 +264,10 @@ class ResmedEDFParser(DeviceParser):
         **STR_VAUTO_SIGNALS,
         **STR_SMODE_SIGNALS,
         **STR_AFH_SIGNALS,
+        **STR_BILEVEL_S10_SIGNALS,
+        **STR_ASV_SIGNALS,
+        **STR_ASV_AUTO_SIGNALS,
+        **STR_IVAPS_SIGNALS,
     }
 
     _ELEVEN_SERIES_RE = re.compile(r"(AirSense|AirCurve)\s*11")
@@ -341,44 +424,75 @@ class ResmedEDFParser(DeviceParser):
         )
 
     def _extract_serial_from_identification(self, path: Path) -> str | None:
-        """Extract device serial number from Identification.json."""
-        id_file = path / "Identification.json"
-        if not id_file.exists():
-            return None
+        """Extract device serial number from Identification.json or .tgt (S9 fallback)."""
+        id_json = path / "Identification.json"
+        if id_json.exists():
+            try:
+                with open(id_json) as f:
+                    data = json.load(f)
+                fg = data.get("FlowGenerator", {})
+                profiles = fg.get("IdentificationProfiles", {})
+                product = profiles.get("Product", {})
+                serial = product.get("SerialNumber")
+                return serial if isinstance(serial, str) else None
+            except Exception:
+                return None
 
+        # S9 devices ship Identification.tgt (key=value lines) instead of JSON.
+        # OSCAR parseIdentFile :2467-2513: reads tgt when json is absent.
+        return self._parse_tgt_field(path / "Identification.tgt", "SerialNumber")
+
+    def _parse_tgt_field(self, tgt_path: Path, field: str) -> str | None:
+        """Return the value for a key from an Identification.tgt key=value file."""
+        if not tgt_path.exists():
+            return None
         try:
-            with open(id_file) as f:
-                data = json.load(f)
-
-            fg = data.get("FlowGenerator", {})
-            profiles = fg.get("IdentificationProfiles", {})
-            product = profiles.get("Product", {})
-            serial = product.get("SerialNumber")
-            return serial if isinstance(serial, str) else None
+            # Real ResMed .tgt files are a few hundred bytes; reject anything
+            # larger to guard against corrupt no-newline binary content.
+            if tgt_path.stat().st_size > 4096:
+                return None
+            with open(tgt_path, encoding="ascii", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        key, _, value = line.partition("=")
+                        if key.strip() == field:
+                            return value.strip() or None
         except Exception:
-            return None
+            pass
+        return None
 
     def _detect_series11(self, root_path: Path) -> bool:
         """Return True when the device is Series 11 based on ProductCode.
 
         OSCAR rule: modelnumber >= 39000 → Series 11 STR mode encoding.
-        Falls back to Series 9/10 when Identification.json is absent (those
-        devices ship Identification.tgt instead).
+        Falls back to .tgt parsing for S9 devices that ship Identification.tgt
+        instead of Identification.json (OSCAR parseIdentFile :2467-2513).
         """
-        id_file = root_path / "Identification.json"
-        if not id_file.exists():
-            return False
-        try:
-            with open(id_file, encoding="utf-8") as f:
-                data = json.load(f)
-            fg = data.get("FlowGenerator", {})
-            profiles = fg.get("IdentificationProfiles", {})
-            product = profiles.get("Product", {})
-            code = product.get("ProductCode")
-            # int(float(...)) handles JSON numbers stored as floats (e.g. 39000.0).
-            return code is not None and int(float(str(code))) >= 39000
-        except Exception:
-            return False
+        id_json = root_path / "Identification.json"
+        if id_json.exists():
+            try:
+                with open(id_json, encoding="utf-8") as f:
+                    data = json.load(f)
+                fg = data.get("FlowGenerator", {})
+                profiles = fg.get("IdentificationProfiles", {})
+                product = profiles.get("Product", {})
+                code = product.get("ProductCode")
+                # int(float(...)) handles JSON numbers stored as floats (e.g. 39000.0).
+                return code is not None and int(float(str(code))) >= 39000
+            except Exception:
+                return False
+
+        # S9 devices use Identification.tgt; ProductCode in tgt is always < 39000.
+        code_str = self._parse_tgt_field(
+            root_path / "Identification.tgt", "ProductCode"
+        )
+        if code_str is not None:
+            try:
+                return int(code_str) >= 39000
+            except ValueError:
+                pass
+        return False
 
     def get_device_info(self, path: Path) -> DeviceInfo:
         """
@@ -1264,7 +1378,6 @@ class ResmedEDFParser(DeviceParser):
             if therapy_day in str_settings_cache:
                 settings = self._convert_str_to_therapy_settings(
                     str_settings_cache[therapy_day],
-                    self._is_eleven_series(device_info.model),
                 )
                 if settings:
                     session.settings = settings
@@ -1796,7 +1909,7 @@ class ResmedEDFParser(DeviceParser):
             )
 
     def _parse_str_settings(
-        self, str_file: Path, session_date: date, is_eleven_series: bool = False
+        self, str_file: Path, session_date: date, is_eleven_series: bool | None = None
     ) -> TherapySettings | None:
         """
         Parse therapy settings from STR.edf for a specific session date.
@@ -1807,8 +1920,8 @@ class ResmedEDFParser(DeviceParser):
         Args:
             str_file: Path to STR.edf file
             session_date: Date of session to get settings for
-            is_eleven_series: True for AirSense/AirCurve 11 devices; forwarded
-                to _convert_str_to_therapy_settings for mask code normalization
+            is_eleven_series: Passed through unchanged to _convert_str_to_therapy_settings;
+                None lets the converter fall back to ProductCode-derived self._str_series11.
 
         Returns:
             TherapySettings populated from STR.edf, None if not found, or None
@@ -1831,7 +1944,7 @@ class ResmedEDFParser(DeviceParser):
                 settings_values = {}
                 signals = edf.get_signal_info()
 
-                for signal_label, setting_key in self.STR_SETTINGS_MAP.items():
+                for signal_label, setting_key in self.ALL_STR_SIGNAL_MAPS.items():
                     if signal_label in signals:
                         data, _ = edf.read_signal(signal_label)
                         if len(data) > days_offset:
@@ -1855,11 +1968,19 @@ class ResmedEDFParser(DeviceParser):
         dict[date, dict[str, float]] | None, dict[date, dict[str, float]] | None
     ]:
         """
-        Merge STR settings and summaries from STR_Backup/*.edf then STR.edf.
+        Merge STR settings and summaries from STR_Backup/*.edf and STR.edf.
 
-        Reads backup files in sorted order, then the primary STR.edf last so
-        it wins on any overlapping dates.  Returns (None, None) when no files
-        are readable.
+        When two files share the same EDF start-date (e.g., a rolled backup and
+        the primary), only the longer file (more records) is used — matching
+        OSCAR's behaviour (resmed_loader.cpp :896-908, :980-993).  Files whose
+        header cannot be read are always included as a safe fallback.
+
+        Two-pass approach: first read only EDF headers to select per-start-date
+        winners cheaply, then fully load only winning files.  If a selected winner's
+        full load returns no settings, the next-best candidate for that start-date
+        is tried (corrupt-file fallback).
+
+        Returns (None, None) when no files are readable.
         """
         backup_dir = root_path / "STR_Backup"
         backup_files: list[Path] = (
@@ -1871,163 +1992,214 @@ class ResmedEDFParser(DeviceParser):
         if not all_files:
             return None, None
 
+        # First pass: header-only reads to select winners per start-date.
+        # candidates_per_start: start_date → [(num_records, file_idx), ...] in discovery order
+        candidates_per_start: dict[date, list[tuple[int, int]]] = {}
+        no_header_indices: list[int] = []
+
+        for idx, f in enumerate(all_files):
+            result = self._read_str_file_header(f)
+            if result is None:
+                no_header_indices.append(idx)
+                continue
+            start_date, num_records = result
+            candidates_per_start.setdefault(start_date, []).append((num_records, idx))
+
+        # For each start-date, sort candidates descending by (num_records, idx) so
+        # the winner is first and later files break ties (matching the >= semantics
+        # from OSCAR :896-908, :980-993).
+        ordered_per_start: dict[date, list[int]] = {
+            sd: [i for _, i in sorted(cands, key=lambda x: (x[0], x[1]), reverse=True)]
+            for sd, cands in candidates_per_start.items()
+        }
+
+        # Build reverse map: file_idx → its start_date (winners only).
+        idx_to_start: dict[int, date] = {
+            idxs[0]: sd for sd, idxs in ordered_per_start.items()
+        }
+
+        # All winner indices plus no-header indices, in file-discovery order.
+        winner_indices = set(idx_to_start)
+        to_process = sorted(winner_indices | set(no_header_indices))
+
         merged_settings: dict[date, dict[str, float]] = {}
         merged_summaries: dict[date, dict[str, float]] = {}
+        loaded_start_dates: set[date] = set()
 
-        for f in all_files:
-            s = self._preload_str_settings(f)
-            if s:
-                for d, vals in s.items():
+        # Second pass: fully load winners; on empty settings fall back to next candidate.
+        for idx in to_process:
+            f = all_files[idx]
+
+            if idx in no_header_indices:
+                # Header unreadable — load unconditionally as safe fallback.
+                s, u = self._preload_str_file(f)
+                for d, vals in (s or {}).items():
                     merged_settings.setdefault(d, {}).update(vals)
-
-            u = self._preload_str_summaries(f)
-            if u:
-                for d, vals in u.items():
+                for d, vals in (u or {}).items():
                     merged_summaries.setdefault(d, {}).update(vals)
+                continue
+
+            start_date = idx_to_start[idx]
+            if start_date in loaded_start_dates:
+                continue  # already loaded a successful candidate for this start-date
+
+            # Try each candidate in order (winner first, then fallbacks).
+            for candidate_idx in ordered_per_start[start_date]:
+                s, u = self._preload_str_file(all_files[candidate_idx])
+                if s:
+                    loaded_start_dates.add(start_date)
+                    for d, vals in s.items():
+                        merged_settings.setdefault(d, {}).update(vals)
+                    for d, vals in (u or {}).items():
+                        merged_summaries.setdefault(d, {}).update(vals)
+                    break
+            # If all candidates fail, nothing is merged for this start-date.
 
         return (merged_settings or None), (merged_summaries or None)
 
-    def _preload_str_settings(
-        self, str_file: Path
-    ) -> dict[date, dict[str, float]] | None:
+    def _read_str_file_header(self, str_file: Path) -> tuple[date, int] | None:
         """
-        Pre-read all settings from STR.edf for all dates.
+        Read the EDF header of a STR file to obtain start-date and record count.
 
-        This method reads the entire STR.edf file once and caches all settings
-        in memory. Used to avoid concurrent file access issues when parsing
-        sessions in parallel.
+        Opens and immediately closes the file — no signal data is read.  Used by
+        _load_str_caches to cheaply select per-start-date winners before doing the
+        more expensive full signal load.
 
-        Args:
-            str_file: Path to STR.edf file
-
-        Returns:
-            Dictionary mapping date -> {setting_name: value}, or None if file
-            doesn't exist or can't be read
+        Returns (start_date, num_data_records) or None on any failure.
         """
         if not str_file.exists():
             return None
+        try:
+            with EDFReader(str_file) as edf:
+                header = edf.get_header()
+                return header.start_datetime.date(), header.num_data_records
+        except Exception:
+            return None
+
+    def _preload_str_file(
+        self, str_file: Path
+    ) -> tuple[
+        dict[date, dict[str, float]] | None, dict[date, dict[str, float]] | None
+    ]:
+        """
+        Open STR.edf exactly once and read all settings and summaries in one pass.
+
+        Returns (settings_by_date, summaries_by_date); either element may be None
+        if no data was found for that signal group.  Returns (None, None) on failure.
+        """
+        if not str_file.exists():
+            return None, None
 
         try:
             with EDFReader(str_file) as edf:
                 header = edf.get_header()
+                # ResMed STR.edf records run noon-to-noon: the EDF header start
+                # timestamp is always local noon of the first day (OSCAR :1595,
+                # comment :1293 "each STR.edf record starts at 12 noon").
+                # pyedflib returns this as a naive datetime; .date() extracts the
+                # correct calendar date without any timezone conversion.
                 start_date = header.start_datetime.date()
                 num_records = header.num_data_records
 
-                all_settings: dict[date, dict[str, float]] = {}
+                # Precompute per-record dates once; avoids re-adding timedelta
+                # inside the per-signal × per-record inner loop.
+                record_dates = [
+                    start_date + timedelta(days=i) for i in range(num_records)
+                ]
+
                 signals = edf.get_signal_info()
 
+                # --- settings loop ---
+                all_settings: dict[date, dict[str, float]] = {}
                 for signal_label, setting_name in self.ALL_STR_SIGNAL_MAPS.items():
                     if signal_label in signals:
                         data, _ = edf.read_signal(signal_label)
-
                         for record_idx in range(min(num_records, len(data))):
-                            record_date = start_date + timedelta(days=record_idx)
-
+                            record_date = record_dates[record_idx]
                             if record_date not in all_settings:
                                 all_settings[record_date] = {}
-
                             all_settings[record_date][setting_name] = float(
                                 data[record_idx]
                             )
 
-                logger.debug(
-                    f"Preloaded STR.edf settings for {len(all_settings)} days "
-                    f"({start_date} to {start_date + timedelta(days=num_records - 1)})"
-                )
-                return all_settings
-
-        except Exception as e:
-            logger.warning(f"Failed to preload STR.edf settings: {e}")
-            return None
-
-    def _preload_str_summaries(
-        self, str_file: Path
-    ) -> dict[date, dict[str, float]] | None:
-        """
-        Pre-read all summary percentiles from STR.edf for all dates.
-
-        STR.edf contains pre-computed per-day statistics (medians, 95th percentiles, etc.)
-        that can supplement or validate waveform-derived statistics.
-
-        Args:
-            str_file: Path to STR.edf file
-
-        Returns:
-            Dictionary mapping date -> {stat_name: value}, or None if file
-            doesn't exist or can't be read
-        """
-        if not str_file.exists():
-            return None
-
-        try:
-            with EDFReader(str_file) as edf:
-                header = edf.get_header()
-                start_date = header.start_datetime.date()
-                num_records = header.num_data_records
-
+                # --- summaries loop ---
                 all_summaries: dict[date, dict[str, float]] = {}
-                signals = edf.get_signal_info()
-
                 for signal_patterns, stat_name in self.STR_SUMMARY_SIGNALS.items():
                     matched_signal = None
                     for pattern in signal_patterns:
                         if pattern in signals:
                             matched_signal = pattern
                             break
-
                     if matched_signal:
                         data, _ = edf.read_signal(matched_signal)
-
                         for record_idx in range(min(num_records, len(data))):
                             value = float(data[record_idx])
                             # Skip sentinel values: ResMed writes negative values
                             # on no-usage days; all physical stats are non-negative.
                             if not (value >= 0):
                                 continue
-
-                            record_date = start_date + timedelta(days=record_idx)
-
+                            record_date = record_dates[record_idx]
                             if record_date not in all_summaries:
                                 all_summaries[record_date] = {}
-
                             all_summaries[record_date][stat_name] = value
 
-                if all_summaries:
-                    logger.debug(
-                        f"Preloaded STR.edf summaries for {len(all_summaries)} days "
-                        f"({start_date} to {start_date + timedelta(days=num_records - 1)})"
-                    )
-                return all_summaries if all_summaries else None
+                logger.debug(
+                    f"Preloaded STR file {str_file.name}: {len(all_settings)} settings-days, "
+                    f"{len(all_summaries)} summary-days "
+                    f"({start_date} to {start_date + timedelta(days=num_records - 1)})"
+                )
+                return (all_settings or None), (all_summaries or None)
 
         except Exception as e:
-            logger.warning(f"Failed to preload STR.edf summaries: {e}")
-            return None
+            logger.warning(f"Failed to preload STR file {str_file.name}: {e}")
+            return None, None
+
+    def _preload_str_settings(
+        self, str_file: Path
+    ) -> dict[date, dict[str, float]] | None:
+        """Thin wrapper — returns the settings half of _preload_str_file."""
+        return self._preload_str_file(str_file)[0]
+
+    def _preload_str_summaries(
+        self, str_file: Path
+    ) -> dict[date, dict[str, float]] | None:
+        """Thin wrapper — returns the summaries half of _preload_str_file."""
+        return self._preload_str_file(str_file)[1]
 
     def _convert_str_to_therapy_settings(
-        self, values: dict[str, float], is_eleven_series: bool = False
+        self, values: dict[str, float], is_eleven_series: bool | None = None
     ) -> TherapySettings | None:
         """
         Convert raw STR.edf values to TherapySettings model.
 
         Returns None when the record is a no-usage sentinel day (all values
         negative/NaN), when the mode signal is absent, or when the mode value
-        is not in the device family's map.
+        is unknown/unimplemented for the device family.
 
         Mode-specific fields are selected based on the active therapy mode so
-        dormant presets for inactive modes are never stored.
+        dormant presets for inactive modes are never stored.  All enum-valued
+        signals are normalized to the S9/S10 basis before lookup (S11 emits
+        raw values one higher; OSCAR resmed_loader.cpp :1869-1975).
 
         Args:
-            values: Dictionary of setting keys to raw float values
-            is_eleven_series: True for AirSense/AirCurve 11 devices, which emit
-                mask codes 2–4 instead of 0–2 (raw value shifted down by 2)
-
-        Returns:
-            TherapySettings instance with proper type conversions, or None.
+            values: Dictionary of setting keys to raw float values (as preloaded
+                by _preload_str_settings — keys come from STR_SETTINGS_MAP and
+                the signal group dicts).
+            is_eleven_series: Explicit family override; defaults to
+                self._str_series11 (set once from ProductCode by _detect_series11).
         """
         if values and all(not (v >= 0) for v in values.values()):
             return None
 
-        # Resolve mode using the family-appropriate map.
+        # Authoritative family flag: ProductCode-based detection wins; param is
+        # kept only for callers that need an explicit override.
+        series11: bool = (
+            self._str_series11 if is_eleven_series is None else is_eleven_series
+        )
+
+        # ------------------------------------------------------------------
+        # Mode decode: translate S11 raw to S10 basis, then apply unified map.
+        # ------------------------------------------------------------------
         mode_value = values.get("mode")
         if mode_value is None:
             logger.warning("STR record has no mode signal; discarding")
@@ -2036,52 +2208,74 @@ class ResmedEDFParser(DeviceParser):
             logger.warning("STR record has NaN mode value; discarding")
             return None
 
-        mode_int = int(mode_value)
-        # Two family-detection mechanisms coexist: _str_series11 comes from ProductCode
-        # in Identification.json (file-level metadata set once at parse start) and picks
-        # the mode map here, while the is_eleven_series parameter comes from a model-name
-        # regex (_is_eleven_series) and shifts mask-type codes below. They can disagree
-        # when Identification.json is absent; ProductCode is authoritative for mode decode.
-        mode_map = (
-            self.MODE_MAP_SERIES11 if self._str_series11 else self.MODE_MAP_SERIES10
-        )
-        mode = mode_map.get(mode_int)
+        raw_mode = int(mode_value)
+        if series11:
+            s10_mode = self._S11_MODE_TO_S10.get(raw_mode)
+            if s10_mode is None:
+                logger.warning(
+                    "Unknown/unimplemented S11 mode %d; discarding record", raw_mode
+                )
+                return None
+        else:
+            s10_mode = raw_mode
+
+        mode = self._MODE_MAP.get(s10_mode)
         if mode is None:
             logger.warning(
-                "Unknown ResMed therapy mode value %d (Series %s); discarding record",
-                mode_int,
-                "11" if self._str_series11 else "9/10",
+                "Unknown ResMed therapy mode (S10 basis %d); discarding record",
+                s10_mode,
             )
             return None
 
-        def _validate_positive(
-            value: float | None, min_val: float = 0.0
-        ) -> float | None:
-            """Return value if >= min_val, else None (filters sentinel values)."""
-            return value if value is not None and value >= min_val else None
+        # ------------------------------------------------------------------
+        # Helpers
+        # ------------------------------------------------------------------
+        def _pos(key: str, min_val: float = 0.0) -> float | None:
+            v = values.get(key)
+            return v if v is not None and v >= min_val else None
 
-        def _validate_non_negative(value: float | None) -> float | None:
-            """Return value if >= 0, else None."""
-            return value if value is not None and value >= 0 else None
+        def _nn(key: str) -> float | None:
+            v = values.get(key)
+            return v if v is not None and v >= 0 else None
 
-        def _extract_epr() -> tuple[int | None, str | None]:
-            level_val = values.get("epr_level")
-            level = (
-                int(level_val)
-                if level_val is not None and 0 <= level_val <= 3
-                else None
-            )
-            type_val = values.get("epr_mode")
-            mode_str = (
-                self.EPR_TYPE_MAP.get(int(type_val), "Unknown")
-                if type_val is not None and type_val >= 0
-                else None
-            )
-            return level, mode_str
+        def _norm(key: str) -> float | None:
+            """Return normalized (S10-basis) value for a "-1 family" enum signal.
 
-        # Universal fields — apply to all therapy modes.
-        ramp_enabled_val = values.get("ramp_enabled")
-        ramp_enabled = ramp_enabled_val == 2 if ramp_enabled_val is not None else None
+            S11 devices emit these signals one higher than S10 (OSCAR :1869-1975).
+            Subtracting 1 for S11 lets all downstream maps use S10 keys unchanged.
+            NaN raw values return None so downstream boolean comparisons don't
+            silently evaluate as False instead of unknown.
+            """
+            v = values.get(key)
+            if v is None or math.isnan(v):
+                return None
+            return v - 1 if series11 else v
+
+        def _apply_timing(
+            ti_max_v: float | None,
+            ti_min_v: float | None,
+            trigger_v: float | None,
+            cycle_v: float | None,
+        ) -> None:
+            """Write ti_max/ti_min/trigger/cycle into other_settings when present."""
+            if ti_max_v is not None and ti_max_v >= 0:
+                other_settings["ti_max"] = f"{ti_max_v:.1f}"
+            if ti_min_v is not None and ti_min_v >= 0:
+                other_settings["ti_min"] = f"{ti_min_v:.1f}"
+            if trigger_v is not None and trigger_v >= 0:
+                other_settings["trigger"] = str(int(trigger_v))
+            if cycle_v is not None and cycle_v >= 0:
+                other_settings["cycle"] = str(int(cycle_v))
+
+        # ------------------------------------------------------------------
+        # Universal fields (all modes)
+        # ------------------------------------------------------------------
+
+        # Ramp enable raw=2 (S10) / raw=3 (S11→after norm=2) means SmartRamp.
+        # OSCAR :2263-2267: S11 raw−1; raw=1 on S10 basis means normal ramp on.
+        ramp_enabled_norm = _norm("ramp_enabled")
+        ramp_enabled = ramp_enabled_norm == 1 if ramp_enabled_norm is not None else None
+        smart_ramp = ramp_enabled_norm == 2 if ramp_enabled_norm is not None else False
 
         ramp_time_value = values.get("ramp_time")
         ramp_time = (
@@ -2090,10 +2284,10 @@ class ResmedEDFParser(DeviceParser):
             else None
         )
 
-        humidity_enabled_val = values.get("humidity_enabled")
-        humidity_enabled = (
-            humidity_enabled_val == 2 if humidity_enabled_val is not None else None
-        )
+        # Humidity/temp enable: S10 raw=1 → on; S11 raw=2 → norm=1 → on.
+        # OSCAR :2329-2339: if (AS_eleven) --s_HumEnable / --s_TempEnable.
+        hum_norm = _norm("humidity_enabled")
+        humidity_enabled = hum_norm == 1 if hum_norm is not None else None
         humidity_level_value = values.get("humidity_level")
         humidity_level = (
             int(humidity_level_value)
@@ -2101,39 +2295,67 @@ class ResmedEDFParser(DeviceParser):
             else None
         )
 
-        tube_temp_enabled_val = values.get("tube_temp_enabled")
-        tube_temp_enabled = (
-            tube_temp_enabled_val == 2 if tube_temp_enabled_val is not None else None
-        )
-        tube_temp = _validate_positive(values.get("tube_temp"), min_val=1.0)
+        temp_norm = _norm("tube_temp_enabled")
+        tube_temp_enabled = temp_norm == 1 if temp_norm is not None else None
+        tube_temp = _pos("tube_temp", min_val=1.0)
 
-        climate_value = values.get("climate_control")
+        # Climate control: normalized to S10 basis (0=Manual, 1=Auto).
+        # OSCAR :2297-2299: if (AS_eleven) --s_ClimateControl.
+        climate_norm = _norm("climate_control")
         climate_control = (
-            self.CLIMATE_CONTROL_MAP.get(int(climate_value), "Manual")
-            if climate_value is not None
+            self.CLIMATE_CONTROL_MAP.get(int(climate_norm))
+            if climate_norm is not None and climate_norm >= 0
             else None
         )
 
-        smart_start_val = values.get("smart_start")
-        smart_start = smart_start_val == 2 if smart_start_val is not None else None
+        # SmartStart (S.SmartStart): S10 basis 0=off, 1=on, 2=SmartRamp (OSCAR :2319-2322).
+        # smart_start=True for both On and SmartRamp (it is an enabled start feature);
+        # when raw==2, "smart_ramp"="True" is additionally recorded in other_settings.
+        ss_norm = _norm("smart_start")
+        smart_start = ss_norm >= 1 if ss_norm is not None else None
 
+        # SmartStop: S10 basis 0=off, 1=on (OSCAR :2324-2327).
+        ss_stop_norm = _norm("smart_stop_raw")
+        smart_stop = ss_stop_norm == 1 if ss_stop_norm is not None else None
+
+        # Mask type: S11 raw 2–4; normalized by −2 (OSCAR :2302-2309).
         mask_value = values.get("mask_type")
         if mask_value is not None:
             mask_code = int(mask_value)
-            if is_eleven_series:
-                mask_code -= 2  # 11-series devices emit raw 2-4; MASK_TYPE_MAP keys are the 0-2 scale
+            if series11:
+                mask_code -= 2
             mask_type = self.MASK_TYPE_MAP.get(mask_code, "Unknown")
         else:
             mask_type = None
 
-        ab_filter_value = values.get("ab_filter")
+        # AB filter: normalized to S10 basis (0=Standard, 1=Antibacterial).
+        # OSCAR :2292-2295: if (AS_eleven) --s_ABFilter.
+        ab_norm = _norm("ab_filter")
         ab_filter = (
-            self.AB_FILTER_MAP.get(int(ab_filter_value), "Unknown")
-            if ab_filter_value is not None and ab_filter_value >= 0
+            self.AB_FILTER_MAP.get(int(ab_norm))
+            if ab_norm is not None and ab_norm >= 0
             else None
         )
 
-        # Mode-specific fields — only include signals active for the current mode.
+        # Patient access (PtAccess): S11 raw−1 (OSCAR :2311-2317).
+        pt_norm = _norm("pt_access_raw")
+        pt_access = str(int(pt_norm)) if pt_norm is not None and pt_norm >= 0 else None
+
+        # Tube type (raw, no normalization — OSCAR :2343 does no −1 for S11).
+        tube_raw = values.get("tube_raw")
+        tube = str(int(tube_raw)) if tube_raw is not None and tube_raw >= 0 else None
+
+        # Response/Comfort (S.AS.Comfort): S11 raw−1 (OSCAR :2180-2183).
+        comfort_norm = _norm("comfort_raw")
+        response = (
+            str(int(comfort_norm))
+            if comfort_norm is not None and comfort_norm >= 0
+            else None
+        )
+
+        # ------------------------------------------------------------------
+        # Mode-specific fields
+        # ------------------------------------------------------------------
         pressure_fixed: float | None = None
         pressure_min: float | None = None
         pressure_max: float | None = None
@@ -2145,84 +2367,241 @@ class ResmedEDFParser(DeviceParser):
         epr_mode: str | None = None
         other_settings: dict[str, str] = {}
 
+        # Build EPR type and gated enable; applies to CPAP and APAP only
+        # (OSCAR :2187-2215 limits EPR decode to those two modes).
+        def _decode_epr() -> tuple[int | None, str | None]:
+            """Return (epr_level, epr_mode_str) with EPREnable/ClinEnable gating."""
+            epr_level_v = _nn("epr_level")
+            lvl = (
+                int(epr_level_v)
+                if epr_level_v is not None and 0 <= epr_level_v <= 3
+                else None
+            )
+
+            # S.EPR.EPRType: S10 raw+1 maps to {1:Ramp Only, 2:Full Time};
+            # S11 raw+1−1=raw maps to {0:Off, 1:Ramp Only, 2:Full Time}.
+            # OSCAR :2195-2199: epr += 1; if (AS_eleven) epr--.
+            epr_type_raw = values.get("epr_type_raw")
+            if epr_type_raw is not None and epr_type_raw >= 0:
+                epr_type_code = int(epr_type_raw) + (0 if series11 else 1)
+            else:
+                epr_type_code = None
+
+            # EPREnable / ClinEnable gating (OSCAR :2201-2215).
+            epr_enable_raw = _norm("epr_enable_raw")
+            if epr_enable_raw is not None:
+                epr_on = epr_enable_raw >= 1
+                if epr_on:
+                    clin_raw = _norm("epr_clin_enable_raw")
+                    # EPREnable-on + ClinEnable-absent → EPR Off, matching OSCAR
+                    # :2201-2215 which initializes clin_epr_on=0 and only sets it
+                    # if ClinEnable is present; absent ClinEnable is NOT "permit".
+                    clin_on = clin_raw is not None and clin_raw >= 1
+                else:
+                    clin_on = False
+                if not (epr_on and clin_on):
+                    return 0, "Off"
+
+            mode_str = (
+                self.EPR_TYPE_MAP.get(epr_type_code, "Unknown")
+                if epr_type_code is not None
+                else None
+            )
+            return lvl, mode_str
+
         if mode == TherapyMode.CPAP:
-            pressure_fixed = _validate_positive(
-                values.get("pressure_fixed"), min_val=1.0
-            )
-            ramp_start_pressure = _validate_positive(
-                values.get("ramp_start_pressure"), min_val=1.0
-            )
-            epr_level, epr_mode = _extract_epr()
+            pressure_fixed = _pos("pressure_fixed", min_val=1.0)
+            ramp_start_pressure = _pos("ramp_start_pressure", min_val=1.0)
+            epr_level, epr_mode = _decode_epr()
 
         elif mode == TherapyMode.APAP:
-            # A4Her devices use AFH signals; fall back to standard APAP signals.
-            p_min = values.get("pressure_min")
-            if p_min is None:
-                p_min = values.get("afh_min_press")
-            p_max = values.get("pressure_max")
-            if p_max is None:
-                p_max = values.get("afh_max_press")
-            pressure_min = _validate_positive(p_min, min_val=1.0)
-            pressure_max = _validate_positive(p_max, min_val=1.0)
+            # A4Her uses AFH signals; S10 AutoSet first-checks S.AS.StartPress
+            # then S.A.StartPress (OSCAR :1938); standard APAP falls back to
+            # S.A.StartPress from ramp_start_pressure key.
+            p_min = _pos("pressure_min", min_val=1.0) or _pos(
+                "afh_min_press", min_val=1.0
+            )
+            p_max = _pos("pressure_max", min_val=1.0) or _pos(
+                "afh_max_press", min_val=1.0
+            )
+            pressure_min = p_min
+            pressure_max = p_max
 
-            rsp = values.get("ramp_start_pressure")
-            if rsp is None:
-                rsp = values.get("afh_start_press")
-            ramp_start_pressure = _validate_positive(rsp, min_val=1.0)
-
-            epr_level, epr_mode = _extract_epr()
+            rsp = (
+                _pos("as_start_press", min_val=1.0)
+                or _pos("ramp_start_pressure", min_val=1.0)
+                or _pos("afh_start_press", min_val=1.0)
+            )
+            ramp_start_pressure = rsp
+            epr_level, epr_mode = _decode_epr()
 
         elif mode == TherapyMode.BIPAP_AUTO:
-            # VAuto mode: uses S.VA.* signals only. CPAP/APAP presets are
-            # dormant and must not be stored.
-            epap = _validate_non_negative(values.get("va_min_epap"))
-            ipap = _validate_non_negative(values.get("va_max_ipap"))
-            ps = _validate_non_negative(values.get("va_ps"))
-            ramp_start_pressure = _validate_non_negative(values.get("va_start_press"))
+            # VAuto: EPAP/IPAP/PS use S.VA.* for both families.
+            # Cycle/Trigger/TiMax/TiMin: S10 uses bare S.* signals, S11 S.VA.*.
+            # OSCAR :2390-2411: sigprefix "S." for S10, "S.VA." for S11.
+            epap = _nn("va_min_epap")
+            ipap = _nn("va_max_ipap")
+            ps = _nn("va_ps")
+            ramp_start_pressure = _nn("va_start_press")
 
-            ti_max = values.get("va_ti_max")
-            if ti_max is not None and ti_max >= 0:
-                other_settings["ti_max"] = f"{ti_max:.1f}"
-            ti_min = values.get("va_ti_min")
-            if ti_min is not None and ti_min >= 0:
-                other_settings["ti_min"] = f"{ti_min:.1f}"
-            trigger = values.get("va_trigger")
-            if trigger is not None and trigger >= 0:
-                other_settings["trigger"] = str(int(trigger))
-            cycle = values.get("va_cycle")
-            if cycle is not None and cycle >= 0:
-                other_settings["cycle"] = str(int(cycle))
+            if series11:
+                ti_max_v = values.get("va_ti_max")
+                ti_min_v = values.get("va_ti_min")
+                trigger_v = _norm("va_trigger")
+                cycle_v = _norm("va_cycle")
+            else:
+                # S10 bare signals (S.TiMax etc.) are not enum-offset; no -1 norm.
+                ti_max_v = values.get("s10_ti_max")
+                ti_min_v = values.get("s10_ti_min")
+                trigger_v = _nn("s10_trigger")
+                cycle_v = _nn("s10_cycle")
+
+            _apply_timing(ti_max_v, ti_min_v, trigger_v, cycle_v)
 
         elif mode in (TherapyMode.BIPAP, TherapyMode.BIPAP_ST):
-            # S/S-T mode: uses S.S.* signals.
-            ipap = _validate_non_negative(values.get("s_ipap"))
-            epap = _validate_non_negative(values.get("s_epap"))
+            # S11 bilevel uses S.S.* (STR_SMODE_SIGNALS); S10 uses bare "S.*"
+            # for timing/rise/easybreathe and "S.BL.*" for pressures only.
+            # OSCAR :2347-2392: sigprefix "S." for S10, "S.S." for S11.
+            if series11:
+                ipap = _nn("s_ipap")
+                epap = _nn("s_epap")
+                ramp_start_pressure = _nn("s_start_press")
+                ti_max_v = values.get("s_ti_max")
+                ti_min_v = values.get("s_ti_min")
+                trigger_v = _norm("s_trigger")  # S11 enum-offset
+                cycle_v = _norm("s_cycle")
+                rise_enable_norm = _norm("s_rise_enable")
+                rise_time_v = values.get("s_rise_time")
+                easy_breathe_v = _norm("s_easy_breathe")
+            else:
+                ipap = _nn("bl_ipap")
+                epap = _nn("bl_epap")
+                ramp_start_pressure = _nn("bl_start_press")
+                # S10: prefer bare S.* timing signals (OSCAR :2347-2392);
+                # fall back to S.BL.* if bare key absent (defensive — real S10
+                # devices emit bare signals, but older/unknown firmware may not).
+                ti_max_v = (
+                    values.get("s10_ti_max")
+                    if values.get("s10_ti_max") is not None
+                    else values.get("bl_ti_max")
+                )
+                ti_min_v = (
+                    values.get("s10_ti_min")
+                    if values.get("s10_ti_min") is not None
+                    else values.get("bl_ti_min")
+                )
+                trigger_v = (
+                    _nn("s10_trigger")
+                    if values.get("s10_trigger") is not None
+                    else _nn("bl_trigger")
+                )
+                cycle_v = (
+                    _nn("s10_cycle")
+                    if values.get("s10_cycle") is not None
+                    else _nn("bl_cycle")
+                )
+                rise_enable_norm = (
+                    _nn("s10_rise_enable")
+                    if values.get("s10_rise_enable") is not None
+                    else _nn("bl_rise_enable")
+                )
+                rise_time_v = (
+                    values.get("s10_rise_time")
+                    if values.get("s10_rise_time") is not None
+                    else values.get("bl_rise_time")
+                )
+                easy_breathe_v = (
+                    _nn("s10_easy_breathe")
+                    if values.get("s10_easy_breathe") is not None
+                    else _nn("bl_easy_breathe")
+                )
+
             if ipap is not None and epap is not None:
                 ps = round(ipap - epap, 2)
-            ramp_start_pressure = _validate_non_negative(values.get("s_start_press"))
+            _apply_timing(ti_max_v, ti_min_v, trigger_v, cycle_v)
+            if rise_enable_norm is not None and rise_enable_norm >= 1:
+                if rise_time_v is not None and rise_time_v >= 0:
+                    other_settings["rise_time"] = str(int(rise_time_v))
+            if easy_breathe_v is not None and easy_breathe_v >= 0:
+                other_settings["easy_breathe"] = str(int(easy_breathe_v) == 1)
 
-            ti_max = values.get("s_ti_max")
-            if ti_max is not None and ti_max >= 0:
-                other_settings["ti_max"] = f"{ti_max:.1f}"
-            ti_min = values.get("s_ti_min")
-            if ti_min is not None and ti_min >= 0:
-                other_settings["ti_min"] = f"{ti_min:.1f}"
-            trigger = values.get("s_trigger")
-            if trigger is not None and trigger >= 0:
-                other_settings["trigger"] = str(int(trigger))
-            cycle = values.get("s_cycle")
-            if cycle is not None and cycle >= 0:
-                other_settings["cycle"] = str(int(cycle))
-            rise_enable = values.get("s_rise_enable")
-            if rise_enable == 2:
-                rise_time = values.get("s_rise_time")
-                if rise_time is not None and rise_time >= 0:
-                    other_settings["rise_time"] = str(int(rise_time))
-            easy_breathe = values.get("s_easy_breathe")
-            if easy_breathe is not None and easy_breathe >= 0:
-                other_settings["easy_breathe"] = str(easy_breathe == 2)
+        elif mode == TherapyMode.ASV:
+            # Fixed-EPAP ASV: S.AV.EPAP, S.AV.MinPS, S.AV.MaxPS (OSCAR :2093-2108).
+            epap = _nn("av_epap")
+            min_ps = _nn("av_min_ps")
+            max_ps = _nn("av_max_ps")
+            ramp_start_pressure = _nn("av_start_press")
+            if epap is not None:
+                other_settings["min_epap"] = f"{epap:.1f}"
+                other_settings["max_epap"] = f"{epap:.1f}"
+            if min_ps is not None:
+                other_settings["min_ps"] = f"{min_ps:.1f}"
+            if max_ps is not None:
+                other_settings["max_ps"] = f"{max_ps:.1f}"
+                ipap = round(epap + max_ps, 2) if epap is not None else None
 
-        # ASV: universal comfort settings only; no pressure fields mapped yet.
+        elif mode == TherapyMode.ASV_AUTO:
+            # Variable-EPAP ASV: S.AA.MinEPAP, S.AA.MaxEPAP, S.AA.MinPS, S.AA.MaxPS
+            # (OSCAR :2109-2127).
+            min_epap = _nn("aa_min_epap")
+            max_epap = _nn("aa_max_epap")
+            min_ps = _nn("aa_min_ps")
+            max_ps = _nn("aa_max_ps")
+            ramp_start_pressure = _nn("aa_start_press")
+            if min_epap is not None:
+                other_settings["min_epap"] = f"{min_epap:.1f}"
+                epap = min_epap
+            if max_epap is not None:
+                other_settings["max_epap"] = f"{max_epap:.1f}"
+            if min_ps is not None:
+                other_settings["min_ps"] = f"{min_ps:.1f}"
+            if max_ps is not None:
+                other_settings["max_ps"] = f"{max_ps:.1f}"
+                if max_epap is not None:
+                    ipap = round(max_epap + max_ps, 2)
+
+        elif mode == TherapyMode.IVAPS:
+            # iVAPS: S.i.EPAP / S.i.EPAPAuto, S.i.MinPS/MaxPS, S.i.MinEPAP/MaxEPAP
+            # (OSCAR :2049-2092).
+            iv_epap = _nn("iv_epap")
+            iv_epap_auto = _nn("iv_epap_auto")
+            iv_min_epap = _nn("iv_min_epap")
+            iv_max_epap = _nn("iv_max_epap")
+            iv_min_ps = _nn("iv_min_ps")
+            iv_max_ps = _nn("iv_max_ps")
+            ramp_start_pressure = _nn("iv_start_press")
+
+            epap_auto = iv_epap_auto is not None and iv_epap_auto >= 1
+            if epap_auto:
+                if iv_min_epap is not None:
+                    other_settings["min_epap"] = f"{iv_min_epap:.1f}"
+                    epap = iv_min_epap
+                if iv_max_epap is not None:
+                    other_settings["max_epap"] = f"{iv_max_epap:.1f}"
+            else:
+                if iv_epap is not None:
+                    other_settings["min_epap"] = f"{iv_epap:.1f}"
+                    other_settings["max_epap"] = f"{iv_epap:.1f}"
+                    epap = iv_epap
+            if iv_min_ps is not None:
+                other_settings["min_ps"] = f"{iv_min_ps:.1f}"
+            if iv_max_ps is not None:
+                other_settings["max_ps"] = f"{iv_max_ps:.1f}"
+                ipap = round((epap or 0) + iv_max_ps, 2) if epap is not None else None
+            other_settings["epap_auto"] = str(epap_auto)
+
+        # Accumulate universal other_settings after mode-specific handling.
+        if smart_stop is not None:
+            other_settings["smart_stop"] = str(smart_stop)
+        # smart_ramp can come from S.RampEnable=2 or S.SmartStart=2 (on S10 basis).
+        if smart_ramp or (ss_norm is not None and ss_norm >= 2):
+            other_settings["smart_ramp"] = "True"
+        if tube is not None:
+            other_settings["tube"] = tube
+        if pt_access is not None:
+            other_settings["pt_access"] = pt_access
+        if response is not None:
+            other_settings["response"] = response
 
         return TherapySettings(
             mode=mode,

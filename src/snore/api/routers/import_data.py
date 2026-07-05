@@ -137,7 +137,7 @@ def _run_import(job: ImportJob) -> None:
             sources = service.detect_sources(job.temp_dir)
             progress_callback(f"Detected {len(sources)} source(s)")
             result = service.import_sources(
-                sources, backup=False, progress_callback=progress_callback
+                sources, backup=True, progress_callback=progress_callback
             )
         elif job.job_type == JobType.PATH and job.sources is not None:
             result = service.import_sources(

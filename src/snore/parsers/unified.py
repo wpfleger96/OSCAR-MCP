@@ -68,6 +68,8 @@ class TherapyMode(Enum):
     BIPAP_ST = "BiPAP S/T"  # Spontaneous/Timed
     BIPAP_AUTO = "BiPAP Auto"  # Auto bi-level
     ASV = "ASV"  # Adaptive servo-ventilation
+    ASV_AUTO = "ASV Auto"  # ASV with variable EPAP (AirCurve 10/11 ASV-A)
+    IVAPS = "iVAPS"  # Intelligent Volume-Assured Pressure Support
 
 
 class DeviceInfo(BaseModel):
