@@ -23,18 +23,10 @@ build-all: web-build build
 ui-playwright-install:
     cd ui && pnpm exec playwright install chromium
 
-# Build UI and capture screenshots with Playwright
+# Build UI and capture the screenshot regression battery (local eyeballing — never post to PRs)
 screenshot:
     just web-build
     cd ui && pnpm exec playwright test screenshot.spec.ts
-
-# Post captured screenshots to a GitHub PR
-screenshot-post PR_NUMBER:
-    bash scripts/post-screenshots.sh {{PR_NUMBER}}
-
-# Build, capture, and post screenshots to a GitHub PR
-screenshot-pr PR_NUMBER: screenshot
-    just screenshot-post {{PR_NUMBER}}
 
 # Generated API types
 
