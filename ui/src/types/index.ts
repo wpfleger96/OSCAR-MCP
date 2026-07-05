@@ -69,6 +69,7 @@ export type ImportPathRequest = Schemas['ImportPathRequest']
 // Database
 export type DatabaseStatsPublic = Schemas['DatabaseStatsPublic']
 export type VacuumResult = Schemas['VacuumResult']
+export type ResetResult = Schemas['ResetResult']
 
 // Validation
 export type ValidationReport = Schemas['ValidationReport']

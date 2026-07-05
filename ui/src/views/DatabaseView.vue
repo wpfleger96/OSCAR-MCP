@@ -156,6 +156,42 @@
                     {{ vacuumError }}
                 </div>
             </section>
+
+            <!-- Danger Zone -->
+            <section class="section">
+                <h2 class="section-heading">Danger Zone</h2>
+                <div class="danger-card">
+                    <div class="vacuum-description">
+                        <p class="vacuum-title">Reset Database</p>
+                        <p class="vacuum-subtitle">
+                            Delete all session data, devices, and profiles. The schema is preserved
+                            — you can re-import data afterward.
+                        </p>
+                    </div>
+                    <Button
+                        variant="destructive"
+                        :disabled="resetting"
+                        @click="resetDialogOpen = true"
+                    >
+                        <Loader2 v-if="resetting" class="mr-2 h-4 w-4 animate-spin" />
+                        Reset
+                    </Button>
+                </div>
+
+                <div v-if="resetResult" class="vacuum-result">
+                    <span class="vacuum-result-label">Last reset:</span>
+                    <span class="vacuum-result-value">
+                        {{ resetResult.total_rows_deleted.toLocaleString() }} rows deleted,
+                        {{ resetResult.size_before_mb.toFixed(1) }} MB →
+                        {{ resetResult.size_after_mb.toFixed(1) }} MB
+                    </span>
+                </div>
+
+                <div v-if="resetError" class="error-state">
+                    <AlertTriangle class="h-4 w-4" />
+                    {{ resetError }}
+                </div>
+            </section>
         </template>
 
         <!-- Vacuum confirmation dialog -->
@@ -177,12 +213,56 @@
                 </AlertDialogFooter>
             </AlertDialogContent>
         </AlertDialog>
+
+        <!-- Reset confirmation dialog -->
+        <DeleteConfirmDialog
+            v-model:visible="resetDialogOpen"
+            title="Reset Database"
+            message="This will permanently delete ALL data from the database. This cannot be undone."
+            :loading="false"
+            :deleting="resetting"
+            @confirm="handleReset"
+        >
+            <template v-if="data" #preview>
+                <div class="reset-preview">
+                    <div class="reset-preview-row">
+                        <span>Sessions</span>
+                        <span class="font-medium">{{ data.session_count.toLocaleString() }}</span>
+                    </div>
+                    <div class="reset-preview-row">
+                        <span>Days</span>
+                        <span class="font-medium">{{ data.day_count.toLocaleString() }}</span>
+                    </div>
+                    <div class="reset-preview-row">
+                        <span>Events</span>
+                        <span class="font-medium">{{ data.event_count.toLocaleString() }}</span>
+                    </div>
+                    <div class="reset-preview-row">
+                        <span>Waveforms</span>
+                        <span class="font-medium">{{ data.waveform_count.toLocaleString() }}</span>
+                    </div>
+                    <div class="reset-preview-row">
+                        <span>Analysis Results</span>
+                        <span class="font-medium">{{ data.analysis_count.toLocaleString() }}</span>
+                    </div>
+                    <div class="reset-preview-row">
+                        <span>Devices</span>
+                        <span class="font-medium">{{ data.device_count }}</span>
+                    </div>
+                    <div class="reset-preview-row">
+                        <span>Profiles</span>
+                        <span class="font-medium">{{ data.profile_count }}</span>
+                    </div>
+                </div>
+            </template>
+        </DeleteConfirmDialog>
     </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
 import StatCard from '@/components/StatCard.vue'
+import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { Button } from '@/components/ui/button'
 import {
     AlertDialog,
@@ -196,9 +276,9 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Loader2, AlertTriangle, Database, HardDrive } from '@lucide/vue'
 import { useApiLoad } from '@/composables/useApiLoad'
-import { getDbStats, vacuumDb } from '@/api/db'
+import { getDbStats, vacuumDb, resetDb } from '@/api/db'
 import { formatDateShort } from '@/utils/formatting'
-import type { VacuumResult } from '@/types'
+import type { VacuumResult, ResetResult } from '@/types'
 
 const { data, loading, error, reload } = useApiLoad(() => getDbStats())
 
@@ -218,6 +298,25 @@ async function handleVacuum(): Promise<void> {
         vacuumError.value = err instanceof Error ? err.message : 'Vacuum failed'
     } finally {
         vacuuming.value = false
+    }
+}
+
+const resetDialogOpen = ref(false)
+const resetting = ref(false)
+const resetResult = ref<ResetResult | null>(null)
+const resetError = ref<string | null>(null)
+
+async function handleReset(): Promise<void> {
+    resetting.value = true
+    resetDialogOpen.value = false
+    resetError.value = null
+    try {
+        resetResult.value = await resetDb()
+        await reload()
+    } catch (err: unknown) {
+        resetError.value = err instanceof Error ? err.message : 'Reset failed'
+    } finally {
+        resetting.value = false
     }
 }
 </script>
@@ -409,5 +508,29 @@ async function handleVacuum(): Promise<void> {
 .vacuum-savings {
     color: var(--color-muted-foreground);
     font-weight: 400;
+}
+
+.danger-card {
+    border: 1px solid var(--color-destructive);
+    border-radius: 8px;
+    background: var(--color-card);
+    padding: 1rem 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.reset-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.875rem;
+}
+
+.reset-preview-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 2rem;
 }
 </style>

@@ -59,3 +59,36 @@ class TestDbVacuum:
         with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
             response = api_client.post("/api/v1/db/vacuum")
         assert response.json()["status"] == "success"
+
+
+class TestDbReset:
+    def test_reset_returns_200(self, api_client, temp_db):
+        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+            response = api_client.post("/api/v1/db/reset")
+        assert response.status_code == 200
+
+    def test_reset_result_shape(self, api_client, temp_db):
+        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+            response = api_client.post("/api/v1/db/reset")
+        data = response.json()
+        assert "status" in data
+        assert "tables_cleared" in data
+        assert "total_rows_deleted" in data
+        assert "size_before_mb" in data
+        assert "size_after_mb" in data
+
+    def test_reset_status_is_success(self, api_client, temp_db):
+        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+            response = api_client.post("/api/v1/db/reset")
+        assert response.json()["status"] == "success"
+
+    def test_reset_clears_data(
+        self, api_client, db_session, test_device, test_session_factory, temp_db
+    ):
+        from datetime import datetime
+
+        test_session_factory(test_device.id, start_time=datetime(2025, 1, 1, 22, 0))
+        db_session.commit()
+        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+            response = api_client.post("/api/v1/db/reset")
+        assert response.json()["total_rows_deleted"] >= 1

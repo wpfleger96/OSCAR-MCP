@@ -106,6 +106,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/db/reset': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Reset Db */
+        post: operations['reset_db_api_v1_db_reset_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/db/stats': {
         parameters: {
             query?: never
@@ -1858,6 +1875,39 @@ export interface components {
             start_time: number
         }
         /**
+         * ResetResult
+         * @description Result of a database reset (delete all data, preserve schema) operation.
+         */
+        ResetResult: {
+            /**
+             * Size After Mb
+             * @description Database size after reset + vacuum in MB
+             */
+            size_after_mb: number
+            /**
+             * Size Before Mb
+             * @description Database size before reset in MB
+             */
+            size_before_mb: number
+            /**
+             * Status
+             * @description Operation status ('success')
+             */
+            status: string
+            /**
+             * Tables Cleared
+             * @description Rows deleted per table (table_name -> count)
+             */
+            tables_cleared: {
+                [key: string]: number
+            }
+            /**
+             * Total Rows Deleted
+             * @description Total rows deleted across all tables
+             */
+            total_rows_deleted: number
+        }
+        /**
          * RxComparisonResponse
          * @description RX period comparison result with best/worst indices.
          */
@@ -2608,6 +2658,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    reset_db_api_v1_db_reset_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ResetResult']
                 }
             }
         }
