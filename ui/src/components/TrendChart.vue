@@ -7,6 +7,7 @@ import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { useDarkMode } from '@/composables/useDarkMode'
+import { parseLocalDate } from '@/utils/formatting'
 
 const { isDark } = useDarkMode()
 
@@ -30,7 +31,7 @@ function createChart(): void {
     chart?.destroy()
 
     const colors = axisColors()
-    const timestamps = props.labels.map((d) => new Date(d).getTime() / 1000)
+    const timestamps = props.labels.map((d) => parseLocalDate(d).getTime() / 1000)
     const width = containerRef.value.clientWidth || 800
 
     const opts: uPlot.Options = {

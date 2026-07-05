@@ -1,22 +1,56 @@
 """Database session management for SNORE."""
 
+import logging
 import os
 import threading
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Engine, create_engine, event
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+from sqlalchemy import Engine, create_engine, event, inspect
 from sqlalchemy.orm import Session, sessionmaker
 
 from snore.constants import DEFAULT_DATABASE_PATH
 from snore.database.models import Base
 
+logger = logging.getLogger(__name__)
+
 _engine = None
 _SessionFactory = None
 _db_path: str | None = None
 _init_lock = threading.Lock()
+
+
+def _build_alembic_config(database_path: str) -> AlembicConfig:
+    migrations_dir = str(Path(__file__).parent / "migrations")
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", migrations_dir)
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
+    return cfg
+
+
+def _apply_migrations(engine: Engine, database_path: str) -> None:
+    insp = inspect(engine)
+    table_names = set(insp.get_table_names())
+    alembic_cfg = _build_alembic_config(database_path)
+
+    if "alembic_version" in table_names:
+        alembic_command.upgrade(alembic_cfg, "head")
+        logger.info("Database migrations applied (upgrade to head)")
+    elif "sessions" not in table_names:
+        Base.metadata.create_all(engine)
+        alembic_command.stamp(alembic_cfg, "head")
+        logger.info("Fresh database created and stamped at head")
+    else:
+        columns = {col["name"] for col in insp.get_columns("statistics")}
+        stamp_rev = "a3f8e9c12b45" if "ipap_median" in columns else "102cf96663ea"
+        alembic_command.stamp(alembic_cfg, stamp_rev)
+        alembic_command.upgrade(alembic_cfg, "head")
+        logger.info("Legacy database stamped at %s and upgraded to head", stamp_rev)
 
 
 def init_database(database_path: str | None = None) -> None:
@@ -75,7 +109,7 @@ def init_database(database_path: str | None = None) -> None:
 
         _SessionFactory = sessionmaker(bind=_engine)
 
-        Base.metadata.create_all(_engine)
+        _apply_migrations(_engine, database_path)
 
 
 def get_session() -> Session:

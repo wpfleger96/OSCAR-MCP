@@ -258,7 +258,7 @@ import {
 } from '@/api/sessions'
 import { getDevices } from '@/api/devices'
 import { ahiClass } from '@/utils/format'
-import { formatDateTime, formatIso } from '@/utils/formatting'
+import { formatDateTime, formatIso, parseLocalDate } from '@/utils/formatting'
 import type { SessionListItem, DeletePreview, DeviceInfo } from '@/types'
 
 const router = useRouter()
@@ -272,8 +272,10 @@ const pageSize = 25
 const selectedIds = ref<Set<number>>(new Set())
 
 // Filters
-const fromDate = ref<Date | null>(route.query.from ? new Date(route.query.from as string) : null)
-const toDate = ref<Date | null>(route.query.to ? new Date(route.query.to as string) : null)
+const fromDate = ref<Date | null>(
+    route.query.from ? parseLocalDate(route.query.from as string) : null,
+)
+const toDate = ref<Date | null>(route.query.to ? parseLocalDate(route.query.to as string) : null)
 const selectedDevice = ref<string | null>(null)
 const includeDisabled = ref(false)
 type SessionSortBy = 'date-asc' | 'date-desc' | 'session-id' | 'duration'
@@ -330,12 +332,12 @@ const deleteMessage = ref('')
 
 function onFromDateChange(event: Event): void {
     const input = event.target as HTMLInputElement
-    fromDate.value = input.value ? new Date(input.value + 'T00:00:00') : null
+    fromDate.value = input.value ? parseLocalDate(input.value) : null
 }
 
 function onToDateChange(event: Event): void {
     const input = event.target as HTMLInputElement
-    toDate.value = input.value ? new Date(input.value + 'T00:00:00') : null
+    toDate.value = input.value ? parseLocalDate(input.value) : null
 }
 
 async function fetchPage(newOffset: number): Promise<void> {
