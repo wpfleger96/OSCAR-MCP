@@ -47,7 +47,7 @@ check-all: check test web-install web-check
     @echo "All quality checks and tests passed"
 
 # Sync, type-check, auto-fix lint/format, and run tests
-pre-commit: sync type-check lint format test
+pre-commit: sync type-check lint format test web-install web-type-check web-lint web-format
     @echo "Pre-commit checks passed"
 
 # Testing
