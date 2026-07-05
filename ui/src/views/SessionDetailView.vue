@@ -174,6 +174,12 @@
                             :decimals="1"
                         />
                         <StatCard
+                            label="Pressure Median"
+                            :value="session.statistics.pressure_median"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
                             label="Pressure 95th"
                             :value="session.statistics.pressure_95th"
                             unit="cmH₂O"
@@ -198,11 +204,46 @@
                             :decimals="1"
                         />
                         <StatCard
+                            label="EPAP Median"
+                            :value="session.statistics.epap_median"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
                             label="EPAP 95th"
                             :value="session.statistics.epap_95th"
                             unit="cmH₂O"
                             :decimals="1"
                         />
+                        <template
+                            v-if="
+                                session.statistics.ipap_median != null ||
+                                session.statistics.ipap_95th != null ||
+                                session.statistics.ipap_max != null
+                            "
+                        >
+                            <StatCard
+                                v-if="session.statistics.ipap_median != null"
+                                label="IPAP Median"
+                                :value="session.statistics.ipap_median"
+                                unit="cmH₂O"
+                                :decimals="1"
+                            />
+                            <StatCard
+                                v-if="session.statistics.ipap_95th != null"
+                                label="IPAP 95th"
+                                :value="session.statistics.ipap_95th"
+                                unit="cmH₂O"
+                                :decimals="1"
+                            />
+                            <StatCard
+                                v-if="session.statistics.ipap_max != null"
+                                label="IPAP Max"
+                                :value="session.statistics.ipap_max"
+                                unit="cmH₂O"
+                                :decimals="1"
+                            />
+                        </template>
                     </div>
                 </CollapsibleContent>
             </Collapsible>
@@ -222,6 +263,24 @@
                         <StatCard
                             label="Leak Mean"
                             :value="session.statistics.leak_mean"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Leak Min"
+                            :value="session.statistics.leak_min"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Leak Max"
+                            :value="session.statistics.leak_max"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Leak Median"
+                            :value="session.statistics.leak_median"
                             unit="L/min"
                             :decimals="1"
                         />
@@ -266,6 +325,12 @@
                             :decimals="1"
                         />
                         <StatCard
+                            label="SpO₂ Max"
+                            :value="session.statistics.spo2_max"
+                            unit="%"
+                            :decimals="1"
+                        />
+                        <StatCard
                             label="SpO₂ Below 90%"
                             :value="session.statistics.spo2_time_below_90"
                             unit="s"
@@ -306,20 +371,56 @@
                 <CollapsibleContent>
                     <div class="stats-grid">
                         <StatCard
-                            label="Respiratory Rate"
+                            label="Resp Rate Mean"
                             :value="session.statistics.respiratory_rate_mean"
                             unit="br/min"
                             :decimals="1"
                         />
                         <StatCard
-                            label="Tidal Volume"
+                            label="Resp Rate Min"
+                            :value="session.statistics.respiratory_rate_min"
+                            unit="br/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Resp Rate Max"
+                            :value="session.statistics.respiratory_rate_max"
+                            unit="br/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Tidal Volume Mean"
                             :value="session.statistics.tidal_volume_mean"
                             unit="mL"
                             :decimals="0"
                         />
                         <StatCard
-                            label="Minute Ventilation"
+                            label="Tidal Volume Min"
+                            :value="session.statistics.tidal_volume_min"
+                            unit="mL"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Tidal Volume Max"
+                            :value="session.statistics.tidal_volume_max"
+                            unit="mL"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            label="Min Ventilation Mean"
                             :value="session.statistics.minute_ventilation_mean"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Min Ventilation Min"
+                            :value="session.statistics.minute_ventilation_min"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="Min Ventilation Max"
+                            :value="session.statistics.minute_ventilation_max"
                             unit="L/min"
                             :decimals="1"
                         />
@@ -327,6 +428,53 @@
                 </CollapsibleContent>
             </Collapsible>
         </div>
+
+        <!-- Import Provenance -->
+        <Collapsible
+            v-if="
+                session.import_source ||
+                session.parser_version ||
+                session.data_quality_notes?.length
+            "
+            v-model:open="provenanceOpen"
+            class="settings-panel"
+        >
+            <CollapsibleTrigger as-child>
+                <button
+                    class="flex w-full items-center justify-between rounded-lg border border-border bg-card p-4 text-left font-semibold hover:bg-accent"
+                >
+                    Import Provenance
+                    <ChevronDown
+                        class="h-4 w-4 transition-transform"
+                        :class="{ 'rotate-180': provenanceOpen }"
+                    />
+                </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent class="px-4 pt-3 pb-4">
+                <div class="settings-grid">
+                    <div v-if="session.import_source" class="setting-row">
+                        <span class="setting-key text-muted-foreground">Import Source</span>
+                        <span class="setting-value">{{ session.import_source }}</span>
+                    </div>
+                    <div v-if="session.parser_version" class="setting-row">
+                        <span class="setting-key text-muted-foreground">Parser Version</span>
+                        <span class="setting-value">{{ session.parser_version }}</span>
+                    </div>
+                </div>
+                <div v-if="session.data_quality_notes?.length" class="quality-notes">
+                    <p class="quality-notes-label text-muted-foreground">Data Quality Notes</p>
+                    <div class="quality-chips">
+                        <span
+                            v-for="note in session.data_quality_notes"
+                            :key="note"
+                            class="quality-chip"
+                        >
+                            {{ note }}
+                        </span>
+                    </div>
+                </div>
+            </CollapsibleContent>
+        </Collapsible>
 
         <!-- Device settings -->
         <Collapsible
@@ -391,6 +539,7 @@ const pressureOpen = ref(false)
 const leakOpen = ref(false)
 const oximetryOpen = ref(false)
 const ventilationOpen = ref(false)
+const provenanceOpen = ref(false)
 
 const sessionIdRef = toRef(props, 'sessionId')
 const {
@@ -542,6 +691,31 @@ onMounted(async () => {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 0.4rem 2rem;
+}
+
+.quality-notes {
+    margin-top: 0.75rem;
+}
+
+.quality-notes-label {
+    font-size: 0.8rem;
+    margin-bottom: 0.4rem;
+}
+
+.quality-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.quality-chip {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 0.25rem;
+    font-size: 0.8rem;
+    color: var(--warning, #d97706);
+    border: 1px solid var(--warning, #d97706);
+    background: color-mix(in srgb, var(--warning, #d97706) 10%, transparent);
 }
 
 .setting-row {

@@ -226,6 +226,13 @@ class SessionService:
             waveform_types=waveform_type_list,
             has_statistics=session.has_statistics,
             has_event_data=session.has_event_data,
+            import_source=session.import_source,
+            parser_version=session.parser_version,
+            data_quality_notes=(
+                session.data_quality_notes
+                if isinstance(session.data_quality_notes, list)
+                else []
+            ),
             statistics=statistics,
             settings=settings_list,
         )

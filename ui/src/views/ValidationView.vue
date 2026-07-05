@@ -134,7 +134,11 @@
                 </Table>
             </div>
 
-            <Button variant="outline" @click="result = null">Run Again</Button>
+            <div class="flex gap-2 flex-wrap">
+                <Button variant="outline" @click="result = null">Run Again</Button>
+                <Button variant="outline" @click="downloadJson">Download JSON</Button>
+                <Button variant="outline" @click="downloadCsv">Download CSV</Button>
+            </div>
         </div>
     </div>
 </template>
@@ -177,6 +181,59 @@ function pct(value: number | null | undefined): string {
 
 function isLowSensitivity(session: SessionValidation): boolean {
     return session.apnea_sensitivity < 0.7 || session.hypopnea_sensitivity < 0.7
+}
+
+function downloadBlob(content: string, filename: string, mimeType: string): void {
+    const blob = new Blob([content], { type: mimeType })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+}
+
+function downloadJson(): void {
+    if (!result.value) return
+    const filename = `validation-report-${fromDate.value}-${toDate.value}.json`
+    downloadBlob(JSON.stringify(result.value, null, 2), filename, 'application/json')
+}
+
+function downloadCsv(): void {
+    if (!result.value) return
+    const headers = [
+        'session_id',
+        'date',
+        'duration_hours',
+        'machine_events',
+        'programmatic_events',
+        'apnea_sens',
+        'apnea_prec',
+        'apnea_f1',
+        'hypopnea_sens',
+        'hypopnea_prec',
+        'hypopnea_f1',
+        'notes',
+    ]
+    const rows = result.value.sessions.map((s) => [
+        s.session_id,
+        s.date,
+        s.duration_hours.toFixed(1),
+        s.machine_event_count,
+        s.programmatic_event_count,
+        `${(s.apnea_sensitivity * 100).toFixed(0)}%`,
+        `${(s.apnea_precision * 100).toFixed(0)}%`,
+        s.apnea_f1.toFixed(2),
+        `${(s.hypopnea_sensitivity * 100).toFixed(0)}%`,
+        `${(s.hypopnea_precision * 100).toFixed(0)}%`,
+        s.hypopnea_f1.toFixed(2),
+        s.notes ?? '',
+    ])
+    const csv = [headers, ...rows].map((r) => r.join(',')).join('\n')
+    const filename = `validation-report-${fromDate.value}-${toDate.value}.csv`
+    downloadBlob(csv, filename, 'text/csv')
 }
 
 async function handleRun(): Promise<void> {

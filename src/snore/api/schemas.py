@@ -80,6 +80,8 @@ class EventItem(BaseModel):
     start_time: float
     duration_seconds: float
     offset_seconds: float
+    spo2_drop: float | None = None
+    peak_flow_limitation: float | None = None
 
 
 AnalysisMode = Literal["aasm", "aasm_relaxed", "resmed"]

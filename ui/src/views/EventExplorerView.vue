@@ -71,6 +71,8 @@
                     <TableHead style="width: 80px">Type</TableHead>
                     <TableHead>Time</TableHead>
                     <TableHead style="width: 100px">Duration</TableHead>
+                    <TableHead style="width: 100px">SpO₂ Drop</TableHead>
+                    <TableHead style="width: 90px">Peak FL</TableHead>
                 </TableRow>
             </TableHeader>
             <TableBody>
@@ -92,6 +94,14 @@
                         </button>
                     </TableCell>
                     <TableCell>{{ row.duration_seconds.toFixed(1) }}s</TableCell>
+                    <TableCell>{{
+                        row.spo2_drop != null ? row.spo2_drop.toFixed(1) + '%' : emDash
+                    }}</TableCell>
+                    <TableCell>{{
+                        row.peak_flow_limitation != null
+                            ? row.peak_flow_limitation.toFixed(2)
+                            : emDash
+                    }}</TableCell>
                 </TableRow>
             </TableBody>
         </Table>
@@ -144,6 +154,7 @@ import { EVENT_COLORS } from '@/types'
 import type { EventItem, EventMatchResult } from '@/types'
 import ErrorState from '@/components/ErrorState.vue'
 
+const emDash = '\u2014' // em-dash used for null display
 const props = defineProps<{ sessionId: number }>()
 const router = useRouter()
 

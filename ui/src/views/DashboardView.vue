@@ -31,6 +31,13 @@
                 >
                     {{ summary.effectiveness }}
                 </Badge>
+                <span
+                    v-if="summary.ahi_trend_direction"
+                    class="trend-badge"
+                    :class="'trend-' + summary.ahi_trend_direction"
+                >
+                    {{ summary.ahi_trend_direction }}
+                </span>
             </div>
             <StatCard label="Avg Hours" :value="summary.avg_hours" unit="hrs" :decimals="1" />
             <StatCard label="Avg Leak" :value="summary.avg_leak" unit="L/min" :decimals="1" />
@@ -217,6 +224,30 @@ function eventTextColor(type: string): string {
     position: absolute;
     top: 0.5rem;
     right: 0.5rem;
+}
+
+.trend-badge {
+    position: absolute;
+    bottom: 0.5rem;
+    right: 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: capitalize;
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.25rem;
+    border: 1px solid currentColor;
+}
+
+.trend-improving {
+    color: var(--success, #16a34a);
+}
+
+.trend-worsening {
+    color: var(--color-destructive);
+}
+
+.trend-stable {
+    color: var(--muted-foreground);
 }
 
 .no-data {

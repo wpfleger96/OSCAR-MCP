@@ -115,6 +115,10 @@ class TestGetSession:
         data = response.json()
         assert data["id"] == session.id
         assert data["device_serial"] == test_device.serial_number
+        assert "import_source" in data
+        assert "parser_version" in data
+        assert "data_quality_notes" in data
+        assert data["data_quality_notes"] == []
 
     def test_get_session_includes_statistics(
         self, api_client, db_session, test_device, test_session_factory
