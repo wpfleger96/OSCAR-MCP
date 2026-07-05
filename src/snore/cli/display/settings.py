@@ -1,9 +1,8 @@
 """Human-readable labels and value formatting for device therapy settings.
 
-Keep in sync with ui/src/utils/deviceSettings.ts — that file is the canonical
-sibling implementation and the source for label text and key groupings. It
-cross-references STR_SETTINGS_MAP in src/snore/parsers/resmed_edf.py; this
-module mirrors the same contract for the CLI surface.
+Mirrors ui/src/utils/deviceSettings.ts — both files carry the same key labels
+and value-formatting rules. The TS file cross-references the parser's
+STR_SETTINGS_MAP; this module is the CLI counterpart.
 """
 
 from __future__ import annotations

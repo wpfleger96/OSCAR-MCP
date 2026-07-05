@@ -161,6 +161,9 @@ class ResmedEDFParser(DeviceParser):
     RESPONSE_MAP = {0: "Standard", 1: "Soft"}
     # Patient access: S10 (OSCAR :224-228); S11 uses PT_VIEW_MAP instead (OSCAR :263-267).
     PT_ACCESS_MAP = {0: "Plus", 1: "On"}
+    # Patient view: S11 (OSCAR :263-267). OSCAR's effective display is "Off"/"On"
+    # (:269-270 overwrites :263-267 via addOption), but "Advanced"/"Simple" matches
+    # the AirSense 11 user interface — intentional deviation.
     PT_VIEW_MAP = {0: "Advanced", 1: "Simple"}
     # Tube type — community-sourced tube-diameter naming; raw value, no normalization.
     # OSCAR declares RMS9_TubeType but never initializes, labels, or stores S.Tube.
@@ -2318,7 +2321,7 @@ class ResmedEDFParser(DeviceParser):
         # OSCAR :2297-2299: if (AS_eleven) --s_ClimateControl.
         climate_norm = _norm("climate_control")
         climate_control = (
-            self.CLIMATE_CONTROL_MAP.get(int(climate_norm))
+            self.CLIMATE_CONTROL_MAP.get(int(climate_norm), str(int(climate_norm)))
             if climate_norm is not None and climate_norm >= 0
             else None
         )
@@ -2347,7 +2350,7 @@ class ResmedEDFParser(DeviceParser):
         # OSCAR :2292-2295: if (AS_eleven) --s_ABFilter.
         ab_norm = _norm("ab_filter")
         ab_filter = (
-            self.AB_FILTER_MAP.get(int(ab_norm))
+            self.AB_FILTER_MAP.get(int(ab_norm), str(int(ab_norm)))
             if ab_norm is not None and ab_norm >= 0
             else None
         )
@@ -2355,7 +2358,6 @@ class ResmedEDFParser(DeviceParser):
         # Patient access/view: S11 emits pt_view (OSCAR :2311-2317 s_PtView--);
         # S10 emits pt_access. S11 path uses _norm (−1); S10 path reads raw value
         # (OSCAR does not decrement s_PtAccess).
-        pt_access_raw = values.get("pt_access_raw")
         if series11:
             pt_norm = _norm("pt_access_raw")
             pt_view: str | None = (
@@ -2366,6 +2368,7 @@ class ResmedEDFParser(DeviceParser):
             pt_access: str | None = None
         else:
             pt_view = None
+            pt_access_raw = values.get("pt_access_raw")
             if pt_access_raw is not None and pt_access_raw >= 0:
                 code = int(pt_access_raw)
                 pt_access = self.PT_ACCESS_MAP.get(code, str(code))

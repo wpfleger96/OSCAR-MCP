@@ -4,6 +4,8 @@
  * Key names mirror STR_SETTINGS_MAP in src/snore/parsers/resmed_edf.py
  * (search for STR_SETTINGS_MAP), which is the canonical source of truth for
  * stored setting keys.
+ *
+ * See also `src/snore/cli/display/settings.py` for the CLI counterpart.
  */
 
 export interface SettingsCategory {

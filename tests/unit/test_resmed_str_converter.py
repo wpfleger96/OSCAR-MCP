@@ -881,7 +881,7 @@ class TestSmartStopTubePtAccess:
         assert settings.other_settings.get("smart_stop") == "False"
 
     def test_tube_stored(self, parser):
-        """Tube type raw value stored in other_settings without normalization."""
+        """Tube type raw value stored via TUBE_TYPE_MAP; unmapped codes pass through as int strings."""
         parser._str_series11 = False
         record = {"mode": 0.0, "tube_raw": 3.0}
         settings = parser._convert_str_to_therapy_settings(record)
