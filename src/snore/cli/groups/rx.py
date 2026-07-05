@@ -16,6 +16,10 @@ from snore.cli.display import (
 )
 
 
+def _format_change_value(val: str | None) -> str:
+    return val if val is not None else "—"
+
+
 def _format_pressure(settings: dict[str, str], *, short: bool = False) -> str:
     if "pressure_min" in settings and "pressure_max" in settings:
         p = f"{settings['pressure_min']}-{settings['pressure_max']}"
@@ -262,14 +266,12 @@ def rx_changes(db: str | None) -> None:
 
     with open_db_session(db) as db_session:
         response = RxTracker().get_changes(db_session)
-        changes = list(reversed(response.changes))
+        # Stable sort preserves the service's within-date ordering (ascending by device_id, key).
+        changes = sorted(response.changes, key=lambda c: c.date, reverse=True)
 
         if not changes:
             console.print("No RX settings changes found")
             return
-
-        def _fmt(val: str | None) -> str:
-            return val if val is not None else "—"
 
         print_header("RX Settings Changes", wide=True)
         print_table(
@@ -284,7 +286,7 @@ def rx_changes(db: str | None) -> None:
                     c.date.strftime("%Y-%m-%d"),
                     c.device_name,
                     c.key,
-                    f"{_fmt(c.old_value)} → {_fmt(c.new_value)}",
+                    f"{_format_change_value(c.old_value)} → {_format_change_value(c.new_value)}",
                 )
                 for c in changes
             ],

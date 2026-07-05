@@ -1260,6 +1260,24 @@ class TestRxChangesCommand:
         assert result.exit_code == 0
         # pressure_fixed disappears on day 2 (old=8.0, new=None) → "8.0 → —"
         assert "8.0 → —" in result.output
+        # pressure_min appears on day 2 (old=None, new=6.0) → "— → 6.0"
+        assert "— → 6.0" in result.output
+
+    def test_changes_within_date_order_is_ascending_by_key(
+        self, cli_runner, db_with_rx_settings_changes
+    ):
+        """Same-date rows appear in ascending key order (service's within-date sort)."""
+        result = cli_runner.invoke(
+            cli, ["rx", "changes", "--db", str(db_with_rx_settings_changes)]
+        )
+
+        assert result.exit_code == 0
+        # Day 2 (2025-06-02) produces three changes with keys: mode, pressure_fixed,
+        # pressure_min.  Ascending alphabetical order means mode < pressure_min, so
+        # the unique text for the mode row must appear before the pressure_min row.
+        idx_mode = result.output.index("CPAP → APAP")
+        idx_pressure_min = result.output.index("— → 6.0")
+        assert idx_mode < idx_pressure_min
 
     def test_changes_empty_db_shows_no_changes_message(self, cli_runner, temp_db):
         """Empty database produces a friendly no-changes message, not an error."""
