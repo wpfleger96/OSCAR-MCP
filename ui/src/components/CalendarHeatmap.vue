@@ -30,6 +30,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { DayListItem } from '@/types'
+import { parseLocalDate } from '@/utils/formatting'
 
 const props = defineProps<{
     days: DayListItem[]
@@ -82,7 +83,7 @@ const monthLabels = computed(() => {
     const labels: { label: string; offset: number }[] = []
     let lastMonth = -1
     for (let i = 0; i < cells.value.length; i += 7) {
-        const d = new Date(cells.value[i].date)
+        const d = parseLocalDate(cells.value[i].date)
         if (d.getMonth() !== lastMonth) {
             lastMonth = d.getMonth()
             labels.push({
