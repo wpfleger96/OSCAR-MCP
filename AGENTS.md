@@ -135,7 +135,7 @@ src/snore/
 └── waveform/           # Waveform visualization
     ├── inspector.py    # Data loading and inspection
     └── renderer.py     # ASCII/plotext terminal rendering
-ui/                     # Vue 3 + TypeScript + PrimeVue frontend
+ui/                     # Vue 3 + TypeScript + Tailwind v4 + shadcn-vue frontend
 ├── src/
 │   ├── api/            # API client (createApiEndpoint wrappers, 8 modules)
 │   ├── components/     # Reusable UI components (10+)
@@ -181,7 +181,8 @@ tests/
 - Click CLI framework
 - Pydantic for validation
 - FastAPI + uvicorn (REST API)
-- Vue 3 + TypeScript + PrimeVue (frontend)
+- Vue 3 + TypeScript + Tailwind CSS v4 + shadcn-vue/reka-ui (frontend)
+- uPlot (UI charts)
 - Rich (terminal formatting)
 - Plotext (terminal charts)
 - scipy (signal processing)
