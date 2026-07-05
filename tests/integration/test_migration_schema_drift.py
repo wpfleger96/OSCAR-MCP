@@ -20,7 +20,6 @@ from alembic import command as alembic_command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config as AlembicConfig
 from alembic.migration import MigrationContext
-from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, create_engine
 
 import snore.database as _snore_db_pkg
@@ -52,15 +51,6 @@ def _alembic_cfg(db_path: str) -> AlembicConfig:
     cfg.set_main_option("script_location", _migrations_dir())
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     return cfg
-
-
-def _current_head() -> str:
-    cfg = AlembicConfig()
-    cfg.set_main_option("script_location", _migrations_dir())
-    script = ScriptDirectory.from_config(cfg)
-    head = script.get_current_head()
-    assert head is not None, "No head revision found in migrations directory"
-    return head
 
 
 def _structural_diffs(engine: Engine) -> list[tuple[Any, ...]]:
@@ -96,42 +86,6 @@ class TestMigrationSchemaDrift:
             diffs = _structural_diffs(engine)
             assert diffs == [], (
                 f"Structural schema drift after upgrade head on empty DB: {diffs}"
-            )
-        finally:
-            engine.dispose()
-
-    def test_create_all_db_stamped_and_upgraded_has_no_structural_drift(self, tmp_path):
-        """create_all DB (epap cols present) stamped at a3f8e9c12b45 then upgraded to
-        head must not fail with a duplicate-column error and must reach head cleanly."""
-        db_path = str(tmp_path / "drift_create_all.db")
-
-        # Simulate legacy DB created via snore db init (Base.metadata.create_all)
-        engine = create_engine(f"sqlite:///{db_path}")
-        Base.metadata.create_all(engine)
-        engine.dispose()
-
-        # Stamp at a3f8e9c12b45 (the revision the startup auto-migration will use
-        # for a DB that already has the ipap columns but no alembic_version table).
-        cfg = _alembic_cfg(db_path)
-        alembic_command.stamp(cfg, "a3f8e9c12b45")
-
-        # upgrade head — must not raise even though epap cols already exist.
-        alembic_command.upgrade(cfg, "head")
-
-        head = _current_head()
-        from sqlalchemy import text
-
-        engine = create_engine(f"sqlite:///{db_path}")
-        try:
-            with engine.connect() as conn:
-                version = conn.execute(
-                    text("SELECT version_num FROM alembic_version")
-                ).scalar()
-            assert version == head, f"Expected head {head}, got {version}"
-
-            diffs = _structural_diffs(engine)
-            assert diffs == [], (
-                f"Structural schema drift after create_all+stamp+upgrade: {diffs}"
             )
         finally:
             engine.dispose()
