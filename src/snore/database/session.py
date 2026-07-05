@@ -34,23 +34,18 @@ def _build_alembic_config(database_path: str) -> AlembicConfig:
 
 
 def _apply_migrations(engine: Engine, database_path: str) -> None:
-    insp = inspect(engine)
-    table_names = set(insp.get_table_names())
+    table_names = set(inspect(engine).get_table_names())
     alembic_cfg = _build_alembic_config(database_path)
 
-    if "alembic_version" in table_names:
-        alembic_command.upgrade(alembic_cfg, "head")
-        logger.info("Database migrations applied (upgrade to head)")
-    elif "sessions" not in table_names:
+    if "sessions" not in table_names:
         Base.metadata.create_all(engine)
         alembic_command.stamp(alembic_cfg, "head")
         logger.info("Fresh database created and stamped at head")
     else:
-        columns = {col["name"] for col in insp.get_columns("statistics")}
-        stamp_rev = "a3f8e9c12b45" if "ipap_median" in columns else "102cf96663ea"
-        alembic_command.stamp(alembic_cfg, stamp_rev)
+        # Pre-squash or unstamped DBs fail loudly here (unknown revision / table
+        # already exists); pre-alpha contract is: delete the DB file and re-import.
         alembic_command.upgrade(alembic_cfg, "head")
-        logger.info("Legacy database stamped at %s and upgraded to head", stamp_rev)
+        logger.info("Database migrations applied (upgrade to head)")
 
 
 def init_database(database_path: str | None = None) -> None:
