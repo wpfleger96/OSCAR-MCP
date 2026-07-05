@@ -7,6 +7,7 @@ Handles the complete import process including waveforms, events, and statistics.
 import json
 import logging
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import numpy as np
@@ -223,6 +224,7 @@ class SessionImporter:
         sessions: list[UnifiedSession],
         force: bool = False,
         batch_size: int = 50,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> tuple[int, int, int]:
         """
         Import multiple sessions in batched transactions.
@@ -234,6 +236,7 @@ class SessionImporter:
             sessions: List of UnifiedSession objects to import
             force: If True, re-import existing sessions
             batch_size: Number of sessions per transaction (default: 50)
+            progress_callback: Optional callback for progress messages
 
         Returns:
             Tuple of (imported_count, skipped_count, failed_count)
@@ -274,6 +277,13 @@ class SessionImporter:
                         day_record = db.get(models.Day, day_id)
                         if day_record:
                             DayManager._aggregate_day_statistics(day_record, db)
+
+            if progress_callback:
+                sessions_done = min(i + batch_size, len(sessions))
+                progress_callback(
+                    f"Imported batch {batch_num}/{total_batches} "
+                    f"({sessions_done} of {len(sessions)} sessions)"
+                )
 
         return imported, skipped, failed
 

@@ -70,11 +70,11 @@
                 </div>
             </template>
 
-            <!-- processing: spinner -->
+            <!-- processing: spinner with live status -->
             <template v-else-if="uploadPhase === 'processing'">
                 <div class="processing-row">
                     <Loader2 class="h-6 w-6 animate-spin text-muted-foreground" />
-                    <span class="processing-text">Processing files…</span>
+                    <span class="processing-text">{{ processingMessage }}</span>
                 </div>
             </template>
 
@@ -159,6 +159,10 @@
                             </div>
                         </label>
                     </div>
+                    <div v-if="pathPhase === 'importing'" class="processing-row">
+                        <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
+                        <span class="processing-text">{{ processingMessage }}</span>
+                    </div>
                     <p v-if="pathImportError" class="error-text">{{ pathImportError }}</p>
                     <div class="card-actions">
                         <Button variant="outline" @click="resetPath">Change path</Button>
@@ -191,6 +195,7 @@ import { ref, computed } from 'vue'
 import type { AxiosProgressEvent } from 'axios'
 import type { ImportSource, ImportResult } from '@/types'
 import { detectSources, importFiles, importFromPath, type FileEntry } from '@/api/import'
+import { connectImportProgress } from '@/api/sse'
 import { formatBytes } from '@/utils/formatting'
 import { Button } from '@/components/ui/button'
 import ImportResultsPanel from '@/components/ImportResultsPanel.vue'
@@ -215,6 +220,7 @@ const uploadLoaded = ref(0)
 const uploadTotal = ref(0)
 const importError = ref<string | null>(null)
 const importResult = ref<ImportResult | null>(null)
+const processingMessage = ref('Processing files...')
 const isDragging = ref(false)
 const dropError = ref<string | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -322,8 +328,23 @@ async function handleImport() {
     }
 
     try {
-        importResult.value = await importFiles(fileEntries.value, onProgress)
-        uploadPhase.value = 'done'
+        const { job_id } = await importFiles(fileEntries.value, onProgress)
+        uploadPhase.value = 'processing'
+        processingMessage.value = 'Starting import...'
+
+        connectImportProgress(job_id, {
+            onProgress: (data) => {
+                processingMessage.value = data.message
+            },
+            onComplete: (data) => {
+                importResult.value = data.result as ImportResult
+                uploadPhase.value = 'done'
+            },
+            onError: (data) => {
+                importError.value = data.message
+                uploadPhase.value = 'error'
+            },
+        })
     } catch (e: unknown) {
         importError.value = e instanceof Error ? e.message : 'Import failed'
         uploadPhase.value = 'error'
@@ -392,10 +413,24 @@ async function handlePathImport() {
     if (selected.length === 0) return
     pathPhase.value = 'importing'
     pathImportError.value = null
+    processingMessage.value = 'Starting import...'
 
     try {
-        pathImportResult.value = await importFromPath({ sources: selected })
-        pathPhase.value = 'done'
+        const { job_id } = await importFromPath({ sources: selected })
+
+        connectImportProgress(job_id, {
+            onProgress: (data) => {
+                processingMessage.value = data.message
+            },
+            onComplete: (data) => {
+                pathImportResult.value = data.result as ImportResult
+                pathPhase.value = 'done'
+            },
+            onError: (data) => {
+                pathImportError.value = data.message
+                pathPhase.value = 'error'
+            },
+        })
     } catch (e: unknown) {
         pathImportError.value = e instanceof Error ? e.message : 'Import failed'
         pathPhase.value = 'error'

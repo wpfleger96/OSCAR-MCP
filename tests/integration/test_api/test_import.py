@@ -1,3 +1,5 @@
+import json
+
 from unittest.mock import patch
 
 import pytest
@@ -48,32 +50,84 @@ class TestDetectSources:
 
 
 class TestImportUpload:
-    def test_upload_small_file_returns_200(self, api_client):
-        """Upload with mocked service returns 200 with ImportResult shape."""
-        fake_result = ImportResult(
-            total_imported=1,
-            total_skipped=0,
-            total_failed=0,
-            sources=[],
-            warnings=[],
+    def test_upload_returns_202_with_job_id(self, api_client):
+        """Upload returns 202 with a job_id for SSE progress tracking."""
+        response = api_client.post(
+            "/api/v1/import",
+            files=[
+                (
+                    "files",
+                    ("test.edf", b"fake edf content", "application/octet-stream"),
+                )
+            ],
         )
-        with patch(
-            "snore.api.routers.import_data.ImportService.import_from_upload",
-            return_value=fake_result,
-        ):
-            response = api_client.post(
-                "/api/v1/import",
-                files=[
-                    (
-                        "files",
-                        ("test.edf", b"fake edf content", "application/octet-stream"),
-                    )
-                ],
-            )
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
-        assert data["total_imported"] == 1
-        assert "sources" in data
+        assert "job_id" in data
+        assert isinstance(data["job_id"], str)
+        assert len(data["job_id"]) > 0
+
+    def test_upload_writes_files_to_temp_dir(self, api_client):
+        """Upload creates temp files that can be retrieved via the job store."""
+        from snore.api.import_jobs import get_job
+
+        response = api_client.post(
+            "/api/v1/import",
+            files=[
+                (
+                    "files",
+                    (
+                        "SDCARD/DATALOG/test.edf",
+                        b"edf content",
+                        "application/octet-stream",
+                    ),
+                )
+            ],
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+        job = get_job(job_id)
+        assert job is not None
+        assert job.temp_dir is not None
+        assert (job.temp_dir / "SDCARD" / "DATALOG" / "test.edf").exists()
+        assert (
+            job.temp_dir / "SDCARD" / "DATALOG" / "test.edf"
+        ).read_bytes() == b"edf content"
+
+        # Cleanup
+        import shutil
+
+        from snore.api.import_jobs import remove_job
+
+        shutil.rmtree(job.temp_dir, ignore_errors=True)
+        remove_job(job_id)
+
+    def test_upload_path_traversal_sanitized(self, api_client):
+        """Path traversal components are stripped from uploaded filenames."""
+        from snore.api.import_jobs import get_job
+
+        response = api_client.post(
+            "/api/v1/import",
+            files=[
+                ("files", ("../../etc/passwd", b"evil", "application/octet-stream"))
+            ],
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+        job = get_job(job_id)
+        assert job is not None
+        assert job.temp_dir is not None
+        # All written files must be inside the temp dir
+        tmp_root = job.temp_dir.resolve()
+        for path in job.temp_dir.rglob("*"):
+            assert path.resolve().is_relative_to(tmp_root)
+
+        import shutil
+
+        from snore.api.import_jobs import remove_job
+
+        shutil.rmtree(job.temp_dir, ignore_errors=True)
+        remove_job(job_id)
 
     def test_upload_size_limit_exceeded(self, api_client, monkeypatch):
         """Cumulative upload size exceeding limit returns 413."""
@@ -83,39 +137,6 @@ class TestImportUpload:
             files=[("files", ("big.edf", b"x" * 20, "application/octet-stream"))],
         )
         assert response.status_code == 413
-
-    def test_upload_path_traversal_forwarded_intact(self, api_client):
-        """Filename with path traversal components is passed through to the service.
-
-        The router uses `f.filename or "unknown"` — actual sanitization happens in
-        ImportService.import_from_upload via _safe_relative_path. Verify the router
-        forwards the filename as-is.
-        """
-        captured_args = {}
-
-        def capture_upload(self, files, **kwargs):
-            captured_args["files"] = files
-            return ImportResult(
-                total_imported=0,
-                total_skipped=0,
-                total_failed=0,
-                sources=[],
-                warnings=[],
-            )
-
-        with patch(
-            "snore.api.routers.import_data.ImportService.import_from_upload",
-            capture_upload,
-        ):
-            response = api_client.post(
-                "/api/v1/import",
-                files=[
-                    ("files", ("../../etc/passwd", b"evil", "application/octet-stream"))
-                ],
-            )
-        assert response.status_code == 200
-        # Router passes filename as-is; ImportService.import_from_upload handles sanitization
-        assert captured_args["files"][0][0] == "../../etc/passwd"
 
     def test_too_many_files_returns_400(self, api_client, monkeypatch):
         """Exceeding MAX_UPLOAD_FILES causes Starlette to return 400."""
@@ -136,35 +157,61 @@ class TestImportUpload:
         assert response.status_code == 422
         assert response.json()["detail"] == "No files provided"
 
-    def test_nested_filename_forwarded_intact(self, api_client):
-        """Nested filename with directory structure arrives at the service unchanged."""
-        captured_args = {}
 
-        def capture_upload(self, files, **kwargs):
-            captured_args["files"] = files
-            return ImportResult(
-                total_imported=0,
-                total_skipped=0,
-                total_failed=0,
-                sources=[],
-                warnings=[],
-            )
+class TestImportProgress:
+    def test_progress_nonexistent_job_returns_404(self, api_client):
+        """GET progress for unknown job_id returns 404."""
+        response = api_client.get("/api/v1/import/nonexistent/progress")
+        assert response.status_code == 404
 
-        with patch(
-            "snore.api.routers.import_data.ImportService.import_from_upload",
-            capture_upload,
+    def test_progress_stream_emits_events(self, api_client):
+        """SSE stream emits progress events and a complete event."""
+        fake_result = ImportResult(
+            total_imported=1,
+            total_skipped=0,
+            total_failed=0,
+            sources=[],
+            warnings=[],
+        )
+        with (
+            patch(
+                "snore.api.routers.import_data.ImportService.detect_sources",
+                return_value=[],
+            ),
+            patch(
+                "snore.api.routers.import_data.ImportService.import_sources",
+                return_value=fake_result,
+            ),
         ):
-            response = api_client.post(
-                "/api/v1/import/",
+            upload_response = api_client.post(
+                "/api/v1/import",
                 files=[
                     (
                         "files",
-                        ("SDCARD/DATALOG/test.edf", b"x", "application/octet-stream"),
+                        ("test.edf", b"fake content", "application/octet-stream"),
                     )
                 ],
             )
-        assert response.status_code == 200
-        assert captured_args["files"][0][0] == "SDCARD/DATALOG/test.edf"
+            assert upload_response.status_code == 202
+            job_id = upload_response.json()["job_id"]
+
+            response = api_client.get(
+                f"/api/v1/import/{job_id}/progress",
+                headers={"Accept": "text/event-stream"},
+            )
+            assert response.status_code == 200
+            assert "text/event-stream" in response.headers["content-type"]
+
+            body = response.text
+            assert "event: complete" in body
+            result_line = [
+                line
+                for line in body.split("\n")
+                if line.startswith("data:") and "total_imported" in line
+            ]
+            assert len(result_line) == 1
+            result_data = json.loads(result_line[0].removeprefix("data: "))
+            assert result_data["result"]["total_imported"] == 1
 
 
 class TestPathImport:
@@ -176,23 +223,23 @@ class TestPathImport:
         )
         assert response.status_code == 403
 
-    def test_localhost_calls_import_sources_with_backup(self, localhost_api_client):
-        """Localhost import/path calls import_sources with backup=True and returns result."""
-        fake_result = ImportResult(
-            total_imported=3, total_skipped=0, total_failed=0, sources=[], warnings=[]
+    def test_localhost_returns_202_with_job_id(self, localhost_api_client):
+        """Localhost import/path returns 202 with a job_id."""
+        response = localhost_api_client.post(
+            "/api/v1/import/path",
+            json={"sources": []},
         )
-        with patch(
-            "snore.api.routers.import_data.ImportService.import_sources",
-            return_value=fake_result,
-        ) as mock_import:
-            response = localhost_api_client.post(
-                "/api/v1/import/path",
-                json={"sources": []},
-            )
-        assert response.status_code == 200
-        assert response.json()["total_imported"] == 3
-        mock_import.assert_called_once()
-        assert mock_import.call_args[1]["backup"] is True
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert isinstance(data["job_id"], str)
+
+        from snore.api.import_jobs import get_job, remove_job
+
+        job = get_job(data["job_id"])
+        assert job is not None
+        assert job.sources == []
+        remove_job(data["job_id"])
 
     def test_invalid_sources_shape_returns_422(self, localhost_api_client):
         """Malformed sources payload returns 422."""
