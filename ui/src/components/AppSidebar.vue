@@ -13,6 +13,10 @@
                 <List class="h-4 w-4" />
                 <span>Sessions</span>
             </RouterLink>
+            <RouterLink to="/devices" class="nav-item">
+                <HardDrive class="h-4 w-4" />
+                <span>Devices</span>
+            </RouterLink>
 
             <span class="nav-group-label">Analysis</span>
             <RouterLink to="/analysis" class="nav-item">
@@ -70,6 +74,7 @@ import {
     Database,
     Download,
     FileText,
+    HardDrive,
     List,
     Moon,
     Pill,

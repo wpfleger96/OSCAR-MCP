@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from snore.database.models import Device, Session, Statistics
 from snore.services.database_service import DatabaseService
+from snore.services.device_service import DeviceService
 
 
 class TestDatabaseService:
@@ -119,12 +120,12 @@ class TestDatabaseService:
         assert stats.db_path == fake_path
 
 
-class TestDatabaseServiceListDevices:
-    """Tests for DatabaseService.list_devices()."""
+class TestDeviceServiceListDevices:
+    """Tests for DeviceService.list_devices() — device listing moved from DatabaseService."""
 
     def test_list_devices_empty(self, db_session):
         """Empty database returns empty list."""
-        service = DatabaseService(db_session)
+        service = DeviceService(db_session)
         result = service.list_devices()
 
         assert len(result) == 0
@@ -149,7 +150,7 @@ class TestDatabaseServiceListDevices:
         db_session.add_all([device1, device2, device3])
         db_session.commit()
 
-        service = DatabaseService(db_session)
+        service = DeviceService(db_session)
         result = service.list_devices()
 
         assert len(result) == 3
@@ -185,7 +186,7 @@ class TestDatabaseServiceListDevices:
         db_session.add_all([device1, device2, device3, device4])
         db_session.commit()
 
-        service = DatabaseService(db_session)
+        service = DeviceService(db_session)
         result = service.list_devices()
 
         assert len(result) == 4
@@ -199,16 +200,19 @@ class TestDatabaseServiceListDevices:
         assert result[3].model == "AirSense 11"
 
     def test_list_devices_includes_all_fields(self, db_session):
-        """Returns all required fields."""
+        """Returns all identity fields including the new firmware/hardware/product_code."""
         device = Device(
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="12345ABC",
+            firmware_version="SX567-0401",
+            hardware_version="R003",
+            product_code="37037",
         )
         db_session.add(device)
         db_session.commit()
 
-        service = DatabaseService(db_session)
+        service = DeviceService(db_session)
         result = service.list_devices()
 
         assert len(result) == 1
@@ -216,6 +220,10 @@ class TestDatabaseServiceListDevices:
         assert result[0].manufacturer == "ResMed"
         assert result[0].model == "AirSense 10"
         assert result[0].serial_number == "12345ABC"
+        assert result[0].firmware_version == "SX567-0401"
+        assert result[0].hardware_version == "R003"
+        assert result[0].product_code == "37037"
+        assert result[0].first_seen is not None
 
 
 class TestVacuum:

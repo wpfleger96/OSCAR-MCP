@@ -220,6 +220,16 @@ Complete project overview showing implemented features and future development pl
 - [x] Skeleton loading states (Dashboard, SessionList, SessionDetail)
 - [x] OpenAPI type audit (`AnalysisResult` now generated; `TrendData`/`RecordsData` kept hand-maintained)
 
+### Phase 2.2e: Devices Page (2026-07-05)
+- [x] **Devices page** — one card per device with identity grid (firmware, hardware, product code, first seen, last import), usage summary (session count, first/last date, total hours, therapy modes), current settings grouped by category (Therapy, Comfort, Other), and a settings-change timeline diffed across all keys
+- [x] **`GET /devices/{device_id}`** — new `DeviceDetail` response (usage, current_settings, settings_history); device listing moved from `DatabaseService` to new `DeviceService`
+
+#### Deliberately deferred (not built in this phase)
+- **Profiles endpoint** — vestigial after the device-centric model (days link directly to devices via `device_id`; `Profile` table retained for schema compatibility)
+- **Standalone `detected_patterns` query endpoint** — episodes already visible via stored `AnalysisResult` JSON; a dedicated endpoint adds no new data
+- **Web log viewer** — `snore logs show/clear/path` remains CLI-only for now
+- **`analysis_results.processing_time_ms` display** — field is stored but not surfaced in any UI view
+
 ---
 
 ## Planned Features 📋

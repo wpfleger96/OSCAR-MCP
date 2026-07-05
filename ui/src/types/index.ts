@@ -27,6 +27,10 @@ export type EventMatchResult = Schemas['EventMatchResult']
 
 // Devices
 export type DeviceInfo = Schemas['DeviceInfo']
+export type DeviceDetail = Schemas['DeviceDetail']
+export type DeviceUsageSummary = Schemas['DeviceUsageSummary']
+export type SettingsChange = Schemas['SettingsChange']
+export type SettingChangeEntry = Schemas['SettingChangeEntry']
 
 // Delete preview
 export type DeletePreview = Schemas['DeletePreview']

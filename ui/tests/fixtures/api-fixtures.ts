@@ -5,6 +5,7 @@ import type {
     DayListItem,
     SessionListItem,
     DeviceInfo,
+    DeviceDetail,
     PeriodStatistics,
     RecordsData,
     RxPeriodResponse,
@@ -530,8 +531,74 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
 }
 
 export const devicesFixture: DeviceInfo[] = [
-    { id: 1, manufacturer: 'ResMed', model: 'AirSense11AutoSet', serial_number: '23456789012' },
+    {
+        id: 1,
+        manufacturer: 'ResMed',
+        model: 'AirSense 11 AutoSet',
+        serial_number: '23456789012',
+        firmware_version: 'SX567-0401',
+        hardware_version: 'R003',
+        product_code: '37037',
+        first_seen: '2023-09-02T00:00:00',
+        last_import: '2026-06-15T12:00:00',
+    },
 ]
+
+export const deviceDetailFixture: DeviceDetail = {
+    id: 1,
+    manufacturer: 'ResMed',
+    model: 'AirSense 11 AutoSet',
+    serial_number: '23456789012',
+    firmware_version: 'SX567-0401',
+    hardware_version: 'R003',
+    product_code: '37037',
+    first_seen: '2023-09-02T00:00:00',
+    last_import: '2026-06-15T12:00:00',
+    usage: {
+        session_count: 491,
+        first_session_date: '2023-09-02',
+        last_session_date: '2026-06-06',
+        total_therapy_hours: 3462.58,
+        therapy_modes: ['AutoSet'],
+    },
+    current_settings: {
+        mode: 'AutoSet',
+        pressure_min: '4.0',
+        pressure_max: '10.0',
+        epr_level: '1',
+        epr_mode: 'Full Time',
+        ramp_enabled: 'False',
+        ramp_time: '20',
+        humidity_enabled: 'True',
+        humidity_level: '3',
+        climate_control: 'Auto',
+        tube_temp_enabled: 'True',
+        tube_temp: '27.0',
+        smart_start: 'True',
+        ab_filter: 'Standard',
+        mask_type: 'Nasal',
+        oscar_custom_key: 'some_value',
+    },
+    settings_history: [
+        {
+            session_id: 120,
+            date: '2024-03-15',
+            changes: [
+                { key: 'pressure_max', old_value: '12.0', new_value: '10.0' },
+                { key: 'epr_level', old_value: '2', new_value: '1' },
+            ],
+        },
+        {
+            session_id: 280,
+            date: '2025-01-10',
+            changes: [
+                { key: 'tube_temp', old_value: null, new_value: '27.0' },
+                { key: 'tube_temp_enabled', old_value: null, new_value: 'True' },
+                { key: 'humidity_level', old_value: '4', new_value: '3' },
+            ],
+        },
+    ],
+}
 
 export const periodsFixture: PeriodStatistics[] = [
     {

@@ -5,6 +5,7 @@ import {
     daysFixture,
     sessionsFixture,
     devicesFixture,
+    deviceDetailFixture,
     periodsFixture,
     recordsFixture,
     rxHistoryFixture,
@@ -23,6 +24,7 @@ function routeApi(route: Route) {
     if (url.includes('/rx/compare')) return route.fulfill({ json: rxCompareFixture })
     if (url.includes('/rx/current')) return route.fulfill({ json: rxCurrentFixture })
     if (url.includes('/rx/history')) return route.fulfill({ json: rxHistoryFixture })
+    if (url.includes('/devices/1')) return route.fulfill({ json: deviceDetailFixture })
     if (url.includes('/devices')) return route.fulfill({ json: devicesFixture })
     if (url.includes('/sessions/1470/events')) return route.fulfill({ json: [] })
     if (url.includes('/sessions/1470/waveforms'))
@@ -118,4 +120,19 @@ test('session-detail dark', async ({ page }) => {
     await page.getByText('Dark Mode').click()
     await page.waitForTimeout(300)
     await page.screenshot({ path: 'screenshots/session-detail-dark.png' })
+})
+
+test('devices', async ({ page }) => {
+    await page.goto('/devices')
+    await page.waitForSelector('.device-card')
+    await page.waitForTimeout(300)
+    await page.screenshot({ path: 'screenshots/devices.png' })
+})
+
+test('devices dark', async ({ page }) => {
+    await page.goto('/devices')
+    await page.waitForSelector('.device-card')
+    await page.getByText('Dark Mode').click()
+    await page.waitForTimeout(300)
+    await page.screenshot({ path: 'screenshots/devices-dark.png' })
 })

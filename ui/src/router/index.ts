@@ -19,6 +19,11 @@ const router = createRouter({
             component: () => import('@/views/SessionListView.vue'),
         },
         {
+            path: '/devices',
+            name: 'devices',
+            component: () => import('@/views/DevicesView.vue'),
+        },
+        {
             path: '/sessions/:id',
             name: 'session-detail',
             component: () => import('@/views/SessionDetailView.vue'),

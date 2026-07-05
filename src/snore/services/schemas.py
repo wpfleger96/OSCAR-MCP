@@ -25,6 +25,10 @@ __all__ = [
     "AnalysisDeletePreview",
     "EventMatchResult",
     "DeviceInfo",
+    "SettingChangeEntry",
+    "SettingsChange",
+    "DeviceUsageSummary",
+    "DeviceDetail",
     # RX / Day / Event schemas (consumed by RxService, DayService, and API routers)
     "DayListItem",
     "DayDetail",
@@ -369,10 +373,51 @@ class AnalysisDeletePreview(BaseModel):
 class DeviceInfo(BaseModel):
     """Device information for listing."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     manufacturer: str
     model: str
     serial_number: str
+    firmware_version: str | None = None
+    hardware_version: str | None = None
+    product_code: str | None = None
+    first_seen: datetime
+    last_import: datetime | None = None
+
+
+class SettingChangeEntry(BaseModel):
+    """A single setting that changed between two consecutive sessions."""
+
+    key: str
+    old_value: str | None
+    new_value: str | None
+
+
+class SettingsChange(BaseModel):
+    """Settings that changed for a particular session relative to the prior one."""
+
+    session_id: int
+    date: date
+    changes: list[SettingChangeEntry]
+
+
+class DeviceUsageSummary(BaseModel):
+    """Aggregated usage statistics for a device."""
+
+    session_count: int
+    first_session_date: date | None
+    last_session_date: date | None
+    total_therapy_hours: float
+    therapy_modes: list[str]
+
+
+class DeviceDetail(DeviceInfo):
+    """Full device detail including usage summary, current settings, and settings history."""
+
+    usage: DeviceUsageSummary
+    current_settings: dict[str, str] | None
+    settings_history: list[SettingsChange]
 
 
 class DayListItem(BaseModel):

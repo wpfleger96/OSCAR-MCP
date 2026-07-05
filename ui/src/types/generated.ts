@@ -157,6 +157,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/devices/{device_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Device Detail */
+        get: operations['get_device_detail_api_v1_devices__device_id__get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/export/csv': {
         parameters: {
             query?: never
@@ -1249,18 +1266,81 @@ export interface components {
             path: string
         }
         /**
-         * DeviceInfo
-         * @description Device information for listing.
+         * DeviceDetail
+         * @description Full device detail including usage summary, current settings, and settings history.
          */
-        DeviceInfo: {
+        DeviceDetail: {
+            /** Current Settings */
+            current_settings: {
+                [key: string]: string
+            } | null
+            /** Firmware Version */
+            firmware_version?: string | null
+            /**
+             * First Seen
+             * Format: date-time
+             */
+            first_seen: string
+            /** Hardware Version */
+            hardware_version?: string | null
             /** Id */
             id: number
+            /** Last Import */
+            last_import?: string | null
             /** Manufacturer */
             manufacturer: string
             /** Model */
             model: string
+            /** Product Code */
+            product_code?: string | null
             /** Serial Number */
             serial_number: string
+            /** Settings History */
+            settings_history: components['schemas']['SettingsChange'][]
+            usage: components['schemas']['DeviceUsageSummary']
+        }
+        /**
+         * DeviceInfo
+         * @description Device information for listing.
+         */
+        DeviceInfo: {
+            /** Firmware Version */
+            firmware_version?: string | null
+            /**
+             * First Seen
+             * Format: date-time
+             */
+            first_seen: string
+            /** Hardware Version */
+            hardware_version?: string | null
+            /** Id */
+            id: number
+            /** Last Import */
+            last_import?: string | null
+            /** Manufacturer */
+            manufacturer: string
+            /** Model */
+            model: string
+            /** Product Code */
+            product_code?: string | null
+            /** Serial Number */
+            serial_number: string
+        }
+        /**
+         * DeviceUsageSummary
+         * @description Aggregated usage statistics for a device.
+         */
+        DeviceUsageSummary: {
+            /** First Session Date */
+            first_session_date: string | null
+            /** Last Session Date */
+            last_session_date: string | null
+            /** Session Count */
+            session_count: number
+            /** Therapy Modes */
+            therapy_modes: string[]
+            /** Total Therapy Hours */
+            total_therapy_hours: number
         }
         /**
          * EventComparisonDetail
@@ -2117,6 +2197,33 @@ export interface components {
             session_id: number
         }
         /**
+         * SettingChangeEntry
+         * @description A single setting that changed between two consecutive sessions.
+         */
+        SettingChangeEntry: {
+            /** Key */
+            key: string
+            /** New Value */
+            new_value: string | null
+            /** Old Value */
+            old_value: string | null
+        }
+        /**
+         * SettingsChange
+         * @description Settings that changed for a particular session relative to the prior one.
+         */
+        SettingsChange: {
+            /** Changes */
+            changes: components['schemas']['SettingChangeEntry'][]
+            /**
+             * Date
+             * Format: date
+             */
+            date: string
+            /** Session Id */
+            session_id: number
+        }
+        /**
          * TherapySummary
          * @description Aggregated therapy statistics summary.
          */
@@ -2561,6 +2668,37 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['DeviceInfo'][]
+                }
+            }
+        }
+    }
+    get_device_detail_api_v1_devices__device_id__get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                device_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DeviceDetail']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
                 }
             }
         }
