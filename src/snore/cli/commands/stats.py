@@ -216,17 +216,12 @@ def stats(
                         date_labels = [d.strftime("%Y-%m-%d") for d in dates_for_plot]
                         x_indices = list(range(len(ahi_values)))
 
-                        latest_ahi = ahi_values[-1]
-                        if len(ahi_values) > 1:
-                            prior_avg = sum(ahi_values[:-1]) / len(ahi_values[:-1])
-                            if latest_ahi < prior_avg * 0.9:
-                                direction = "(improving)"
-                            elif latest_ahi > prior_avg * 1.1:
-                                direction = "(worsening)"
-                            else:
-                                direction = "(stable)"
-                        else:
-                            direction = ""
+                        from snore.analysis.calculations import (
+                            calculate_ahi_trend_direction,
+                        )
+
+                        direction_str = calculate_ahi_trend_direction(ahi_values)
+                        direction = f"({direction_str})" if direction_str else ""
 
                         print_header("AHI Trend", wide=True)
 

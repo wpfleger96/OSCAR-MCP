@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from snore.analysis.calculations import (
     PeriodType,
     assess_therapy_effectiveness,
+    calculate_ahi_trend_direction,
     calculate_average_ahi,
     calculate_period_statistics,
     calculate_records,
@@ -100,6 +101,13 @@ class StatsService:
 
         avg_ahi = calculate_average_ahi(day_records)
         effectiveness = assess_therapy_effectiveness(avg_ahi) if avg_ahi else "unknown"
+
+        # Compute AHI trend over weekly period aggregates (matches CLI behavior)
+        weekly_periods = calculate_period_statistics(day_records, "week")
+        weekly_ahi_values = [
+            ps.avg_ahi for ps in weekly_periods if ps.avg_ahi is not None
+        ]
+        ahi_trend_direction = calculate_ahi_trend_direction(weekly_ahi_values)
 
         pressure_values = [
             d.pressure_median for d in day_records if d.pressure_median is not None
@@ -214,6 +222,7 @@ class StatsService:
             avg_respiratory_rate=_avg("rr"),
             avg_tidal_volume=_avg("tv"),
             avg_minute_ventilation=_avg("mv"),
+            ahi_trend_direction=ahi_trend_direction,
             event_counts=event_type_counts,
         )
 

@@ -26,30 +26,156 @@
             <StatCard label="OAI" :value="data.oai ?? null" :decimals="2" />
             <StatCard label="CAI" :value="data.cai ?? null" :decimals="2" />
             <StatCard label="HI" :value="data.hi ?? null" :decimals="2" />
+            <StatCard label="Obstructive Apneas" :value="data.obstructive_apneas" :decimals="0" />
+            <StatCard label="Central Apneas" :value="data.central_apneas" :decimals="0" />
+            <StatCard label="Hypopneas" :value="data.hypopneas" :decimals="0" />
+            <StatCard label="RERAs" :value="data.reras" :decimals="0" />
         </div>
 
+        <!-- Pressure group -->
         <div
-            v-if="data.avg_pressure != null || data.avg_leak != null || data.avg_spo2 != null"
+            v-if="
+                data.avg_pressure != null || data.pressure_min != null || data.pressure_95th != null
+            "
             class="stats-grid mb-6"
         >
             <StatCard
                 v-if="data.avg_pressure != null"
-                label="Avg Pressure"
+                label="Pressure Mean"
                 :value="data.avg_pressure"
                 unit="cmH₂O"
                 :decimals="1"
             />
             <StatCard
+                v-if="data.pressure_min != null"
+                label="Pressure Min"
+                :value="data.pressure_min"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.pressure_max != null"
+                label="Pressure Max"
+                :value="data.pressure_max"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.pressure_median != null"
+                label="Pressure Median"
+                :value="data.pressure_median"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.pressure_95th != null"
+                label="Pressure 95th"
+                :value="data.pressure_95th"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+        </div>
+
+        <!-- EPAP group -->
+        <div
+            v-if="data.epap_min != null || data.epap_mean != null || data.epap_95th != null"
+            class="stats-grid mb-6"
+        >
+            <StatCard
+                v-if="data.epap_mean != null"
+                label="EPAP Mean"
+                :value="data.epap_mean"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.epap_min != null"
+                label="EPAP Min"
+                :value="data.epap_min"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.epap_max != null"
+                label="EPAP Max"
+                :value="data.epap_max"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.epap_median != null"
+                label="EPAP Median"
+                :value="data.epap_median"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.epap_95th != null"
+                label="EPAP 95th"
+                :value="data.epap_95th"
+                unit="cmH₂O"
+                :decimals="1"
+            />
+        </div>
+
+        <!-- Leak group -->
+        <div
+            v-if="data.avg_leak != null || data.leak_min != null || data.leak_95th != null"
+            class="stats-grid mb-6"
+        >
+            <StatCard
                 v-if="data.avg_leak != null"
-                label="Avg Leak"
+                label="Leak Mean"
                 :value="data.avg_leak"
                 unit="L/min"
                 :decimals="1"
             />
             <StatCard
+                v-if="data.leak_min != null"
+                label="Leak Min"
+                :value="data.leak_min"
+                unit="L/min"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.leak_max != null"
+                label="Leak Max"
+                :value="data.leak_max"
+                unit="L/min"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.leak_95th != null"
+                label="Leak 95th"
+                :value="data.leak_95th"
+                unit="L/min"
+                :decimals="1"
+            />
+        </div>
+
+        <!-- SpO₂ group -->
+        <div
+            v-if="data.avg_spo2 != null || data.spo2_min != null || data.spo2_max != null"
+            class="stats-grid mb-6"
+        >
+            <StatCard
                 v-if="data.avg_spo2 != null"
-                label="Avg SpO₂"
+                label="SpO₂ Mean"
                 :value="data.avg_spo2"
+                unit="%"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.spo2_min != null"
+                label="SpO₂ Min"
+                :value="data.spo2_min"
+                unit="%"
+                :decimals="1"
+            />
+            <StatCard
+                v-if="data.spo2_max != null"
+                label="SpO₂ Max"
+                :value="data.spo2_max"
                 unit="%"
                 :decimals="1"
             />

@@ -398,3 +398,27 @@ def calculate_records(
         }
 
     return records
+
+
+def calculate_ahi_trend_direction(ahi_values: list[float]) -> str | None:
+    """
+    Determine AHI trend direction from a time-ordered list of period AHI values.
+
+    Args:
+        ahi_values: Chronological list of AHI values
+
+    Returns:
+        "improving", "worsening", "stable", or None if insufficient data
+    """
+    if len(ahi_values) < 2:
+        return None
+    latest = ahi_values[-1]
+    prior = ahi_values[:-1]
+    prior_avg = sum(prior) / len(prior)
+    if prior_avg == 0:
+        return None
+    if latest < prior_avg * 0.9:
+        return "improving"
+    if latest > prior_avg * 1.1:
+        return "worsening"
+    return "stable"
