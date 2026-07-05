@@ -1,6 +1,14 @@
 import { ref, watchEffect } from 'vue'
 
-const isDark = ref(false)
+function readSavedDark(): boolean {
+    try {
+        return localStorage.getItem('snore-dark-mode') === '1'
+    } catch {
+        return false
+    }
+}
+
+const isDark = ref(readSavedDark())
 
 watchEffect(() => {
     const html = document.documentElement
@@ -12,7 +20,7 @@ watchEffect(() => {
     try {
         localStorage.setItem('snore-dark-mode', isDark.value ? '1' : '0')
     } catch {
-        // private browsing or sandboxed iframe — persist in-memory only
+        // private browsing or sandboxed iframe
     }
 })
 
@@ -22,14 +30,4 @@ export function useDarkMode() {
     }
 
     return { isDark, toggleDark }
-}
-
-export function initDarkMode(): void {
-    try {
-        const saved = localStorage.getItem('snore-dark-mode') === '1'
-        isDark.value = saved
-        if (saved) document.documentElement.classList.add('dark')
-    } catch {
-        isDark.value = false
-    }
 }

@@ -132,7 +132,14 @@ class ResmedEDFParser(DeviceParser):
     }
     CLIMATE_CONTROL_MAP = {1: "Manual", 2: "Auto"}
     AB_FILTER_MAP = {0: "Standard", 1: "Antibacterial"}
-    MODE_MAP = {0: TherapyMode.CPAP, 1: TherapyMode.APAP, 2: TherapyMode.BIPAP}
+    MODE_MAP = {
+        0: TherapyMode.CPAP,
+        1: TherapyMode.APAP,
+        2: TherapyMode.BIPAP,
+        3: TherapyMode.BIPAP_AUTO,
+        4: TherapyMode.ASV,
+        5: TherapyMode.ASV,
+    }
 
     def __init__(self) -> None:
         """Initialize ResMed parser."""
@@ -1845,11 +1852,16 @@ class ResmedEDFParser(DeviceParser):
             TherapySettings instance with proper type conversions
         """
         mode_value = values.get("mode")
-        mode = (
-            self.MODE_MAP.get(int(mode_value), TherapyMode.APAP)
-            if mode_value is not None
-            else TherapyMode.APAP
-        )
+        if mode_value is not None:
+            mode_int = int(mode_value)
+            mode = self.MODE_MAP.get(mode_int)
+            if mode is None:
+                logger.warning(
+                    "Unknown ResMed therapy mode value %d, defaulting to CPAP", mode_int
+                )
+                mode = TherapyMode.CPAP
+        else:
+            mode = TherapyMode.CPAP
 
         epr_type_value = values.get("epr_mode")
         epr_mode = (

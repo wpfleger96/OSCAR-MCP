@@ -580,12 +580,24 @@ class OscarDeviceParser(DeviceParser):
             return None
 
         mode_value = summary.settings.get(CPAP_MODE)
-        mode_map = {0: TherapyMode.CPAP, 1: TherapyMode.APAP, 2: TherapyMode.BIPAP}
-        mode = (
-            mode_map.get(int(mode_value), TherapyMode.APAP)
-            if mode_value is not None
-            else TherapyMode.APAP
-        )
+        mode_map = {
+            0: TherapyMode.CPAP,
+            1: TherapyMode.APAP,
+            2: TherapyMode.BIPAP,
+            3: TherapyMode.BIPAP_AUTO,
+            4: TherapyMode.ASV,
+            5: TherapyMode.ASV,
+        }
+        if mode_value is not None:
+            mode_int = int(mode_value)
+            mode = mode_map.get(mode_int)
+            if mode is None:
+                logger.warning(
+                    "Unknown OSCAR therapy mode value %d, defaulting to CPAP", mode_int
+                )
+                mode = TherapyMode.CPAP
+        else:
+            mode = TherapyMode.CPAP
 
         settings = TherapySettings(mode=mode)
 
