@@ -202,7 +202,10 @@ class ImportService:
             total_batches = (len(sessions) + batch_size - 1) // batch_size
             emit(f"Importing {len(sessions)} sessions in {total_batches} batch(es)...")
             imported, skipped, failed = importer.import_sessions_batch(
-                sessions, force=force, batch_size=batch_size
+                sessions,
+                force=force,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
             )
 
             total_imported += imported
@@ -240,9 +243,15 @@ class ImportService:
         Writes files to a temp directory preserving relative paths, then detects
         and imports. Backup is disabled (there is no SD card to protect).
         """
+
+        def emit(msg: str) -> None:
+            if progress_callback:
+                progress_callback(msg)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             tmp_root = tmp_path.resolve()
+            emit(f"Writing {len(files)} files...")
             for filename, fileobj in files:
                 rel = _safe_relative_path(filename) or "unknown"
                 dest = tmp_path / rel
@@ -254,7 +263,9 @@ class ImportService:
                 with open(dest, "wb") as out:
                     shutil.copyfileobj(fileobj, out, 1024 * 1024)
 
+            emit("Detecting data sources...")
             sources = self.detect_sources(tmp_path)
+            emit(f"Detected {len(sources)} source(s)")
             return self.import_sources(
                 sources,
                 force=force,
