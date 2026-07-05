@@ -861,9 +861,16 @@ class ResmedEDFParser(DeviceParser):
                     self._safe_copy(dest_str, snapshot_path)
                     logger.debug(f"Archived STR.edf → STR_Backup/{snapshot_name}")
                 else:
-                    logger.debug(
-                        f"Duplicate STR snapshot skipped: STR_Backup/{snapshot_name} already exists"
-                    )
+                    if "unreadable" in snapshot_name:
+                        logger.warning(
+                            f"Cannot distinguish STR snapshot (file unreadable): "
+                            f"STR_Backup/{snapshot_name} already exists"
+                        )
+                    else:
+                        logger.debug(
+                            f"Duplicate STR snapshot skipped: "
+                            f"STR_Backup/{snapshot_name} already exists"
+                        )
             self._safe_copy(src_str, dest_str)
             device_files_copied.append(dest_str)
 
@@ -1002,16 +1009,18 @@ class ResmedEDFParser(DeviceParser):
             return f"STR-unknown-{ResmedEDFParser._file_content_hash(str_path)}.edf"
 
     @staticmethod
-    def _file_content_hash(path: Path, length: int = 12) -> str:
-        """Return the first ``length`` hex chars of the SHA-256 of the file at ``path``.
+    def _file_content_hash(path: Path) -> str:
+        """Return the first 12 hex chars of the SHA-256 of the file at ``path``.
 
-        Returns the literal string ``"unreadable"`` if the file cannot be read,
-        so callers remain non-raising even when the filesystem is inaccessible.
+        Uses chunked I/O so large or corrupted files on SD cards do not cause
+        unbounded memory use. Returns the literal string ``"unreadable"`` on
+        any error so callers remain non-raising.
         """
         try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            return digest[:length]
-        except OSError:
+            with open(path, "rb") as f:
+                digest = hashlib.file_digest(f, "sha256").hexdigest()
+            return digest[:12]
+        except Exception:
             return "unreadable"
 
     def trim_device_summary(
