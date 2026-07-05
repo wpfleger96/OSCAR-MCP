@@ -8,6 +8,7 @@ from snore.services.analysis_facade import AnalysisFacade
 from snore.services.backup_service import BackupService
 from snore.services.database_service import DatabaseService
 from snore.services.day_service import DayService
+from snore.services.device_service import DeviceService
 from snore.services.event_service import EventService
 from snore.services.export_service import ExportService
 from snore.services.import_service import ImportService
@@ -21,6 +22,7 @@ __all__ = [
     "BackupService",
     "DatabaseService",
     "DayService",
+    "DeviceService",
     "ExportService",
     "EventService",
     "ImportService",

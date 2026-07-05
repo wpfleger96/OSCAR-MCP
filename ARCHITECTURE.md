@@ -15,11 +15,11 @@ Technical documentation for the SNORE system architecture, components, and desig
 │  PrimeVue components + uPlot charts         │
 ├─────────────────────────────────────────────┤
 │        FastAPI REST API (api/)              │
-│  12 routers, 35 endpoints, LTTB            │
+│  12 routers, 36 endpoints, LTTB            │
 │  OpenAPI docs at /docs                      │
 ├─────────────────────────────────────────────┤
 │        Service Layer (services/)            │
-│  11 services: business logic between        │
+│  12 services: business logic between        │
 │  CLI/API and database                       │
 ├─────────────────────────────────────────────┤
 │        Analysis Layer (Parser Agnostic)     │
@@ -328,7 +328,7 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 | events | `/events` | List, match machine vs programmatic |
 | analysis | `/analysis` | List status, get result, run, delete, batch analysis |
 | stats | `/stats` | Summary, periods, trends, records |
-| devices | `/devices` | List |
+| devices | `/devices` | List, detail |
 | days | `/days` | List, detail |
 | rx | `/rx` | History, current, compare |
 | import | `/import` | Detect sources, upload+import |
@@ -349,14 +349,15 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 
 ## Service Layer
 
-12 service modules in `src/snore/services/` form the business logic layer between CLI/API and database:
+13 service modules in `src/snore/services/` form the business logic layer between CLI/API and database:
 
 | Service | Responsibility |
 |---------|---------------|
 | AnalysisFacade | Analysis orchestration, result retrieval, batch analysis |
 | BackupService | Raw SD card file backup to `~/.snore/raw/` |
-| DatabaseService | Database operations (stats, vacuum, init) and device listing |
+| DatabaseService | Database operations (stats, vacuum, init) |
 | DayService | Day aggregation and lookup |
+| DeviceService | Device listing and per-device detail (usage summary, current settings, settings history) |
 | EventService | Event queries and matching |
 | ExportService | Data export (CSV, JSON, raw files) |
 | ImportService | CPAP data import: source detection, file upload, backup, parse orchestration |
