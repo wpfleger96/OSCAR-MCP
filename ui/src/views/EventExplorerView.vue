@@ -251,7 +251,7 @@ function jumpToWaveform(offsetSec: number): void {
     border-radius: 4px;
     font-size: 0.75rem;
     font-weight: 600;
-    color: #1a1a1a;
+    color: var(--color-foreground);
 }
 
 .time-link {

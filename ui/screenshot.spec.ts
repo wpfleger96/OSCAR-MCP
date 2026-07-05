@@ -102,3 +102,20 @@ test('reports', async ({ page }) => {
     await page.waitForSelector('.rx-select')
     await page.screenshot({ path: 'screenshots/reports.png' })
 })
+
+test('dashboard dark', async ({ page }) => {
+    await page.goto('/')
+    await page.waitForSelector('.summary-row')
+    await page.waitForTimeout(800)
+    await page.getByText('Dark Mode').click()
+    await page.waitForTimeout(300)
+    await page.screenshot({ path: 'screenshots/dashboard-dark.png' })
+})
+
+test('session-detail dark', async ({ page }) => {
+    await page.goto('/sessions/1470')
+    await page.waitForSelector('.session-detail .stats-section')
+    await page.getByText('Dark Mode').click()
+    await page.waitForTimeout(300)
+    await page.screenshot({ path: 'screenshots/session-detail-dark.png' })
+})
