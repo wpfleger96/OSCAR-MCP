@@ -38,14 +38,9 @@ watch(
 </script>
 
 <style>
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-}
-
+/* No universal reset here: Tailwind preflight already zeroes margin/padding in
+   @layer base, and an unlayered duplicate overrides every layered
+   margin/padding utility (p-*, px-*, m-*) app-wide. */
 .app-layout {
     display: grid;
     grid-template-columns: 220px 1fr;

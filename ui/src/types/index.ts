@@ -47,6 +47,8 @@ export type DayDetail = Schemas['DayDetail']
 // RX
 export type RxPeriodResponse = Schemas['RxPeriodResponse']
 export type RxComparisonResponse = Schemas['RxComparisonResponse']
+export type RxSettingChange = Schemas['RxSettingChange']
+export type RxChangesResponse = Schemas['RxChangesResponse']
 
 // Analysis
 export type AnalysisListItem = Schemas['AnalysisListItem']
@@ -61,10 +63,26 @@ export type RERAEvent = Schemas['RERAEvent']
 
 // Import
 export type ImportSource = Schemas['ImportSource']
-export type ImportSourceResult = Schemas['ImportSourceResult']
-export type ImportResult = Schemas['ImportResult']
 export type DetectRequest = Schemas['DetectRequest']
 export type ImportPathRequest = Schemas['ImportPathRequest']
+
+// ImportSourceResult and ImportResult are returned as SSE event data (not HTTP
+// response models), so they are absent from the OpenAPI spec and hand-written here.
+export interface ImportSourceResult {
+    source: ImportSource
+    imported: number
+    skipped: number
+    failed: number
+    warnings: string[]
+}
+
+export interface ImportResult {
+    total_imported: number
+    total_skipped: number
+    total_failed: number
+    sources: ImportSourceResult[]
+    warnings: string[]
+}
 
 // Database
 export type DatabaseStatsPublic = Schemas['DatabaseStatsPublic']

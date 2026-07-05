@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from snore.analysis.rx_tracker import RxTracker
 from snore.api.deps import get_db
-from snore.api.schemas import RxComparisonResponse, RxPeriodResponse
+from snore.api.schemas import RxChangesResponse, RxComparisonResponse, RxPeriodResponse
 
 router = APIRouter()
 
@@ -34,3 +34,8 @@ def compare_rx(
     db: Session = Depends(get_db),
 ) -> RxComparisonResponse:
     return RxTracker().get_comparison(db, min_days)
+
+
+@router.get("/changes", response_model=RxChangesResponse)
+def get_rx_changes(db: Session = Depends(get_db)) -> RxChangesResponse:
+    return RxTracker().get_changes(db)

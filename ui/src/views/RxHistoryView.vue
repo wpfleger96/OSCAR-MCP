@@ -18,6 +18,7 @@
                         {{ formatDateFull(current.end_date) }}</span
                     >
                     <span>{{ current.days_count }} days</span>
+                    <span v-if="current.device_name">{{ current.device_name }}</span>
                     <span v-if="current.avg_ahi != null"
                         >Avg AHI: {{ current.avg_ahi.toFixed(1) }}</span
                     >
@@ -32,7 +33,7 @@
                         variant="secondary"
                         class="setting-pill"
                     >
-                        {{ key }}: {{ value }}
+                        {{ settingLabel(key) }}: {{ formatSettingValue(key, value) }}
                     </Badge>
                 </div>
             </div>
@@ -40,50 +41,109 @@
             <!-- Comparison Table -->
             <div v-if="comparison" class="section-card">
                 <h2>Period Comparison</h2>
-                <Table>
-                    <TableHeader>
-                        <TableRow>
-                            <TableHead>Period</TableHead>
-                            <TableHead class="w-[70px]">Days</TableHead>
-                            <TableHead>Settings</TableHead>
-                            <TableHead class="w-[90px]">Avg AHI</TableHead>
-                            <TableHead class="w-[100px]">Median AHI</TableHead>
-                            <TableHead class="w-[90px]">Avg Hours</TableHead>
-                            <TableHead class="w-[90px]">Avg Leak</TableHead>
-                            <TableHead class="w-[80px]"></TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        <TableRow
-                            v-for="row in comparisonRows"
-                            :key="row.start_date"
-                            :class="{
-                                'bg-green-500/10': row.isBest,
-                                'bg-destructive/10': row.isWorst,
-                                'even:bg-muted/50': !row.isBest && !row.isWorst,
-                            }"
-                        >
-                            <TableCell>
-                                {{ formatDateFull(row.start_date) }} –
-                                {{ formatDateFull(row.end_date) }}
-                            </TableCell>
-                            <TableCell>{{ row.days_count }}</TableCell>
-                            <TableCell>{{ summarizeSettings(row.settings) }}</TableCell>
-                            <TableCell>{{ row.avg_ahi?.toFixed(1) ?? '---' }}</TableCell>
-                            <TableCell>{{ row.median_ahi?.toFixed(1) ?? '---' }}</TableCell>
-                            <TableCell>{{ row.avg_hours?.toFixed(1) ?? '---' }}</TableCell>
-                            <TableCell>{{ row.avg_leak?.toFixed(1) ?? '---' }}</TableCell>
-                            <TableCell>
-                                <Badge
-                                    v-if="row.isBest"
-                                    class="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                                    >Best</Badge
-                                >
-                                <Badge v-if="row.isWorst" variant="destructive">Worst</Badge>
-                            </TableCell>
-                        </TableRow>
-                    </TableBody>
-                </Table>
+                <div class="overflow-x-auto">
+                    <Table>
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead class="whitespace-nowrap">Period</TableHead>
+                                <TableHead class="whitespace-nowrap">Days</TableHead>
+                                <TableHead class="whitespace-nowrap">Device</TableHead>
+                                <TableHead>Settings</TableHead>
+                                <TableHead class="whitespace-nowrap">Avg AHI</TableHead>
+                                <TableHead class="whitespace-nowrap">Median AHI</TableHead>
+                                <TableHead class="whitespace-nowrap">Avg Hours</TableHead>
+                                <TableHead class="whitespace-nowrap">Avg Leak</TableHead>
+                                <TableHead></TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            <TableRow
+                                v-for="row in comparisonRows"
+                                :key="row.start_date"
+                                :class="{
+                                    'bg-green-500/10': row.isBest,
+                                    'bg-destructive/10': row.isWorst,
+                                    'even:bg-muted/50': !row.isBest && !row.isWorst,
+                                }"
+                            >
+                                <TableCell class="whitespace-nowrap">
+                                    {{ formatDateFull(row.start_date) }} –
+                                    {{ formatDateFull(row.end_date) }}
+                                </TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    row.days_count
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    row.device_name ?? '—'
+                                }}</TableCell>
+                                <TableCell>{{ summarizeSettings(row.settings) }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    row.avg_ahi?.toFixed(1) ?? '---'
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    row.median_ahi?.toFixed(1) ?? '---'
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    row.avg_hours?.toFixed(1) ?? '---'
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    row.avg_leak?.toFixed(1) ?? '---'
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">
+                                    <Badge
+                                        v-if="row.isBest"
+                                        class="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                                        >Best</Badge
+                                    >
+                                    <Badge v-if="row.isWorst" variant="destructive">Worst</Badge>
+                                </TableCell>
+                            </TableRow>
+                        </TableBody>
+                    </Table>
+                </div>
+            </div>
+
+            <!-- Settings Changes — most recent first -->
+            <div v-if="changes.length" class="section-card">
+                <h2>Settings Changes</h2>
+                <div class="overflow-x-auto">
+                    <Table>
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead class="whitespace-nowrap">Date</TableHead>
+                                <TableHead class="whitespace-nowrap">Device</TableHead>
+                                <TableHead class="whitespace-nowrap">Setting</TableHead>
+                                <TableHead class="whitespace-nowrap">Change</TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            <TableRow v-for="change in changes" :key="changeKey(change)">
+                                <TableCell class="whitespace-nowrap">{{
+                                    formatDateFull(change.date)
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    change.device_name
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    settingLabel(change.key)
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">
+                                    <span class="text-muted-foreground">{{
+                                        change.old_value != null
+                                            ? formatSettingValue(change.key, change.old_value)
+                                            : '—'
+                                    }}</span>
+                                    <span class="mx-1">→</span>
+                                    <span>{{
+                                        change.new_value != null
+                                            ? formatSettingValue(change.key, change.new_value)
+                                            : '—'
+                                    }}</span>
+                                </TableCell>
+                            </TableRow>
+                        </TableBody>
+                    </Table>
+                </div>
             </div>
         </template>
 
@@ -103,24 +163,30 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
-import { getRxHistory, getRxCurrent, getRxCompare } from '@/api/rx'
+import { getRxHistory, getRxCurrent, getRxCompare, getRxChanges } from '@/api/rx'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
-import type { RxPeriodResponse } from '@/types'
+import { settingLabel, formatSettingValue } from '@/utils/deviceSettings'
+import type { RxPeriodResponse, RxSettingChange } from '@/types'
 import ErrorState from '@/components/ErrorState.vue'
 
 const { data, loading, error, reload } = useApiLoad(async () => {
-    const [history, current, comparison] = await Promise.all([
+    const [history, current, comparison, changesResponse] = await Promise.all([
         getRxHistory(),
         getRxCurrent(),
         getRxCompare(),
+        getRxChanges(),
     ])
-    return { history, current, comparison }
+    return { history, current, comparison, changesResponse }
 }, 'Failed to load RX data')
 
 const history = computed(() => data.value?.history ?? [])
 const current = computed(() => data.value?.current ?? null)
 const comparison = computed(() => data.value?.comparison ?? null)
+// Most recent first — users care about recent changes.
+const changes = computed<RxSettingChange[]>(() =>
+    [...(data.value?.changesResponse?.changes ?? [])].reverse(),
+)
 
 interface ComparisonRow extends RxPeriodResponse {
     isBest: boolean
@@ -137,18 +203,34 @@ const comparisonRows = computed<ComparisonRow[]>(() => {
 })
 
 function summarizeSettings(settings: Record<string, string>): string {
-    const keys = ['Mode', 'Pressure', 'EPR', 'EPR Level']
+    const priorityKeys = [
+        'mode',
+        'pressure_fixed',
+        'pressure_min',
+        'pressure_max',
+        'ipap',
+        'epap',
+        'ps',
+        'epr_level',
+    ]
     const parts: string[] = []
-    for (const k of keys) {
-        if (k in settings) parts.push(`${k}: ${settings[k]}`)
+    for (const k of priorityKeys) {
+        if (k in settings) {
+            parts.push(`${settingLabel(k)}: ${formatSettingValue(k, settings[k])}`)
+            if (parts.length === 4) break
+        }
     }
     if (!parts.length) {
         return Object.entries(settings)
             .slice(0, 3)
-            .map(([k, v]) => `${k}: ${v}`)
+            .map(([k, v]) => `${settingLabel(k)}: ${v}`)
             .join(', ')
     }
     return parts.join(', ')
+}
+
+function changeKey(change: RxSettingChange): string {
+    return `${change.date}-${change.device_id}-${change.key}`
 }
 </script>
 

@@ -34,6 +34,8 @@ __all__ = [
     "DayDetail",
     "RxPeriodResponse",
     "RxComparisonResponse",
+    "RxSettingChange",
+    "RxChangesResponse",
     # Import schemas
     "ImportSource",
     "ImportSourceResult",
@@ -482,6 +484,8 @@ class RxPeriodResponse(BaseModel):
     avg_hours: float | None = None
     total_hours: float = 0.0
     avg_leak: float | None = None
+    device_id: int | None = None
+    device_name: str | None = None
 
 
 class RxComparisonResponse(BaseModel):
@@ -490,6 +494,23 @@ class RxComparisonResponse(BaseModel):
     periods: list[RxPeriodResponse]
     best_index: int | None = None
     worst_index: int | None = None
+
+
+class RxSettingChange(BaseModel):
+    """A single per-key settings change on a given day for a device."""
+
+    date: date
+    device_id: int
+    device_name: str
+    key: str
+    old_value: str | None = None
+    new_value: str | None = None
+
+
+class RxChangesResponse(BaseModel):
+    """All settings changes across all devices, sorted by (date, device_id, key)."""
+
+    changes: list[RxSettingChange]
 
 
 class ImportSource(BaseModel):
