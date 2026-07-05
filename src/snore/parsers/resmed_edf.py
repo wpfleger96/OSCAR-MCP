@@ -123,13 +123,9 @@ class ResmedEDFParser(DeviceParser):
     }
 
     EPR_TYPE_MAP = {0: "Off", 1: "Ramp Only", 2: "Full Time"}
-    MASK_TYPE_MAP = {
-        0: "Pillows",
-        1: "Full Face",
-        2: "Nasal",
-        3: "Nasal Pillows",
-        4: "Nasal",
-    }
+    # S9/10-series mask codes per OSCAR resmed_loader.cpp (S.Mask signal).
+    # 11-series devices emit raw 2–4; callers normalize by subtracting 2 before lookup.
+    MASK_TYPE_MAP = {0: "Pillows", 1: "Full Face", 2: "Nasal"}
     CLIMATE_CONTROL_MAP = {1: "Manual", 2: "Auto"}
     AB_FILTER_MAP = {0: "Standard", 1: "Antibacterial"}
     MODE_MAP = {
@@ -140,6 +136,13 @@ class ResmedEDFParser(DeviceParser):
         4: TherapyMode.ASV,
         5: TherapyMode.ASV,
     }
+
+    _ELEVEN_SERIES_RE = re.compile(r"(AirSense|AirCurve)\s*11")
+
+    @staticmethod
+    def _is_eleven_series(model: str) -> bool:
+        """Return True if the device model string identifies an 11-series machine."""
+        return bool(ResmedEDFParser._ELEVEN_SERIES_RE.search(model or ""))
 
     def __init__(self) -> None:
         """Initialize ResMed parser."""
@@ -1162,7 +1165,8 @@ class ResmedEDFParser(DeviceParser):
             therapy_day = self._therapy_date(session.start_time)
             if therapy_day in str_settings_cache:
                 settings = self._convert_str_to_therapy_settings(
-                    str_settings_cache[therapy_day]
+                    str_settings_cache[therapy_day],
+                    self._is_eleven_series(device_info.model),
                 )
                 if settings:
                     session.settings = settings
@@ -1694,7 +1698,7 @@ class ResmedEDFParser(DeviceParser):
             )
 
     def _parse_str_settings(
-        self, str_file: Path, session_date: date
+        self, str_file: Path, session_date: date, is_eleven_series: bool = False
     ) -> TherapySettings | None:
         """
         Parse therapy settings from STR.edf for a specific session date.
@@ -1705,6 +1709,8 @@ class ResmedEDFParser(DeviceParser):
         Args:
             str_file: Path to STR.edf file
             session_date: Date of session to get settings for
+            is_eleven_series: True for AirSense/AirCurve 11 devices; forwarded
+                to _convert_str_to_therapy_settings for mask code normalization
 
         Returns:
             TherapySettings populated from STR.edf, None if not found, or None
@@ -1737,7 +1743,9 @@ class ResmedEDFParser(DeviceParser):
                     logger.debug(f"No settings found in STR.edf for {session_date}")
                     return None
 
-                return self._convert_str_to_therapy_settings(settings_values)
+                return self._convert_str_to_therapy_settings(
+                    settings_values, is_eleven_series
+                )
 
         except Exception as e:
             logger.warning(f"Failed to parse STR.edf settings: {e}")
@@ -1860,7 +1868,7 @@ class ResmedEDFParser(DeviceParser):
             return None
 
     def _convert_str_to_therapy_settings(
-        self, values: dict[str, float]
+        self, values: dict[str, float], is_eleven_series: bool = False
     ) -> TherapySettings | None:
         """
         Convert raw STR.edf values to TherapySettings model.
@@ -1872,6 +1880,8 @@ class ResmedEDFParser(DeviceParser):
 
         Args:
             values: Dictionary of setting keys to raw float values
+            is_eleven_series: True for AirSense/AirCurve 11 devices, which emit
+                mask codes 2–4 instead of 0–2 (raw value shifted down by 2)
 
         Returns:
             TherapySettings instance with proper type conversions, or None for
@@ -1900,11 +1910,13 @@ class ResmedEDFParser(DeviceParser):
         )
 
         mask_value = values.get("mask_type")
-        mask_type = (
-            self.MASK_TYPE_MAP.get(int(mask_value), "Unknown")
-            if mask_value is not None
-            else None
-        )
+        if mask_value is not None:
+            mask_code = int(mask_value)
+            if is_eleven_series:
+                mask_code -= 2  # 11-series devices emit raw 2-4; MASK_TYPE_MAP keys are the 0-2 scale
+            mask_type = self.MASK_TYPE_MAP.get(mask_code, "Unknown")
+        else:
+            mask_type = None
 
         ramp_enabled_val = values.get("ramp_enabled")
         ramp_enabled = ramp_enabled_val == 2 if ramp_enabled_val is not None else None

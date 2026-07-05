@@ -63,7 +63,11 @@ class TestConvertStrToTherapySettings:
         assert parser._convert_str_to_therapy_settings(sentinel_record) is None
 
     def test_valid_record_returns_therapy_settings(self, parser):
-        """Valid record (record 0 from fixture) must return a populated TherapySettings."""
+        """Valid record (record 0 from fixture) must return a populated TherapySettings.
+
+        The fixture uses is_eleven_series=True because the raw mask_type value is 4.0,
+        which is an 11-series raw code (2–4 scale); after the -2 shift it maps to 2 → "Nasal".
+        """
         valid_record = {
             "mode": 1.0,
             "pressure_fixed": 10.0,
@@ -77,7 +81,9 @@ class TestConvertStrToTherapySettings:
             "mask_type": 4.0,
             "tube_temp": 27.0,
         }
-        settings = parser._convert_str_to_therapy_settings(valid_record)
+        settings = parser._convert_str_to_therapy_settings(
+            valid_record, is_eleven_series=True
+        )
         assert settings is not None
         assert settings.mode == TherapyMode.APAP
         assert settings.pressure_fixed == 10.0
@@ -107,3 +113,73 @@ class TestConvertStrToTherapySettings:
         assert settings.mode == TherapyMode.APAP
         assert settings.pressure_fixed is None
         assert settings.epr_level == 2
+
+
+class TestMaskTypeMapping:
+    """Tests for generation-aware mask code decoding."""
+
+    @pytest.fixture
+    def parser(self):
+        return ResmedEDFParser()
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (0, "Pillows"),
+            (1, "Full Face"),
+            (2, "Nasal"),
+            (3, "Unknown"),
+            (4, "Unknown"),
+            (5, "Unknown"),
+        ],
+    )
+    def test_ten_series_mask_codes(self, parser, raw, expected):
+        """S9/10-series codes 0–2 map to mask names; anything else → Unknown."""
+        values = {"mode": 1.0, "mask_type": float(raw)}
+        settings = parser._convert_str_to_therapy_settings(
+            values, is_eleven_series=False
+        )
+        assert settings is not None
+        assert settings.mask_type == expected
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (2, "Pillows"),
+            (3, "Full Face"),
+            (4, "Nasal"),
+            (0, "Unknown"),
+            (1, "Unknown"),
+            (5, "Unknown"),
+        ],
+    )
+    def test_eleven_series_mask_codes(self, parser, raw, expected):
+        """11-series raw codes 2–4 are shifted down by 2 before lookup; others → Unknown."""
+        values = {"mode": 1.0, "mask_type": float(raw)}
+        settings = parser._convert_str_to_therapy_settings(
+            values, is_eleven_series=True
+        )
+        assert settings is not None
+        assert settings.mask_type == expected
+
+
+class TestIsElevenSeries:
+    """Tests for _is_eleven_series model-string detection."""
+
+    @pytest.mark.parametrize(
+        "model, expected",
+        [
+            (
+                "AirSense11AutoSet",
+                True,
+            ),  # space-less ProductName from Identification.json
+            ("AirCurve 11 VAuto", True),
+            ("AirSense 10 AutoSet", False),
+            ("AirCurve 10 VAuto", False),
+            ("S9 AutoSet", False),
+            ("Unknown", False),
+            ("", False),
+        ],
+    )
+    def test_model_detection(self, model, expected):
+        assert ResmedEDFParser._is_eleven_series(model) is expected
