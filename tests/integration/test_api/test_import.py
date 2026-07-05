@@ -214,6 +214,54 @@ class TestImportProgress:
             assert result_data["result"]["total_imported"] == 1
 
 
+class TestUploadBackupEnabled:
+    """Upload job must call import_sources with backup=True (WS2 fix)."""
+
+    def test_upload_job_calls_import_with_backup_true(self, api_client):
+        """_run_import for UPLOAD type must pass backup=True to import_sources."""
+        fake_result = ImportResult(
+            total_imported=1,
+            total_skipped=0,
+            total_failed=0,
+            sources=[],
+            warnings=[],
+        )
+        with (
+            patch(
+                "snore.api.routers.import_data.ImportService.detect_sources",
+                return_value=[],
+            ),
+            patch(
+                "snore.api.routers.import_data.ImportService.import_sources",
+                return_value=fake_result,
+            ) as mock_import,
+        ):
+            upload_response = api_client.post(
+                "/api/v1/import",
+                files=[
+                    (
+                        "files",
+                        ("test.edf", b"fake content", "application/octet-stream"),
+                    )
+                ],
+            )
+            assert upload_response.status_code == 202
+            job_id = upload_response.json()["job_id"]
+
+            api_client.get(
+                f"/api/v1/import/{job_id}/progress",
+                headers={"Accept": "text/event-stream"},
+            )
+
+        # Verify the upload path called import_sources with backup=True
+        mock_import.assert_called_once()
+        _, kwargs = mock_import.call_args
+        assert kwargs.get("backup") is True, (
+            "Upload route must call import_sources(backup=True); "
+            f"got backup={kwargs.get('backup')!r}"
+        )
+
+
 class TestPathImport:
     def test_non_localhost_gets_403(self, api_client):
         """Non-localhost client is rejected with 403."""
