@@ -70,3 +70,22 @@ class TestDaysRouter:
         assert data["session_count"] == 2
         assert data["ahi"] == 1.8
         assert data["session_ids"] == []
+        assert "pressure_min" in data
+        assert "pressure_max" in data
+        assert "pressure_median" in data
+        assert "pressure_95th" in data
+        assert "epap_min" in data
+        assert "epap_max" in data
+        assert "epap_median" in data
+        assert "epap_mean" in data
+        assert "epap_95th" in data
+        assert "leak_min" in data
+        assert "leak_max" in data
+        assert "leak_mean" in data
+        assert "leak_95th" in data
+        assert "spo2_min" in data
+        assert "spo2_max" in data
+        assert data["obstructive_apneas"] == 0
+        assert data["central_apneas"] == 0
+        assert data["hypopneas"] == 0
+        assert data["reras"] == 0

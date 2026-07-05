@@ -33,6 +33,7 @@ class TestStatsSummary:
         data = response.json()
         assert data["days_with_data"] == 1
         assert data["total_hours"] == pytest.approx(0.0, abs=0.1)
+        assert "ahi_trend_direction" in data
 
 
 class TestStatsPeriods:

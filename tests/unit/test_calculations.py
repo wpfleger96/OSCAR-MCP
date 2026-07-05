@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from snore.analysis.calculations import (
+    calculate_ahi_trend_direction,
     calculate_median_ahi,
     calculate_period_statistics,
     calculate_trends,
@@ -664,3 +665,29 @@ class TestCalculateTrendsExtended:
 
         assert all(v == [] for v in result.values())
         assert len(result) == 13
+
+
+class TestCalculateAhiTrendDirection:
+    def test_empty_returns_none(self) -> None:
+        assert calculate_ahi_trend_direction([]) is None
+
+    def test_single_value_returns_none(self) -> None:
+        assert calculate_ahi_trend_direction([5.0]) is None
+
+    def test_zero_prior_average_returns_none(self) -> None:
+        assert calculate_ahi_trend_direction([0.0, 0.0, 3.0]) is None
+
+    def test_improving(self) -> None:
+        # latest = 1.0, prior_avg = 5.0 → 1.0 < 4.5 → improving
+        result = calculate_ahi_trend_direction([5.0, 5.0, 1.0])
+        assert result == "improving"
+
+    def test_worsening(self) -> None:
+        # latest = 10.0, prior_avg = 5.0 → 10.0 > 5.5 → worsening
+        result = calculate_ahi_trend_direction([5.0, 5.0, 10.0])
+        assert result == "worsening"
+
+    def test_stable(self) -> None:
+        # latest = 5.2, prior_avg = 5.0 → within ±10% → stable
+        result = calculate_ahi_trend_direction([5.0, 5.0, 5.2])
+        assert result == "stable"

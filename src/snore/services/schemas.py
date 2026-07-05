@@ -204,26 +204,38 @@ class SessionStatistics(BaseModel):
     pressure_mean: float | None = None
     pressure_min: float | None = None
     pressure_max: float | None = None
+    pressure_median: float | None = None
     pressure_95th: float | None = None
     epap_mean: float | None = None
     epap_min: float | None = None
     epap_max: float | None = None
+    epap_median: float | None = None
     epap_95th: float | None = None
     ipap_median: float | None = None
     ipap_95th: float | None = None
     ipap_max: float | None = None
     leak_mean: float | None = None
+    leak_min: float | None = None
+    leak_max: float | None = None
+    leak_median: float | None = None
     leak_percentile_70: float | None = None
     leak_95th: float | None = None
     spo2_mean: float | None = None
     spo2_min: float | None = None
+    spo2_max: float | None = None
     spo2_time_below_90: int | None = None
     pulse_mean: float | None = None
     pulse_min: float | None = None
     pulse_max: float | None = None
     respiratory_rate_mean: float | None = None
+    respiratory_rate_min: float | None = None
+    respiratory_rate_max: float | None = None
     tidal_volume_mean: float | None = None
+    tidal_volume_min: float | None = None
+    tidal_volume_max: float | None = None
     minute_ventilation_mean: float | None = None
+    minute_ventilation_min: float | None = None
+    minute_ventilation_max: float | None = None
 
 
 class SessionSetting(BaseModel):
@@ -252,6 +264,9 @@ class SessionDetail(BaseModel):
     waveform_types: list[str]
     has_statistics: bool
     has_event_data: bool
+    import_source: str | None = None
+    parser_version: str | None = None
+    data_quality_notes: list[str] = Field(default_factory=list)
     statistics: SessionStatistics | None = None
     settings: list[SessionSetting] | None = None
 
@@ -297,6 +312,7 @@ class TherapySummary(BaseModel):
     avg_respiratory_rate: float | None = None
     avg_tidal_volume: float | None = None
     avg_minute_ventilation: float | None = None
+    ahi_trend_direction: str | None = None
     event_counts: list[EventTypeCount] = Field(default_factory=list)
 
 
@@ -380,6 +396,30 @@ class DayDetail(DayListItem):
     avg_pressure: float | None = None
     avg_leak: float | None = None
     avg_spo2: float | None = None
+    # Pressure detail
+    pressure_min: float | None = None
+    pressure_max: float | None = None
+    pressure_median: float | None = None
+    pressure_95th: float | None = None
+    # EPAP detail
+    epap_min: float | None = None
+    epap_max: float | None = None
+    epap_median: float | None = None
+    epap_mean: float | None = None
+    epap_95th: float | None = None
+    # Leak detail
+    leak_min: float | None = None
+    leak_max: float | None = None
+    leak_mean: float | None = None
+    leak_95th: float | None = None
+    # SpO2 detail
+    spo2_min: float | None = None
+    spo2_max: float | None = None
+    # Raw event counts
+    obstructive_apneas: int = 0
+    central_apneas: int = 0
+    hypopneas: int = 0
+    reras: int = 0
     session_ids: list[int] = Field(default_factory=list)
 
 

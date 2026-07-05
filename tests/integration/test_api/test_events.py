@@ -40,6 +40,8 @@ class TestEventsRouter:
         assert data[0]["event_type"] == "OA"
         assert data[0]["duration_seconds"] == 15.0
         assert data[0]["offset_seconds"] == 3600.0
+        assert "spo2_drop" in data[0]
+        assert "peak_flow_limitation" in data[0]
 
     def test_list_events_filter_by_type(
         self, api_client, db_session, test_device, test_session_factory

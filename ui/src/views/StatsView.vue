@@ -1,6 +1,15 @@
 <template>
     <div class="stats-view">
-        <h1 class="page-title">Statistics</h1>
+        <div class="stats-title-row">
+            <h1 class="page-title">Statistics</h1>
+            <span
+                v-if="summary?.ahi_trend_direction"
+                class="trend-badge"
+                :class="'trend-' + summary.ahi_trend_direction"
+            >
+                AHI {{ summary.ahi_trend_direction }}
+            </span>
+        </div>
 
         <!-- Controls -->
         <div class="controls">
@@ -108,7 +117,7 @@ import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import RecordsPanel from '@/components/RecordsPanel.vue'
 import ErrorState from '@/components/ErrorState.vue'
-import { getPeriods, getTrends, getRecords } from '@/api/stats'
+import { getSummary, getPeriods, getTrends, getRecords } from '@/api/stats'
 import { useApiLoad } from '@/composables/useApiLoad'
 import type { PeriodStatistics, TrendData } from '@/types'
 
@@ -211,11 +220,12 @@ const {
     error: periodsError,
     reload: reloadPeriods,
 } = useApiLoad(async () => {
-    const [periods, trends] = await Promise.all([
+    const [periods, trends, summary] = await Promise.all([
         getPeriods(granularity.value, effectiveDaysLimit.value),
         getTrends(granularity.value, effectiveDaysLimit.value),
+        getSummary(),
     ])
-    return { periods, trends }
+    return { periods, trends, summary }
 })
 
 const {
@@ -226,6 +236,7 @@ const {
 } = useApiLoad(() => getRecords(effectiveDaysLimit.value))
 
 const periods = computed<PeriodStatistics[]>(() => periodData.value?.periods ?? [])
+const summary = computed(() => periodData.value?.summary ?? null)
 const trends = computed(() => periodData.value?.trends ?? null)
 
 watch([granularity, daysRange], () => {
@@ -260,6 +271,38 @@ const anyVisibleChart = computed(() => selectedMetrics.value.some((key) => hasDa
 <style scoped>
 .stats-view {
     max-width: 1200px;
+}
+
+.stats-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.stats-title-row .page-title {
+    margin-bottom: 0;
+}
+
+.trend-badge {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: capitalize;
+    padding: 0.15rem 0.5rem;
+    border-radius: 0.25rem;
+    border: 1px solid currentColor;
+}
+
+.trend-improving {
+    color: var(--color-success);
+}
+
+.trend-worsening {
+    color: var(--color-destructive);
+}
+
+.trend-stable {
+    color: var(--muted-foreground);
 }
 
 .controls {

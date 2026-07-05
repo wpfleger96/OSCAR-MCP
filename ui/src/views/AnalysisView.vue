@@ -170,6 +170,54 @@
             </div>
         </div>
 
+        <!-- Flow Limitation Analysis -->
+        <div v-if="flowAnalysis" class="section-card">
+            <h2>Flow Limitation</h2>
+            <div class="summary-row" style="margin-bottom: 1rem">
+                <StatCard
+                    label="Flow Limitation Index"
+                    :value="flowAnalysis!.flow_limitation_index * 100"
+                    unit="%"
+                    :decimals="1"
+                />
+                <StatCard
+                    label="Total Breaths"
+                    :value="flowAnalysis!.total_breaths"
+                    :decimals="0"
+                />
+                <StatCard
+                    label="Avg Confidence"
+                    :value="flowAnalysis!.average_confidence * 100"
+                    unit="%"
+                    :decimals="1"
+                />
+            </div>
+            <Table>
+                <TableHeader>
+                    <TableRow>
+                        <TableHead style="width: 60px">Class</TableHead>
+                        <TableHead>Name</TableHead>
+                        <TableHead style="width: 80px">Severity</TableHead>
+                        <TableHead style="width: 80px">Count</TableHead>
+                        <TableHead style="width: 80px">% Breaths</TableHead>
+                    </TableRow>
+                </TableHeader>
+                <TableBody>
+                    <TableRow
+                        v-for="cls in flDistributionRows"
+                        :key="cls.classNum"
+                        class="odd:bg-muted/50"
+                    >
+                        <TableCell>{{ cls.classNum }}</TableCell>
+                        <TableCell>{{ cls.name }}</TableCell>
+                        <TableCell>{{ cls.severity }}</TableCell>
+                        <TableCell>{{ cls.count }}</TableCell>
+                        <TableCell>{{ cls.pct.toFixed(1) }}%</TableCell>
+                    </TableRow>
+                </TableBody>
+            </Table>
+        </div>
+
         <!-- Event Comparison -->
         <div v-if="comparison" class="section-card">
             <h2>Event Comparison</h2>
@@ -318,6 +366,14 @@ import { getAnalysis, runAnalysis } from '@/api/analysis'
 import { getWaveformCompare } from '@/api/waveforms'
 import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
+import { FLOW_LIMITATION_CLASSES } from '@/utils/flowLimitation'
+
+interface FlowAnalysis {
+    total_breaths: number
+    class_distribution: Record<string, number>
+    flow_limitation_index: number
+    average_confidence: number
+}
 import type { AnalysisResult, EventComparisonResult } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
@@ -409,6 +465,38 @@ const paginatedEvents = computed(() => {
 })
 
 const totalEventPages = computed(() => Math.ceil(modeEvents.value.length / eventsPageSize))
+
+interface FlDistRow {
+    classNum: number
+    name: string
+    severity: string
+    count: number
+    pct: number
+}
+
+const flowAnalysis = computed<FlowAnalysis | null>(() => {
+    const fa = analysis.value?.flow_analysis as FlowAnalysis | null | undefined
+    return fa ?? null
+})
+
+const flDistributionRows = computed<FlDistRow[]>(() => {
+    const fa = flowAnalysis.value
+    if (!fa) return []
+    const total = fa.total_breaths || 1
+    return Object.entries(fa.class_distribution)
+        .map(([k, count]) => {
+            const classNum = parseInt(k)
+            const info = FLOW_LIMITATION_CLASSES[classNum]
+            return {
+                classNum,
+                name: info?.name ?? `Class ${classNum}`,
+                severity: info?.severity ?? '—',
+                count,
+                pct: (count / total) * 100,
+            }
+        })
+        .sort((a, b) => a.classNum - b.classNum)
+})
 
 const allFalsePositives = computed(() =>
     [

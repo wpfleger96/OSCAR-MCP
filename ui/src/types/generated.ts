@@ -1131,20 +1131,70 @@ export interface components {
             /** Cai */
             cai?: number | null
             /**
+             * Central Apneas
+             * @default 0
+             */
+            central_apneas: number
+            /**
              * Date
              * Format: date
              */
             date: string
             /** Device Id */
             device_id: number
+            /** Epap 95Th */
+            epap_95th?: number | null
+            /** Epap Max */
+            epap_max?: number | null
+            /** Epap Mean */
+            epap_mean?: number | null
+            /** Epap Median */
+            epap_median?: number | null
+            /** Epap Min */
+            epap_min?: number | null
             /** Hi */
             hi?: number | null
+            /**
+             * Hypopneas
+             * @default 0
+             */
+            hypopneas: number
+            /** Leak 95Th */
+            leak_95th?: number | null
+            /** Leak Max */
+            leak_max?: number | null
+            /** Leak Mean */
+            leak_mean?: number | null
+            /** Leak Min */
+            leak_min?: number | null
             /** Oai */
             oai?: number | null
+            /**
+             * Obstructive Apneas
+             * @default 0
+             */
+            obstructive_apneas: number
+            /** Pressure 95Th */
+            pressure_95th?: number | null
+            /** Pressure Max */
+            pressure_max?: number | null
+            /** Pressure Median */
+            pressure_median?: number | null
+            /** Pressure Min */
+            pressure_min?: number | null
+            /**
+             * Reras
+             * @default 0
+             */
+            reras: number
             /** Session Count */
             session_count: number
             /** Session Ids */
             session_ids?: number[]
+            /** Spo2 Max */
+            spo2_max?: number | null
+            /** Spo2 Min */
+            spo2_min?: number | null
             /** Total Therapy Hours */
             total_therapy_hours?: number | null
         }
@@ -1294,6 +1344,10 @@ export interface components {
             id: number
             /** Offset Seconds */
             offset_seconds: number
+            /** Peak Flow Limitation */
+            peak_flow_limitation?: number | null
+            /** Spo2 Drop */
+            spo2_drop?: number | null
             /** Start Time */
             start_time: number
         }
@@ -1780,6 +1834,8 @@ export interface components {
          * @description Detailed view of a single session with all metadata.
          */
         SessionDetail: {
+            /** Data Quality Notes */
+            data_quality_notes?: string[]
             /** Device Manufacturer */
             device_manufacturer: string | null
             /** Device Model */
@@ -1807,6 +1863,10 @@ export interface components {
             has_statistics: boolean
             /** Id */
             id: number
+            /** Import Source */
+            import_source?: string | null
+            /** Parser Version */
+            parser_version?: string | null
             /** Settings */
             settings?: components['schemas']['SessionSetting'][] | null
             /**
@@ -1907,6 +1967,8 @@ export interface components {
             epap_max?: number | null
             /** Epap Mean */
             epap_mean?: number | null
+            /** Epap Median */
+            epap_median?: number | null
             /** Epap Min */
             epap_min?: number | null
             /** Flow Limitations */
@@ -1923,12 +1985,22 @@ export interface components {
             ipap_median?: number | null
             /** Leak 95Th */
             leak_95th?: number | null
+            /** Leak Max */
+            leak_max?: number | null
             /** Leak Mean */
             leak_mean?: number | null
+            /** Leak Median */
+            leak_median?: number | null
+            /** Leak Min */
+            leak_min?: number | null
             /** Leak Percentile 70 */
             leak_percentile_70?: number | null
+            /** Minute Ventilation Max */
+            minute_ventilation_max?: number | null
             /** Minute Ventilation Mean */
             minute_ventilation_mean?: number | null
+            /** Minute Ventilation Min */
+            minute_ventilation_min?: number | null
             /** Mixed Apneas */
             mixed_apneas?: number | null
             /** Oai */
@@ -1941,6 +2013,8 @@ export interface components {
             pressure_max?: number | null
             /** Pressure Mean */
             pressure_mean?: number | null
+            /** Pressure Median */
+            pressure_median?: number | null
             /** Pressure Min */
             pressure_min?: number | null
             /** Pulse Max */
@@ -1953,16 +2027,26 @@ export interface components {
             rei?: number | null
             /** Reras */
             reras?: number | null
+            /** Respiratory Rate Max */
+            respiratory_rate_max?: number | null
             /** Respiratory Rate Mean */
             respiratory_rate_mean?: number | null
+            /** Respiratory Rate Min */
+            respiratory_rate_min?: number | null
+            /** Spo2 Max */
+            spo2_max?: number | null
             /** Spo2 Mean */
             spo2_mean?: number | null
             /** Spo2 Min */
             spo2_min?: number | null
             /** Spo2 Time Below 90 */
             spo2_time_below_90?: number | null
+            /** Tidal Volume Max */
+            tidal_volume_max?: number | null
             /** Tidal Volume Mean */
             tidal_volume_mean?: number | null
+            /** Tidal Volume Min */
+            tidal_volume_min?: number | null
             /** Usage Hours */
             usage_hours?: number | null
         }
@@ -2037,6 +2121,8 @@ export interface components {
          * @description Aggregated therapy statistics summary.
          */
         TherapySummary: {
+            /** Ahi Trend Direction */
+            ahi_trend_direction?: string | null
             /** Avg Ahi */
             avg_ahi?: number | null
             /** Avg Epap */
