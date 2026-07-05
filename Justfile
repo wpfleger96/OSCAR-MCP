@@ -43,7 +43,7 @@ check: sync type-check lint-check format-check
     @echo "Quick quality checks passed"
 
 # Run all quality checks and tests
-check-all: check test
+check-all: check test web-install web-check
     @echo "All quality checks and tests passed"
 
 # Sync, type-check, auto-fix lint/format, and run tests
