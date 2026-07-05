@@ -18,6 +18,9 @@ export const SETTING_CATEGORIES: SettingsCategory[] = [
             'pressure_fixed',
             'pressure_min',
             'pressure_max',
+            'ipap',
+            'epap',
+            'ps',
             'ramp_start_pressure',
             'epr_level',
             'epr_mode',
@@ -28,6 +31,11 @@ export const SETTING_CATEGORIES: SettingsCategory[] = [
         keys: [
             'ramp_enabled',
             'ramp_time',
+            'ti_min',
+            'ti_max',
+            'rise_time',
+            'trigger',
+            'cycle',
             'humidity_enabled',
             'humidity_level',
             'climate_control',
@@ -37,7 +45,7 @@ export const SETTING_CATEGORIES: SettingsCategory[] = [
     },
     {
         label: 'Other',
-        keys: ['smart_start', 'ab_filter', 'mask_type'],
+        keys: ['smart_start', 'ab_filter', 'mask_type', 'easy_breathe'],
     },
 ]
 
@@ -48,11 +56,19 @@ const SETTING_LABELS: Record<string, string> = {
     pressure_fixed: 'Pressure',
     pressure_min: 'Min Pressure',
     pressure_max: 'Max Pressure',
+    ipap: 'IPAP',
+    epap: 'EPAP',
+    ps: 'Pressure Support',
     ramp_start_pressure: 'Ramp Start Pressure',
     epr_level: 'EPR Level',
     epr_mode: 'EPR Mode',
     ramp_enabled: 'Ramp',
     ramp_time: 'Ramp Time',
+    ti_min: 'Ti Min',
+    ti_max: 'Ti Max',
+    rise_time: 'Rise Time',
+    trigger: 'Trigger',
+    cycle: 'Cycle',
     humidity_enabled: 'Humidity',
     humidity_level: 'Humidity Level',
     climate_control: 'Climate Control',
@@ -61,6 +77,7 @@ const SETTING_LABELS: Record<string, string> = {
     smart_start: 'Smart Start',
     ab_filter: 'Filter Type',
     mask_type: 'Mask Type',
+    easy_breathe: 'Easy-Breathe',
 }
 
 const BOOLEAN_KEYS = new Set([
@@ -75,6 +92,9 @@ const PRESSURE_KEYS = new Set([
     'pressure_min',
     'pressure_max',
     'ramp_start_pressure',
+    'ipap',
+    'epap',
+    'ps',
 ])
 
 /** Human-readable label for a setting key. */

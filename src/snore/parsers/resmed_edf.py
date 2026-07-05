@@ -15,6 +15,7 @@ File Types:
 
 import json
 import logging
+import math
 import os
 import re
 
@@ -128,13 +129,62 @@ class ResmedEDFParser(DeviceParser):
     MASK_TYPE_MAP = {0: "Pillows", 1: "Full Face", 2: "Nasal"}
     CLIMATE_CONTROL_MAP = {1: "Manual", 2: "Auto"}
     AB_FILTER_MAP = {0: "Standard", 1: "Antibacterial"}
-    MODE_MAP = {
+    # Series 11 native STR mode encoding; OSCAR rule: modelnumber >= 39000
+    MODE_MAP_SERIES11 = {
+        1: TherapyMode.APAP,  # AutoSet
+        2: TherapyMode.APAP,  # AutoSet for Her
+        3: TherapyMode.CPAP,
+        7: TherapyMode.ASV,  # ASVauto (variable EPAP); OSCAR MODE_ASV_VARIABLE_EPAP — mapped to TherapyMode.ASV (closest available)
+        8: TherapyMode.BIPAP_AUTO,  # VAuto
+    }
+    # Series 9/10 native STR mode encoding
+    MODE_MAP_SERIES10 = {
         0: TherapyMode.CPAP,
         1: TherapyMode.APAP,
         2: TherapyMode.BIPAP,
-        3: TherapyMode.BIPAP_AUTO,
-        4: TherapyMode.ASV,
-        5: TherapyMode.ASV,
+        3: TherapyMode.BIPAP,  # VPAP S
+        4: TherapyMode.BIPAP_ST,  # OSCAR collapses S10 modes 3/4/5 to BILEVEL_FIXED; 4/5 are S/T variants — BIPAP_ST is a deliberate local deviation
+        5: TherapyMode.BIPAP_ST,  # OSCAR collapses S10 modes 3/4/5 to BILEVEL_FIXED; 4/5 are S/T variants — BIPAP_ST is a deliberate local deviation
+        6: TherapyMode.BIPAP_AUTO,  # VAuto
+        7: TherapyMode.ASV,
+        8: TherapyMode.ASV,  # ASV Auto / variable EPAP (MODE_ASV_VARIABLE_EPAP in OSCAR)
+        11: TherapyMode.APAP,  # APAP for Her
+    }
+
+    STR_VAUTO_SIGNALS = {
+        "S.VA.StartPress": "va_start_press",
+        "S.VA.MaxIPAP": "va_max_ipap",
+        "S.VA.MinEPAP": "va_min_epap",
+        "S.VA.PS": "va_ps",
+        "S.VA.TiMax": "va_ti_max",
+        "S.VA.TiMin": "va_ti_min",
+        "S.VA.Trigger": "va_trigger",
+        "S.VA.Cycle": "va_cycle",
+    }
+    STR_SMODE_SIGNALS = {
+        "S.S.StartPress": "s_start_press",
+        "S.S.IPAP": "s_ipap",
+        "S.S.EPAP": "s_epap",
+        "S.S.EasyBreathe": "s_easy_breathe",
+        "S.S.TiMax": "s_ti_max",
+        "S.S.TiMin": "s_ti_min",
+        "S.S.RiseEnable": "s_rise_enable",
+        "S.S.RiseTime": "s_rise_time",
+        "S.S.Trigger": "s_trigger",
+        "S.S.Cycle": "s_cycle",
+    }
+    STR_AFH_SIGNALS = {
+        "S.AFH.StartPress": "afh_start_press",
+        "S.AFH.MaxPress": "afh_max_press",
+        "S.AFH.MinPress": "afh_min_press",
+    }
+
+    # Merged view of all STR signal groups — invariant across files, built once.
+    ALL_STR_SIGNAL_MAPS = {
+        **STR_SETTINGS_MAP,
+        **STR_VAUTO_SIGNALS,
+        **STR_SMODE_SIGNALS,
+        **STR_AFH_SIGNALS,
     }
 
     _ELEVEN_SERIES_RE = re.compile(r"(AirSense|AirCurve)\s*11")
@@ -151,6 +201,7 @@ class ResmedEDFParser(DeviceParser):
         self._root_metadata: DataRoot | None = None
         self._all_roots: list[DataRoot] = []
         self._finder = DataRootFinder()
+        self._str_series11: bool = False
 
     def get_metadata(self) -> ParserMetadata:
         """Return ResMed parser metadata."""
@@ -307,6 +358,28 @@ class ResmedEDFParser(DeviceParser):
         except Exception:
             return None
 
+    def _detect_series11(self, root_path: Path) -> bool:
+        """Return True when the device is Series 11 based on ProductCode.
+
+        OSCAR rule: modelnumber >= 39000 → Series 11 STR mode encoding.
+        Falls back to Series 9/10 when Identification.json is absent (those
+        devices ship Identification.tgt instead).
+        """
+        id_file = root_path / "Identification.json"
+        if not id_file.exists():
+            return False
+        try:
+            with open(id_file, encoding="utf-8") as f:
+                data = json.load(f)
+            fg = data.get("FlowGenerator", {})
+            profiles = fg.get("IdentificationProfiles", {})
+            product = profiles.get("Product", {})
+            code = product.get("ProductCode")
+            # int(float(...)) handles JSON numbers stored as floats (e.g. 39000.0).
+            return code is not None and int(float(str(code))) >= 39000
+        except Exception:
+            return False
+
     def get_device_info(self, path: Path) -> DeviceInfo:
         """
         Extract ResMed device information.
@@ -401,9 +474,8 @@ class ResmedEDFParser(DeviceParser):
 
         device_info = self.get_device_info(path)
 
-        str_file = path / "STR.edf"
-        str_settings_cache = self._preload_str_settings(str_file)
-        str_summaries_cache = self._preload_str_summaries(str_file)
+        self._str_series11 = self._detect_series11(path)
+        str_settings_cache, str_summaries_cache = self._load_str_caches(path)
 
         sessions_yielded = 0
 
@@ -1751,6 +1823,44 @@ class ResmedEDFParser(DeviceParser):
             logger.warning(f"Failed to parse STR.edf settings: {e}")
             return None
 
+    def _load_str_caches(
+        self, root_path: Path
+    ) -> tuple[
+        dict[date, dict[str, float]] | None, dict[date, dict[str, float]] | None
+    ]:
+        """
+        Merge STR settings and summaries from STR_Backup/*.edf then STR.edf.
+
+        Reads backup files in sorted order, then the primary STR.edf last so
+        it wins on any overlapping dates.  Returns (None, None) when no files
+        are readable.
+        """
+        backup_dir = root_path / "STR_Backup"
+        backup_files: list[Path] = (
+            sorted(backup_dir.glob("STR-*.edf")) if backup_dir.is_dir() else []
+        )
+        primary = root_path / "STR.edf"
+        all_files = backup_files + ([primary] if primary.exists() else [])
+
+        if not all_files:
+            return None, None
+
+        merged_settings: dict[date, dict[str, float]] = {}
+        merged_summaries: dict[date, dict[str, float]] = {}
+
+        for f in all_files:
+            s = self._preload_str_settings(f)
+            if s:
+                for d, vals in s.items():
+                    merged_settings.setdefault(d, {}).update(vals)
+
+            u = self._preload_str_summaries(f)
+            if u:
+                for d, vals in u.items():
+                    merged_summaries.setdefault(d, {}).update(vals)
+
+        return (merged_settings or None), (merged_summaries or None)
+
     def _preload_str_settings(
         self, str_file: Path
     ) -> dict[date, dict[str, float]] | None:
@@ -1780,7 +1890,7 @@ class ResmedEDFParser(DeviceParser):
                 all_settings: dict[date, dict[str, float]] = {}
                 signals = edf.get_signal_info()
 
-                for signal_label, setting_name in self.STR_SETTINGS_MAP.items():
+                for signal_label, setting_name in self.ALL_STR_SIGNAL_MAPS.items():
                     if signal_label in signals:
                         data, _ = edf.read_signal(signal_label)
 
@@ -1873,10 +1983,12 @@ class ResmedEDFParser(DeviceParser):
         """
         Convert raw STR.edf values to TherapySettings model.
 
-        Returns None when the record is a no-usage sentinel day: ResMed writes
-        negative values (e.g. -1.0, -0.02) into every settings signal on days
-        where the device was not used.  If every value in the dict fails
-        ``v >= 0`` (NaN also fails this check), the record is discarded.
+        Returns None when the record is a no-usage sentinel day (all values
+        negative/NaN), when the mode signal is absent, or when the mode value
+        is not in the device family's map.
+
+        Mode-specific fields are selected based on the active therapy mode so
+        dormant presets for inactive modes are never stored.
 
         Args:
             values: Dictionary of setting keys to raw float values
@@ -1884,30 +1996,100 @@ class ResmedEDFParser(DeviceParser):
                 mask codes 2–4 instead of 0–2 (raw value shifted down by 2)
 
         Returns:
-            TherapySettings instance with proper type conversions, or None for
-            no-usage sentinel records
+            TherapySettings instance with proper type conversions, or None.
         """
         if values and all(not (v >= 0) for v in values.values()):
             return None
 
+        # Resolve mode using the family-appropriate map.
         mode_value = values.get("mode")
-        if mode_value is not None:
-            mode_int = int(mode_value)
-            mode = self.MODE_MAP.get(mode_int)
-            if mode is None:
-                logger.warning(
-                    "Unknown ResMed therapy mode value %d, defaulting to CPAP", mode_int
-                )
-                mode = TherapyMode.CPAP
-        else:
-            mode = TherapyMode.CPAP
+        if mode_value is None:
+            logger.warning("STR record has no mode signal; discarding")
+            return None
+        if isinstance(mode_value, float) and math.isnan(mode_value):
+            logger.warning("STR record has NaN mode value; discarding")
+            return None
 
-        epr_type_value = values.get("epr_mode")
-        epr_mode = (
-            self.EPR_TYPE_MAP.get(int(epr_type_value), "Unknown")
-            if epr_type_value is not None
+        mode_int = int(mode_value)
+        # Two family-detection mechanisms coexist: _str_series11 comes from ProductCode
+        # in Identification.json (file-level metadata set once at parse start) and picks
+        # the mode map here, while the is_eleven_series parameter comes from a model-name
+        # regex (_is_eleven_series) and shifts mask-type codes below. They can disagree
+        # when Identification.json is absent; ProductCode is authoritative for mode decode.
+        mode_map = (
+            self.MODE_MAP_SERIES11 if self._str_series11 else self.MODE_MAP_SERIES10
+        )
+        mode = mode_map.get(mode_int)
+        if mode is None:
+            logger.warning(
+                "Unknown ResMed therapy mode value %d (Series %s); discarding record",
+                mode_int,
+                "11" if self._str_series11 else "9/10",
+            )
+            return None
+
+        def _validate_positive(
+            value: float | None, min_val: float = 0.0
+        ) -> float | None:
+            """Return value if >= min_val, else None (filters sentinel values)."""
+            return value if value is not None and value >= min_val else None
+
+        def _validate_non_negative(value: float | None) -> float | None:
+            """Return value if >= 0, else None."""
+            return value if value is not None and value >= 0 else None
+
+        def _extract_epr() -> tuple[int | None, str | None]:
+            level_val = values.get("epr_level")
+            level = (
+                int(level_val)
+                if level_val is not None and 0 <= level_val <= 3
+                else None
+            )
+            type_val = values.get("epr_mode")
+            mode_str = (
+                self.EPR_TYPE_MAP.get(int(type_val), "Unknown")
+                if type_val is not None and type_val >= 0
+                else None
+            )
+            return level, mode_str
+
+        # Universal fields — apply to all therapy modes.
+        ramp_enabled_val = values.get("ramp_enabled")
+        ramp_enabled = ramp_enabled_val == 2 if ramp_enabled_val is not None else None
+
+        ramp_time_value = values.get("ramp_time")
+        ramp_time = (
+            int(ramp_time_value)
+            if ramp_time_value is not None and ramp_time_value >= 0 and ramp_enabled
             else None
         )
+
+        humidity_enabled_val = values.get("humidity_enabled")
+        humidity_enabled = (
+            humidity_enabled_val == 2 if humidity_enabled_val is not None else None
+        )
+        humidity_level_value = values.get("humidity_level")
+        humidity_level = (
+            int(humidity_level_value)
+            if humidity_level_value is not None and humidity_level_value >= 0
+            else None
+        )
+
+        tube_temp_enabled_val = values.get("tube_temp_enabled")
+        tube_temp_enabled = (
+            tube_temp_enabled_val == 2 if tube_temp_enabled_val is not None else None
+        )
+        tube_temp = _validate_positive(values.get("tube_temp"), min_val=1.0)
+
+        climate_value = values.get("climate_control")
+        climate_control = (
+            self.CLIMATE_CONTROL_MAP.get(int(climate_value), "Manual")
+            if climate_value is not None
+            else None
+        )
+
+        smart_start_val = values.get("smart_start")
+        smart_start = smart_start_val == 2 if smart_start_val is not None else None
 
         mask_value = values.get("mask_type")
         if mask_value is not None:
@@ -1918,61 +2100,6 @@ class ResmedEDFParser(DeviceParser):
         else:
             mask_type = None
 
-        ramp_enabled_val = values.get("ramp_enabled")
-        ramp_enabled = ramp_enabled_val == 2 if ramp_enabled_val is not None else None
-        humidity_enabled_val = values.get("humidity_enabled")
-        humidity_enabled = (
-            humidity_enabled_val == 2 if humidity_enabled_val is not None else None
-        )
-        tube_temp_enabled_val = values.get("tube_temp_enabled")
-        tube_temp_enabled = (
-            tube_temp_enabled_val == 2 if tube_temp_enabled_val is not None else None
-        )
-        smart_start_val = values.get("smart_start")
-        smart_start = smart_start_val == 2 if smart_start_val is not None else None
-
-        climate_value = values.get("climate_control")
-        climate_control = (
-            self.CLIMATE_CONTROL_MAP.get(int(climate_value), "Manual")
-            if climate_value is not None
-            else None
-        )
-
-        def _validate_positive(
-            value: float | None, min_val: float = 0.0
-        ) -> float | None:
-            """Return value if >= min_val, else None (filters sentinel values)."""
-            return value if value is not None and value >= min_val else None
-
-        ramp_time_value = values.get("ramp_time")
-        ramp_time = (
-            int(ramp_time_value)
-            if ramp_time_value is not None and ramp_time_value >= 0 and ramp_enabled
-            else None
-        )
-
-        epr_level_value = values.get("epr_level")
-        epr_level = (
-            int(epr_level_value)
-            if epr_level_value is not None and 0 <= epr_level_value <= 3
-            else None
-        )
-
-        humidity_level_value = values.get("humidity_level")
-        humidity_level = (
-            int(humidity_level_value)
-            if humidity_level_value is not None and humidity_level_value >= 0
-            else None
-        )
-
-        pressure_fixed = _validate_positive(values.get("pressure_fixed"), min_val=1.0)
-        pressure_min = _validate_positive(values.get("pressure_min"), min_val=1.0)
-        pressure_max = _validate_positive(values.get("pressure_max"), min_val=1.0)
-        ramp_start_pressure = _validate_positive(
-            values.get("ramp_start_pressure"), min_val=1.0
-        )
-        tube_temp = _validate_positive(values.get("tube_temp"), min_val=1.0)
-
         ab_filter_value = values.get("ab_filter")
         ab_filter = (
             self.AB_FILTER_MAP.get(int(ab_filter_value), "Unknown")
@@ -1980,11 +2107,105 @@ class ResmedEDFParser(DeviceParser):
             else None
         )
 
+        # Mode-specific fields — only include signals active for the current mode.
+        pressure_fixed: float | None = None
+        pressure_min: float | None = None
+        pressure_max: float | None = None
+        ipap: float | None = None
+        epap: float | None = None
+        ps: float | None = None
+        ramp_start_pressure: float | None = None
+        epr_level: int | None = None
+        epr_mode: str | None = None
+        other_settings: dict[str, str] = {}
+
+        if mode == TherapyMode.CPAP:
+            pressure_fixed = _validate_positive(
+                values.get("pressure_fixed"), min_val=1.0
+            )
+            ramp_start_pressure = _validate_positive(
+                values.get("ramp_start_pressure"), min_val=1.0
+            )
+            epr_level, epr_mode = _extract_epr()
+
+        elif mode == TherapyMode.APAP:
+            # A4Her devices use AFH signals; fall back to standard APAP signals.
+            p_min = values.get("pressure_min")
+            if p_min is None:
+                p_min = values.get("afh_min_press")
+            p_max = values.get("pressure_max")
+            if p_max is None:
+                p_max = values.get("afh_max_press")
+            pressure_min = _validate_positive(p_min, min_val=1.0)
+            pressure_max = _validate_positive(p_max, min_val=1.0)
+
+            rsp = values.get("ramp_start_pressure")
+            if rsp is None:
+                rsp = values.get("afh_start_press")
+            ramp_start_pressure = _validate_positive(rsp, min_val=1.0)
+
+            epr_level, epr_mode = _extract_epr()
+
+        elif mode == TherapyMode.BIPAP_AUTO:
+            # VAuto mode: uses S.VA.* signals only. CPAP/APAP presets are
+            # dormant and must not be stored.
+            epap = _validate_non_negative(values.get("va_min_epap"))
+            ipap = _validate_non_negative(values.get("va_max_ipap"))
+            ps = _validate_non_negative(values.get("va_ps"))
+            ramp_start_pressure = _validate_non_negative(values.get("va_start_press"))
+
+            ti_max = values.get("va_ti_max")
+            if ti_max is not None and ti_max >= 0:
+                other_settings["ti_max"] = f"{ti_max:.1f}"
+            ti_min = values.get("va_ti_min")
+            if ti_min is not None and ti_min >= 0:
+                other_settings["ti_min"] = f"{ti_min:.1f}"
+            trigger = values.get("va_trigger")
+            if trigger is not None and trigger >= 0:
+                other_settings["trigger"] = str(int(trigger))
+            cycle = values.get("va_cycle")
+            if cycle is not None and cycle >= 0:
+                other_settings["cycle"] = str(int(cycle))
+
+        elif mode in (TherapyMode.BIPAP, TherapyMode.BIPAP_ST):
+            # S/S-T mode: uses S.S.* signals.
+            ipap = _validate_non_negative(values.get("s_ipap"))
+            epap = _validate_non_negative(values.get("s_epap"))
+            if ipap is not None and epap is not None:
+                ps = round(ipap - epap, 2)
+            ramp_start_pressure = _validate_non_negative(values.get("s_start_press"))
+
+            ti_max = values.get("s_ti_max")
+            if ti_max is not None and ti_max >= 0:
+                other_settings["ti_max"] = f"{ti_max:.1f}"
+            ti_min = values.get("s_ti_min")
+            if ti_min is not None and ti_min >= 0:
+                other_settings["ti_min"] = f"{ti_min:.1f}"
+            trigger = values.get("s_trigger")
+            if trigger is not None and trigger >= 0:
+                other_settings["trigger"] = str(int(trigger))
+            cycle = values.get("s_cycle")
+            if cycle is not None and cycle >= 0:
+                other_settings["cycle"] = str(int(cycle))
+            rise_enable = values.get("s_rise_enable")
+            if rise_enable == 2:
+                rise_time = values.get("s_rise_time")
+                if rise_time is not None and rise_time >= 0:
+                    other_settings["rise_time"] = str(int(rise_time))
+            easy_breathe = values.get("s_easy_breathe")
+            if easy_breathe is not None and easy_breathe >= 0:
+                other_settings["easy_breathe"] = str(easy_breathe == 2)
+
+        # ASV: universal comfort settings only; no pressure fields mapped yet.
+
         return TherapySettings(
             mode=mode,
             pressure_fixed=pressure_fixed,
             pressure_min=pressure_min,
             pressure_max=pressure_max,
+            ipap=ipap,
+            epap=epap,
+            ps=ps,
             epr_level=epr_level,
             epr_mode=epr_mode,
             ramp_enabled=ramp_enabled,
@@ -1998,4 +2219,5 @@ class ResmedEDFParser(DeviceParser):
             smart_start=smart_start,
             mask_type=mask_type,
             ab_filter=ab_filter,
+            other_settings=other_settings,
         )

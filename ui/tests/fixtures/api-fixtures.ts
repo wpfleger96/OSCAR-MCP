@@ -10,6 +10,7 @@ import type {
     RecordsData,
     RxPeriodResponse,
     RxComparisonResponse,
+    RxChangesResponse,
     SessionDetail,
 } from '../../src/types/index'
 
@@ -829,10 +830,9 @@ export const recordsFixture: RecordsData = {
 const rxPeriods: RxPeriodResponse[] = [
     {
         settings: {
-            epr_level: '3',
+            epr_level: '2',
             epr_mode: 'Full Time',
             mode: 'APAP',
-            pressure_fixed: '10.0',
             pressure_max: '8.0',
             pressure_min: '8.0',
         },
@@ -844,13 +844,14 @@ const rxPeriods: RxPeriodResponse[] = [
         avg_hours: 6.88,
         total_hours: 343.8,
         avg_leak: 0.0,
+        device_id: 1,
+        device_name: 'ResMed AirSense 11 AutoSet',
     },
     {
         settings: {
-            epr_level: '3',
+            epr_level: '2',
             epr_mode: 'Full Time',
             mode: 'APAP',
-            pressure_fixed: '10.0',
             pressure_max: '9.0',
             pressure_min: '8.0',
         },
@@ -862,14 +863,15 @@ const rxPeriods: RxPeriodResponse[] = [
         avg_hours: 7.23,
         total_hours: 50.63,
         avg_leak: 0.0,
+        device_id: 1,
+        device_name: 'ResMed AirSense 11 AutoSet',
     },
     {
         settings: {
             epr_level: '3',
             epr_mode: 'Full Time',
             mode: 'APAP',
-            pressure_fixed: '10.0',
-            pressure_max: '8.0',
+            pressure_max: '9.0',
             pressure_min: '8.0',
         },
         start_date: '2025-06-27',
@@ -880,13 +882,14 @@ const rxPeriods: RxPeriodResponse[] = [
         avg_hours: 8.34,
         total_hours: 500.49,
         avg_leak: 0.02,
+        device_id: 1,
+        device_name: 'ResMed AirSense 11 AutoSet',
     },
     {
         settings: {
             epr_level: '3',
             epr_mode: 'Full Time',
             mode: 'APAP',
-            pressure_fixed: '10.0',
             pressure_max: '12.0',
             pressure_min: '8.0',
         },
@@ -898,15 +901,15 @@ const rxPeriods: RxPeriodResponse[] = [
         avg_hours: 8.13,
         total_hours: 333.27,
         avg_leak: 1.14,
+        device_id: 1,
+        device_name: 'ResMed AirSense 11 AutoSet',
     },
     {
         settings: {
-            epr_level: '3',
-            epr_mode: 'Full Time',
-            mode: 'APAP',
-            pressure_fixed: '10.0',
-            pressure_max: '12.0',
-            pressure_min: '8.2',
+            mode: 'BiPAP Auto',
+            epap: '6.0',
+            ipap: '18.0',
+            ps: '4.0',
         },
         start_date: '2026-02-20',
         end_date: '2026-04-06',
@@ -916,6 +919,8 @@ const rxPeriods: RxPeriodResponse[] = [
         avg_hours: 7.85,
         total_hours: 353.12,
         avg_leak: 0.11,
+        device_id: 2,
+        device_name: 'ResMed AirCurve 11 VAuto',
     },
 ]
 
@@ -923,12 +928,10 @@ export const rxHistoryFixture: RxPeriodResponse[] = rxPeriods
 
 export const rxCurrentFixture: RxPeriodResponse = {
     settings: {
-        epr_level: '3',
-        epr_mode: 'Full Time',
-        mode: 'APAP',
-        pressure_fixed: '10.0',
-        pressure_max: '12.0',
-        pressure_min: '8.2',
+        mode: 'BiPAP Auto',
+        epap: '6.0',
+        ipap: '18.0',
+        ps: '4.0',
     },
     start_date: '2026-02-20',
     end_date: '2026-04-06',
@@ -938,12 +941,91 @@ export const rxCurrentFixture: RxPeriodResponse = {
     avg_hours: 7.85,
     total_hours: 353.12,
     avg_leak: 0.11,
+    device_id: 2,
+    device_name: 'ResMed AirCurve 11 VAuto',
 }
 
 export const rxCompareFixture: RxComparisonResponse = {
     periods: rxPeriods,
     best_index: 0,
     worst_index: 1,
+}
+
+export const rxChangesFixture: RxChangesResponse = {
+    changes: [
+        {
+            date: '2025-06-20',
+            device_id: 1,
+            device_name: 'ResMed AirSense 11 AutoSet',
+            key: 'pressure_max',
+            old_value: '8.0',
+            new_value: '9.0',
+        },
+        {
+            date: '2025-06-27',
+            device_id: 1,
+            device_name: 'ResMed AirSense 11 AutoSet',
+            key: 'epr_level',
+            old_value: '2',
+            new_value: '3',
+        },
+        {
+            date: '2025-10-27',
+            device_id: 1,
+            device_name: 'ResMed AirSense 11 AutoSet',
+            key: 'pressure_max',
+            old_value: '9.0',
+            new_value: '12.0',
+        },
+        {
+            date: '2026-02-28',
+            device_id: 2,
+            device_name: 'ResMed AirCurve 11 VAuto',
+            key: 'ps',
+            old_value: '4.0',
+            new_value: '4.4',
+        },
+        {
+            date: '2026-03-05',
+            device_id: 2,
+            device_name: 'ResMed AirCurve 11 VAuto',
+            key: 'epap',
+            old_value: '5.0',
+            new_value: '6.0',
+        },
+        {
+            date: '2026-03-10',
+            device_id: 2,
+            device_name: 'ResMed AirCurve 11 VAuto',
+            key: 'cycle',
+            old_value: '3',
+            new_value: '1',
+        },
+        {
+            date: '2026-03-15',
+            device_id: 2,
+            device_name: 'ResMed AirCurve 11 VAuto',
+            key: 'ti_max',
+            old_value: '2.0',
+            new_value: '1.8',
+        },
+        {
+            date: '2026-03-20',
+            device_id: 2,
+            device_name: 'ResMed AirCurve 11 VAuto',
+            key: 'mask_type',
+            old_value: 'Nasal',
+            new_value: 'Nasal Pillows',
+        },
+        {
+            date: '2026-03-25',
+            device_id: 2,
+            device_name: 'ResMed AirCurve 11 VAuto',
+            key: 'humidity_level',
+            old_value: '3',
+            new_value: '4',
+        },
+    ],
 }
 
 export const sessionDetailFixture: SessionDetail = {

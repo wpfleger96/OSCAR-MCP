@@ -293,6 +293,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/import/{job_id}/progress': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Import Progress */
+        get: operations['import_progress_api_v1_import__job_id__progress_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/reports/comparison': {
         parameters: {
             query?: never
@@ -319,6 +336,23 @@ export interface paths {
         }
         /** Get Summary Report */
         get: operations['get_summary_report_api_v1_reports_summary_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/rx/changes': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Rx Changes */
+        get: operations['get_rx_changes_api_v1_rx_changes_get']
         put?: never
         post?: never
         delete?: never
@@ -1543,40 +1577,6 @@ export interface components {
             sources: components['schemas']['ImportSource'][]
         }
         /**
-         * ImportResult
-         * @description Aggregate result of an import operation across all sources.
-         */
-        ImportResult: {
-            /**
-             * Sources
-             * @description Per-source results
-             */
-            sources?: components['schemas']['ImportSourceResult'][]
-            /**
-             * Total Failed
-             * @description Total sessions that failed
-             * @default 0
-             */
-            total_failed: number
-            /**
-             * Total Imported
-             * @description Total sessions imported
-             * @default 0
-             */
-            total_imported: number
-            /**
-             * Total Skipped
-             * @description Total sessions skipped
-             * @default 0
-             */
-            total_skipped: number
-            /**
-             * Warnings
-             * @description Global warnings
-             */
-            warnings?: string[]
-        }
-        /**
          * ImportSource
          * @description Detected data source for import.
          */
@@ -1612,36 +1612,10 @@ export interface components {
              */
             structure_type?: string | null
         }
-        /**
-         * ImportSourceResult
-         * @description Result of importing a single data source.
-         */
-        ImportSourceResult: {
-            /**
-             * Failed
-             * @description Sessions that failed to import
-             * @default 0
-             */
-            failed: number
-            /**
-             * Imported
-             * @description Sessions successfully imported
-             * @default 0
-             */
-            imported: number
-            /**
-             * Skipped
-             * @description Sessions skipped (already exist)
-             * @default 0
-             */
-            skipped: number
-            /** @description The source that was imported */
-            source: components['schemas']['ImportSource']
-            /**
-             * Warnings
-             * @description Non-fatal warnings
-             */
-            warnings?: string[]
+        /** JobResponse */
+        JobResponse: {
+            /** Job Id */
+            job_id: string
         }
         /**
          * ModeResult
@@ -1908,6 +1882,14 @@ export interface components {
             total_rows_deleted: number
         }
         /**
+         * RxChangesResponse
+         * @description All settings changes across all devices, sorted by (date, device_id, key).
+         */
+        RxChangesResponse: {
+            /** Changes */
+            changes: components['schemas']['RxSettingChange'][]
+        }
+        /**
          * RxComparisonResponse
          * @description RX period comparison result with best/worst indices.
          */
@@ -1932,6 +1914,10 @@ export interface components {
             avg_leak?: number | null
             /** Days Count */
             days_count: number
+            /** Device Id */
+            device_id?: number | null
+            /** Device Name */
+            device_name?: string | null
             /**
              * End Date
              * Format: date
@@ -1953,6 +1939,27 @@ export interface components {
              * @default 0
              */
             total_hours: number
+        }
+        /**
+         * RxSettingChange
+         * @description A single per-key settings change on a given day for a device.
+         */
+        RxSettingChange: {
+            /**
+             * Date
+             * Format: date
+             */
+            date: string
+            /** Device Id */
+            device_id: number
+            /** Device Name */
+            device_name: string
+            /** Key */
+            key: string
+            /** New Value */
+            new_value?: string | null
+            /** Old Value */
+            old_value?: string | null
         }
         /** SessionDeleteRequest */
         SessionDeleteRequest: {
@@ -2891,12 +2898,12 @@ export interface operations {
         }
         responses: {
             /** @description Successful Response */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['ImportResult']
+                    'application/json': components['schemas']['JobResponse']
                 }
             }
         }
@@ -2948,12 +2955,43 @@ export interface operations {
         }
         responses: {
             /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['JobResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    import_progress_api_v1_import__job_id__progress_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                job_id: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['ImportResult']
+                    'application/json': unknown
                 }
             }
             /** @description Validation Error */
@@ -3029,6 +3067,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_rx_changes_api_v1_rx_changes_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['RxChangesResponse']
                 }
             }
         }

@@ -1,5 +1,8 @@
 """RX (prescription) change tracking and period analysis."""
 
+import itertools
+import logging
+
 from dataclasses import dataclass
 from datetime import date
 
@@ -7,7 +10,14 @@ from sqlalchemy.orm import Session, joinedload
 
 from snore.database.models import Day
 from snore.database.models import Session as SessionModel
-from snore.services.schemas import RxComparisonResponse, RxPeriodResponse
+from snore.services.schemas import (
+    RxChangesResponse,
+    RxComparisonResponse,
+    RxPeriodResponse,
+    RxSettingChange,
+)
+
+logger = logging.getLogger(__name__)
 
 RX_KEYS = (
     "mode",
@@ -16,7 +26,20 @@ RX_KEYS = (
     "pressure_min",
     "pressure_max",
     "pressure_fixed",
+    "ipap",
+    "epap",
+    "ps",
 )
+
+
+def _diff_settings(
+    prev: dict[str, str], curr: dict[str, str]
+) -> list[tuple[str, str | None, str | None]]:
+    """Return (key, old_value, new_value) for every key whose value changed."""
+    all_keys = sorted(set(prev) | set(curr))
+    return [
+        (k, prev.get(k), curr.get(k)) for k in all_keys if prev.get(k) != curr.get(k)
+    ]
 
 
 @dataclass
@@ -27,6 +50,8 @@ class RxPeriod:
     start_date: date
     end_date: date
     days: list[Day]
+    device_id: int
+    device_name: str
 
 
 @dataclass
@@ -68,6 +93,42 @@ class RxTracker:
             periods=responses, best_index=best_index, worst_index=worst_index
         )
 
+    def get_changes(self, db_session: Session) -> RxChangesResponse:
+        """Return a log of every per-key settings change across all devices.
+
+        Intentionally diffs ALL persisted settings keys — including comfort
+        settings such as mask_type and humidity_level — not just the
+        prescription-defining RX_KEYS.  This gives a complete audit trail of
+        every setting the clinician or patient touched.  Do not narrow this to
+        _get_day_rx_settings; use _get_day_settings (no key filter).
+        """
+        all_changes: list[RxSettingChange] = []
+
+        for device_id, device_name, device_days in self._days_by_device(db_session):
+            prev_settings: dict[str, str] | None = None
+            for day in device_days:
+                curr_settings = self._get_day_settings(day)
+                if curr_settings is None:
+                    continue
+                if prev_settings is not None:
+                    for key, old_val, new_val in _diff_settings(
+                        prev_settings, curr_settings
+                    ):
+                        all_changes.append(
+                            RxSettingChange(
+                                date=day.date,
+                                device_id=device_id,
+                                device_name=device_name,
+                                key=key,
+                                old_value=old_val,
+                                new_value=new_val,
+                            )
+                        )
+                prev_settings = curr_settings
+
+        all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
+        return RxChangesResponse(changes=all_changes)
+
     def _to_response(self, period: RxPeriodStats) -> RxPeriodResponse:
         """Convert RxPeriodStats dataclass to RxPeriodResponse Pydantic model."""
         return RxPeriodResponse(
@@ -80,32 +141,66 @@ class RxTracker:
             avg_hours=period.avg_hours,
             total_hours=period.total_hours,
             avg_leak=period.avg_leak,
+            device_id=period.device_id,
+            device_name=period.device_name,
         )
 
     def _compute_periods(self, db_session: Session) -> list[RxPeriod]:
         """
-        Group consecutive days by therapy settings into RX periods.
+        Group consecutive days per device by therapy settings into RX periods.
 
         Algorithm:
-        1. Query sessions ordered by start_time, join with settings
-        2. For each day, extract RX-defining keys from the longest session's settings
-        3. Build fingerprint from sorted key-value pairs
-        4. Group consecutive days with same fingerprint into RxPeriod
-
-        Returns:
-            List of RxPeriod objects in chronological order.
+        1. Query days ordered by (device_id, date), join sessions→settings and device
+        2. Group by device_id with itertools.groupby (via _days_by_device)
+        3. For each device, run the fingerprint loop via _compute_device_periods
+        4. Sort combined list by (start_date, device_id) for stable ordering
         """
-        days_query = (
+        all_periods: list[RxPeriod] = []
+        for device_id, device_name, device_days in self._days_by_device(db_session):
+            all_periods.extend(
+                self._compute_device_periods(device_days, device_id, device_name)
+            )
+
+        all_periods.sort(key=lambda p: (p.start_date, p.device_id))
+        return all_periods
+
+    def _days_by_device(self, db_session: Session) -> list[tuple[int, str, list[Day]]]:
+        """Query all days grouped by device, ordered by (device_id, date).
+
+        Returns a list of (device_id, device_name, days) tuples, one per
+        device, preserving the query order.  Devices whose Day rows have no
+        matching Device row (device is None) are skipped with a warning.
+        """
+        days = (
             db_session.query(Day)
-            .order_by(Day.date)
-            .options(joinedload(Day.sessions).joinedload(SessionModel.settings))
+            .order_by(Day.device_id, Day.date)
+            .options(
+                joinedload(Day.sessions).joinedload(SessionModel.settings),
+                joinedload(Day.device),
+            )
+            .all()
         )
 
-        days = days_query.all()
+        result: list[tuple[int, str, list[Day]]] = []
+        for device_id, device_days_iter in itertools.groupby(
+            days, key=lambda d: d.device_id
+        ):
+            device_days = list(device_days_iter)
+            device = device_days[0].device
+            if device is None:
+                logger.warning(
+                    "Skipping device_id=%s: no matching Device row", device_id
+                )
+                continue
+            device_name = f"{device.manufacturer} {device.model}"
+            result.append((device_id, device_name, device_days))
 
-        if not days:
-            return []
+        return result
 
+    def _compute_device_periods(
+        self, days: list[Day], device_id: int, device_name: str
+    ) -> list[RxPeriod]:
+        """Run the fingerprint-grouping loop for a single device's days in date order."""
         periods: list[RxPeriod] = []
         current_settings: dict[str, str] | None = None
         current_fingerprint: str | None = None
@@ -128,6 +223,8 @@ class RxTracker:
                             start_date=current_start_date,
                             end_date=current_period_days[-1].date,
                             days=current_period_days,
+                            device_id=device_id,
+                            device_name=device_name,
                         )
                     )
 
@@ -145,6 +242,8 @@ class RxTracker:
                     start_date=current_start_date,
                     end_date=current_period_days[-1].date,
                     days=current_period_days,
+                    device_id=device_id,
+                    device_name=device_name,
                 )
             )
 
@@ -192,6 +291,8 @@ class RxTracker:
                     start_date=period.start_date,
                     end_date=period.end_date,
                     days=period.days,
+                    device_id=period.device_id,
+                    device_name=period.device_name,
                     avg_ahi=avg_ahi,
                     median_ahi=median_ahi,
                     avg_hours=avg_hours,
@@ -233,13 +334,22 @@ class RxTracker:
 
         return (best, worst)
 
-    def _get_day_rx_settings(self, day: Day) -> dict[str, str] | None:
-        """Extract RX-defining settings from the longest session of a day."""
-        if not day.sessions:
+    def _get_day_settings(
+        self, day: Day, key_filter: tuple[str, ...] | None = None
+    ) -> dict[str, str] | None:
+        """Extract settings from the longest enabled session of a day.
+
+        Args:
+            day: The Day ORM object with sessions pre-loaded.
+            key_filter: If given, only these keys are included in the result.
+                        If None, all keys with non-null values are returned.
+        """
+        enabled_sessions = [s for s in day.sessions if s.enabled]
+        if not enabled_sessions:
             return None
 
         longest_session = max(
-            day.sessions,
+            enabled_sessions,
             key=lambda s: s.duration_seconds if s.duration_seconds else 0.0,
         )
 
@@ -248,10 +358,15 @@ class RxTracker:
 
         settings_dict: dict[str, str] = {}
         for setting in longest_session.settings:
-            if setting.key in RX_KEYS and setting.value is not None:
-                settings_dict[setting.key] = setting.value
+            if setting.value is not None:
+                if key_filter is None or setting.key in key_filter:
+                    settings_dict[setting.key] = setting.value
 
         return settings_dict if settings_dict else None
+
+    def _get_day_rx_settings(self, day: Day) -> dict[str, str] | None:
+        """Extract RX-defining settings from the longest enabled session of a day."""
+        return self._get_day_settings(day, key_filter=RX_KEYS)
 
     def _build_fingerprint(self, settings: dict[str, str]) -> str:
         """Build a fingerprint string from RX settings for comparison."""

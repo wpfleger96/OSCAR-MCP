@@ -363,7 +363,7 @@ class SessionImporter:
             return
 
         settings_dict: dict[str, object] = settings.model_dump(
-            mode="json", exclude={"ps", "other_settings"}, exclude_none=True
+            mode="json", exclude={"other_settings"}, exclude_none=True
         )
 
         if settings.other_settings:
@@ -371,9 +371,14 @@ class SessionImporter:
 
         # exclude_none only covers the main model fields; other_settings is
         # merged in afterward, so guard against None here to avoid persisting
-        # the literal string "None".
+        # the literal string "None". Floats are rounded to strip EDF
+        # gain-arithmetic noise (28.900000000000002 → 28.9).
         setting_records = [
-            models.Setting(session_id=session_id, key=key, value=str(value))
+            models.Setting(
+                session_id=session_id,
+                key=key,
+                value=str(round(value, 2)) if isinstance(value, float) else str(value),
+            )
             for key, value in settings_dict.items()
             if value is not None
         ]

@@ -1,6 +1,9 @@
 """Unit tests for ResmedEDFParser STR.edf conversion helpers."""
 
+import json
+
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -62,14 +65,15 @@ class TestConvertStrToTherapySettings:
         }
         assert parser._convert_str_to_therapy_settings(sentinel_record) is None
 
-    def test_valid_record_returns_therapy_settings(self, parser):
-        """Valid record (record 0 from fixture) must return a populated TherapySettings.
+    def test_valid_cpap_record_returns_therapy_settings(self, parser):
+        """Valid Series 10 CPAP record returns a populated TherapySettings.
 
-        The fixture uses is_eleven_series=True because the raw mask_type value is 4.0,
-        which is an 11-series raw code (2–4 scale); after the -2 shift it maps to 2 → "Nasal".
+        Mask decoding passes is_eleven_series=True: the raw mask_type value 4.0
+        is an 11-series code (2–4 scale); after the -2 shift it maps to 2 → "Nasal".
         """
+        parser._str_series11 = False  # Series 10: mode 0 = CPAP
         valid_record = {
-            "mode": 1.0,
+            "mode": 0.0,
             "pressure_fixed": 10.0,
             "epr_level": 2.0,
             "epr_mode": 2.0,
@@ -85,7 +89,7 @@ class TestConvertStrToTherapySettings:
             valid_record, is_eleven_series=True
         )
         assert settings is not None
-        assert settings.mode == TherapyMode.APAP
+        assert settings.mode == TherapyMode.CPAP
         assert settings.pressure_fixed == 10.0
         assert settings.epr_level == 2
         assert settings.epr_mode == "Full Time"
@@ -103,16 +107,186 @@ class TestConvertStrToTherapySettings:
         Fields backed by sentinel values become None; fields with valid values
         are converted normally.  The all-sentinel fast path must not fire.
         """
+        parser._str_series11 = False  # Series 10: mode 1 = APAP
         mixed_record = {
             "mode": 1.0,
-            "pressure_fixed": -0.02,  # sentinel — should become None
+            "pressure_min": -0.02,  # sentinel — should become None
+            "pressure_max": 20.0,
             "epr_level": 2.0,
         }
         settings = parser._convert_str_to_therapy_settings(mixed_record)
         assert settings is not None
         assert settings.mode == TherapyMode.APAP
-        assert settings.pressure_fixed is None
+        assert settings.pressure_min is None
+        assert settings.pressure_max == 20.0
         assert settings.epr_level == 2
+
+    def test_series11_vauto_mode8_maps_bipap_auto(self, parser):
+        """Series 11 mode 8 with VA signals maps to BIPAP_AUTO with correct bilevel pressures."""
+        parser._str_series11 = True
+        record = {
+            "mode": 8.0,
+            # Stale CPAP/APAP presets that should NOT leak through
+            "pressure_fixed": 10.0,
+            "pressure_min": 4.0,
+            "pressure_max": 20.0,
+            "epr_level": 1.0,
+            "epr_mode": 2.0,
+            # Active VAuto signals
+            "va_min_epap": 5.0,
+            "va_max_ipap": 14.0,
+            "va_ps": 3.0,
+            "va_start_press": 5.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.BIPAP_AUTO
+        assert settings.epap == 5.0
+        assert settings.ipap == 14.0
+        assert settings.ps == 3.0
+        # Dormant presets must not appear
+        assert settings.pressure_fixed is None
+        assert settings.pressure_min is None
+        assert settings.pressure_max is None
+        assert settings.epr_level is None
+        assert settings.epr_mode is None
+
+    def test_vauto_ti_trigger_cycle_land_in_other_settings(self, parser):
+        """VAuto timing parameters are stored as strings in other_settings."""
+        parser._str_series11 = True
+        record = {
+            "mode": 8.0,
+            "va_min_epap": 5.0,
+            "va_max_ipap": 14.0,
+            "va_ps": 3.0,
+            "va_ti_max": 2.5,
+            "va_ti_min": 0.3,
+            "va_trigger": 3.0,
+            "va_cycle": 1.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.other_settings["ti_max"] == "2.5"
+        assert settings.other_settings["ti_min"] == "0.3"
+        assert settings.other_settings["trigger"] == "3"
+        assert settings.other_settings["cycle"] == "1"
+
+    def test_series11_mode3_cpap_has_pressure_fixed_and_epr(self, parser):
+        """Series 11 mode 3 → CPAP with pressure_fixed and EPR; no bilevel fields."""
+        parser._str_series11 = True
+        record = {
+            "mode": 3.0,
+            "pressure_fixed": 9.0,
+            "epr_level": 1.0,
+            "epr_mode": 2.0,
+            # Stale VAuto keys that must not leak through
+            "va_min_epap": 4.0,
+            "va_max_ipap": 12.0,
+            "va_ps": 2.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.CPAP
+        assert settings.pressure_fixed == 9.0
+        assert settings.epr_level == 1
+        assert settings.epr_mode == "Full Time"
+        assert settings.ipap is None
+        assert settings.epap is None
+
+    def test_series11_mode1_apap_pressure_min_max(self, parser):
+        """Series 11 mode 1 → APAP with pressure_min/pressure_max."""
+        parser._str_series11 = True
+        record = {
+            "mode": 1.0,
+            "pressure_min": 4.0,
+            "pressure_max": 20.0,
+            "ramp_start_pressure": 4.0,
+            "epr_level": 2.0,
+            "epr_mode": 2.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.APAP
+        assert settings.pressure_min == 4.0
+        assert settings.pressure_max == 20.0
+        assert settings.pressure_fixed is None
+
+    def test_series11_mode2_apap_via_afh_signals(self, parser):
+        """Series 11 mode 2 (A4Her) falls back to AFH signals for pressure range."""
+        parser._str_series11 = True
+        record = {
+            "mode": 2.0,
+            "afh_min_press": 5.0,
+            "afh_max_press": 18.0,
+            "afh_start_press": 5.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.APAP
+        assert settings.pressure_min == 5.0
+        assert settings.pressure_max == 18.0
+        assert settings.ramp_start_pressure == 5.0
+
+    def test_unknown_mode_series11_returns_none(self, parser):
+        """Unmapped mode value on Series 11 returns None (never fabricates CPAP)."""
+        parser._str_series11 = True
+        record = {"mode": 5.0, "pressure_fixed": 10.0}
+        assert parser._convert_str_to_therapy_settings(record) is None
+
+    def test_unknown_mode_series10_returns_none(self, parser):
+        """Unmapped mode value on Series 10 returns None."""
+        parser._str_series11 = False
+        record = {"mode": 99.0, "pressure_fixed": 10.0}
+        assert parser._convert_str_to_therapy_settings(record) is None
+
+    def test_missing_mode_key_returns_none(self, parser):
+        """Missing mode key returns None; a settings record without a mode is unusable."""
+        record = {"pressure_fixed": 10.0, "humidity_level": 4.0}
+        assert parser._convert_str_to_therapy_settings(record) is None
+
+    def test_series10_mode6_maps_bipap_auto(self, parser):
+        """Series 10 mode 6 (VPAP Auto / VAuto) maps to BIPAP_AUTO."""
+        parser._str_series11 = False
+        record = {
+            "mode": 6.0,
+            "va_min_epap": 6.0,
+            "va_max_ipap": 15.0,
+            "va_ps": 4.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.BIPAP_AUTO
+        assert settings.epap == 6.0
+        assert settings.ipap == 15.0
+
+    def test_series10_mode3_bipap_computes_ps(self, parser):
+        """Series 10 mode 3 (VPAP S) maps to BIPAP with computed ps = ipap - epap."""
+        parser._str_series11 = False
+        record = {
+            "mode": 3.0,
+            "s_ipap": 14.0,
+            "s_epap": 8.0,
+            "s_start_press": 8.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.BIPAP
+        assert settings.ipap == 14.0
+        assert settings.epap == 8.0
+        assert settings.ps == 6.0
+
+    def test_vauto_ps_sentinel_becomes_none(self, parser):
+        """VAuto ps sentinel value (-0.02) results in ps=None."""
+        parser._str_series11 = True
+        record = {
+            "mode": 8.0,
+            "va_min_epap": 5.0,
+            "va_max_ipap": 14.0,
+            "va_ps": -0.02,  # sentinel
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.ps is None
 
 
 class TestMaskTypeMapping:
@@ -183,3 +357,89 @@ class TestIsElevenSeries:
     )
     def test_model_detection(self, model, expected):
         assert ResmedEDFParser._is_eleven_series(model) is expected
+
+
+class TestDetectSeries11:
+    """Tests for _detect_series11 ProductCode-based family detection."""
+
+    def _make_id_json(self, tmp_path: Path, product_code: int | float | str) -> Path:
+        """Write a minimal Identification.json and return the directory path."""
+        data = {
+            "FlowGenerator": {
+                "IdentificationProfiles": {"Product": {"ProductCode": product_code}}
+            }
+        }
+        (tmp_path / "Identification.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        return tmp_path
+
+    def test_product_code_39000_is_series11(self, tmp_path):
+        root = self._make_id_json(tmp_path, 39000)
+        assert ResmedEDFParser()._detect_series11(root) is True
+
+    def test_product_code_38999_is_not_series11(self, tmp_path):
+        root = self._make_id_json(tmp_path, 38999)
+        assert ResmedEDFParser()._detect_series11(root) is False
+
+    def test_product_code_float_string_39000_0_is_series11(self, tmp_path):
+        """ProductCode stored as the string "39000.0" must not raise ValueError."""
+        root = self._make_id_json(tmp_path, "39000.0")
+        assert ResmedEDFParser()._detect_series11(root) is True
+
+    def test_product_code_float_39000_0_is_series11(self, tmp_path):
+        """ProductCode stored as a JSON float (39000.0) must be handled correctly."""
+        root = self._make_id_json(tmp_path, 39000.0)
+        assert ResmedEDFParser()._detect_series11(root) is True
+
+    def test_missing_product_code_key_returns_false(self, tmp_path):
+        data = {"FlowGenerator": {"IdentificationProfiles": {"Product": {}}}}
+        (tmp_path / "Identification.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        assert ResmedEDFParser()._detect_series11(tmp_path) is False
+
+    def test_missing_identification_json_returns_false(self, tmp_path):
+        assert ResmedEDFParser()._detect_series11(tmp_path) is False
+
+    def test_malformed_json_returns_false(self, tmp_path):
+        (tmp_path / "Identification.json").write_text(
+            "not valid json {{{", encoding="utf-8"
+        )
+        assert ResmedEDFParser()._detect_series11(tmp_path) is False
+
+
+class TestSeries10ModesBipapST:
+    """Tests for Series 10 modes 4 and 5 — BIPAP_ST deliberate deviation from OSCAR."""
+
+    @pytest.fixture
+    def parser(self):
+        return ResmedEDFParser()
+
+    @pytest.mark.parametrize("mode_int", [4, 5])
+    def test_series10_modes_4_5_map_to_bipap_st(self, parser, mode_int):
+        """S10 modes 4 and 5 are S/T variants; mapped to BIPAP_ST (OSCAR maps them to BILEVEL_FIXED)."""
+        parser._str_series11 = False
+        record = {
+            "mode": float(mode_int),
+            "s_ipap": 14.0,
+            "s_epap": 8.0,
+            "s_start_press": 8.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.BIPAP_ST
+
+
+class TestNanModeValue:
+    """Test that a NaN mode value is discarded gracefully."""
+
+    @pytest.fixture
+    def parser(self):
+        return ResmedEDFParser()
+
+    def test_nan_mode_returns_none_without_raising(self, parser):
+        """NaN mode value is treated like a missing mode — returns None, does not raise."""
+        record = {"mode": float("nan"), "pressure_fixed": 10.0}
+        result = parser._convert_str_to_therapy_settings(record)
+        assert result is None
