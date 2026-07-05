@@ -1086,6 +1086,21 @@ class ResmedEDFParser(DeviceParser):
 
         return merged_session
 
+    @staticmethod
+    def _therapy_date(start_time: datetime) -> date:
+        """
+        Return the therapy-day date for a session start time.
+
+        ResMed STR.edf records run noon-to-noon: a record for day D covers
+        the 24-hour window starting at 12:00 on day D.  A session that begins
+        after midnight (e.g. 01:11 on May 28) belongs to the therapy night
+        that started on May 27, so the correct record key is May 27.
+
+        Subtracting 12 hours before extracting the date maps every session to
+        its owning STR record, regardless of whether it crosses midnight.
+        """
+        return (start_time - timedelta(hours=12)).date()
+
     def _parse_session_group(
         self,
         session_id: str,
@@ -1144,10 +1159,10 @@ class ResmedEDFParser(DeviceParser):
             self._parse_pressure_leak(files["PLD"], session)
 
         if str_settings_cache:
-            session_date = session.start_time.date()
-            if session_date in str_settings_cache:
+            therapy_day = self._therapy_date(session.start_time)
+            if therapy_day in str_settings_cache:
                 settings = self._convert_str_to_therapy_settings(
-                    str_settings_cache[session_date]
+                    str_settings_cache[therapy_day]
                 )
                 if settings:
                     session.settings = settings
@@ -1156,9 +1171,9 @@ class ResmedEDFParser(DeviceParser):
                     )
 
         if str_summaries_cache:
-            session_date = session.start_time.date()
-            if session_date in str_summaries_cache:
-                summaries = str_summaries_cache[session_date]
+            therapy_day = self._therapy_date(session.start_time)
+            if therapy_day in str_summaries_cache:
+                summaries = str_summaries_cache[therapy_day]
                 stats = session.statistics
 
                 for stat_name, value in summaries.items():
@@ -1692,7 +1707,8 @@ class ResmedEDFParser(DeviceParser):
             session_date: Date of session to get settings for
 
         Returns:
-            TherapySettings populated from STR.edf, or None if not found
+            TherapySettings populated from STR.edf, None if not found, or None
+            for no-usage days where ResMed writes all-sentinel (negative) values
         """
         try:
             with EDFReader(str_file) as edf:
@@ -1819,14 +1835,18 @@ class ResmedEDFParser(DeviceParser):
                         data, _ = edf.read_signal(matched_signal)
 
                         for record_idx in range(min(num_records, len(data))):
+                            value = float(data[record_idx])
+                            # Skip sentinel values: ResMed writes negative values
+                            # on no-usage days; all physical stats are non-negative.
+                            if not (value >= 0):
+                                continue
+
                             record_date = start_date + timedelta(days=record_idx)
 
                             if record_date not in all_summaries:
                                 all_summaries[record_date] = {}
 
-                            all_summaries[record_date][stat_name] = float(
-                                data[record_idx]
-                            )
+                            all_summaries[record_date][stat_name] = value
 
                 if all_summaries:
                     logger.debug(
@@ -1841,16 +1861,25 @@ class ResmedEDFParser(DeviceParser):
 
     def _convert_str_to_therapy_settings(
         self, values: dict[str, float]
-    ) -> TherapySettings:
+    ) -> TherapySettings | None:
         """
         Convert raw STR.edf values to TherapySettings model.
+
+        Returns None when the record is a no-usage sentinel day: ResMed writes
+        negative values (e.g. -1.0, -0.02) into every settings signal on days
+        where the device was not used.  If every value in the dict fails
+        ``v >= 0`` (NaN also fails this check), the record is discarded.
 
         Args:
             values: Dictionary of setting keys to raw float values
 
         Returns:
-            TherapySettings instance with proper type conversions
+            TherapySettings instance with proper type conversions, or None for
+            no-usage sentinel records
         """
+        if values and all(not (v >= 0) for v in values.values()):
+            return None
+
         mode_value = values.get("mode")
         if mode_value is not None:
             mode_int = int(mode_value)

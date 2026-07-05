@@ -23,7 +23,7 @@ class TestSTRSettingsParsing:
         """Test that STR.edf parsing returns TherapySettings object."""
         str_file = resmed_fixture_path / "STR.edf"
 
-        session_date = date(2024, 6, 21)
+        session_date = date(2023, 8, 22)
         settings = resmed_parser._parse_str_settings(str_file, session_date)
 
         assert settings is not None, "Settings should be parsed from STR.edf"
@@ -36,7 +36,7 @@ class TestSTRSettingsParsing:
     ):
         """Test pressure settings are correctly parsed."""
         str_file = resmed_fixture_path / "STR.edf"
-        session_date = date(2024, 6, 21)
+        session_date = date(2023, 8, 22)
         settings = resmed_parser._parse_str_settings(str_file, session_date)
 
         assert settings is not None
@@ -65,7 +65,7 @@ class TestSTRSettingsParsing:
     def test_parse_str_settings_epr(self, resmed_parser, resmed_fixture_path):
         """Test EPR settings are correctly parsed."""
         str_file = resmed_fixture_path / "STR.edf"
-        session_date = date(2024, 6, 21)
+        session_date = date(2023, 8, 22)
         settings = resmed_parser._parse_str_settings(str_file, session_date)
 
         assert settings is not None
@@ -86,7 +86,7 @@ class TestSTRSettingsParsing:
     ):
         """Test climate control settings are correctly parsed."""
         str_file = resmed_fixture_path / "STR.edf"
-        session_date = date(2024, 6, 21)
+        session_date = date(2023, 8, 22)
         settings = resmed_parser._parse_str_settings(str_file, session_date)
 
         assert settings is not None
@@ -177,3 +177,32 @@ class TestSTRSettingsParsing:
             assert len(found_signals) > 0, (
                 f"Should find some expected signals. Found: {signals}"
             )
+
+    @pytest.mark.parser
+    def test_no_usage_date_returns_none(self, resmed_parser, resmed_fixture_path):
+        """_parse_str_settings must return None for a no-usage sentinel day.
+
+        Record 1 (2023-08-23) in the fixture has all-negative sentinel values;
+        it must not produce a degenerate TherapySettings object.
+        """
+        str_file = resmed_fixture_path / "STR.edf"
+        settings = resmed_parser._parse_str_settings(str_file, date(2023, 8, 23))
+        assert settings is None, (
+            "Settings should be None for a no-usage day with sentinel values"
+        )
+
+    @pytest.mark.parser
+    def test_first_valid_date_returns_settings(
+        self, resmed_parser, resmed_fixture_path
+    ):
+        """_parse_str_settings must return real settings for the first valid fixture day.
+
+        Record 0 (2023-08-22) has Mode=1.0 (APAP), S.C.Press=10.0, etc.
+        """
+        str_file = resmed_fixture_path / "STR.edf"
+        settings = resmed_parser._parse_str_settings(str_file, date(2023, 8, 22))
+        assert settings is not None, "Settings should be parsed for the first valid day"
+        assert settings.mode is not None
+        from snore.parsers.unified import TherapyMode
+
+        assert isinstance(settings.mode, TherapyMode)

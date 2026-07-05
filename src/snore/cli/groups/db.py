@@ -32,7 +32,7 @@ def db() -> None:
 @db.command()
 @db_option
 def init(db: str | None) -> None:
-    """Initialize database (creates tables if needed)."""
+    """Initialize database and apply pending migrations."""
     db_path = Path(db).expanduser() if db else Path(DEFAULT_DATABASE_PATH)
     db_existed = db_path.exists()
 
@@ -51,7 +51,7 @@ def init(db: str | None) -> None:
         console.print(f"    - {table_name}")
 
     if db_existed:
-        console.print("\nNo changes needed - all tables exist")
+        console.print("\nDatabase is up to date")
 
 
 @db.command("stats")

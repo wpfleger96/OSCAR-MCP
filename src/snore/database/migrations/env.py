@@ -28,6 +28,16 @@ target_metadata.naming_convention = {
 }
 
 
+def _resolve_url() -> str:
+    """Return the configured URL, falling back to DEFAULT_DATABASE_PATH when unset."""
+    url = config.get_main_option("sqlalchemy.url") or ""
+    if url in ("", "sqlite:///"):
+        from snore.constants import DEFAULT_DATABASE_PATH  # noqa: PLC0415
+
+        return f"sqlite:///{DEFAULT_DATABASE_PATH}"
+    return url
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -40,7 +50,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = _resolve_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -59,6 +69,7 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
+    config.set_main_option("sqlalchemy.url", _resolve_url())
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

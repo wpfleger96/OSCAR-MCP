@@ -1,8 +1,15 @@
 /** Shared date/time and quantity formatting helpers. */
 
+/** e.g. parseLocalDate("2026-05-28") — treats date-only strings as local midnight to avoid UTC shift. */
+export function parseLocalDate(iso: string): Date {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso)
+    if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+    return new Date(iso)
+}
+
 /** e.g. "Jan 5, 03:12 AM" — short date with time, no year. */
 export function formatDateShort(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
+    return parseLocalDate(iso).toLocaleDateString(undefined, {
         month: 'short',
         day: 'numeric',
         hour: '2-digit',
@@ -12,7 +19,7 @@ export function formatDateShort(iso: string): string {
 
 /** e.g. "Jan 5, 2024" — full date, no time. */
 export function formatDateFull(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
+    return parseLocalDate(iso).toLocaleDateString(undefined, {
         year: 'numeric',
         month: 'short',
         day: 'numeric',
@@ -21,7 +28,7 @@ export function formatDateFull(iso: string): string {
 
 /** e.g. "Fri, Jan 5, 2024" — full date with weekday. */
 export function formatDateWithWeekday(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
+    return parseLocalDate(iso).toLocaleDateString(undefined, {
         weekday: 'short',
         year: 'numeric',
         month: 'short',
@@ -31,7 +38,7 @@ export function formatDateWithWeekday(iso: string): string {
 
 /** e.g. "Jan 5, 2024, 03:12 AM" — full date with time. */
 export function formatDateTime(iso: string): string {
-    return new Date(iso).toLocaleString(undefined, {
+    return parseLocalDate(iso).toLocaleString(undefined, {
         year: 'numeric',
         month: 'short',
         day: 'numeric',
@@ -42,7 +49,7 @@ export function formatDateTime(iso: string): string {
 
 /** e.g. "Jan 5" — month and day only. */
 export function formatDateMonthDay(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    return parseLocalDate(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 /** e.g. "2024-01-05" — ISO calendar date in local time. */
