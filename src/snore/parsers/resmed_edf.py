@@ -453,6 +453,7 @@ class ResmedEDFParser(DeviceParser):
         limit: int | None = None,
         sort_by: str | None = None,
         parallel: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all ResMed sessions from the given path.
@@ -466,11 +467,13 @@ class ResmedEDFParser(DeviceParser):
             limit: Limit number of sessions
             sort_by: Sort order (date-asc, date-desc, or None)
             parallel: Enable parallel parsing (default: True)
+            progress_callback: Optional callback for progress messages
         """
         path = Path(path)
 
         path, night_items = self._discover_session_files(path, sort_by)
         night_items = self._filter_night_items(night_items, date_from, date_to)
+        total_nights = len(night_items)
 
         device_info = self.get_device_info(path)
 
@@ -504,6 +507,16 @@ class ResmedEDFParser(DeviceParser):
                     for night_date, segments in night_items
                 }
 
+                completed = 0
+
+                def emit_progress() -> None:
+                    nonlocal completed
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(
+                            f"Parsing session {completed}/{total_nights}..."
+                        )
+
                 for future in as_completed(futures):
                     night_date = futures[future]
 
@@ -520,7 +533,10 @@ class ResmedEDFParser(DeviceParser):
                         session = future.result()
                     except Exception as e:
                         logger.error(f"Failed to parse night {night_date}: {e}")
+                        emit_progress()
                         continue
+
+                    emit_progress()
 
                     if session is None:
                         continue
@@ -528,6 +544,14 @@ class ResmedEDFParser(DeviceParser):
                     yield session
                     sessions_yielded += 1
         else:
+            completed = 0
+
+            def emit_progress() -> None:
+                nonlocal completed
+                completed += 1
+                if progress_callback:
+                    progress_callback(f"Parsing session {completed}/{total_nights}...")
+
             for night_date, segments in night_items:
                 if limit is not None and sessions_yielded >= limit:
                     logger.debug(f"Reached session limit of {limit}, stopping")
@@ -546,7 +570,10 @@ class ResmedEDFParser(DeviceParser):
                     )
                 except Exception as e:
                     logger.error(f"Failed to parse night {night_date}: {e}")
+                    emit_progress()
                     continue
+
+                emit_progress()
 
                 if session is None:
                     continue
@@ -745,10 +772,9 @@ class ResmedEDFParser(DeviceParser):
             flat = flatten_night_files(grouped)
             total_nights = len(flat)
 
-            if progress_callback:
-                progress_callback(f"Copying {total_nights} nights of DATALOG files...")
-
-            for night_str, src_files in sorted(flat.items()):
+            for idx, (night_str, src_files) in enumerate(sorted(flat.items()), 1):
+                if progress_callback:
+                    progress_callback(f"Backing up night {idx}/{total_nights}...")
                 night_date = datetime.strptime(night_str, "%Y%m%d").date()
                 copied_files: list[Path] = []
 

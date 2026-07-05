@@ -182,6 +182,7 @@ class DeviceParser(ABC):
         limit: int | None = None,
         sort_by: str | None = None,
         parallel: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all sessions from the given path and yield unified sessions.
@@ -198,6 +199,7 @@ class DeviceParser(ABC):
             date_to: Optional end date filter (ISO format: YYYY-MM-DD)
             limit: Optional maximum number of sessions to yield
             sort_by: Optional sort order - "date-asc", "date-desc", or None for filesystem order
+            progress_callback: Optional callback invoked with a progress message string as each session is parsed
 
         Yields:
             UnifiedSession objects

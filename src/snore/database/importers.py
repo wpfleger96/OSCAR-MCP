@@ -244,15 +244,12 @@ class SessionImporter:
         imported = 0
         skipped = 0
         failed = 0
-        total_batches = (len(sessions) + batch_size - 1) // batch_size
 
         for batch_num, i in enumerate(range(0, len(sessions), batch_size), 1):
             batch = sessions[i : i + batch_size]
             batch_day_ids = set()
 
-            logger.debug(
-                f"Importing batch {batch_num}/{total_batches} ({len(batch)} sessions)"
-            )
+            logger.debug(f"Importing batch {batch_num} ({len(batch)} sessions)")
 
             with session_scope() as db:
                 for session_data in batch:
@@ -272,18 +269,17 @@ class SessionImporter:
                         )
                         failed += 1
 
+                    if progress_callback:
+                        sessions_done = imported + skipped + failed
+                        progress_callback(
+                            f"Importing session {sessions_done}/{len(sessions)}..."
+                        )
+
                 if batch_day_ids:
                     for day_id in batch_day_ids:
                         day_record = db.get(models.Day, day_id)
                         if day_record:
                             DayManager._aggregate_day_statistics(day_record, db)
-
-            if progress_callback:
-                sessions_done = min(i + batch_size, len(sessions))
-                progress_callback(
-                    f"Imported batch {batch_num}/{total_batches} "
-                    f"({sessions_done} of {len(sessions)} sessions)"
-                )
 
         return imported, skipped, failed
 

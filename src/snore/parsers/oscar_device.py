@@ -9,7 +9,7 @@ import logging
 import os
 import xml.etree.ElementTree as ET
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
@@ -254,6 +254,7 @@ class OscarDeviceParser(DeviceParser):
         limit: int | None = None,
         sort_by: str | None = None,
         parallel: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all sessions from OSCAR binary cache.
@@ -297,8 +298,18 @@ class OscarDeviceParser(DeviceParser):
                     date_from,
                     date_to,
                     limit,
+                    progress_callback=progress_callback,
                 )
                 return
+
+            total_sessions = len(session_files)
+            completed = 0
+
+            def emit_progress(*, _total: int = total_sessions) -> None:
+                nonlocal completed
+                completed += 1
+                if progress_callback:
+                    progress_callback(f"Parsing session {completed}/{_total}...")
 
             for session_id, summary_path, events_path in session_files:
                 if limit is not None and sessions_yielded >= limit:
@@ -310,11 +321,13 @@ class OscarDeviceParser(DeviceParser):
                         date_from
                         and session_date < datetime.fromisoformat(date_from).date()
                     ):
+                        emit_progress()
                         continue
                     if (
                         date_to
                         and session_date > datetime.fromisoformat(date_to).date()
                     ):
+                        emit_progress()
                         continue
 
                 try:
@@ -326,11 +339,13 @@ class OscarDeviceParser(DeviceParser):
                         data_root.path,
                     )
 
+                    emit_progress()
                     yield session
                     sessions_yielded += 1
 
                 except Exception as e:
                     logger.error(f"Failed to parse session {session_id}: {e}")
+                    emit_progress()
                     continue
 
     def _find_session_files(
@@ -387,6 +402,7 @@ class OscarDeviceParser(DeviceParser):
         date_from: str | None,
         date_to: str | None,
         limit: int | None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> Iterator[UnifiedSession]:
         """Parse sessions in parallel using ThreadPoolExecutor."""
         filtered_files = []
@@ -402,6 +418,7 @@ class OscarDeviceParser(DeviceParser):
                     continue
             filtered_files.append((session_id, summary_path, events_path))
 
+        total = len(filtered_files)
         if limit and len(filtered_files) > limit:
             filtered_files = filtered_files[:limit]
 
@@ -410,6 +427,13 @@ class OscarDeviceParser(DeviceParser):
         )
 
         sessions_yielded = 0
+        completed = 0
+
+        def emit_progress() -> None:
+            nonlocal completed
+            completed += 1
+            if progress_callback:
+                progress_callback(f"Parsing session {completed}/{total}...")
 
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             futures = {
@@ -435,10 +459,12 @@ class OscarDeviceParser(DeviceParser):
 
                 try:
                     session = future.result()
+                    emit_progress()
                     yield session
                     sessions_yielded += 1
                 except Exception as e:
                     logger.error(f"Failed to parse session {session_id}: {e}")
+                    emit_progress()
                     continue
 
     def _parse_single_session(
