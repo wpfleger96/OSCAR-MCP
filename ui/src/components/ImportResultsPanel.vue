@@ -70,8 +70,8 @@ const router = useRouter()
 }
 
 .warnings-box {
-    border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 40%, transparent);
-    background: color-mix(in srgb, var(--color-warning, #f59e0b) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
     border-radius: 8px;
     padding: 0.75rem 1rem;
     display: flex;
@@ -131,7 +131,7 @@ const router = useRouter()
 }
 
 .count-imported {
-    color: var(--color-success, #16a34a);
+    color: var(--color-success);
 }
 
 .count-skipped {

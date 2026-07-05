@@ -284,16 +284,16 @@ async function handleGenerate(): Promise<void> {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    border-color: var(--color-success, #16a34a);
+    border-color: var(--color-success);
 }
 
 .success-icon {
-    color: var(--color-success, #16a34a);
+    color: var(--color-success);
 }
 
 .success-title {
     font-weight: 600;
-    color: var(--color-success, #16a34a);
+    color: var(--color-success);
 }
 
 .success-size {
