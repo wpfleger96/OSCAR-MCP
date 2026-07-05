@@ -465,11 +465,44 @@ class TestRxTrackerCurrentTailWalk:
             )
         db_session.flush()
 
-        result = RxTracker().get_current(db_session)
+        tracker = RxTracker()
+        result = tracker.get_current(db_session)
         assert result is not None
-        assert result.settings == real_settings
-        assert result.days_count == 5
-        assert result.end_date == base + timedelta(days=4)
+        assert result == tracker.get_history(db_session)[-1]
+
+    def test_current_skips_none_settings_day_mid_period(
+        self, db_session: DbSession, test_device: Device
+    ) -> None:
+        """A None-settings day sandwiched inside the last period is skipped, not a boundary."""
+        base = date(2025, 7, 1)
+        settings_old = {"mode": "CPAP", "pressure_fixed": "6.0"}
+        settings_new = {"mode": "APAP", "pressure_min": "4.0", "pressure_max": "20.0"}
+
+        # Older different-fingerprint days
+        for i in range(3):
+            _create_day_with_session(
+                db_session, test_device, base + timedelta(days=i), settings=settings_old
+            )
+        # Newer period: valid day, then a None-settings day, then a valid day (newest)
+        _create_day_with_session(
+            db_session, test_device, base + timedelta(days=3), settings=settings_new
+        )
+        _create_day_with_session(
+            db_session,
+            test_device,
+            base + timedelta(days=4),
+            settings=settings_new,
+            enabled=False,
+        )
+        _create_day_with_session(
+            db_session, test_device, base + timedelta(days=5), settings=settings_new
+        )
+        db_session.flush()
+
+        tracker = RxTracker()
+        result = tracker.get_current(db_session)
+        assert result is not None
+        assert result == tracker.get_history(db_session)[-1]
 
     def test_current_all_days_same_settings_single_period(
         self, db_session: DbSession, test_device: Device

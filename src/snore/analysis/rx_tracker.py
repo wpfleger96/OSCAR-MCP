@@ -405,7 +405,10 @@ class RxTracker:
             .all()
         )
         return [
-            (device_id, f"{manufacturer} {model}")
+            (
+                device_id,
+                f"{manufacturer} {model}",
+            )  # name format must match _days_by_device
             for device_id, manufacturer, model in rows
         ]
 
@@ -432,7 +435,6 @@ class RxTracker:
         return (
             q.options(
                 selectinload(Day.sessions).selectinload(SessionModel.settings),
-                joinedload(Day.device),
             )
             .limit(limit)
             .all()
