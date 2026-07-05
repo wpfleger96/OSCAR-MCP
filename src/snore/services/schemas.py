@@ -46,6 +46,8 @@ __all__ = [
     "EventComparisonResult",
     # Vacuum schema
     "VacuumResult",
+    # Reset schema
+    "ResetResult",
 ]
 
 
@@ -588,3 +590,15 @@ class VacuumResult(BaseModel):
     status: str = Field(description="Operation status ('success')")
     size_before_mb: float = Field(description="Database size before vacuum in MB")
     size_after_mb: float = Field(description="Database size after vacuum in MB")
+
+
+class ResetResult(BaseModel):
+    """Result of a database reset (delete all data, preserve schema) operation."""
+
+    status: str = Field(description="Operation status ('success')")
+    tables_cleared: dict[str, int] = Field(
+        description="Rows deleted per table (table_name -> count)"
+    )
+    total_rows_deleted: int = Field(description="Total rows deleted across all tables")
+    size_before_mb: float = Field(description="Database size before reset in MB")
+    size_after_mb: float = Field(description="Database size after reset + vacuum in MB")

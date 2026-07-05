@@ -241,3 +241,81 @@ class TestVacuum:
         service = DatabaseService(db_session)
         result = service.vacuum(str(temp_db))
         assert result.size_after_mb >= 0
+
+
+class TestReset:
+    def test_empty_db_returns_zeros(self, db_session, temp_db):
+        service = DatabaseService(db_session)
+        result = service.reset(str(temp_db))
+        assert result.status == "success"
+        assert result.total_rows_deleted == 0
+        assert all(v == 0 for v in result.tables_cleared.values())
+
+    def test_includes_all_tables(self, db_session, temp_db):
+        service = DatabaseService(db_session)
+        result = service.reset(str(temp_db))
+        expected = {
+            "detected_patterns",
+            "analysis_results",
+            "settings",
+            "statistics",
+            "waveforms",
+            "events",
+            "sessions",
+            "days",
+            "devices",
+            "profiles",
+        }
+        assert set(result.tables_cleared.keys()) == expected
+
+    def test_deletes_data(self, db_session, test_device, temp_db):
+        from datetime import datetime, timedelta
+
+        from snore.database.models import Session as DbSession
+
+        now = datetime.now()
+        session = DbSession(
+            device_id=test_device.id,
+            device_session_id="reset_test",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        db_session.add(session)
+        db_session.commit()
+
+        service = DatabaseService(db_session)
+        result = service.reset(str(temp_db))
+
+        assert result.tables_cleared["sessions"] == 1
+        assert result.tables_cleared["devices"] >= 1
+        assert result.total_rows_deleted >= 2
+
+    def test_tables_empty_after_reset(self, db_session, test_device, temp_db):
+        from datetime import datetime, timedelta
+
+        from snore.database.models import Session as DbSession
+
+        now = datetime.now()
+        session = DbSession(
+            device_id=test_device.id,
+            device_session_id="reset_test_2",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        db_session.add(session)
+        db_session.commit()
+
+        service = DatabaseService(db_session)
+        service.reset(str(temp_db))
+
+        stats = service.get_stats(str(temp_db))
+        assert stats.session_count == 0
+        assert stats.device_count == 0
+
+    def test_size_reported(self, db_session, temp_db):
+        service = DatabaseService(db_session)
+        result = service.reset(str(temp_db))
+        assert result.size_before_mb >= 0
+        assert result.size_after_mb >= 0

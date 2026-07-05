@@ -8,7 +8,7 @@ from pydantic import Field
 from snore.api.deps import service_dep
 from snore.database.session import get_db_path
 from snore.services.database_service import DatabaseService
-from snore.services.schemas import DatabaseStats, VacuumResult
+from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 
 router = APIRouter()
 
@@ -28,3 +28,8 @@ def get_stats(service: DatabaseServiceDep) -> DatabaseStats:
 @router.post("/vacuum", response_model=VacuumResult)
 def vacuum_db(service: DatabaseServiceDep) -> VacuumResult:
     return service.vacuum(get_db_path())
+
+
+@router.post("/reset", response_model=ResetResult)
+def reset_db(service: DatabaseServiceDep) -> ResetResult:
+    return service.reset(get_db_path())
