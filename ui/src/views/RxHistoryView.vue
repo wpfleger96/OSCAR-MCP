@@ -117,7 +117,7 @@
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            <TableRow v-for="change in changes" :key="changeKey(change)">
+                            <TableRow v-for="(change, i) in changes" :key="changeKey(change, i)">
                                 <TableCell class="whitespace-nowrap">{{
                                     formatDateFull(change.date)
                                 }}</TableCell>
@@ -223,14 +223,14 @@ function summarizeSettings(settings: Record<string, string>): string {
     if (!parts.length) {
         return Object.entries(settings)
             .slice(0, 3)
-            .map(([k, v]) => `${settingLabel(k)}: ${v}`)
+            .map(([k, v]) => `${settingLabel(k)}: ${formatSettingValue(k, v)}`)
             .join(', ')
     }
     return parts.join(', ')
 }
 
-function changeKey(change: RxSettingChange): string {
-    return `${change.date}-${change.device_id}-${change.key}`
+function changeKey(change: RxSettingChange, i: number): string {
+    return `${change.date}-${change.device_id}-${change.key}-${i}`
 }
 </script>
 

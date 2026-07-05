@@ -613,3 +613,30 @@ class TestRxTrackerChanges:
         for i in range(len(changes) - 1):
             a, b = changes[i], changes[i + 1]
             assert (a.date, a.device_id, a.key) <= (b.date, b.device_id, b.key)
+
+    def test_non_rx_key_change_is_tracked(self, db_session, test_device):
+        """A comfort-setting change (humidity_level) not in RX_KEYS appears in get_changes."""
+        base = date(2025, 6, 1)
+        _create_day_with_session(
+            db_session,
+            test_device,
+            base,
+            settings={"mode": "CPAP", "pressure_fixed": "8.0", "humidity_level": "3"},
+        )
+        _create_day_with_session(
+            db_session,
+            test_device,
+            base + timedelta(days=1),
+            settings={"mode": "CPAP", "pressure_fixed": "8.0", "humidity_level": "5"},
+        )
+        db_session.flush()
+
+        result = RxTracker().get_changes(db_session)
+
+        humidity_changes = [c for c in result.changes if c.key == "humidity_level"]
+        assert len(humidity_changes) == 1
+        change = humidity_changes[0]
+        assert change.date == base + timedelta(days=1)
+        assert change.old_value == "3"
+        assert change.new_value == "5"
+        assert change.device_id == test_device.id

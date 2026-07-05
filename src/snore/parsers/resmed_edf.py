@@ -15,6 +15,7 @@ File Types:
 
 import json
 import logging
+import math
 import os
 import re
 
@@ -133,7 +134,7 @@ class ResmedEDFParser(DeviceParser):
         1: TherapyMode.APAP,  # AutoSet
         2: TherapyMode.APAP,  # AutoSet for Her
         3: TherapyMode.CPAP,
-        7: TherapyMode.ASV,
+        7: TherapyMode.ASV,  # ASVauto (variable EPAP); OSCAR MODE_ASV_VARIABLE_EPAP — mapped to TherapyMode.ASV (closest available)
         8: TherapyMode.BIPAP_AUTO,  # VAuto
     }
     # Series 9/10 native STR mode encoding
@@ -142,11 +143,11 @@ class ResmedEDFParser(DeviceParser):
         1: TherapyMode.APAP,
         2: TherapyMode.BIPAP,
         3: TherapyMode.BIPAP,  # VPAP S
-        4: TherapyMode.BIPAP_ST,
-        5: TherapyMode.BIPAP_ST,
+        4: TherapyMode.BIPAP_ST,  # OSCAR collapses S10 modes 3/4/5 to BILEVEL_FIXED; 4/5 are S/T variants — BIPAP_ST is a deliberate local deviation
+        5: TherapyMode.BIPAP_ST,  # OSCAR collapses S10 modes 3/4/5 to BILEVEL_FIXED; 4/5 are S/T variants — BIPAP_ST is a deliberate local deviation
         6: TherapyMode.BIPAP_AUTO,  # VAuto
         7: TherapyMode.ASV,
-        8: TherapyMode.ASV,
+        8: TherapyMode.ASV,  # ASV Auto / variable EPAP (MODE_ASV_VARIABLE_EPAP in OSCAR)
         11: TherapyMode.APAP,  # APAP for Her
     }
 
@@ -176,6 +177,14 @@ class ResmedEDFParser(DeviceParser):
         "S.AFH.StartPress": "afh_start_press",
         "S.AFH.MaxPress": "afh_max_press",
         "S.AFH.MinPress": "afh_min_press",
+    }
+
+    # Merged view of all STR signal groups — invariant across files, built once.
+    ALL_STR_SIGNAL_MAPS = {
+        **STR_SETTINGS_MAP,
+        **STR_VAUTO_SIGNALS,
+        **STR_SMODE_SIGNALS,
+        **STR_AFH_SIGNALS,
     }
 
     _ELEVEN_SERIES_RE = re.compile(r"(AirSense|AirCurve)\s*11")
@@ -360,13 +369,14 @@ class ResmedEDFParser(DeviceParser):
         if not id_file.exists():
             return False
         try:
-            with open(id_file) as f:
+            with open(id_file, encoding="utf-8") as f:
                 data = json.load(f)
             fg = data.get("FlowGenerator", {})
             profiles = fg.get("IdentificationProfiles", {})
             product = profiles.get("Product", {})
             code = product.get("ProductCode")
-            return code is not None and int(str(code)) >= 39000
+            # int(float(...)) handles JSON numbers stored as floats (e.g. 39000.0).
+            return code is not None and int(float(str(code))) >= 39000
         except Exception:
             return False
 
@@ -1880,13 +1890,7 @@ class ResmedEDFParser(DeviceParser):
                 all_settings: dict[date, dict[str, float]] = {}
                 signals = edf.get_signal_info()
 
-                all_signal_maps = {
-                    **self.STR_SETTINGS_MAP,
-                    **self.STR_VAUTO_SIGNALS,
-                    **self.STR_SMODE_SIGNALS,
-                    **self.STR_AFH_SIGNALS,
-                }
-                for signal_label, setting_name in all_signal_maps.items():
+                for signal_label, setting_name in self.ALL_STR_SIGNAL_MAPS.items():
                     if signal_label in signals:
                         data, _ = edf.read_signal(signal_label)
 
@@ -2002,8 +2006,16 @@ class ResmedEDFParser(DeviceParser):
         if mode_value is None:
             logger.warning("STR record has no mode signal; discarding")
             return None
+        if isinstance(mode_value, float) and math.isnan(mode_value):
+            logger.warning("STR record has NaN mode value; discarding")
+            return None
 
         mode_int = int(mode_value)
+        # Two family-detection mechanisms coexist: _str_series11 comes from ProductCode
+        # in Identification.json (file-level metadata set once at parse start) and picks
+        # the mode map here, while the is_eleven_series parameter comes from a model-name
+        # regex (_is_eleven_series) and shifts mask-type codes below. They can disagree
+        # when Identification.json is absent; ProductCode is authoritative for mode decode.
         mode_map = (
             self.MODE_MAP_SERIES11 if self._str_series11 else self.MODE_MAP_SERIES10
         )
@@ -2025,6 +2037,21 @@ class ResmedEDFParser(DeviceParser):
         def _validate_non_negative(value: float | None) -> float | None:
             """Return value if >= 0, else None."""
             return value if value is not None and value >= 0 else None
+
+        def _extract_epr() -> tuple[int | None, str | None]:
+            level_val = values.get("epr_level")
+            level = (
+                int(level_val)
+                if level_val is not None and 0 <= level_val <= 3
+                else None
+            )
+            type_val = values.get("epr_mode")
+            mode_str = (
+                self.EPR_TYPE_MAP.get(int(type_val), "Unknown")
+                if type_val is not None and type_val >= 0
+                else None
+            )
+            return level, mode_str
 
         # Universal fields — apply to all therapy modes.
         ramp_enabled_val = values.get("ramp_enabled")
@@ -2099,18 +2126,7 @@ class ResmedEDFParser(DeviceParser):
             ramp_start_pressure = _validate_positive(
                 values.get("ramp_start_pressure"), min_val=1.0
             )
-            epr_level_val = values.get("epr_level")
-            epr_level = (
-                int(epr_level_val)
-                if epr_level_val is not None and 0 <= epr_level_val <= 3
-                else None
-            )
-            epr_type_val = values.get("epr_mode")
-            epr_mode = (
-                self.EPR_TYPE_MAP.get(int(epr_type_val), "Unknown")
-                if epr_type_val is not None and epr_type_val >= 0
-                else None
-            )
+            epr_level, epr_mode = _extract_epr()
 
         elif mode == TherapyMode.APAP:
             # A4Her devices use AFH signals; fall back to standard APAP signals.
@@ -2128,18 +2144,7 @@ class ResmedEDFParser(DeviceParser):
                 rsp = values.get("afh_start_press")
             ramp_start_pressure = _validate_positive(rsp, min_val=1.0)
 
-            epr_level_val = values.get("epr_level")
-            epr_level = (
-                int(epr_level_val)
-                if epr_level_val is not None and 0 <= epr_level_val <= 3
-                else None
-            )
-            epr_type_val = values.get("epr_mode")
-            epr_mode = (
-                self.EPR_TYPE_MAP.get(int(epr_type_val), "Unknown")
-                if epr_type_val is not None and epr_type_val >= 0
-                else None
-            )
+            epr_level, epr_mode = _extract_epr()
 
         elif mode == TherapyMode.BIPAP_AUTO:
             # VAuto mode: uses S.VA.* signals only. CPAP/APAP presets are

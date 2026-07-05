@@ -1,6 +1,9 @@
 """Unit tests for ResmedEDFParser STR.edf conversion helpers."""
 
+import json
+
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -354,3 +357,89 @@ class TestIsElevenSeries:
     )
     def test_model_detection(self, model, expected):
         assert ResmedEDFParser._is_eleven_series(model) is expected
+
+
+class TestDetectSeries11:
+    """Tests for _detect_series11 ProductCode-based family detection."""
+
+    def _make_id_json(self, tmp_path: Path, product_code: int | float | str) -> Path:
+        """Write a minimal Identification.json and return the directory path."""
+        data = {
+            "FlowGenerator": {
+                "IdentificationProfiles": {"Product": {"ProductCode": product_code}}
+            }
+        }
+        (tmp_path / "Identification.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        return tmp_path
+
+    def test_product_code_39000_is_series11(self, tmp_path):
+        root = self._make_id_json(tmp_path, 39000)
+        assert ResmedEDFParser()._detect_series11(root) is True
+
+    def test_product_code_38999_is_not_series11(self, tmp_path):
+        root = self._make_id_json(tmp_path, 38999)
+        assert ResmedEDFParser()._detect_series11(root) is False
+
+    def test_product_code_float_string_39000_0_is_series11(self, tmp_path):
+        """ProductCode stored as the string "39000.0" must not raise ValueError."""
+        root = self._make_id_json(tmp_path, "39000.0")
+        assert ResmedEDFParser()._detect_series11(root) is True
+
+    def test_product_code_float_39000_0_is_series11(self, tmp_path):
+        """ProductCode stored as a JSON float (39000.0) must be handled correctly."""
+        root = self._make_id_json(tmp_path, 39000.0)
+        assert ResmedEDFParser()._detect_series11(root) is True
+
+    def test_missing_product_code_key_returns_false(self, tmp_path):
+        data = {"FlowGenerator": {"IdentificationProfiles": {"Product": {}}}}
+        (tmp_path / "Identification.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        assert ResmedEDFParser()._detect_series11(tmp_path) is False
+
+    def test_missing_identification_json_returns_false(self, tmp_path):
+        assert ResmedEDFParser()._detect_series11(tmp_path) is False
+
+    def test_malformed_json_returns_false(self, tmp_path):
+        (tmp_path / "Identification.json").write_text(
+            "not valid json {{{", encoding="utf-8"
+        )
+        assert ResmedEDFParser()._detect_series11(tmp_path) is False
+
+
+class TestSeries10ModesBipapST:
+    """Tests for Series 10 modes 4 and 5 — BIPAP_ST deliberate deviation from OSCAR."""
+
+    @pytest.fixture
+    def parser(self):
+        return ResmedEDFParser()
+
+    @pytest.mark.parametrize("mode_int", [4, 5])
+    def test_series10_modes_4_5_map_to_bipap_st(self, parser, mode_int):
+        """S10 modes 4 and 5 are S/T variants; mapped to BIPAP_ST (OSCAR maps them to BILEVEL_FIXED)."""
+        parser._str_series11 = False
+        record = {
+            "mode": float(mode_int),
+            "s_ipap": 14.0,
+            "s_epap": 8.0,
+            "s_start_press": 8.0,
+        }
+        settings = parser._convert_str_to_therapy_settings(record)
+        assert settings is not None
+        assert settings.mode == TherapyMode.BIPAP_ST
+
+
+class TestNanModeValue:
+    """Test that a NaN mode value is discarded gracefully."""
+
+    @pytest.fixture
+    def parser(self):
+        return ResmedEDFParser()
+
+    def test_nan_mode_returns_none_without_raising(self, parser):
+        """NaN mode value is treated like a missing mode — returns None, does not raise."""
+        record = {"mode": float("nan"), "pressure_fixed": 10.0}
+        result = parser._convert_str_to_therapy_settings(record)
+        assert result is None

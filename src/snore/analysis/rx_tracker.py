@@ -1,6 +1,7 @@
 """RX (prescription) change tracking and period analysis."""
 
 import itertools
+import logging
 
 from dataclasses import dataclass
 from datetime import date
@@ -15,6 +16,8 @@ from snore.services.schemas import (
     RxPeriodResponse,
     RxSettingChange,
 )
+
+logger = logging.getLogger(__name__)
 
 RX_KEYS = (
     "mode",
@@ -91,26 +94,17 @@ class RxTracker:
         )
 
     def get_changes(self, db_session: Session) -> RxChangesResponse:
-        """Return a log of every per-key settings change across all devices."""
-        days = (
-            db_session.query(Day)
-            .order_by(Day.device_id, Day.date)
-            .options(
-                joinedload(Day.sessions).joinedload(SessionModel.settings),
-                joinedload(Day.device),
-            )
-            .all()
-        )
+        """Return a log of every per-key settings change across all devices.
 
+        Intentionally diffs ALL persisted settings keys — including comfort
+        settings such as mask_type and humidity_level — not just the
+        prescription-defining RX_KEYS.  This gives a complete audit trail of
+        every setting the clinician or patient touched.  Do not narrow this to
+        _get_day_rx_settings; use _get_day_settings (no key filter).
+        """
         all_changes: list[RxSettingChange] = []
 
-        for device_id, device_days_iter in itertools.groupby(
-            days, key=lambda d: d.device_id
-        ):
-            device_days = list(device_days_iter)
-            device = device_days[0].device
-            device_name = f"{device.manufacturer} {device.model}"
-
+        for device_id, device_name, device_days in self._days_by_device(db_session):
             prev_settings: dict[str, str] | None = None
             for day in device_days:
                 curr_settings = self._get_day_settings(day)
@@ -157,9 +151,25 @@ class RxTracker:
 
         Algorithm:
         1. Query days ordered by (device_id, date), join sessions→settings and device
-        2. Group by device_id with itertools.groupby
+        2. Group by device_id with itertools.groupby (via _days_by_device)
         3. For each device, run the fingerprint loop via _compute_device_periods
         4. Sort combined list by (start_date, device_id) for stable ordering
+        """
+        all_periods: list[RxPeriod] = []
+        for device_id, device_name, device_days in self._days_by_device(db_session):
+            all_periods.extend(
+                self._compute_device_periods(device_days, device_id, device_name)
+            )
+
+        all_periods.sort(key=lambda p: (p.start_date, p.device_id))
+        return all_periods
+
+    def _days_by_device(self, db_session: Session) -> list[tuple[int, str, list[Day]]]:
+        """Query all days grouped by device, ordered by (device_id, date).
+
+        Returns a list of (device_id, device_name, days) tuples, one per
+        device, preserving the query order.  Devices whose Day rows have no
+        matching Device row (device is None) are skipped with a warning.
         """
         days = (
             db_session.query(Day)
@@ -171,24 +181,21 @@ class RxTracker:
             .all()
         )
 
-        if not days:
-            return []
-
-        all_periods: list[RxPeriod] = []
-        for _device_id, device_days_iter in itertools.groupby(
+        result: list[tuple[int, str, list[Day]]] = []
+        for device_id, device_days_iter in itertools.groupby(
             days, key=lambda d: d.device_id
         ):
             device_days = list(device_days_iter)
             device = device_days[0].device
-            device_name = f"{device.manufacturer} {device.model}"
-            all_periods.extend(
-                self._compute_device_periods(
-                    device_days, device_days[0].device_id, device_name
+            if device is None:
+                logger.warning(
+                    "Skipping device_id=%s: no matching Device row", device_id
                 )
-            )
+                continue
+            device_name = f"{device.manufacturer} {device.model}"
+            result.append((device_id, device_name, device_days))
 
-        all_periods.sort(key=lambda p: (p.start_date, p.device_id))
-        return all_periods
+        return result
 
     def _compute_device_periods(
         self, days: list[Day], device_id: int, device_name: str
