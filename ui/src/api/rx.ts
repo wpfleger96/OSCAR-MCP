@@ -1,5 +1,10 @@
 import { apiGet, apiGetOrNull } from './client'
-import type { RxChangesResponse, RxComparisonResponse, RxPeriodResponse } from '@/types'
+import type {
+    RxAllResponse,
+    RxChangesResponse,
+    RxComparisonResponse,
+    RxPeriodResponse,
+} from '@/types'
 
 export const getRxHistory = apiGet<RxPeriodResponse[]>('/rx/history')
 
@@ -11,3 +16,7 @@ export const getRxCompare = apiGet<RxComparisonResponse, [minDays?: number]>(
 )
 
 export const getRxChanges = apiGet<RxChangesResponse>('/rx/changes')
+
+export const getRxAll = apiGet<RxAllResponse, [minDays?: number]>('/rx/all', (minDays = 7) => ({
+    params: { min_days: minDays },
+}))

@@ -127,3 +127,89 @@ class TestRxRouter:
         assert len(periods) == 1
         assert periods[0]["device_id"] == device.id
         assert periods[0]["device_name"] == "ResMed AirSense 10"
+
+
+class TestRxAllRouter:
+    def test_get_rx_all_empty(self, api_client):
+        """Empty database returns 200 with empty history, null current, and no changes."""
+        response = api_client.get("/api/v1/rx/all")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["history"] == []
+        assert data["current"] is None
+        assert data["best_index"] is None
+        assert data["worst_index"] is None
+        assert data["changes"] == {"changes": []}
+
+    def test_get_rx_all_with_data(self, api_client, db_session):
+        """Combined response contains history, current, best/worst, and changes."""
+        device = _create_device(db_session)
+        base = date(2025, 6, 1)
+
+        for i in range(10):
+            _create_day_with_session(
+                db_session,
+                device,
+                base + timedelta(days=i),
+                settings={
+                    "mode": "APAP",
+                    "pressure_min": "6.0",
+                    "pressure_max": "15.0",
+                },
+            )
+
+        _create_day_with_session(
+            db_session,
+            device,
+            base + timedelta(days=10),
+            settings={"mode": "CPAP", "pressure_fixed": "10.0"},
+        )
+        db_session.flush()
+
+        response = api_client.get("/api/v1/rx/all")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["history"]) == 2
+        assert data["current"] == data["history"][-1]
+        assert data["current"]["settings"]["mode"] == "CPAP"
+
+        assert "best_index" in data
+        assert "worst_index" in data
+
+        changes = data["changes"]["changes"]
+        changed_keys = {c["key"] for c in changes}
+        assert "mode" in changed_keys
+
+    def test_get_rx_all_min_days_propagates(self, api_client, db_session):
+        """min_days parameter affects best/worst index selection."""
+        device = _create_device(db_session)
+        base = date(2025, 6, 1)
+
+        for i in range(3):
+            _create_day_with_session(
+                db_session,
+                device,
+                base + timedelta(days=i),
+                settings={"mode": "APAP", "pressure_min": "6.0"},
+            )
+        db_session.flush()
+
+        response_high = api_client.get("/api/v1/rx/all?min_days=100")
+        data_high = response_high.json()
+        assert data_high["best_index"] is None
+        assert data_high["worst_index"] is None
+
+        response_low = api_client.get("/api/v1/rx/all?min_days=1")
+        data_low = response_low.json()
+        assert len(data_low["history"]) == 1
+
+    def test_get_rx_all_min_days_rejects_zero(self, api_client):
+        """min_days=0 returns 422."""
+        response = api_client.get("/api/v1/rx/all?min_days=0")
+        assert response.status_code == 422
+
+    def test_compare_rx_min_days_rejects_zero(self, api_client):
+        """min_days=0 on /compare also returns 422."""
+        response = api_client.get("/api/v1/rx/compare?min_days=0")
+        assert response.status_code == 422

@@ -49,6 +49,7 @@ export type RxPeriodResponse = Schemas['RxPeriodResponse']
 export type RxComparisonResponse = Schemas['RxComparisonResponse']
 export type RxSettingChange = Schemas['RxSettingChange']
 export type RxChangesResponse = Schemas['RxChangesResponse']
+export type RxAllResponse = Schemas['RxAllResponse']
 
 // Analysis
 export type AnalysisListItem = Schemas['AnalysisListItem']

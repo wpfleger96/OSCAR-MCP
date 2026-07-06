@@ -39,7 +39,7 @@
             </div>
 
             <!-- Comparison Table -->
-            <div v-if="comparison" class="section-card">
+            <div v-if="history.length > 1" class="section-card">
                 <h2>Period Comparison</h2>
                 <div class="overflow-x-auto">
                     <Table>
@@ -163,29 +163,19 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
-import { getRxHistory, getRxCurrent, getRxCompare, getRxChanges } from '@/api/rx'
+import { getRxAll } from '@/api/rx'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
 import { settingLabel, formatSettingValue } from '@/utils/deviceSettings'
 import type { RxPeriodResponse, RxSettingChange } from '@/types'
 import ErrorState from '@/components/ErrorState.vue'
 
-const { data, loading, error, reload } = useApiLoad(async () => {
-    const [history, current, comparison, changesResponse] = await Promise.all([
-        getRxHistory(),
-        getRxCurrent(),
-        getRxCompare(),
-        getRxChanges(),
-    ])
-    return { history, current, comparison, changesResponse }
-}, 'Failed to load RX data')
+const { data, loading, error, reload } = useApiLoad(() => getRxAll(), 'Failed to load RX data')
 
 const history = computed(() => data.value?.history ?? [])
 const current = computed(() => data.value?.current ?? null)
-const comparison = computed(() => data.value?.comparison ?? null)
-// Most recent first — users care about recent changes.
 const changes = computed<RxSettingChange[]>(() =>
-    [...(data.value?.changesResponse?.changes ?? [])].reverse(),
+    [...(data.value?.changes?.changes ?? [])].reverse(),
 )
 
 interface ComparisonRow extends RxPeriodResponse {
@@ -193,14 +183,13 @@ interface ComparisonRow extends RxPeriodResponse {
     isWorst: boolean
 }
 
-const comparisonRows = computed<ComparisonRow[]>(() => {
-    if (!comparison.value) return []
-    return comparison.value.periods.map((p, i) => ({
+const comparisonRows = computed<ComparisonRow[]>(() =>
+    history.value.map((p, i) => ({
         ...p,
-        isBest: comparison.value!.best_index === i,
-        isWorst: comparison.value!.worst_index === i,
-    }))
-})
+        isBest: data.value?.best_index === i,
+        isWorst: data.value?.worst_index === i,
+    })),
+)
 
 function summarizeSettings(settings: Record<string, string>): string {
     const priorityKeys = [
