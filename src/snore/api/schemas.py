@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from snore.services.schemas import (
     DayDetail,
     DayListItem,
+    RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
     RxPeriodResponse,
@@ -28,6 +29,7 @@ __all__ = [
     "EventItem",
     "DayDetail",
     "DayListItem",
+    "RxAllResponse",
     "RxPeriodResponse",
     "RxComparisonResponse",
     "RxSettingChange",
