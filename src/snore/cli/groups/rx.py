@@ -14,13 +14,21 @@ from snore.cli.display import (
     print_subsection,
     print_table,
 )
+from snore.cli.display.settings import format_setting_key, format_setting_value
 
 
-def _format_change_value(val: str | None) -> str:
-    return val if val is not None else "—"
+def _format_change_value(key: str, val: str | None) -> str:
+    if val is None:
+        return "—"
+    return format_setting_value(key, val)
 
 
 def _format_pressure(settings: dict[str, str], *, short: bool = False) -> str:
+    if "epap" in settings and "ipap" in settings:
+        epap = settings["epap"]
+        ipap = settings["ipap"]
+        p = f"{epap}-{ipap}"
+        return p if short else f"{p} cmH2O (EPAP-IPAP)"
     if "pressure_min" in settings and "pressure_max" in settings:
         p = f"{settings['pressure_min']}-{settings['pressure_max']}"
         return p if short else f"{p} cmH2O"
@@ -72,13 +80,20 @@ def rx_history(db: str | None) -> None:
             )
 
             mode = period.settings.get("mode", "?")
-            epr_level = period.settings.get("epr_level", "?")
-            epr_mode = period.settings.get("epr_mode", "?")
             pressure_str = _format_pressure(period.settings)
 
-            console.print(
-                f"  Mode: {mode} | Pressure: {pressure_str} | EPR: {epr_level} {epr_mode}"
-            )
+            summary_parts = [
+                f"Mode: {mode}",
+                f"Pressure: {pressure_str}",
+            ]
+            if "epr_level" in period.settings and "epr_mode" in period.settings:
+                summary_parts.append(
+                    f"EPR: {period.settings['epr_level']} {period.settings['epr_mode']}"
+                )
+            elif "ps" in period.settings:
+                summary_parts.append(f"PS: {period.settings['ps']}")
+
+            console.print("  " + " | ".join(summary_parts))
 
             ahi_str = (
                 f"  Avg AHI: {period.avg_ahi:.1f}"
@@ -124,13 +139,18 @@ def rx_current(db: str | None) -> None:
         )
 
         mode = current.settings.get("mode", "?")
-        epr_level = current.settings.get("epr_level", "?")
-        epr_mode = current.settings.get("epr_mode", "?")
         pressure_str = _format_pressure(current.settings)
 
         print_kv("Mode", str(mode), indent=0)
         print_kv("Pressure", str(pressure_str), indent=0)
-        print_kv("EPR", f"{epr_level} {epr_mode}", indent=0)
+        if "epr_level" in current.settings and "epr_mode" in current.settings:
+            print_kv(
+                "EPR",
+                f"{current.settings['epr_level']} {current.settings['epr_mode']}",
+                indent=0,
+            )
+        elif "ps" in current.settings:
+            print_kv("PS", current.settings["ps"], indent=0)
 
         print_subsection("Outcomes")
         if current.avg_ahi is not None:
@@ -213,7 +233,14 @@ def rx_compare(db: str | None, min_days: int) -> None:
             date_range = f"{start_str}..{end_str}"
 
             mode = period.settings.get("mode", "?")[:7]
-            epr = f"{period.settings.get('epr_level', '?')} {period.settings.get('epr_mode', '?')[:2]}"
+            if "epr_level" in period.settings and "epr_mode" in period.settings:
+                epr = (
+                    f"{period.settings['epr_level']} {period.settings['epr_mode'][:2]}"
+                )
+            elif "ps" in period.settings:
+                epr = f"PS:{period.settings['ps']}"
+            else:
+                epr = "?"
 
             pressure_str = _format_pressure(period.settings, short=True)
 
@@ -285,8 +312,8 @@ def rx_changes(db: str | None) -> None:
                 (
                     c.date.strftime("%Y-%m-%d"),
                     c.device_name,
-                    c.key,
-                    f"{_format_change_value(c.old_value)} → {_format_change_value(c.new_value)}",
+                    format_setting_key(c.key),
+                    f"{_format_change_value(c.key, c.old_value)} → {_format_change_value(c.key, c.new_value)}",
                 )
                 for c in changes
             ],

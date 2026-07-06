@@ -1,8 +1,11 @@
 /**
  * Utilities for displaying device therapy settings.
  *
- * Key names mirror STR_SETTINGS_MAP in src/snore/parsers/resmed_edf.py (lines 82-101),
- * which is the canonical source of truth for stored setting keys.
+ * Key names mirror STR_SETTINGS_MAP in src/snore/parsers/resmed_edf.py
+ * (search for STR_SETTINGS_MAP), which is the canonical source of truth for
+ * stored setting keys.
+ *
+ * See also `src/snore/cli/display/settings.py` for the CLI counterpart.
  */
 
 export interface SettingsCategory {
@@ -60,6 +63,7 @@ export const SETTING_CATEGORIES: SettingsCategory[] = [
             'easy_breathe',
             'tube',
             'pt_access',
+            'pt_view',
         ],
     },
 ]
@@ -103,6 +107,7 @@ const SETTING_LABELS: Record<string, string> = {
     easy_breathe: 'Easy-Breathe',
     tube: 'Tube',
     pt_access: 'Patient Access',
+    pt_view: 'Patient View',
 }
 
 const BOOLEAN_KEYS = new Set([
@@ -159,6 +164,10 @@ export function formatSettingValue(key: string, rawValue: string): string {
             return `${f.toFixed(1)}°F`
         }
         return rawValue
+    }
+
+    if (key === 'humidity_level' && rawValue === '0') {
+        return 'Off'
     }
 
     return rawValue

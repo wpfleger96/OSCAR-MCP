@@ -151,8 +151,24 @@ class ResmedEDFParser(DeviceParser):
     MASK_TYPE_MAP = {0: "Pillows", 1: "Full Face", 2: "Nasal"}
     # Shared climate control and AB-filter maps on the S10 basis.
     # S11 raw values are normalized by −1 before lookup (OSCAR :2292-2299).
-    CLIMATE_CONTROL_MAP = {0: "Manual", 1: "Auto"}
+    # Climate control option labels: OSCAR :233-234.
+    CLIMATE_CONTROL_MAP = {0: "Auto", 1: "Manual"}
     AB_FILTER_MAP = {0: "Standard", 1: "Antibacterial"}
+    # Trigger/cycle sensitivity maps — S10 basis (S11 raw−1 before lookup).
+    # OSCAR :288-294 (Trigger), :280-286 (Cycle). "Med" spelling matches OSCAR.
+    TRIGGER_MAP = {0: "Very Low", 1: "Low", 2: "Med", 3: "High", 4: "Very High"}
+    CYCLE_MAP = {0: "Very Low", 1: "Low", 2: "Med", 3: "High", 4: "Very High"}
+    # APAP response (S.AS.Comfort) labels — S10 basis (OSCAR :251-255).
+    RESPONSE_MAP = {0: "Standard", 1: "Soft"}
+    # Patient access: S10 (OSCAR :224-228); S11 uses PT_VIEW_MAP instead (OSCAR :263-267).
+    PT_ACCESS_MAP = {0: "Plus", 1: "On"}
+    # Patient view: S11 (OSCAR :263-267). OSCAR's effective display is "Off"/"On"
+    # (:269-270 overwrites :263-267 via addOption), but "Advanced"/"Simple" matches
+    # the AirSense 11 user interface — intentional deviation.
+    PT_VIEW_MAP = {0: "Advanced", 1: "Simple"}
+    # Tube type — community-sourced tube-diameter naming; raw value, no normalization.
+    # OSCAR declares RMS9_TubeType but never initializes, labels, or stores S.Tube.
+    TUBE_TYPE_MAP = {15: "SlimLine", 19: "Standard"}
 
     # These two tables are underscore-private because they are internals of the
     # two-step mode decode (translate S11 raw → S10 basis, then map to TherapyMode).
@@ -2300,9 +2316,11 @@ class ResmedEDFParser(DeviceParser):
             if ti_min_v is not None and ti_min_v >= 0:
                 other_settings["ti_min"] = f"{ti_min_v:.1f}"
             if trigger_v is not None and trigger_v >= 0:
-                other_settings["trigger"] = str(int(trigger_v))
+                code = int(trigger_v)
+                other_settings["trigger"] = self.TRIGGER_MAP.get(code, str(code))
             if cycle_v is not None and cycle_v >= 0:
-                other_settings["cycle"] = str(int(cycle_v))
+                code = int(cycle_v)
+                other_settings["cycle"] = self.CYCLE_MAP.get(code, str(code))
 
         # ------------------------------------------------------------------
         # Universal fields (all modes)
@@ -2336,11 +2354,11 @@ class ResmedEDFParser(DeviceParser):
         tube_temp_enabled = temp_norm == 1 if temp_norm is not None else None
         tube_temp = _pos("tube_temp", min_val=1.0)
 
-        # Climate control: normalized to S10 basis (0=Manual, 1=Auto).
+        # Climate control: normalized to S10 basis (0=Auto, 1=Manual).
         # OSCAR :2297-2299: if (AS_eleven) --s_ClimateControl.
         climate_norm = _norm("climate_control")
         climate_control = (
-            self.CLIMATE_CONTROL_MAP.get(int(climate_norm))
+            self.CLIMATE_CONTROL_MAP.get(int(climate_norm), str(int(climate_norm)))
             if climate_norm is not None and climate_norm >= 0
             else None
         )
@@ -2369,26 +2387,46 @@ class ResmedEDFParser(DeviceParser):
         # OSCAR :2292-2295: if (AS_eleven) --s_ABFilter.
         ab_norm = _norm("ab_filter")
         ab_filter = (
-            self.AB_FILTER_MAP.get(int(ab_norm))
+            self.AB_FILTER_MAP.get(int(ab_norm), str(int(ab_norm)))
             if ab_norm is not None and ab_norm >= 0
             else None
         )
 
-        # Patient access (PtAccess): S11 raw−1 (OSCAR :2311-2317).
-        pt_norm = _norm("pt_access_raw")
-        pt_access = str(int(pt_norm)) if pt_norm is not None and pt_norm >= 0 else None
+        # Patient access/view: S11 emits pt_view (OSCAR :2311-2317 s_PtView--);
+        # S10 emits pt_access. S11 path uses _norm (−1); S10 path reads raw value
+        # (OSCAR does not decrement s_PtAccess).
+        if series11:
+            pt_norm = _norm("pt_access_raw")
+            pt_view: str | None = (
+                self.PT_VIEW_MAP.get(int(pt_norm), str(int(pt_norm)))
+                if pt_norm is not None and pt_norm >= 0
+                else None
+            )
+            pt_access: str | None = None
+        else:
+            pt_view = None
+            pt_access_raw = values.get("pt_access_raw")
+            if pt_access_raw is not None and pt_access_raw >= 0:
+                code = int(pt_access_raw)
+                pt_access = self.PT_ACCESS_MAP.get(code, str(code))
+            else:
+                pt_access = None
 
         # Tube type (raw, no normalization — OSCAR :2343 does no −1 for S11).
         tube_raw = values.get("tube_raw")
-        tube = str(int(tube_raw)) if tube_raw is not None and tube_raw >= 0 else None
+        if tube_raw is not None and tube_raw >= 0:
+            code = int(tube_raw)
+            tube: str | None = self.TUBE_TYPE_MAP.get(code, str(code))
+        else:
+            tube = None
 
         # Response/Comfort (S.AS.Comfort): S11 raw−1 (OSCAR :2180-2183).
         comfort_norm = _norm("comfort_raw")
-        response = (
-            str(int(comfort_norm))
-            if comfort_norm is not None and comfort_norm >= 0
-            else None
-        )
+        if comfort_norm is not None and comfort_norm >= 0:
+            code = int(comfort_norm)
+            response: str | None = self.RESPONSE_MAP.get(code, str(code))
+        else:
+            response = None
 
         # ------------------------------------------------------------------
         # Mode-specific fields
@@ -2635,7 +2673,9 @@ class ResmedEDFParser(DeviceParser):
             other_settings["smart_ramp"] = "True"
         if tube is not None:
             other_settings["tube"] = tube
-        if pt_access is not None:
+        if pt_view is not None:
+            other_settings["pt_view"] = pt_view
+        elif pt_access is not None:
             other_settings["pt_access"] = pt_access
         if response is not None:
             other_settings["response"] = response

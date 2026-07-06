@@ -15,6 +15,7 @@ import pytest
 
 from click.testing import CliRunner
 from sqlalchemy import text
+from sqlalchemy.orm import Session as OrmSession
 
 from snore.cli import cli
 from snore.database import models
@@ -1241,12 +1242,12 @@ class TestRxChangesCommand:
         idx_older = result.output.index("2025-06-02")
         assert idx_recent < idx_older
 
-        # pressure_min change on day 3: 6.0 → 8.0
-        assert "pressure_min" in result.output
-        assert "6.0 → 8.0" in result.output
+        # pressure_min change on day 3 — key rendered as label, values formatted
+        assert "Min Pressure" in result.output
+        assert "6.0 cmH2O → 8.0 cmH2O" in result.output
 
-        # mode change on day 2: CPAP → APAP
-        assert "mode" in result.output
+        # mode change on day 2 — key rendered as "Mode", values pass through
+        assert "Mode" in result.output
         assert "CPAP → APAP" in result.output
 
     def test_changes_none_value_rendered_as_dash(
@@ -1258,10 +1259,10 @@ class TestRxChangesCommand:
         )
 
         assert result.exit_code == 0
-        # pressure_fixed disappears on day 2 (old=8.0, new=None) → "8.0 → —"
-        assert "8.0 → —" in result.output
-        # pressure_min appears on day 2 (old=None, new=6.0) → "— → 6.0"
-        assert "— → 6.0" in result.output
+        # pressure_fixed disappears on day 2 (old=8.0 cmH2O, new=None) → "8.0 cmH2O → —"
+        assert "8.0 cmH2O → —" in result.output
+        # pressure_min appears on day 2 (old=None, new=6.0 cmH2O) → "— → 6.0 cmH2O"
+        assert "— → 6.0 cmH2O" in result.output
 
     def test_changes_within_date_order_is_ascending_by_key(
         self, cli_runner, db_with_rx_settings_changes
@@ -1276,7 +1277,7 @@ class TestRxChangesCommand:
         # pressure_min.  Ascending alphabetical order means mode < pressure_min, so
         # the unique text for the mode row must appear before the pressure_min row.
         idx_mode = result.output.index("CPAP → APAP")
-        idx_pressure_min = result.output.index("— → 6.0")
+        idx_pressure_min = result.output.index("— → 6.0 cmH2O")
         assert idx_mode < idx_pressure_min
 
     def test_changes_empty_db_shows_no_changes_message(self, cli_runner, temp_db):
@@ -1287,3 +1288,200 @@ class TestRxChangesCommand:
 
         assert result.exit_code == 0
         assert "No RX settings changes found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for rx history / current / compare tests
+# ---------------------------------------------------------------------------
+
+
+def _make_rx_session(
+    session: OrmSession,
+    device_id: int,
+    start_time: datetime,
+    settings: dict[str, str],
+    *,
+    ahi: float = 3.0,
+    hours: float = 7.5,
+    leak: float = 8.0,
+    serial_suffix: str = "",
+) -> None:
+    """Helper: create one session + day + statistics for rx tests."""
+    sess = models.Session(
+        device_id=device_id,
+        device_session_id=f"rx_{start_time.date().isoformat()}{serial_suffix}",
+        start_time=start_time,
+        end_time=start_time + timedelta(hours=hours),
+        duration_seconds=int(hours * 3600),
+        enabled=True,
+    )
+    session.add(sess)
+    session.flush()
+
+    day = DayManager.create_or_update_day(
+        device_id, DayManager.get_day_for_session(start_time), session
+    )
+    sess.day_id = day.id
+
+    for key, value in settings.items():
+        session.add(models.Setting(session_id=sess.id, key=key, value=value))
+
+    session.add(
+        models.Statistics(
+            session_id=sess.id, ahi=ahi, usage_hours=hours, leak_mean=leak
+        )
+    )
+
+
+@pytest.fixture
+def db_with_apap_rx(temp_db):
+    """DB with a single APAP period: pressure range and EPR settings present."""
+    init_database(str(temp_db))
+
+    with session_scope() as session:
+        device = models.Device(
+            manufacturer="ResMed",
+            model="AirSense 10",
+            serial_number="APAP_RX_TEST",
+        )
+        session.add(device)
+        session.flush()
+
+        apap_settings = {
+            "mode": "APAP",
+            "pressure_min": "6.0",
+            "pressure_max": "20.0",
+            "epr_level": "2",
+            "epr_mode": "Full Time",
+        }
+        for i in range(3):
+            _make_rx_session(
+                session,
+                device.id,
+                datetime(2025, 7, 1 + i, 22, 0, 0),
+                apap_settings,
+                serial_suffix=f"_{i}",
+            )
+
+        session.commit()
+
+    return temp_db
+
+
+@pytest.fixture
+def db_with_bipap_rx(temp_db):
+    """DB with two RX periods: CPAP then BiPAP Auto.
+
+    Period 1 (day 1): CPAP, pressure_fixed=10.0
+    Period 2 (days 2-4): BiPAP Auto, epap=6.0, ipap=18.0, ps=4.0, no epr keys
+    """
+    init_database(str(temp_db))
+
+    with session_scope() as session:
+        device = models.Device(
+            manufacturer="ResMed",
+            model="AirCurve 10 VAuto",
+            serial_number="BIPAP_RX_TEST",
+        )
+        session.add(device)
+        session.flush()
+
+        cpap_settings = {"mode": "CPAP", "pressure_fixed": "10.0"}
+        _make_rx_session(
+            session,
+            device.id,
+            datetime(2025, 7, 1, 22, 0, 0),
+            cpap_settings,
+            serial_suffix="_cpap",
+        )
+
+        bipap_settings = {
+            "mode": "BiPAP Auto",
+            "epap": "6.0",
+            "ipap": "18.0",
+            "ps": "4.0",
+        }
+        for i in range(3):
+            _make_rx_session(
+                session,
+                device.id,
+                datetime(2025, 7, 2 + i, 22, 0, 0),
+                bipap_settings,
+                serial_suffix=f"_bipap_{i}",
+            )
+
+        session.commit()
+
+    return temp_db
+
+
+class TestRxHistoryCommand:
+    """Test rx history command with pressure formatting and EPR/PS rendering."""
+
+    def test_history_apap_shows_pressure_range_with_units(
+        self, cli_runner, db_with_apap_rx
+    ):
+        """APAP period renders pressure range with cmH2O units."""
+        result = cli_runner.invoke(cli, ["rx", "history", "--db", str(db_with_apap_rx)])
+
+        assert result.exit_code == 0
+        assert "6.0-20.0 cmH2O" in result.output
+
+    def test_history_bilevel_shows_epap_ipap_format(self, cli_runner, db_with_bipap_rx):
+        """BiPAP Auto period renders pressure as epap-ipap cmH2O (EPAP-IPAP)."""
+        result = cli_runner.invoke(
+            cli, ["rx", "history", "--db", str(db_with_bipap_rx)]
+        )
+
+        assert result.exit_code == 0
+        assert "6.0-18.0 cmH2O (EPAP-IPAP)" in result.output
+
+    def test_history_bilevel_shows_ps_not_epr(self, cli_runner, db_with_bipap_rx):
+        """BiPAP Auto period shows PS segment, not EPR."""
+        result = cli_runner.invoke(
+            cli, ["rx", "history", "--db", str(db_with_bipap_rx)]
+        )
+
+        assert result.exit_code == 0
+        # The BiPAP Auto period must show PS
+        assert "PS: 4.0" in result.output
+        # And must NOT show EPR for the bilevel period
+        lines = result.output.splitlines()
+        bipap_lines = [l for l in lines if "6.0-18.0" in l]
+        assert bipap_lines, "Expected a BiPAP period line with EPAP-IPAP pressure"
+        assert all("EPR:" not in l for l in bipap_lines)
+
+
+class TestRxCurrentCommand:
+    """Test rx current command — EPR vs PS vs omitted segment."""
+
+    def test_current_apap_shows_epr_when_present(self, cli_runner, db_with_apap_rx):
+        """APAP current period shows EPR key/value when both epr keys are present."""
+        result = cli_runner.invoke(cli, ["rx", "current", "--db", str(db_with_apap_rx)])
+
+        assert result.exit_code == 0
+        assert "EPR:" in result.output
+
+    def test_current_bilevel_shows_ps_no_epr(self, cli_runner, db_with_bipap_rx):
+        """BiPAP Auto current period shows PS, not EPR."""
+        result = cli_runner.invoke(
+            cli, ["rx", "current", "--db", str(db_with_bipap_rx)]
+        )
+
+        assert result.exit_code == 0
+        assert "PS:" in result.output
+        assert "EPR:" not in result.output
+
+
+class TestRxCompareCommand:
+    """Test rx compare command — bilevel pressure fits in the pressure column."""
+
+    def test_compare_bilevel_pressure_in_table(self, cli_runner, db_with_bipap_rx):
+        """BiPAP Auto period shows short epap-ipap form in the comparison table."""
+        result = cli_runner.invoke(
+            cli, ["rx", "compare", "--db", str(db_with_bipap_rx)]
+        )
+
+        assert result.exit_code == 0
+        # Short form for bilevel: "<epap>-<ipap>" without units
+        assert "6.0-18.0" in result.output
