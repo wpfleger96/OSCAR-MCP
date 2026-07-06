@@ -36,6 +36,7 @@ __all__ = [
     "RxComparisonResponse",
     "RxSettingChange",
     "RxChangesResponse",
+    "RxAllResponse",
     # Import schemas
     "ImportSource",
     "ImportSourceResult",
@@ -511,6 +512,16 @@ class RxChangesResponse(BaseModel):
     """All settings changes across all devices, sorted by (date, device_id, key)."""
 
     changes: list[RxSettingChange]
+
+
+class RxAllResponse(BaseModel):
+    """Combined RX data derived from a single database query."""
+
+    history: list[RxPeriodResponse]
+    current: RxPeriodResponse | None = None
+    best_index: int | None = None
+    worst_index: int | None = None
+    changes: RxChangesResponse
 
 
 class ImportSource(BaseModel):

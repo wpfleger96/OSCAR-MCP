@@ -344,6 +344,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/rx/all': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Rx All */
+        get: operations['get_rx_all_api_v1_rx_all_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/rx/changes': {
         parameters: {
             query?: never
@@ -1882,6 +1899,20 @@ export interface components {
             total_rows_deleted: number
         }
         /**
+         * RxAllResponse
+         * @description Combined RX data derived from a single database query.
+         */
+        RxAllResponse: {
+            /** Best Index */
+            best_index?: number | null
+            changes: components['schemas']['RxChangesResponse']
+            current?: components['schemas']['RxPeriodResponse'] | null
+            /** History */
+            history: components['schemas']['RxPeriodResponse'][]
+            /** Worst Index */
+            worst_index?: number | null
+        }
+        /**
          * RxChangesResponse
          * @description All settings changes across all devices, sorted by (date, device_id, key).
          */
@@ -3058,6 +3089,37 @@ export interface operations {
                 }
                 content: {
                     'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_rx_all_api_v1_rx_all_get: {
+        parameters: {
+            query?: {
+                min_days?: number
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['RxAllResponse']
                 }
             }
             /** @description Validation Error */
