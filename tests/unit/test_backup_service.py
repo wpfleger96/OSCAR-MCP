@@ -290,6 +290,92 @@ class TestResmedBackupRawData:
         assert str_backup.is_dir()
         snapshots = list(str_backup.glob("STR-*.edf"))
         assert len(snapshots) >= 1
+        # The literal "STR-unknown.edf" must never appear; unparseable files get a hash suffix.
+        assert not any(s.name == "STR-unknown.edf" for s in snapshots)
+
+    def test_two_distinct_unparseable_strs_produce_two_snapshots(
+        self, fake_sd: Path, tmp_path: Path
+    ) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        parser = ResmedEDFParser()
+        dest = tmp_path / "backup"
+
+        # First backup: source is b"\x00" * 256 (unparseable header), no dest yet → no snapshot.
+        parser.backup_raw_data(fake_sd, dest)
+
+        # Replace source with distinct unparseable content and back up; archives the null-byte dest.
+        (fake_sd / "STR.edf").write_bytes(b"\xff" * 256)
+        parser.backup_raw_data(fake_sd, dest)
+
+        # Replace source again with yet another distinct unparseable file; archives the ff-byte dest.
+        (fake_sd / "STR.edf").write_bytes(b"\xee" * 256)
+        parser.backup_raw_data(fake_sd, dest)
+
+        str_backup = dest / "STR_Backup"
+        snapshots = list(str_backup.glob("STR-unknown-*.edf"))
+        assert len(snapshots) == 2
+        # Each snapshot must have a unique name (different hash suffixes).
+        names = {s.name for s in snapshots}
+        assert len(names) == 2
+
+    def test_same_unparseable_str_reimport_idempotent(
+        self, fake_sd: Path, tmp_path: Path
+    ) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        parser = ResmedEDFParser()
+        dest = tmp_path / "backup"
+
+        # Use a fixed unparseable content for all three backups.
+        unparseable = b"\xff" * 256
+        (fake_sd / "STR.edf").write_bytes(unparseable)
+
+        # First backup: dest doesn't exist → just copies, no snapshot.
+        parser.backup_raw_data(fake_sd, dest)
+
+        # Second backup: dest (ff bytes) exists → snapshot it under STR-unknown-<hash>.edf.
+        parser.backup_raw_data(fake_sd, dest)
+
+        # Third backup: same content → snapshot name already exists → skipped.
+        parser.backup_raw_data(fake_sd, dest)
+
+        str_backup = dest / "STR_Backup"
+        snapshots = list(str_backup.glob("STR-unknown-*.edf"))
+        assert len(snapshots) == 1
+
+    def test_valid_header_still_yields_dated_snapshot_name(
+        self, tmp_path: Path
+    ) -> None:
+        from snore.parsers.resmed_edf import ResmedEDFParser
+
+        parser = ResmedEDFParser()
+        sd = tmp_path / "sd"
+        sd.mkdir()
+        (sd / "Identification.json").write_text('{"serial": "DEF456"}')
+
+        # Build a minimal 256-byte EDF header with parseable date/time fields.
+        # Offsets 168-176: dd.mm.yy  → 15.03.24  (March 15, 2024)
+        # Offsets 176-184: hh.mm.ss  → 14.30.00  (14:30:00)
+        header = bytearray(256)
+        header[168:176] = b"15.03.24"
+        header[176:184] = b"14.30.00"
+        (sd / "STR.edf").write_bytes(bytes(header))
+
+        dest = tmp_path / "backup"
+        # First backup: no dest → just copies, no snapshot yet.
+        parser.backup_raw_data(sd, dest)
+
+        # Second backup with a different source triggers a snapshot of the valid-header dest.
+        altered = bytearray(header)
+        altered[0] = 0xFF
+        (sd / "STR.edf").write_bytes(bytes(altered))
+        parser.backup_raw_data(sd, dest)
+
+        str_backup = dest / "STR_Backup"
+        snapshots = list(str_backup.glob("STR-*.edf"))
+        assert len(snapshots) == 1
+        assert snapshots[0].name == "STR-20240315-143000.edf"
 
 
 class TestResmedGetRawFileManifest:
