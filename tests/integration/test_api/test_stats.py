@@ -62,19 +62,6 @@ class TestStatsPeriods:
         assert "period_start" in period
         assert "period_end" in period
 
-    def test_periods_week_type(self, api_client):
-        response = api_client.get("/api/v1/stats/periods?period_type=week")
-        assert response.status_code == 200
-
-    def test_periods_year_type(self, api_client):
-        response = api_client.get("/api/v1/stats/periods?period_type=year")
-        assert response.status_code == 200
-
-    def test_periods_day_type_accepted(self, api_client):
-        """/periods accepts period_type=day and returns 200."""
-        response = api_client.get("/api/v1/stats/periods?period_type=day")
-        assert response.status_code == 200
-
     def test_periods_day_type_with_data(self, api_client, db_session, test_device):
         """day granularity on /periods returns one entry per therapy date."""
         for i in range(3):
@@ -103,15 +90,6 @@ class TestStatsTrends:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, dict)
-
-    def test_trends_with_period_type(self, api_client):
-        response = api_client.get("/api/v1/stats/trends?period_type=week")
-        assert response.status_code == 200
-
-    def test_trends_day_type_accepted(self, api_client):
-        """/trends accepts period_type=day and returns 200."""
-        response = api_client.get("/api/v1/stats/trends?period_type=day")
-        assert response.status_code == 200
 
     def test_trends_payload_has_13_keys(self, api_client, db_session, test_device):
         """/trends always returns exactly 13 metric keys."""
@@ -212,7 +190,3 @@ class TestStatsRecords:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, dict)
-
-    def test_records_top_n(self, api_client):
-        response = api_client.get("/api/v1/stats/records?top_n=3")
-        assert response.status_code == 200

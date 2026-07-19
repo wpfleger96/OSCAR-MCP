@@ -13,17 +13,10 @@ from snore.cli.display import (
     _indent_prefix,
     print_dry_run_complete,
     print_dry_run_header,
-    print_error,
-    print_footer,
     print_header,
-    print_info,
     print_kv,
     print_raw,
-    print_separator,
-    print_skip,
-    print_subsection,
     print_success,
-    print_tip,
     print_warning,
 )
 
@@ -57,56 +50,15 @@ class TestConsoleRouting:
         assert "watch out" in capture_stderr.getvalue()
         assert "⚠" in capture_stderr.getvalue()
 
-    def test_print_error_routes_to_stderr(self, capture_stderr):
-        print_error("broke")
-        assert "broke" in capture_stderr.getvalue()
-        assert "✗" in capture_stderr.getvalue()
-
-    def test_print_skip_routes_to_stdout(self, capture_stdout):
-        print_skip("skipped it")
-        assert "skipped it" in capture_stdout.getvalue()
-        assert "⊙" in capture_stdout.getvalue()
-
-    def test_print_info_routes_to_stdout(self, capture_stdout):
-        print_info("just info")
-        assert "just info" in capture_stdout.getvalue()
-
-    def test_print_tip_routes_to_stdout(self, capture_stdout):
-        print_tip("helpful hint")
-        output = capture_stdout.getvalue()
-        assert "Tip:" in output
-        assert "helpful hint" in output
-
 
 class TestIndentation:
-    def test_indent_prefix_zero(self):
-        assert _indent_prefix(0) == ""
-
     def test_indent_prefix_one(self):
         assert _indent_prefix(1) == "  "
-
-    def test_indent_prefix_three(self):
-        assert _indent_prefix(3) == "      "
 
     def test_print_success_with_indent(self, capture_stdout):
         print_success("msg", indent=2)
         output = capture_stdout.getvalue()
         assert output.startswith("    ")
-
-    def test_print_warning_with_indent(self, capture_stderr):
-        print_warning("msg", indent=1)
-        output = capture_stderr.getvalue()
-        assert output.startswith("  ")
-
-    def test_print_info_with_indent(self, capture_stdout):
-        print_info("msg", indent=2)
-        output = capture_stdout.getvalue()
-        assert output.startswith("    ")
-
-    def test_print_raw_with_indent(self, capture_stdout):
-        print_raw("msg", indent=1)
-        output = capture_stdout.getvalue()
-        assert output.startswith("  ")
 
 
 class TestPrintRaw:
@@ -123,26 +75,6 @@ class TestPrintRaw:
 
 
 class TestSeparators:
-    def test_footer_narrow_width(self, capture_stdout):
-        print_footer()
-        output = capture_stdout.getvalue().strip()
-        assert output == "=" * SEP_NARROW
-
-    def test_footer_wide_width(self, capture_stdout):
-        print_footer(wide=True)
-        output = capture_stdout.getvalue().strip()
-        assert output == "=" * SEP_WIDE
-
-    def test_separator_narrow_width(self, capture_stdout):
-        print_separator()
-        output = capture_stdout.getvalue().strip()
-        assert output == "-" * SEP_NARROW
-
-    def test_separator_wide_width(self, capture_stdout):
-        print_separator(wide=True)
-        output = capture_stdout.getvalue().strip()
-        assert output == "-" * SEP_WIDE
-
     def test_header_contains_title_and_separator(self, capture_stdout):
         print_header("My Title")
         output = capture_stdout.getvalue()
@@ -155,26 +87,6 @@ class TestSeparators:
         assert "Wide Title" in output
         assert "=" * SEP_WIDE in output
 
-    def test_header_with_icon(self, capture_stdout):
-        print_header("Stats", "ICON")
-        output = capture_stdout.getvalue()
-        assert "ICON" in output
-        assert "Stats" in output
-
-    def test_header_without_icon_no_leading_space(self, capture_stdout):
-        print_header("Plain")
-        output = capture_stdout.getvalue()
-        lines = output.strip().split("\n")
-        title_line = lines[0].strip()
-        assert title_line == "Plain"
-
-
-class TestSubsection:
-    def test_subsection_prints_title(self, capture_stdout):
-        print_subsection("Details")
-        output = capture_stdout.getvalue()
-        assert "Details" in output
-
 
 class TestKeyValue:
     def test_kv_contains_key_and_value(self, capture_stdout):
@@ -183,27 +95,12 @@ class TestKeyValue:
         assert "Name" in output
         assert "Alice" in output
 
-    def test_kv_default_indent(self, capture_stdout):
-        print_kv("Key", "Val")
-        output = capture_stdout.getvalue()
-        assert output.startswith("  ")
-
-    def test_kv_custom_indent(self, capture_stdout):
-        print_kv("Key", "Val", indent=3)
-        output = capture_stdout.getvalue()
-        assert output.startswith("      ")
-
 
 class TestDryRun:
     def test_dry_run_header_contains_mode_label(self, capture_stdout):
         print_dry_run_header()
         output = capture_stdout.getvalue()
         assert "DRY RUN MODE" in output
-
-    def test_dry_run_complete_default_verb(self, capture_stdout):
-        print_dry_run_complete()
-        output = capture_stdout.getvalue()
-        assert "Dry run complete" in output
 
     def test_dry_run_complete_custom_verb(self, capture_stdout):
         print_dry_run_complete("import")

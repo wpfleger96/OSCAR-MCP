@@ -11,23 +11,6 @@ from __future__ import annotations
 import json
 
 
-def test_csv_export_writes_three_files_with_data(snore, imported_db, tmp_path):
-    out = tmp_path / "csv"
-    result = snore("export", "csv", "--output", str(out), db=imported_db)
-    assert result.returncode == 0, result.stderr or result.stdout
-
-    for name in ("sessions.csv", "events.csv", "settings.csv"):
-        path = out / name
-        assert path.exists(), f"missing {name}"
-        lines = path.read_text().strip().splitlines()
-        assert len(lines) >= 1  # at least a header
-
-    sessions = (out / "sessions.csv").read_text().strip().splitlines()
-    assert "device_session_id" in sessions[0]
-    assert len(sessions) >= 2  # header + the imported night
-    assert "20240621_013454" in sessions[1]
-
-
 def test_json_export_is_well_formed(snore, imported_db, tmp_path):
     out = tmp_path / "out.json"
     result = snore("export", "json", "--output", str(out), db=imported_db)

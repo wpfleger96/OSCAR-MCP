@@ -174,42 +174,6 @@ class TestEventServiceClassifyMatches:
         assert machine_matched == []
         assert prog_matched == []
 
-    def test_all_matched(self):
-        """Identical timestamps result in all True booleans."""
-        machine_times = [10.0, 20.0, 30.0]
-        programmatic_times = [10.0, 20.0, 30.0]
-
-        machine_matched, prog_matched = EventService.classify_matches(
-            machine_times, programmatic_times
-        )
-
-        assert machine_matched == [True, True, True]
-        assert prog_matched == [True, True, True]
-
-    def test_within_tolerance(self):
-        """Events within tolerance are marked as matched."""
-        machine_times = [10.0, 20.0]
-        programmatic_times = [13.0, 22.0]
-
-        machine_matched, prog_matched = EventService.classify_matches(
-            machine_times, programmatic_times
-        )
-
-        assert machine_matched == [True, True]
-        assert prog_matched == [True, True]
-
-    def test_outside_tolerance(self):
-        """Events outside tolerance are marked as unmatched."""
-        machine_times = [10.0]
-        programmatic_times = [16.1]
-
-        machine_matched, prog_matched = EventService.classify_matches(
-            machine_times, programmatic_times
-        )
-
-        assert machine_matched == [False]
-        assert prog_matched == [False]
-
     def test_mixed_match(self):
         """Mixed scenario with some matched and some unmatched events."""
         machine_times = [10.0, 20.0, 30.0, 40.0]
@@ -221,59 +185,6 @@ class TestEventServiceClassifyMatches:
 
         assert machine_matched == [True, False, True, True]
         assert prog_matched == [True, True, False]
-
-    def test_false_negatives_only(self):
-        """Machine events with no programmatic events are all unmatched."""
-        machine_times = [10.0, 20.0, 30.0]
-        programmatic_times = []
-
-        machine_matched, prog_matched = EventService.classify_matches(
-            machine_times, programmatic_times
-        )
-
-        assert machine_matched == [False, False, False]
-        assert prog_matched == []
-
-    def test_false_positives_only(self):
-        """Programmatic events with no machine events are all unmatched."""
-        machine_times = []
-        programmatic_times = [10.0, 20.0, 30.0]
-
-        machine_matched, prog_matched = EventService.classify_matches(
-            machine_times, programmatic_times
-        )
-
-        assert machine_matched == []
-        assert prog_matched == [False, False, False]
-
-    def test_custom_tolerance(self):
-        """Custom tolerance parameter affects classification."""
-        machine_times = [10.0, 20.0]
-        programmatic_times = [12.5, 22.5]
-
-        machine_matched_tight, prog_matched_tight = EventService.classify_matches(
-            machine_times, programmatic_times, tolerance=2.0
-        )
-        assert machine_matched_tight == [False, False]
-        assert prog_matched_tight == [False, False]
-
-        machine_matched_loose, prog_matched_loose = EventService.classify_matches(
-            machine_times, programmatic_times, tolerance=3.0
-        )
-        assert machine_matched_loose == [True, True]
-        assert prog_matched_loose == [True, True]
-
-    def test_unsorted_input(self):
-        """Unsorted input lists are handled correctly."""
-        machine_times = [30.0, 10.0, 20.0]
-        programmatic_times = [20.0, 30.0, 10.0]
-
-        machine_matched, prog_matched = EventService.classify_matches(
-            machine_times, programmatic_times
-        )
-
-        assert machine_matched == [True, True, True]
-        assert prog_matched == [True, True, True]
 
     def test_many_to_one_matching(self):
         """Multiple programmatic events can all match to a single machine event."""

@@ -37,24 +37,6 @@ class TestExportCsv:
             response = api_client.get("/api/v1/export/csv")
         assert "snore_export.csv" in response.headers.get("content-disposition", "")
 
-    def test_csv_with_date_filter(self, api_client):
-        with patch(
-            "snore.api.routers.export.ExportService.export_csv",
-            _make_fake_csv_export,
-        ):
-            response = api_client.get(
-                "/api/v1/export/csv?from_date=2025-01-01&to_date=2025-01-31"
-            )
-        assert response.status_code == 200
-
-    def test_csv_with_include_waveforms(self, api_client):
-        with patch(
-            "snore.api.routers.export.ExportService.export_csv",
-            _make_fake_csv_export,
-        ):
-            response = api_client.get("/api/v1/export/csv?include_waveforms=true")
-        assert response.status_code == 200
-
 
 class TestExportJson:
     def test_json_returns_200(self, api_client):

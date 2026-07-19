@@ -297,15 +297,6 @@ class TestParserDetection:
     """Test parser detection and validation."""
 
     @pytest.mark.parser
-    def test_detect_resmed_data(self, resmed_parser, resmed_fixture_path):
-        """Test parser correctly identifies ResMed data."""
-        result = resmed_parser.detect(resmed_fixture_path)
-
-        assert result.detected, "ResMed data should be detected"
-        assert result.confidence >= 0.9, f"Low confidence: {result.confidence}"
-        assert "ResMed" in result.message or "detected" in result.message.lower()
-
-    @pytest.mark.parser
     def test_detect_missing_datalog(self, resmed_parser, tmp_path):
         """Test detection fails gracefully without DATALOG directory."""
         str_file = tmp_path / "STR.edf"

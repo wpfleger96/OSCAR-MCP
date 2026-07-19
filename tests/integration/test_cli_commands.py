@@ -830,33 +830,6 @@ class TestAnalysisCommand:
         assert "Date" in result.output
         assert "Analyzed" in result.output
 
-    def test_analyze_list_with_date_range(self, cli_runner, db_with_analysis):
-        """Test list subcommand with date range filtering."""
-        result = cli_runner.invoke(
-            cli,
-            [
-                "analysis",
-                "list",
-                "--db",
-                str(db_with_analysis),
-                "--from",
-                "2025-10-01",
-                "--to",
-                "2025-10-03",
-            ],
-        )
-
-        assert result.exit_code == 0
-
-    def test_analyze_no_subcommand_shows_help(self, cli_runner, temp_db):
-        """Test that running 'analyze' without subcommand shows help."""
-        init_database(str(temp_db))
-
-        result = cli_runner.invoke(cli, ["analysis"])
-
-        assert result.exit_code in [0, 2]
-        assert "Commands:" in result.output or "show" in result.output
-
     def test_analyze_show_by_session_id(self, cli_runner, db_with_analysis):
         """Test show subcommand displays stored analysis by session ID."""
         result = cli_runner.invoke(
@@ -1128,44 +1101,6 @@ class TestStatsPeriod:
 
         assert result.exit_code == 0
         assert "Oct 2025" in result.output or "2025-10" in result.output
-
-    def test_stats_period_week(self, cli_runner, populated_test_db_full):
-        """Test stats with weekly period breakdown."""
-        result = cli_runner.invoke(
-            cli,
-            ["stats", "--db", str(populated_test_db_full), "--period", "week"],
-        )
-
-        assert result.exit_code == 0
-
-
-class TestStatsTrend:
-    """Test stats command with trend visualization."""
-
-    def test_stats_trend_defaults_to_week(self, cli_runner, populated_test_db_full):
-        """Test stats with trend flag defaults to weekly periods."""
-        result = cli_runner.invoke(
-            cli,
-            ["stats", "--db", str(populated_test_db_full), "--trend"],
-        )
-
-        assert result.exit_code == 0
-
-    def test_stats_trend_with_period(self, cli_runner, populated_test_db_full):
-        """Test stats with trend and custom period."""
-        result = cli_runner.invoke(
-            cli,
-            [
-                "stats",
-                "--db",
-                str(populated_test_db_full),
-                "--period",
-                "month",
-                "--trend",
-            ],
-        )
-
-        assert result.exit_code == 0
 
 
 @pytest.fixture

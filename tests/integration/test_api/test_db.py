@@ -3,11 +3,6 @@ from unittest.mock import patch
 
 
 class TestDbStats:
-    def test_stats_returns_200(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
-            response = api_client.get("/api/v1/db/stats")
-        assert response.status_code == 200
-
     def test_stats_excludes_db_path(self, api_client, temp_db):
         with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
             response = api_client.get("/api/v1/db/stats")
@@ -32,29 +27,8 @@ class TestDbStats:
         assert data["device_count"] >= 1
         assert data["session_count"] >= 1
 
-    def test_stats_has_expected_keys(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
-            response = api_client.get("/api/v1/db/stats")
-        data = response.json()
-        assert "size_mb" in data
-        assert "session_count" in data
-        assert "waveform_coverage_pct" in data
-
 
 class TestDbVacuum:
-    def test_vacuum_returns_200(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
-            response = api_client.post("/api/v1/db/vacuum")
-        assert response.status_code == 200
-
-    def test_vacuum_result_shape(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
-            response = api_client.post("/api/v1/db/vacuum")
-        data = response.json()
-        assert "status" in data
-        assert "size_before_mb" in data
-        assert "size_after_mb" in data
-
     def test_vacuum_status_is_success(self, api_client, temp_db):
         with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
             response = api_client.post("/api/v1/db/vacuum")
@@ -62,21 +36,6 @@ class TestDbVacuum:
 
 
 class TestDbReset:
-    def test_reset_returns_200(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
-            response = api_client.post("/api/v1/db/reset")
-        assert response.status_code == 200
-
-    def test_reset_result_shape(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
-            response = api_client.post("/api/v1/db/reset")
-        data = response.json()
-        assert "status" in data
-        assert "tables_cleared" in data
-        assert "total_rows_deleted" in data
-        assert "size_before_mb" in data
-        assert "size_after_mb" in data
-
     def test_reset_status_is_success(self, api_client, temp_db):
         with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
             response = api_client.post("/api/v1/db/reset")

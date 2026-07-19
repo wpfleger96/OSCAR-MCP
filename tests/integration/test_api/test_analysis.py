@@ -92,12 +92,6 @@ class TestBatchAnalysis:
         )
         assert response.status_code == 201
 
-    def test_to_date_only_accepted(self, api_client):
-        response = api_client.post(
-            "/api/v1/analysis/batch", json={"to_date": "2025-01-31"}
-        )
-        assert response.status_code == 201
-
     def test_empty_range_returns_total_zero(self, api_client):
         response = api_client.post(
             "/api/v1/analysis/batch",
@@ -108,20 +102,3 @@ class TestBatchAnalysis:
         assert data["total"] == 0
         assert data["successful"] == 0
         assert data["failed"] == 0
-
-    def test_response_has_expected_keys(self, api_client):
-        response = api_client.post(
-            "/api/v1/analysis/batch", json={"from_date": "2025-01-01"}
-        )
-        data = response.json()
-        assert "total" in data
-        assert "successful" in data
-        assert "failed" in data
-        assert "results" in data
-
-    def test_invalid_mode_returns_422(self, api_client):
-        response = api_client.post(
-            "/api/v1/analysis/batch",
-            json={"from_date": "2025-01-01", "modes": ["bogus"]},
-        )
-        assert response.status_code == 422

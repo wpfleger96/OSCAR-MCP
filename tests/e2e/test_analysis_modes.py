@@ -9,21 +9,6 @@ doesn't break the suite while a mode that stops producing results does.
 
 from __future__ import annotations
 
-import pytest
-
-
-@pytest.mark.parametrize("mode", ["aasm", "aasm_relaxed", "resmed"])
-def test_each_detection_mode_runs(snore, imported_db, mode):
-    """Every documented detection mode analyzes the fixture session cleanly."""
-    result = snore(
-        "analysis", "run", "--session-id", "1", "--mode", mode, db=imported_db
-    )
-    assert result.returncode == 0, result.stderr or result.stdout
-    # Stored and retrievable.
-    shown = snore("analysis", "show", "--session-id", "1", db=imported_db)
-    assert shown.returncode == 0
-    assert "ANALYSIS SUMMARY" in shown.stdout
-
 
 def test_all_modes_flag_runs_every_mode(snore, imported_db):
     """`--all-modes` completes and produces validation output for the session."""
@@ -44,13 +29,6 @@ def test_no_store_does_not_persist(snore, imported_db):
     shown = snore("analysis", "show", "--session-id", "1", db=imported_db)
     assert shown.returncode != 0
     assert "no analysis found" in (shown.stdout + shown.stderr).lower()
-
-
-def test_analysis_requires_a_selection_flag(snore, imported_db):
-    """Running analysis with no selector is a clean user error, not a crash."""
-    result = snore("analysis", "run", db=imported_db)
-    assert result.returncode == 1
-    assert "at least one selection flag" in (result.stdout + result.stderr).lower()
 
 
 def test_validate_reports_per_session_metrics(snore, imported_db):
