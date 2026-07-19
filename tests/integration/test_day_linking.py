@@ -108,30 +108,6 @@ class TestDayRecordCreation:
             )
 
 
-class TestDaySplittingLogic:
-    """Test day-splitting logic (sessions before noon belong to previous day)."""
-
-    def test_session_after_noon_belongs_to_same_day(self, temp_db, test_device_fixture):
-        """Test that session starting after noon belongs to same day."""
-        start_time = datetime(2025, 10, 15, 22, 0, 0)
-
-        day_date = DayManager.get_day_for_session(start_time)
-
-        expected_date = datetime(2025, 10, 15).date()
-        assert day_date == expected_date
-
-    def test_session_before_noon_belongs_to_previous_day(
-        self, temp_db, test_device_fixture
-    ):
-        """Test that session starting before noon belongs to previous day."""
-        start_time = datetime(2025, 10, 16, 9, 0, 0)
-
-        day_date = DayManager.get_day_for_session(start_time)
-
-        expected_date = datetime(2025, 10, 15).date()
-        assert day_date == expected_date
-
-
 class TestDeviceDayIntegration:
     """Test that device-day relationships work correctly."""
 

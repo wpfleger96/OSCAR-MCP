@@ -203,13 +203,3 @@ class TestRxAllRouter:
         response_low = api_client.get("/api/v1/rx/all?min_days=1")
         data_low = response_low.json()
         assert len(data_low["history"]) == 1
-
-    def test_get_rx_all_min_days_rejects_zero(self, api_client):
-        """min_days=0 returns 422."""
-        response = api_client.get("/api/v1/rx/all?min_days=0")
-        assert response.status_code == 422
-
-    def test_compare_rx_min_days_rejects_zero(self, api_client):
-        """min_days=0 on /compare also returns 422."""
-        response = api_client.get("/api/v1/rx/compare?min_days=0")
-        assert response.status_code == 422

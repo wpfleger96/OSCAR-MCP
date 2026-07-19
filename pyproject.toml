@@ -47,7 +47,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --cov=snore --cov-report=term-missing"
+addopts = "-v -n auto --cov=snore --cov-report=term-missing"
 markers = [
     "unit: marks tests as unit tests (run in parallel)",
     "integration: marks tests as integration tests (run sequentially)",

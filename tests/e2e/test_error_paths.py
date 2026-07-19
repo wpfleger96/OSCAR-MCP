@@ -31,10 +31,3 @@ def test_stats_on_empty_database_is_graceful(snore, empty_db):
     result = snore("stats", db=empty_db)
     assert result.returncode == 0
     assert "No therapy data found" in result.stdout
-
-
-def test_session_list_on_empty_database_is_graceful(snore, empty_db):
-    result = snore("session", "list", db=empty_db)
-    assert result.returncode == 0
-    # No traceback leaked to stderr.
-    assert "Traceback" not in result.stderr

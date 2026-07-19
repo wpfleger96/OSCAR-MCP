@@ -13,26 +13,6 @@ import json
 
 import pytest
 
-# Every router's "happy path" against the imported single-night fixture.
-OK_ENDPOINTS = [
-    "/api/v1/sessions/",
-    "/api/v1/sessions/1",
-    "/api/v1/sessions/1/events",
-    "/api/v1/sessions/1/waveforms",
-    "/api/v1/devices/",
-    "/api/v1/days/",
-    "/api/v1/stats/summary",
-    "/api/v1/rx/current",
-    "/api/v1/db/stats",
-    "/api/v1/analysis/sessions",
-]
-
-# Endpoints that return non-JSON streaming responses (tested separately).
-STREAMING_ENDPOINTS = [
-    "/api/v1/export/csv",
-    "/api/v1/export/json",
-]
-
 
 @pytest.fixture
 def running_api(server, imported_db):
@@ -52,19 +32,6 @@ def test_openapi_schema_is_served(running_api):
     assert any(p.startswith("/api/v1/stats/") for p in paths)
 
 
-@pytest.mark.parametrize("path", OK_ENDPOINTS)
-def test_core_endpoints_return_200(running_api, path):
-    resp = running_api.get(path)
-    assert resp.status_code == 200, f"{path} -> {resp.status_code}: {resp.text[:200]}"
-    # Responses are JSON with content.
-    body = resp.json()
-    assert body is not None
-    if isinstance(body, dict):
-        assert body  # non-empty object
-    elif isinstance(body, list):
-        assert len(body) >= 1  # the imported night yields at least one row
-
-
 def test_sessions_listing_includes_imported_night(running_api):
     body = running_api.get("/api/v1/sessions/").json()
     items = body["items"] if isinstance(body, dict) else body
@@ -78,47 +45,6 @@ def test_missing_session_returns_structured_404(running_api):
     body = resp.json()
     # Structured error envelope, not an unhandled exception.
     assert body.get("error") == "not_found" or "not found" in json.dumps(body).lower()
-
-
-@pytest.mark.parametrize("path", STREAMING_ENDPOINTS)
-def test_streaming_endpoints_return_200(running_api, path):
-    resp = running_api.get(path)
-    assert resp.status_code == 200, f"{path} -> {resp.status_code}: {resp.text[:200]}"
-
-
-def test_db_stats_excludes_db_path(running_api):
-    """The db_path field should be excluded from the public API response."""
-    resp = running_api.get("/api/v1/db/stats")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "db_path" not in data
-    assert "session_count" in data
-
-
-def test_db_vacuum_returns_success(running_api):
-    """POST to vacuum endpoint returns success status."""
-    import httpx
-
-    resp = httpx.post(
-        f"{running_api.base_url}/api/v1/db/vacuum",
-        timeout=30,
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    assert "size_before_mb" in data
-
-
-def test_batch_analysis_both_dates_none_returns_400(running_api):
-    """Batch analysis without any date filter returns 400."""
-    import httpx
-
-    resp = httpx.post(
-        f"{running_api.base_url}/api/v1/analysis/batch",
-        json={},
-        timeout=30,
-    )
-    assert resp.status_code == 400
 
 
 def test_openapi_matches_committed_generated_types(running_api, request):

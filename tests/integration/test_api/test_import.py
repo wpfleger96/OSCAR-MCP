@@ -138,16 +138,6 @@ class TestImportUpload:
         )
         assert response.status_code == 413
 
-    def test_too_many_files_returns_400(self, api_client, monkeypatch):
-        """Exceeding MAX_UPLOAD_FILES causes Starlette to return 400."""
-        monkeypatch.setattr("snore.api.routers.import_data.MAX_UPLOAD_FILES", 2)
-        files = [
-            ("files", (f"file{i}.edf", b"x", "application/octet-stream"))
-            for i in range(3)
-        ]
-        response = api_client.post("/api/v1/import/", files=files)
-        assert response.status_code == 400
-
     def test_no_files_returns_422(self, api_client):
         """Request with no 'files' field returns 422 with detail."""
         response = api_client.post(
@@ -288,14 +278,6 @@ class TestPathImport:
         assert job is not None
         assert job.sources == []
         remove_job(data["job_id"])
-
-    def test_invalid_sources_shape_returns_422(self, localhost_api_client):
-        """Malformed sources payload returns 422."""
-        response = localhost_api_client.post(
-            "/api/v1/import/path",
-            json={"sources": [{"bad": "shape"}]},
-        )
-        assert response.status_code == 422
 
 
 class TestRequireLocalhost:

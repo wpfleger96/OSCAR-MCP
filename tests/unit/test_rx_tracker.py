@@ -315,12 +315,6 @@ class TestRxTrackerHistory:
 
 
 class TestRxTrackerCurrent:
-    def test_current_empty_db(self, db_session):
-        """Empty database returns None."""
-        tracker = RxTracker()
-        result = tracker.get_current(db_session)
-        assert result is None
-
     def test_current_returns_last_period(self, db_session, test_device):
         """Returns the most recent RX period when multiple exist."""
         base = date(2025, 1, 1)

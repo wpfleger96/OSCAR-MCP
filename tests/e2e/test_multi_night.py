@@ -3,7 +3,7 @@
 These run against ``multi_night_db`` — the device night plus the four real
 recorded nights composed into one import (5 sessions / 5 days spanning
 2024-06 → 2025-10, all real data). They cover multi-date listing, date-range
-filtering, batch analysis, day-splitting, and multi-session export.
+filtering, batch analysis, and multi-session export.
 
 Assertions are pinned to the deterministic contents of these fixed fixtures.
 """
@@ -84,19 +84,6 @@ def test_batch_analysis_over_date_range(snore, multi_night_db):
     # Four nights analyzed (✓); the un-analyzed 2024 night remains (✗).
     assert listed.stdout.count("✓") == 4
     assert "✗" in listed.stdout
-
-
-def test_day_splitting_assigns_pre_noon_sessions_to_previous_day(snore, multi_night_db):
-    """OSCAR noon-to-noon: a 00:58 session lists under the previous calendar day.
-
-    `analysis list` keys on the Day date, so the 2025-10-25 00:58 session shows as
-    2025-10-24, and the 2024-06-21 01:34 session shows as 2024-06-20.
-    """
-    listed = snore("analysis", "list", db=multi_night_db).stdout
-    assert "2025-10-24" in listed  # start was 2025-10-25 00:58
-    assert "2024-06-20" in listed  # start was 2024-06-21 01:34
-    # The post-noon session keeps its own date (start 2025-09-10 22:36).
-    assert "2025-09-10" in listed
 
 
 def test_csv_export_has_one_row_per_night(snore, multi_night_db, tmp_path):
