@@ -244,7 +244,7 @@ DetectionModeConfig(
     name="mode_name",
     baseline_method=BaselineMethod.TIME | BaselineMethod.BREATH,
     baseline_window=120.0,  # seconds or breath count
-    apnea_threshold=0.90,   # 90% flow reduction
+    apnea_threshold=0.90,  # 90% flow reduction
     apnea_validation_threshold=0.90,
     hypopnea_min_threshold=0.30,
     hypopnea_max_threshold=0.89,
@@ -253,7 +253,7 @@ DetectionModeConfig(
     metric="amplitude",
     hypopnea_mode=HypopneaMode.AASM_3PCT | AASM_4PCT | FLOW_ONLY | DISABLED,
     hypopnea_flow_only_fallback=True,  # Fallback if no SpO2 data
-    rera_detection_enabled=True  # Detect RERA-like events
+    rera_detection_enabled=True,  # Detect RERA-like events
 )
 ```
 
