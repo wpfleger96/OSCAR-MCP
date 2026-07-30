@@ -215,7 +215,8 @@ with session_scope() as session:
 In CLI commands, use the combined helper from `cli/decorators.py` instead of
 calling `init_db()` + `session_scope()` manually:
 ```python
-with db_session(db) as session: ...
+with db_session(db) as session:
+    ...
 ```
 
 **Service Layer Pattern:**
@@ -232,8 +233,8 @@ class StatsService:
 **Crossing schema boundaries:** the unified parser models, services schemas, and ORM
 models align by field name — do NOT write field-by-field mappings:
 ```python
-models.Statistics(session_id=sid, **stats.model_dump())      # Pydantic → ORM
-SessionStatistics.model_validate(orm_row)                     # ORM → Pydantic (from_attributes)
+models.Statistics(session_id=sid, **stats.model_dump())  # Pydantic → ORM
+SessionStatistics.model_validate(orm_row)  # ORM → Pydantic (from_attributes)
 ```
 `tests/unit/test_schema_alignment.py` enforces the alignment; if you add a field,
 add it to both sides.

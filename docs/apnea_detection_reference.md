@@ -146,11 +146,9 @@ def detect_flow_reduction(flow, timestamps, baseline):
         reduction = 1.0 - (amplitude / baseline_at_breath)
         reduction = np.clip(reduction, 0, 1)
 
-        reductions.append({
-            'time': breath.mid_time,
-            'reduction': reduction,
-            'amplitude': amplitude
-        })
+        reductions.append(
+            {"time": breath.mid_time, "reduction": reduction, "amplitude": amplitude}
+        )
 
     return reductions
 ```
@@ -166,10 +164,10 @@ def detect_flow_reduction_window(flow, baseline, window_size=10):
 
     reductions = []
     for i in range(len(flow) - window_samples):
-        window = flow[i:i + window_samples]
+        window = flow[i : i + window_samples]
 
         # Method 1: RMS amplitude
-        rms = np.sqrt(np.mean(window ** 2))
+        rms = np.sqrt(np.mean(window**2))
 
         # Method 2: Peak-to-peak
         p2p = np.max(window) - np.min(window)
@@ -211,10 +209,7 @@ def classify_apnea_type(flow_during_event):
 
     # Scoring (empirically derived thresholds) [6][8]
     effort_score = (
-        std_dev * 0.3 +
-        peak_to_peak * 0.3 +
-        roughness * 0.2 +
-        breathing_power * 0.2
+        std_dev * 0.3 + peak_to_peak * 0.3 + roughness * 0.2 + breathing_power * 0.2
     )
 
     if effort_score > 0.15:
@@ -242,7 +237,7 @@ def validate_event_duration(event_mask, timestamps, min_duration=10.0):
     end_indices = np.where(np.diff(np.concatenate([[0], event_mask, [0]])) == -1)[0]
 
     for start, end in zip(start_indices, end_indices):
-        duration = timestamps[end-1] - timestamps[start]
+        duration = timestamps[end - 1] - timestamps[start]
 
         if duration >= min_duration:
             # Check 90% rule
@@ -398,9 +393,9 @@ def validate_detection(detected_events, machine_events, tolerance=5.0):
     precision = true_positives / (true_positives + false_positives)
 
     return {
-        'sensitivity': sensitivity,
-        'precision': precision,
-        'f1_score': 2 * (precision * sensitivity) / (precision + sensitivity)
+        "sensitivity": sensitivity,
+        "precision": precision,
+        "f1_score": 2 * (precision * sensitivity) / (precision + sensitivity),
     }
 ```
 
