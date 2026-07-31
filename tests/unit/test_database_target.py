@@ -144,3 +144,141 @@ class TestDatabaseTargetPrecedenceChain:
         # The resolved URL points to the --db flag value, not the env vars.
         assert "db.db" in canonical_url
         assert "inherited" not in canonical_url
+
+
+class TestDatabaseTargetExactURLAssertions:
+    """Exact URL/path assertions covering all documented edge cases (§2).
+
+    These tests pin the exact make_url/URL.set behaviour to prevent regressions
+    from any future hand-rolled parser creeping back in.
+    """
+
+    # --- SQLite three-slash relative ---
+
+    def test_sqlite_relative_three_slash_location_is_filename_only(self):
+        """sqlite:///rel.db → location is 'rel.db' (not '/rel.db')."""
+        target = DatabaseTarget.from_url("sqlite:///rel.db")
+        assert target.location == "rel.db"
+        assert target.sqlite_path == "rel.db"
+
+    def test_sqlite_relative_three_slash_sync_url_is_three_slash(self):
+        """sqlite:///rel.db resolves to sqlite+pysqlite:///rel.db (not ////rel.db)."""
+        target = DatabaseTarget.from_url("sqlite:///rel.db")
+        url = target.resolve_sync_url()
+        assert url == "sqlite+pysqlite:///rel.db"
+
+    # --- SQLite four-slash absolute ---
+
+    def test_sqlite_absolute_four_slash_location_is_absolute_path(self):
+        """sqlite:////abs/path.db → location is '/abs/path.db'."""
+        target = DatabaseTarget.from_url("sqlite:////abs/path.db")
+        assert target.location == "/abs/path.db"
+        assert target.sqlite_path == "/abs/path.db"
+
+    def test_sqlite_absolute_four_slash_sync_url_is_four_slash(self):
+        """sqlite:////abs/path.db resolves to sqlite+pysqlite:////abs/path.db."""
+        target = DatabaseTarget.from_url("sqlite:////abs/path.db")
+        url = target.resolve_sync_url()
+        assert url == "sqlite+pysqlite:////abs/path.db"
+
+    # --- SQLite nested relative path ---
+
+    def test_sqlite_nested_relative_path_preserved(self):
+        """sqlite:///sub/dir/db.sqlite → location is 'sub/dir/db.sqlite'."""
+        target = DatabaseTarget.from_url("sqlite:///sub/dir/db.sqlite")
+        assert target.location == "sub/dir/db.sqlite"
+        url = target.resolve_sync_url()
+        assert url == "sqlite+pysqlite:///sub/dir/db.sqlite"
+
+    # --- :memory: ---
+
+    def test_sqlite_memory_url_location_is_memory_sentinel(self):
+        """sqlite:///:memory: → location is ':memory:'."""
+        target = DatabaseTarget.from_url("sqlite:///:memory:")
+        assert target.location == ":memory:"
+        assert target.sqlite_path == ":memory:"
+
+    def test_sqlite_memory_sync_url_is_exact(self):
+        """sqlite:///:memory: resolves to sqlite+pysqlite:///:memory:."""
+        target = DatabaseTarget.from_url("sqlite:///:memory:")
+        url = target.resolve_sync_url()
+        assert url == "sqlite+pysqlite:///:memory:"
+
+    # --- Query parameters preserved ---
+
+    def test_sqlite_query_parameters_preserved_in_resolved_url(self):
+        """Query parameters (e.g. ?timeout=5000) survive resolution."""
+        target = DatabaseTarget.from_url("sqlite:///my.db?timeout=5000")
+        url = target.resolve_sync_url()
+        assert "timeout=5000" in url
+
+    # --- Driver-qualified input normalised ---
+
+    def test_sqlite_pysqlite_qualified_relative_resolves_correctly(self):
+        """sqlite+pysqlite:///rel.db resolves to the correct relative path."""
+        target = DatabaseTarget.from_url("sqlite+pysqlite:///rel.db")
+        assert target.dialect == "sqlite"
+        assert target.location == "rel.db"
+        url = target.resolve_sync_url()
+        assert url == "sqlite+pysqlite:///rel.db"
+
+    def test_sqlite_pysqlite_qualified_absolute_resolves_correctly(self):
+        """sqlite+pysqlite:////abs/path.db resolves to the correct absolute path."""
+        target = DatabaseTarget.from_url("sqlite+pysqlite:////abs/path.db")
+        assert target.dialect == "sqlite"
+        assert target.location == "/abs/path.db"
+        url = target.resolve_sync_url()
+        assert url == "sqlite+pysqlite:////abs/path.db"
+
+    # --- Bare path (no scheme) ---
+
+    def test_bare_relative_path_location_equals_input(self):
+        """A bare relative path is treated as sqlite with location == input."""
+        target = DatabaseTarget.from_url("my/data.db")
+        assert target.dialect == "sqlite"
+        assert target.location == "my/data.db"
+
+    def test_bare_absolute_path_location_equals_input(self):
+        """A bare absolute path is treated as sqlite with location == input."""
+        target = DatabaseTarget.from_url("/tmp/test.db")
+        assert target.dialect == "sqlite"
+        assert target.location == "/tmp/test.db"
+
+
+class TestServeDbCollisionScenario:
+    """serve --db scenario: the resolved URL must point to the flag-specified DB.
+
+    The key property: when snore serve exports SNORE_DATABASE_URL to the child
+    process, that URL must open the correct file — not whatever SNORE_DB_PATH
+    or SNORE_DATABASE_URL the child may have inherited.
+    """
+
+    def test_serve_db_flag_resolves_correct_path(self, monkeypatch, tmp_path):
+        """--db /explicit/db.db → resolved URL contains the exact path, not inherited vars."""
+        monkeypatch.setenv("SNORE_DATABASE_URL", "sqlite:///inherited.db")
+        monkeypatch.setenv("SNORE_DB_PATH", "/also/inherited.db")
+
+        explicit_path = str(tmp_path / "serve.db")
+        target = DatabaseTarget.from_env_and_flags(
+            db_flag=explicit_path, warn_ignored=False
+        )
+        canonical_url = target.resolve_sync_url()
+
+        # Exact check: the URL must contain the flag-specified path.
+        assert "serve.db" in canonical_url
+        assert "inherited" not in canonical_url
+        # The URL must be a valid sqlite+pysqlite:/// URL.
+        assert canonical_url.startswith("sqlite+pysqlite://")
+
+    def test_serve_db_flag_sqlite_path_attribute_is_flag_value(
+        self, monkeypatch, tmp_path
+    ):
+        """target.sqlite_path must equal the flag value (not a mangled version)."""
+        monkeypatch.delenv("SNORE_DATABASE_URL", raising=False)
+        monkeypatch.delenv("SNORE_DB_PATH", raising=False)
+
+        explicit_path = str(tmp_path / "exact.db")
+        target = DatabaseTarget.from_env_and_flags(
+            db_flag=explicit_path, warn_ignored=False
+        )
+        assert target.sqlite_path == explicit_path

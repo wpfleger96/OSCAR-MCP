@@ -50,11 +50,17 @@ def test_missing_session_returns_structured_404(running_api):
 def test_openapi_matches_committed_generated_types(running_api, request):
     """Guard against schema drift between the live API and the UI codegen.
 
-    The UI generates `ui/src/types/generated.ts` from the OpenAPI schema. Every
-    `/api/v1/...` path the generated file declares must still be served by the
-    live API — catching a backend change that silently breaks the typed
-    frontend contract. Skips cleanly when the generated file isn't present
-    (e.g. before the UI-codegen PR lands).
+    The UI generates `ui/src/types/generated.ts` from the OpenAPI schema.  Two
+    directions are checked:
+    1. Every ``/api/v1/...`` path the generated file declares must still be
+       served by the live API — catching a backend change that silently breaks
+       the typed frontend contract.
+    2. Every ``/api/v1/...`` path served by the live API must appear in the
+       generated file — catching a new backend route whose types were never
+       regenerated.
+
+    Skips cleanly when the generated file isn't present (e.g. before the
+    UI-codegen PR lands).
     """
     import re
 
@@ -67,11 +73,21 @@ def test_openapi_matches_committed_generated_types(running_api, request):
     live_paths = set(schema["paths"].keys())
 
     # openapi-typescript emits the path templates as quoted object keys.
-    referenced = set(re.findall(r'["\'](/api/v1/[^"\']*)["\']', generated.read_text()))
+    generated_text = generated.read_text()
+    referenced = set(re.findall(r"['\"](?P<p>/api/v1/[^'\"]+)['\"]", generated_text))
     if not referenced:
         pytest.skip("generated types declare no /api/v1 path keys to compare")
 
-    drifted = referenced - live_paths
-    assert not drifted, (
-        f"ui generated types reference paths the live API no longer serves: {sorted(drifted)}"
+    # Direction 1: generated types reference paths that no longer exist.
+    stale = referenced - live_paths
+    assert not stale, (
+        f"ui generated types reference paths the live API no longer serves: {sorted(stale)}"
+    )
+
+    # Direction 2: live API paths not yet in generated types.
+    ungenerated = live_paths - referenced
+    assert not ungenerated, (
+        "live API paths missing from ui generated types "
+        "(regenerate with pnpm generate:types): "
+        f"{sorted(ungenerated)}"
     )

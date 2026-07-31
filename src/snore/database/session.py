@@ -81,16 +81,22 @@ def _register_sqlite_pragmas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
     def set_sqlite_pragmas(dbapi_conn: Any, connection_record: Any) -> None:
         # Step 1: exit implicit transaction so WAL pragma can execute.
+        # Preserve prior autocommit value so we restore exactly what was set.
+        prior_autocommit = dbapi_conn.autocommit
         dbapi_conn.autocommit = True
         cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
-        cursor.execute("PRAGMA temp_store=MEMORY")
-        cursor.close()
-        # Step 2: restore modern transaction control.
-        dbapi_conn.autocommit = False
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
+            cursor.execute("PRAGMA temp_store=MEMORY")
+        finally:
+            cursor.close()
+            # Step 2: restore to prior value (always False in practice, but
+            # wrapping in finally ensures cursor and state are cleaned up even
+            # if a PRAGMA raises).
+            dbapi_conn.autocommit = prior_autocommit
 
 
 def init_database(database_path: str | None = None) -> None:
@@ -153,13 +159,15 @@ def init_database_from_url(database_url: str) -> None:
     Used by ``serve`` after the parent has resolved the canonical URL from the
     ``DatabaseTarget`` precedence chain and exported it as ``SNORE_DATABASE_URL``.
 
-    For SQLite URLs the path component is extracted and used for directory
-    creation and Alembic config.  Non-SQLite URLs (e.g. PostgreSQL) are
-    forwarded once their drivers are installed (hosted milestone).
+    For SQLite URLs the path component is extracted via ``make_url().database``
+    (not slash-counting) and used for directory creation.  Non-SQLite URLs
+    (e.g. PostgreSQL) are forwarded once their drivers are installed.
 
     Args:
         database_url: A fully-formed SQLAlchemy URL string.
     """
+    from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
+
     global _engine, _SessionFactory, _db_path
 
     with _init_lock:
@@ -169,28 +177,27 @@ def init_database_from_url(database_url: str) -> None:
         if not database_url:
             raise ValueError(f"Invalid database URL: {database_url!r}")
 
-        # Extract file path from sqlite:///... URL for directory creation.
-        if database_url.startswith("sqlite"):
-            # sqlite:////abs/path or sqlite:///rel/path
-            raw_path = database_url.split("sqlite+pysqlite://", 1)[-1]
-            if raw_path.startswith("/"):
-                pass  # absolute
-            raw_path = database_url.split("sqlite", 1)[1].split("///", 1)[-1]
-            # Normalise: strip leading slash for relative, keep for absolute.
-            if database_url.count("/") >= 4:
-                # Four or more slashes → absolute path (sqlite:////abs/…)
-                _db_path = "/" + raw_path.lstrip("/")
-            else:
-                _db_path = raw_path
+        parsed = _make_url(database_url)
+        dialect = parsed.get_backend_name()
 
-            db_dir = os.path.dirname(_db_path)
-            if db_dir:
-                try:
-                    os.makedirs(db_dir, exist_ok=True)
-                except PermissionError as e:
-                    raise PermissionError(
-                        f"Cannot create database directory {db_dir}: {e}"
-                    ) from e
+        if dialect == "sqlite":
+            # URL.database is the canonical path component regardless of how
+            # many slashes the URL has:
+            #   sqlite:///rel.db      → "rel.db"     (relative)
+            #   sqlite:////abs/p.db   → "/abs/p.db"  (absolute)
+            #   sqlite:///:memory:    → ":memory:"   (in-memory)
+            db_path_str = parsed.database or ""
+            _db_path = db_path_str if db_path_str != ":memory:" else None
+
+            if _db_path:
+                db_dir = os.path.dirname(_db_path)
+                if db_dir:
+                    try:
+                        os.makedirs(db_dir, exist_ok=True)
+                    except PermissionError as e:
+                        raise PermissionError(
+                            f"Cannot create database directory {db_dir}: {e}"
+                        ) from e
         else:
             _db_path = None  # non-SQLite; no local path
 
@@ -204,7 +211,8 @@ def init_database_from_url(database_url: str) -> None:
             pool_pre_ping=True,
         )
 
-        _register_sqlite_pragmas(_engine)
+        if dialect == "sqlite":
+            _register_sqlite_pragmas(_engine)
 
         _SessionFactory = sessionmaker(bind=_engine)
 

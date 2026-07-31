@@ -537,78 +537,80 @@ class ExportService:
         device_serial: str | None,
     ) -> list[dict[str, Any]]:
         """Query sessions with optional filters, returning dicts with joined data."""
-        from sqlalchemy import text
+        from snore.database import models  # noqa: PLC0415
 
-        where_clauses = ["sessions.enabled = 1"]
-        params: dict[str, Any] = {}
+        # Build the base join: sessions → devices (required) + statistics (optional).
+        stats_alias = models.Statistics
+        stmt = (
+            select(
+                models.Session.id,
+                models.Session.device_session_id,
+                models.Session.start_time,
+                models.Session.end_time,
+                models.Session.duration_seconds,
+                models.Session.therapy_mode,
+                models.Device.serial_number,
+                models.Device.model,
+                models.Device.manufacturer,
+                # Statistics columns — None when no stats row exists.
+                stats_alias.ahi,
+                stats_alias.oai,
+                stats_alias.cai,
+                stats_alias.hi,
+                stats_alias.obstructive_apneas,
+                stats_alias.central_apneas,
+                stats_alias.hypopneas,
+                stats_alias.reras,
+                stats_alias.pressure_mean,
+                stats_alias.pressure_95th,
+                stats_alias.epap_mean,
+                stats_alias.leak_mean,
+                stats_alias.leak_95th,
+                stats_alias.spo2_mean,
+                stats_alias.usage_hours,
+            )
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .outerjoin(stats_alias, models.Session.id == stats_alias.session_id)
+            .where(models.Session.enabled.is_(True))
+            .order_by(models.Session.start_time)
+        )
 
         if device_serial:
-            where_clauses.append("devices.serial_number = :device")
-            params["device"] = device_serial
+            stmt = stmt.where(models.Device.serial_number == device_serial)
         if date_from:
-            where_clauses.append("sessions.start_time >= :from_date")
-            params["from_date"] = datetime(
-                date_from.year, date_from.month, date_from.day
-            ).isoformat()
+            stmt = stmt.where(
+                models.Session.start_time
+                >= datetime(date_from.year, date_from.month, date_from.day)
+            )
         if date_to:
-            where_clauses.append("sessions.start_time <= :to_date")
-            params["to_date"] = datetime(
-                date_to.year, date_to.month, date_to.day, 23, 59, 59
-            ).isoformat()
+            stmt = stmt.where(
+                models.Session.start_time
+                <= datetime(date_to.year, date_to.month, date_to.day, 23, 59, 59)
+            )
 
-        where_sql = " AND ".join(where_clauses)
-
-        query = text(f"""
-            SELECT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                sessions.end_time,
-                sessions.duration_seconds,
-                sessions.therapy_mode,
-                devices.serial_number,
-                devices.model,
-                devices.manufacturer,
-                statistics.ahi, statistics.oai, statistics.cai, statistics.hi,
-                statistics.obstructive_apneas, statistics.central_apneas,
-                statistics.hypopneas, statistics.reras,
-                statistics.pressure_mean, statistics.pressure_95th,
-                statistics.epap_mean,
-                statistics.leak_mean, statistics.leak_95th,
-                statistics.spo2_mean, statistics.usage_hours
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            LEFT JOIN statistics ON sessions.id = statistics.session_id
-            WHERE {where_sql}
-            ORDER BY sessions.start_time ASC
-        """)
-
-        rows = db_session.execute(query, params).fetchall()
+        rows = db_session.execute(stmt).fetchall()
+        stat_keys = [
+            "ahi",
+            "oai",
+            "cai",
+            "hi",
+            "obstructive_apneas",
+            "central_apneas",
+            "hypopneas",
+            "reras",
+            "pressure_mean",
+            "pressure_95th",
+            "epap_mean",
+            "leak_mean",
+            "leak_95th",
+            "spo2_mean",
+            "usage_hours",
+        ]
         results = []
         for row in rows:
             r = dict(row._mapping)
-            for dt_field in ("start_time", "end_time"):
-                if isinstance(r[dt_field], str):
-                    r[dt_field] = datetime.fromisoformat(r[dt_field])
-            stat_keys = [
-                "ahi",
-                "oai",
-                "cai",
-                "hi",
-                "obstructive_apneas",
-                "central_apneas",
-                "hypopneas",
-                "reras",
-                "pressure_mean",
-                "pressure_95th",
-                "epap_mean",
-                "leak_mean",
-                "leak_95th",
-                "spo2_mean",
-                "usage_hours",
-            ]
             r["statistics"] = {k: r.pop(k) for k in stat_keys if r.get(k) is not None}
-            # Clean up None stat keys
+            # Remove any stat keys that were None (not present in statistics dict).
             for k in stat_keys:
                 r.pop(k, None)
             results.append(r)

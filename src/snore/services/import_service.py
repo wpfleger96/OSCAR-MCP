@@ -94,16 +94,25 @@ class ImportService:
         parallel: bool = True,
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> ImportResult:
         """Run the import pipeline for the selected sources.
 
         Backup (optional) → parse → import (or dry-run count). Returns aggregate
         counts and per-source breakdown.
+
+        Args:
+            cancel_predicate: Optional callable that returns True when the caller
+                has requested cancellation.  Checked between sources and at each
+                batch boundary inside ``SessionImporter``.
         """
 
         def emit(msg: str) -> None:
             if progress_callback:
                 progress_callback(msg)
+
+        def is_cancelled() -> bool:
+            return cancel_predicate is not None and cancel_predicate()
 
         source_results: list[ImportSourceResult] = []
         total_imported = 0
@@ -119,6 +128,9 @@ class ImportService:
         parser_map = {p.parser_id: p for p in parser_registry.list_parsers()}
 
         for source in sources:
+            if is_cancelled():
+                break
+
             parser = parser_map.get(source.parser_name)
             if parser is None:
                 logger.warning(
@@ -166,6 +178,9 @@ class ImportService:
                     warnings.append("No device serial — backup skipped")
                     emit("No device serial found — skipping backup")
 
+            if is_cancelled():
+                break
+
             # Parse sessions
             sessions = list(
                 parser.parse_sessions(
@@ -203,6 +218,7 @@ class ImportService:
                 force=force,
                 batch_size=batch_size,
                 progress_callback=progress_callback,
+                cancel_predicate=cancel_predicate,
             )
 
             total_imported += imported

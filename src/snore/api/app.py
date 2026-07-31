@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from snore.api.errors import NotFoundError, not_found_handler, server_error_handler
+from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.middleware import AuthMiddleware, RateLimitMiddleware
 from snore.api.routers import (
     analysis,
@@ -51,7 +52,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         db_path = os.environ.get("SNORE_DB_PATH")
         init_database(db_path)
-    yield
+    try:
+        yield
+    finally:
+        # Cancel all in-flight import jobs and await their threads before the
+        # process exits.  Idempotent — safe to call with no active jobs.
+        _shutdown_import_jobs()
 
 
 def create_app() -> FastAPI:

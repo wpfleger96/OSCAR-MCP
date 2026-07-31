@@ -61,7 +61,10 @@ class DatabaseService:
             or 0
         )
         event_count = (
-            self.db_session.execute(text("SELECT COUNT(*) FROM events")).scalar() or 0
+            self.db_session.execute(
+                select(func.count()).select_from(models.Event)
+            ).scalar()
+            or 0
         )
         waveform_count = (
             self.db_session.execute(
@@ -100,22 +103,22 @@ class DatabaseService:
         )
 
         first_session_raw = self.db_session.execute(
-            text("SELECT MIN(start_time) as first FROM sessions")
+            select(func.min(models.Session.start_time))
         ).scalar()
 
         last_session_raw = self.db_session.execute(
-            text("SELECT MAX(start_time) as last FROM sessions")
+            select(func.max(models.Session.start_time))
         ).scalar()
 
         first_session = None
         last_session = None
-        if first_session_raw:
+        if first_session_raw is not None:
             first_session = (
                 datetime.fromisoformat(first_session_raw)
                 if isinstance(first_session_raw, str)
                 else first_session_raw
             )
-        if last_session_raw:
+        if last_session_raw is not None:
             last_session = (
                 datetime.fromisoformat(last_session_raw)
                 if isinstance(last_session_raw, str)
@@ -158,10 +161,17 @@ class DatabaseService:
     def vacuum(self, db_path: str) -> VacuumResult:
         """Vacuum the database to reclaim space after deletions.
 
+        SQLite-only operation.  Raises ``RuntimeError`` for non-SQLite targets.
         VACUUM requires AUTOCOMMIT on SQLite; it runs on a dedicated connection
         separate from the normal session pool so it cannot affect in-flight
         transactions.
         """
+        if not db_path:
+            raise RuntimeError(
+                "VACUUM is a SQLite-only operation and requires a file-backed database. "
+                "This operation is not available for in-memory or non-SQLite databases."
+            )
+
         size_before = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
         )
@@ -191,10 +201,22 @@ class DatabaseService:
     def reset(self, db_path: str) -> ResetResult:
         """Delete all rows from all data tables and vacuum to reclaim space.
 
+        SQLite-only operation.  Raises ``RuntimeError`` for non-SQLite targets.
         Tables are cleared in FK-safe order (leaf tables first). Schema is preserved.
         VACUUM runs on a separate AUTOCOMMIT connection after the deletes are
         committed (SQLite forbids VACUUM inside a transaction).
+
+        The caller's session owns the commit for the DELETE phase; ``reset``
+        calls ``self.db_session.commit()`` explicitly because VACUUM must follow
+        the commit (SQLite forbids VACUUM in a transaction), and the route
+        dependency creates a fresh session per request.
         """
+        if not db_path:
+            raise RuntimeError(
+                "Reset is a SQLite-only operation and requires a file-backed database. "
+                "This operation is not available for in-memory or non-SQLite databases."
+            )
+
         size_before = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
         )
@@ -208,6 +230,8 @@ class DatabaseService:
             total += count
 
         # Commit deletes before VACUUM — SQLite forbids VACUUM in a transaction.
+        # This is intentional: reset is a destructive, single-request operation
+        # and the route dependency creates a fresh session per request.
         self.db_session.commit()
 
         # VACUUM on its own AUTOCOMMIT connection.

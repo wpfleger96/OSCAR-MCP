@@ -448,3 +448,136 @@ class TestSlowObserver:
             f"Expected coalesced messages (≤10), got {len(messages)}. "
             "Slow observer accumulated too many messages."
         )
+
+
+# ---------------------------------------------------------------------------
+# Worker terminal-state tests (behaviour-level, not private-flag probes)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerTerminalState:
+    """Running cancel must produce exactly CANCELLED; finish races; early-return paths."""
+
+    def test_cancel_mid_running_produces_cancelled_not_failed(self, tmp_path):
+        """A running job that sees the cancel flag must terminate as CANCELLED."""
+        job = _make_upload_job(tmp_path)
+        job.try_start()
+
+        # Simulate the worker noticing cancellation and calling _finish_cancelled().
+        job._finish_cancelled()
+
+        assert job.state == JobState.CANCELLED
+        assert job._terminal_msg is not None
+        assert job._terminal_msg.get("event") == "error"
+        assert "Cancelled" in job._terminal_msg["data"]["message"]
+
+    def test_cancel_wins_race_before_finish(self, tmp_path):
+        """If the worker calls _finish_cancelled before _finish, state is CANCELLED."""
+        job = _make_upload_job(tmp_path)
+        job.try_start()
+
+        # Simulate: worker sees the cancel flag and calls _finish_cancelled (wins the race).
+        job._cancel_flag = True
+        job._finish_cancelled()
+        assert job.state == JobState.CANCELLED
+
+        # Worker's normal completion path fires afterward — must be a no-op.
+        won = job._finish(
+            succeeded=True,
+            terminal_msg={"event": "complete", "data": {}},
+        )
+        assert won is False  # _finish yielded to the cancel.
+        assert job.state == JobState.CANCELLED  # Unchanged.
+
+    def test_finish_wins_race_before_cancel(self, tmp_path):
+        """If _finish wins before try_cancel, state stays SUCCEEDED."""
+        job = _make_upload_job(tmp_path)
+        job.try_start()
+
+        # Worker finishes first.
+        won = job._finish(
+            succeeded=True,
+            terminal_msg={"event": "complete", "data": {}},
+        )
+        assert won is True
+        assert job.state == JobState.SUCCEEDED
+
+        # Cancel fires after — must be a no-op.
+        cancel_result = job.try_cancel()
+        assert cancel_result is False  # Cancel returned False (already terminal).
+        assert job.state == JobState.SUCCEEDED  # Unchanged.
+
+    def test_early_upload_cancel_terminates_as_cancelled(self, tmp_path):
+        """An early-upload-check cancel calls _finish_cancelled, not just return."""
+        job = _make_upload_job(tmp_path)
+        job.try_start()
+        # Simulate the early check in _run_import:
+        # if job.cancel_requested: job._finish_cancelled(); return
+        job._cancel_flag = True
+        job._finish_cancelled()
+
+        assert job.state == JobState.CANCELLED
+        assert job.is_terminal
+
+    def test_cancelled_job_observer_receives_error_event(self, tmp_path):
+        """Observer attached before cancellation receives the error event."""
+        job = _make_upload_job(tmp_path)
+        job.try_start()
+        ch = job.attach_observer()
+
+        job._finish_cancelled()
+
+        msg = ch.get(timeout=0.5)
+        assert msg is not None
+        assert msg.get("event") == "error"
+        assert "Cancelled" in msg["data"]["message"]
+
+    def test_no_state_can_be_both_running_and_terminal(self, tmp_path):
+        """A job cannot be both running and terminal simultaneously."""
+        job = _make_upload_job(tmp_path)
+        job.try_start()
+        assert not job.is_terminal
+
+        job._finish_cancelled()
+        assert job.is_terminal
+        assert job.state == JobState.CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# SSE quiet-connection test (sentinel / keepalive)
+# ---------------------------------------------------------------------------
+
+
+class TestSSEQuietConnection:
+    """A quiet observer channel (poll timeout) does not look like a closed channel."""
+
+    def test_poll_timeout_is_distinguishable_from_channel_close(self):
+        """ObserverChannel.get returns None on timeout AND on close;
+        the SSE generator must treat them differently.
+
+        This test validates the channel contract: after close() the returned None
+        is distinguishable from a timeout None via ch._closed.
+        """
+        ch = ObserverChannel()
+
+        # Poll timeout: returns None, channel still open.
+        msg = ch.get(timeout=0.05)
+        assert msg is None
+        assert not ch._closed  # Channel is still open — a timeout, not a close.
+
+        # Close: returns None, channel closed.
+        ch.close()
+        msg2 = ch.get(timeout=0.05)
+        assert msg2 is None
+        assert ch._closed  # Channel is now actually closed.
+
+    def test_get_returns_none_only_on_timeout_when_no_message_and_open(self):
+        """get() returns None on timeout with no message; not prematurely closed."""
+        ch = ObserverChannel()
+        start = time.monotonic()
+        result = ch.get(timeout=0.1)
+        elapsed = time.monotonic() - start
+
+        assert result is None
+        assert elapsed >= 0.08  # Waited close to the timeout.
+        assert not ch._closed  # Not closed — just a poll timeout.

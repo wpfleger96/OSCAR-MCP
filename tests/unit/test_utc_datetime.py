@@ -196,3 +196,158 @@ class TestUTCDateTimeRoundTrip:
         """UTCDateTime.cache_ok must be True so SQLAlchemy can cache statements."""
         udt = UTCDateTime()
         assert udt.cache_ok is True
+
+
+# ---------------------------------------------------------------------------
+# Dialect-aware impl tests
+# ---------------------------------------------------------------------------
+
+
+class TestUTCDateTimeDialectAware:
+    """UTCDateTime.load_dialect_impl returns dialect-appropriate impl."""
+
+    def test_sqlite_dialect_returns_non_tz_datetime(self):
+        """On SQLite, UTCDateTime uses DateTime(timezone=False)."""
+        from sqlalchemy.dialects import sqlite as _sqlite
+
+        udt = UTCDateTime()
+        dialect = _sqlite.dialect()
+        impl = udt.load_dialect_impl(dialect)
+        # SQLite impl should be a DateTime without timezone.
+        assert impl is not None
+        # The impl type should be a non-tz DateTime (not TIMESTAMPTZ).
+        assert hasattr(impl, "timezone")
+        assert not impl.timezone
+
+    def test_postgresql_dialect_returns_tz_datetime(self):
+        """On PostgreSQL, UTCDateTime uses DateTime(timezone=True)."""
+        from sqlalchemy.dialects import postgresql as _pg
+
+        udt = UTCDateTime()
+        dialect = _pg.dialect()  # type: ignore[no-untyped-call]
+        impl = udt.load_dialect_impl(dialect)
+        assert impl is not None
+        assert hasattr(impl, "timezone")
+        assert impl.timezone is True
+
+    def test_sqlite_dialect_compiles_without_timezone_suffix(self):
+        """UTCDateTime compiles to DATETIME (no timezone) on SQLite."""
+        from sqlalchemy import Column, MetaData, Table
+        from sqlalchemy.dialects import sqlite as _sqlite
+
+        meta = MetaData()
+        t = Table("_test", meta, Column("ts", UTCDateTime()))
+        dialect = _sqlite.dialect()
+        compiled = str(t.c.ts.type.compile(dialect=dialect))
+        # Should not include TIMEZONE or TIMESTAMPTZ.
+        assert "TIMEZONE" not in compiled.upper()
+
+    def test_postgresql_dialect_compiles_with_timezone_suffix(self):
+        """UTCDateTime compiles to TIMESTAMP WITH TIME ZONE on PostgreSQL."""
+        from sqlalchemy import Column, MetaData, Table
+        from sqlalchemy.dialects import postgresql as _pg
+
+        meta = MetaData()
+        t = Table("_test", meta, Column("ts", UTCDateTime()))
+        dialect = _pg.dialect()  # type: ignore[no-untyped-call]
+        compiled = str(t.c.ts.type.compile(dialect=dialect))
+        # PostgreSQL should get TIMESTAMP WITH TIME ZONE.
+        assert "TIME ZONE" in compiled.upper() or "TIMESTAMPTZ" in compiled.upper()
+
+
+# ---------------------------------------------------------------------------
+# AnalysisResult.created_at ordering via real model path (§3)
+# ---------------------------------------------------------------------------
+
+
+class TestAnalysisResultOrdering:
+    """Latest-result selection uses created_at (UTCDateTime) with correct ordering."""
+
+    def test_latest_analysis_result_selected_by_created_at(self, tmp_path):
+        """When multiple AnalysisResult rows exist, the one with the latest
+        created_at is selected correctly — even when inserted in reversed order.
+        """
+        from datetime import UTC
+
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import Session as SASession
+
+        from snore.database.models import (
+            AnalysisResult,
+            Base,
+            Day,
+            Device,
+        )
+        from snore.database.models import (
+            Session as DBSession,
+        )
+
+        db_path = str(tmp_path / "analysis_ordering.db")
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+
+        now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        earlier = datetime(2024, 6, 1, 10, 0, 0, tzinfo=UTC)
+        start = datetime(2024, 6, 1, 21, 0, 0)
+        end = datetime(2024, 6, 2, 5, 0, 0)  # 8h session
+
+        with SASession(engine) as db:
+            device = Device(
+                manufacturer="TestMfr", model="M1", serial_number="SN_ORDERING"
+            )
+            db.add(device)
+            db.flush()
+
+            day = Day(device_id=device.id, date=start.date())
+            db.add(day)
+            db.flush()
+
+            session = DBSession(
+                device_id=device.id,
+                day_id=day.id,
+                device_session_id="SESS_ORDER",
+                start_time=start,
+                end_time=end,
+            )
+            db.add(session)
+            db.flush()
+
+            # Insert the OLDER result first, then the NEWER one — to verify
+            # ordering is by created_at, not insertion order.
+            older_result = AnalysisResult(
+                session_id=session.id,
+                created_at=earlier,
+                timestamp_start=start,
+                timestamp_end=end,
+            )
+            newer_result = AnalysisResult(
+                session_id=session.id,
+                created_at=now,
+                timestamp_start=start,
+                timestamp_end=end,
+            )
+            db.add_all([older_result, newer_result])
+            db.flush()
+
+            # Verify that querying DESC by created_at returns the newer result first.
+            stmt = (
+                select(AnalysisResult)
+                .where(AnalysisResult.session_id == session.id)
+                .order_by(AnalysisResult.created_at.desc())
+                .limit(1)
+            )
+            latest = db.execute(stmt).scalars().first()
+
+            assert latest is not None
+            assert latest.created_at is not None
+            # The latest result has the newer timestamp.
+            assert latest.created_at == now, (
+                f"Expected created_at={now}, got {latest.created_at}"
+            )
+            # Verify UTC tzinfo is attached.
+            assert latest.created_at.tzinfo is not None, (
+                "UTCDateTime must restore tzinfo=UTC on load"
+            )
+            assert latest.created_at.utcoffset() == timedelta(0)
+
+        engine.dispose()

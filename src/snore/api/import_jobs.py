@@ -258,12 +258,16 @@ class ImportJob:
             ch.put(terminal_msg)
         return True
 
-    def _finish(self, *, succeeded: bool, terminal_msg: dict[str, Any]) -> None:
-        """Transition running → succeeded/failed.  Called by the worker thread."""
+    def _finish(self, *, succeeded: bool, terminal_msg: dict[str, Any]) -> bool:
+        """Transition running → succeeded/failed/cancelled.  Called by the worker thread.
+
+        Returns True if this call won the transition; False if cancellation already
+        claimed the terminal slot (cancel() won the race).
+        """
         with self._lock:
             if self._state in TERMINAL_STATES:
                 # cancel() already won the race; honour it.
-                return
+                return False
             self._state = JobState.SUCCEEDED if succeeded else JobState.FAILED
             self._terminal_msg = terminal_msg
             self._terminal_at = time.monotonic()
@@ -271,6 +275,27 @@ class ImportJob:
             self._observers.clear()
         for ch in observers:
             ch.put(terminal_msg)
+        return True
+
+    def _finish_cancelled(self) -> bool:
+        """Transition running → CANCELLED.  Called by the worker thread when it sees
+        the cancel flag.
+
+        Returns True if this call won the transition; False if another terminal
+        (succeeded/failed) already claimed the slot.
+        """
+        terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
+        with self._lock:
+            if self._state in TERMINAL_STATES:
+                return False
+            self._state = JobState.CANCELLED
+            self._terminal_msg = terminal_msg
+            self._terminal_at = time.monotonic()
+            observers = list(self._observers)
+            self._observers.clear()
+        for ch in observers:
+            ch.put(terminal_msg)
+        return True
 
     def wait_for_worker(self, timeout: float = 5.0) -> None:
         """Block until the worker thread exits (used during shutdown)."""

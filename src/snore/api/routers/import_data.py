@@ -76,32 +76,32 @@ def _run_import(job: ImportJob) -> None:
         if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
             job.report_progress("Detecting data sources...")
             if job.cancel_requested:
+                job._finish_cancelled()
                 return
             sources = service.detect_sources(job.temp_dir)
             job.report_progress(f"Detected {len(sources)} source(s)")
+            if job.cancel_requested:
+                job._finish_cancelled()
+                return
             result = service.import_sources(
                 sources,
                 backup=True,
-                progress_callback=lambda msg: (
-                    job.report_progress(msg) if not job.cancel_requested else None
-                ),
+                progress_callback=lambda msg: job.report_progress(msg),
+                cancel_predicate=lambda: job.cancel_requested,
             )
         elif job.job_type == JobType.PATH and job.sources is not None:
             result = service.import_sources(
                 job.sources,
                 backup=True,
-                progress_callback=lambda msg: (
-                    job.report_progress(msg) if not job.cancel_requested else None
-                ),
+                progress_callback=lambda msg: job.report_progress(msg),
+                cancel_predicate=lambda: job.cancel_requested,
             )
         else:
             raise ValueError("Invalid job configuration")
 
+        # Check cancellation after import_sources returns (it may have exited early).
         if job.cancel_requested:
-            job._finish(
-                succeeded=False,
-                terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
-            )
+            job._finish_cancelled()
             return
 
         terminal_msg = {"event": "complete", "data": {"result": result.model_dump()}}
@@ -212,18 +212,38 @@ def cancel_import(job_id: str) -> None:
     cancel_job(job_id)
 
 
+_SSE_TIMEOUT = object()  # Sentinel: poll timed out (not a closed channel)
+
+
 async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
-    """SSE stream for one observer.  Attaches, drains events, then detaches."""
+    """SSE stream for one observer.  Attaches, drains events, then detaches.
+
+    ``ObserverChannel.get()`` returns ``None`` when the channel is explicitly
+    closed (job cancelled / shutdown).  A poll timeout returns ``_SSE_TIMEOUT``
+    via the executor wrapper below — we emit a keepalive and continue polling.
+    Only a ``None`` (closed channel) or a terminal event breaks the loop.
+    """
     loop = asyncio.get_running_loop()
     ch = job.attach_observer()
+
+    def _get_or_sentinel() -> object:
+        """Return the next message, or _SSE_TIMEOUT on poll timeout."""
+        msg = ch.get(timeout=1.0)
+        return _SSE_TIMEOUT if msg is None and not ch._closed else msg
+
     try:
         while True:
             try:
                 msg = await asyncio.wait_for(
-                    loop.run_in_executor(None, ch.get, 1.0),
+                    loop.run_in_executor(None, _get_or_sentinel),
                     timeout=2.0,
                 )
             except TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+
+            if msg is _SSE_TIMEOUT:
+                # Poll timed out — channel is still open; send keepalive.
                 yield ": keepalive\n\n"
                 continue
 
@@ -231,6 +251,8 @@ async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
                 # Channel closed (job cancelled / shutdown).
                 break
 
+            # At this point msg is dict[str, Any] — not _SSE_TIMEOUT, not None.
+            assert isinstance(msg, dict)
             event_type = msg.get("event", "progress")
             data = json.dumps(msg.get("data", {}))
             yield f"event: {event_type}\ndata: {data}\n\n"

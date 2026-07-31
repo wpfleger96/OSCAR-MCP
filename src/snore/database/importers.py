@@ -78,31 +78,40 @@ class SessionImporter:
 
         This can happen if CASCADE delete is not enabled or if a database was corrupted.
 
+        Uses typed ``delete()`` statements keyed on ``session_id`` FK — no f-string
+        SQL, no internal commit (the caller's transaction owns commit/rollback).
+
         Args:
-            db: SQLAlchemy session
+            db: SQLAlchemy session (caller owns the transaction)
 
         Returns:
             Number of orphaned records removed
         """
-        from sqlalchemy import text
+        from sqlalchemy import delete  # noqa: PLC0415
 
-        tables = ["settings", "events", "waveforms", "statistics"]
+        orphan_tables = [
+            models.Setting,
+            models.Event,
+            models.Waveform,
+            models.Statistics,
+        ]
         total_cleaned = 0
 
-        for table in tables:
-            result = db.execute(
-                text(
-                    f"DELETE FROM {table} WHERE session_id NOT IN (SELECT id FROM sessions)"
+        for model_cls in orphan_tables:
+            stmt = delete(model_cls).where(
+                model_cls.session_id.notin_(  # type: ignore[attr-defined]
+                    select(models.Session.id)
                 )
             )
+            result = db.execute(stmt)
             count = result.rowcount if hasattr(result, "rowcount") else 0
             if count > 0:
-                logger.debug(f"Cleaned {count} orphaned records from {table}")
+                logger.debug(
+                    f"Cleaned {count} orphaned records from {model_cls.__tablename__}"
+                )
                 total_cleaned += count
 
-        if total_cleaned > 0:
-            db.commit()
-
+        # No db.commit() — caller owns the transaction boundary.
         return total_cleaned
 
     def _import_single_session(
@@ -238,6 +247,7 @@ class SessionImporter:
         force: bool = False,
         batch_size: int = 50,
         progress_callback: Callable[[str], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> tuple[int, int, int]:
         """
         Import multiple sessions in batched transactions with per-session savepoints.
@@ -246,11 +256,16 @@ class SessionImporter:
         releases its savepoint and increments ``failed`` without poisoning the rest of
         the batch.  Day statistics are aggregated at the end of each batch.
 
+        Checks ``cancel_predicate()`` between batches.  If cancellation is requested
+        the loop exits early; partial results accumulated so far are returned.
+
         Args:
             sessions: List of UnifiedSession objects to import
             force: If True, re-import existing sessions
             batch_size: Number of sessions per transaction (default: 50)
             progress_callback: Optional callback for progress messages
+            cancel_predicate: Optional callable; returns True when cancellation
+                is requested.  Checked between batches (not mid-batch).
 
         Returns:
             Tuple of (imported_count, skipped_count, failed_count)
@@ -260,6 +275,10 @@ class SessionImporter:
         failed = 0
 
         for batch_num, i in enumerate(range(0, len(sessions), batch_size), 1):
+            # Check cancellation between batches.
+            if cancel_predicate is not None and cancel_predicate():
+                break
+
             batch = sessions[i : i + batch_size]
             batch_day_ids = set()
 

@@ -11,6 +11,10 @@ Resolution is capability-gated per operation:
   message.
 - The postgresql → (asyncpg, psycopg) mapping is declared here but not
   installed until the hosted milestone.
+
+URL handling uses SQLAlchemy ``make_url()`` / ``URL.set(drivername=...)``
+throughout — no hand-rolled string splitting.  SQLite file paths are always
+derived from ``URL.database``, not from slash-counting.
 """
 
 from __future__ import annotations
@@ -18,8 +22,10 @@ from __future__ import annotations
 import logging
 import os
 
-from dataclasses import dataclass
-from urllib.parse import urlparse
+from dataclasses import dataclass, field
+
+from sqlalchemy.engine import make_url
+from sqlalchemy.engine.url import URL
 
 from snore.constants import DEFAULT_DATABASE_PATH
 
@@ -47,6 +53,12 @@ _FUTURE_MIGRATION_DRIVERS: dict[str, str] = {
 
 _RECOGNISED_DIALECTS = frozenset({"sqlite", "postgresql"})
 
+_CAPABILITY_ERROR = (
+    "PostgreSQL support requires a driver that is not installed. "
+    "The postgresql dialect is recognised but not yet supported — "
+    "it will be enabled at the hosted milestone."
+)
+
 
 @dataclass(frozen=True)
 class DatabaseTarget:
@@ -54,13 +66,16 @@ class DatabaseTarget:
 
     Attributes:
         dialect: ``"sqlite"`` or ``"postgresql"``.
-        location: File path (SQLite) or host:port/dbname string (PostgreSQL).
+        location: File path (SQLite) or ``host:port/dbname`` string (PostgreSQL).
         raw_url: The original URL or path string before normalisation.
     """
 
     dialect: str
     location: str
     raw_url: str
+    # Internal: the canonical SQLAlchemy URL object used for resolution.
+    # Excluded from equality/repr so tests can compare by dialect+location+raw_url.
+    _parsed_url: URL = field(default=None, compare=False, repr=False)  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     # Factories
@@ -70,9 +85,9 @@ class DatabaseTarget:
     def from_url(cls, url: str) -> DatabaseTarget:
         """Parse a database URL or bare file path into a ``DatabaseTarget``.
 
-        Driver qualifiers (e.g. ``sqlite+pysqlite://``) are stripped and
-        normalised to the canonical dialect.  Unrecognised dialects raise
-        ``ValueError`` at parse time.
+        Driver qualifiers (e.g. ``sqlite+pysqlite://``) are normalised to the
+        canonical dialect.  Bare file paths (no ``://``) are treated as SQLite
+        paths.  Unrecognised dialects raise ``ValueError`` at parse time.
 
         Args:
             url: Database URL or bare file path string.
@@ -83,17 +98,25 @@ class DatabaseTarget:
         Raises:
             ValueError: If the dialect is not recognised.
         """
-        # Bare path (no scheme) → sqlite URL
+        # Bare path (no scheme) → treat as SQLite file path.
         if "://" not in url:
-            return cls(dialect="sqlite", location=url, raw_url=url)
+            parsed = URL.create("sqlite+pysqlite", database=url)
+            return cls(
+                dialect="sqlite",
+                location=url,
+                raw_url=url,
+                _parsed_url=parsed,
+            )
 
-        # Strip driver qualifier: "sqlite+pysqlite://..." → "sqlite://..."
-        if "+" in url.split("://")[0]:
-            scheme_part, rest = url.split("://", 1)
-            dialect = scheme_part.split("+")[0].lower()
-            url = f"{dialect}://{rest}"
-        else:
-            dialect = urlparse(url).scheme.lower()
+        # Parse with SQLAlchemy so we get correct dialect extraction even for
+        # driver-qualified forms like ``sqlite+pysqlite://...``.
+        try:
+            parsed = make_url(url)
+        except Exception as exc:
+            raise ValueError(f"Invalid database URL {url!r}: {exc}") from exc
+
+        # Strip the driver qualifier to get the bare dialect.
+        dialect = parsed.get_backend_name()  # "sqlite" from "sqlite+pysqlite"
 
         if dialect not in _RECOGNISED_DIALECTS:
             raise ValueError(
@@ -101,24 +124,26 @@ class DatabaseTarget:
                 f"Supported: {sorted(_RECOGNISED_DIALECTS)}"
             )
 
-        # Extract location from URL
-        parsed = urlparse(url)
         if dialect == "sqlite":
-            # sqlite:///path/to/db → location = "path/to/db" (or absolute path)
-            location = parsed.path.lstrip("/") if parsed.path else ""
-            if parsed.netloc:
-                location = (
-                    f"/{parsed.netloc}{parsed.path}"
-                    if parsed.path
-                    else f"/{parsed.netloc}"
-                )
-            # Handle absolute path: sqlite:////abs/path → path = //abs/path
-            raw_path = url.split("sqlite://", 1)[1]
-            location = raw_path
+            # URL.database is the canonical path component after stripping
+            # scheme and authority — covers relative, absolute, and :memory:.
+            # For sqlite:///relative.db  → database = "relative.db"
+            # For sqlite:////abs/path    → database = "/abs/path"
+            # For sqlite:///:memory:     → database = ":memory:"
+            location = parsed.database or ""
         else:
-            location = f"{parsed.netloc}{parsed.path}"
+            # PostgreSQL: reconstruct host/port/dbname without credentials.
+            host = parsed.host or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            db = parsed.database or ""
+            location = f"{host}{port}/{db}" if db else f"{host}{port}"
 
-        return cls(dialect=dialect, location=location, raw_url=url)
+        return cls(
+            dialect=dialect,
+            location=location,
+            raw_url=url,
+            _parsed_url=parsed,
+        )
 
     @classmethod
     def from_env_and_flags(
@@ -174,6 +199,9 @@ class DatabaseTarget:
     def resolve_sync_url(self) -> str:
         """Return the sync SQLAlchemy URL for this target.
 
+        Uses ``URL.set(drivername=...)`` to insert the correct driver without
+        touching any other URL component.
+
         Returns:
             SQLAlchemy URL string usable with ``create_engine()``.
 
@@ -183,15 +211,10 @@ class DatabaseTarget:
                 error message.
         """
         if self.dialect not in _SYNC_RUNTIME_DRIVERS:
-            raise RuntimeError(
-                "PostgreSQL support requires a driver that is not installed. "
-                "The postgresql dialect is recognised but not yet supported — "
-                "it will be enabled at the hosted milestone."
-            )
+            raise RuntimeError(_CAPABILITY_ERROR)
         driver = _SYNC_RUNTIME_DRIVERS[self.dialect]
-        if self.dialect == "sqlite":
-            return f"sqlite+{driver}:///{self.location}"
-        return f"{self.dialect}+{driver}://{self.location}"
+        resolved = self._parsed_url.set(drivername=f"{self.dialect}+{driver}")
+        return str(resolved)
 
     def resolve_migration_url(self) -> str:
         """Return the Alembic migration URL for this target.
@@ -199,15 +222,10 @@ class DatabaseTarget:
         Same capability-gating as ``resolve_sync_url()``.
         """
         if self.dialect not in _MIGRATION_DRIVERS:
-            raise RuntimeError(
-                "PostgreSQL support requires a driver that is not installed. "
-                "The postgresql dialect is recognised but not yet supported — "
-                "it will be enabled at the hosted milestone."
-            )
+            raise RuntimeError(_CAPABILITY_ERROR)
         driver = _MIGRATION_DRIVERS[self.dialect]
-        if self.dialect == "sqlite":
-            return f"sqlite+{driver}:///{self.location}"
-        return f"{self.dialect}+{driver}://{self.location}"
+        resolved = self._parsed_url.set(drivername=f"{self.dialect}+{driver}")
+        return str(resolved)
 
     @property
     def is_sqlite(self) -> bool:

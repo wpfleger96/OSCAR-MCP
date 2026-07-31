@@ -80,7 +80,10 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,  # Required for SQLite ALTER TABLE support
+            # render_as_batch is required for SQLite ALTER TABLE support; it is
+            # harmless (but unnecessary) on PostgreSQL.  We gate it on the dialect
+            # so generated migration SQL stays portable and readable on Postgres.
+            render_as_batch=connection.dialect.name == "sqlite",
         )
 
         with context.begin_transaction():

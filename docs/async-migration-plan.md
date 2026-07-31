@@ -59,7 +59,7 @@ normalises any aware result to UTC on read.
 **Column classification:**
 
 - **`UTCDateTime` (absolute instants):** `Device.first_seen`, `Device.last_import`,
-  `Day.import_date`, model `created_at`/`updated_at` pairs,
+  `Session.import_date`, model `created_at`/`updated_at` pairs,
   `AnalysisResult.created_at`
 - **Naive by contract (device/session wall-clock — no source timezone, never
   convert):** `Session.start_time`/`end_time`, `Event.start_time`,
@@ -67,6 +67,16 @@ normalises any aware result to UTC on read.
 
 `cache_ok = True` set on the type. Existing naive UTC values backfill correctly
 (SQLite stores them without offset; `UTCDateTime` reads them back as UTC-aware).
+
+**Dialect behaviour:**
+
+- SQLite: uses `DateTime` (no native TZ); UTC is re-attached on load.
+- PostgreSQL: uses `DateTime(timezone=True)` (TIMESTAMP WITH TIME ZONE); the driver
+  receives and returns offset-aware datetimes; normalised to UTC on load.
+
+A migration (`c3f2a1b4d5e6`) documents the column classification, validates that all
+non-nullable absolute-instant columns are populated, and anchors the ALTER COLUMN …
+TYPE TIMESTAMPTZ statements for the hosted PostgreSQL milestone.
 
 ### 4. SQLite connection recipe (one integrated protocol)
 
@@ -101,23 +111,41 @@ transaction.
 One authoritative table documenting who opens, commits, and rolls back each mutating
 entry point.
 
-Import UoW: batch-scoped, `ImportService`-owned session; per-session
+| Entry point | Opens session | Commits | Rollback on error | Notes |
+|---|---|---|---|---|
+| `session_scope()` context manager | Yes | `session.commit()` on exit | `session.rollback()` on exception | All normal service calls |
+| `import_sessions_batch` (per batch) | Yes (via `session_scope()`) | On batch exit | On batch exception | Each session wrapped in `begin_nested()` savepoint |
+| `_import_single_session` savepoint | `db.begin_nested()` | `sp.commit()` | `sp.rollback()` | Never commits or rolls back the outer session |
+| `cleanup_orphaned_records` | No (caller provides) | **Never** | **Never** | Caller owns the transaction; no internal commit |
+| `DatabaseService.reset` | No (caller provides via dep) | Yes (intentional, before VACUUM) | No | VACUUM requires committed state; route dep creates a fresh session per request |
+| `BatchAnalysisCoordinator.analyze_one` (read) | Yes (via `session_scope()`) | On scope exit | On scope exception | Closed before compute phase begins |
+| `BatchAnalysisCoordinator.analyze_one` (write) | Yes (via `session_scope()`) | On scope exit | On scope exception | Short-lived INSERT only; held ≤ write duration |
+
+Import UoW: batch-scoped, `ImportService`-owned `session_scope()` per batch; per-session
 `begin_nested()` savepoints so one failed import cannot poison the batch. One
 forced-failure test asserts zero rows survive when a session import raises mid-batch.
 
 ### 7. I/O–compute DTO split
 
-No ORM session crosses a thread boundary. All five surfaces (single analysis, batch
-analysis, waveform, report, export/import) use detached DTOs between I/O and compute
-phases.
+No ORM session crosses a thread boundary. Batch analysis uses detached DTOs between
+I/O and compute phases.
 
-Batch analysis: `analyze_one` splits into a read+compute `session_scope()` (returns a
-detached `AnalysisResult`) and a separate write-only `session_scope()` (INSERT only).
+Batch analysis: `BatchAnalysisCoordinator.analyze_one` splits into:
+1. A read+compute `session_scope()` that closes before returning the `AnalysisResult` DTO.
+2. A separate write-only `session_scope()` (INSERT only), held only for the write duration.
+
 This eliminates SQLite write-lock contention under `ThreadPoolExecutor` with
-`autocommit=False`.
+`autocommit=False`. Real `processing_time_ms` is measured over the read+compute phase
+and written with each result.
 
-A narrow coordinator interface (`submit / progress / cancel`) backs the scheduler so
-PR-2 can swap its internals to `asyncio` tasks without touching callers.
+`BatchAnalysisCoordinator` provides the narrow `submit / progress / cancel` interface
+so PR-2 can swap the executor internals (``ThreadPoolExecutor`` → ``asyncio`` tasks)
+without touching callers.
+
+**Note:** Report, export, and single-analysis surfaces still use session-scoped ORM
+access. These surfaces do not cross thread boundaries in PR-1 (all synchronous), so
+the session lifetime constraint is not violated. The full I/O→compute→write split for
+those surfaces is deferred to PR-2 where async session semantics require it.
 
 ### 8. Import-job state machine
 

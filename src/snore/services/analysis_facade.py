@@ -19,7 +19,7 @@ from snore.services.schemas import (
     BatchSessionResult,
 )
 
-__all__ = ["AnalysisFacade"]
+__all__ = ["AnalysisFacade", "BatchAnalysisCoordinator"]
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +362,9 @@ class AnalysisFacade:
     ) -> BatchAnalysisResult:
         """Run analysis on multiple sessions in parallel.
 
+        Delegates to ``BatchAnalysisCoordinator`` so PR-2 can swap the executor
+        internals (``ThreadPoolExecutor`` → async tasks) without touching callers.
+
         Args:
             from_date: Filter sessions from this datetime (inclusive)
             to_date: Filter sessions to this datetime (inclusive)
@@ -373,11 +376,6 @@ class AnalysisFacade:
         Returns:
             BatchAnalysisResult with per-session outcomes and aggregate counts
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        from snore.analysis.service import AnalysisService
-        from snore.database.session import session_scope
-
         stmt = select(models.Session, models.Day.date.label("day_date")).join(
             models.Day, models.Session.day_id == models.Day.id
         )
@@ -392,34 +390,125 @@ class AnalysisFacade:
             row.Session.id: row.day_date for row in rows
         }
         session_ids = [row.Session.id for row in rows]
-        total = len(session_ids)
 
         if not session_ids:
             return BatchAnalysisResult(total=0, successful=0, failed=0, results=[])
 
+        coordinator = BatchAnalysisCoordinator()
+        return coordinator.submit(
+            session_ids=session_ids,
+            session_dates=session_dates,
+            modes=modes,
+            store_results=store_results,
+            max_workers=max_workers,
+            progress_callback=progress_callback,
+        )
+
+
+# ---------------------------------------------------------------------------
+# BatchAnalysisCoordinator (§7)
+# ---------------------------------------------------------------------------
+
+
+class BatchAnalysisCoordinator:
+    """Thin coordinator that backs batch analysis scheduling.
+
+    PR-1 implementation: ``ThreadPoolExecutor`` with detached I/O→compute→write
+    pipelines.  PR-2 swaps the executor internals to ``asyncio`` tasks without
+    touching callers — the ``submit`` interface is the stable boundary.
+
+    The narrow interface (``submit / progress / cancel``) is intentional:
+    - ``submit`` starts work synchronously and returns the aggregated result.
+    - ``progress`` is reserved for PR-2's async streaming path.
+    - ``cancel`` requests cooperative cancellation via a flag checked between
+      sessions; PR-2 replaces it with task cancellation.
+    """
+
+    def __init__(self) -> None:
+        self._cancel_requested = False
+        self._completed = 0
+        self._total = 0
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation.  Checked between sessions."""
+        self._cancel_requested = True
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        """Return (completed, total) session counts."""
+        return self._completed, self._total
+
+    def submit(
+        self,
+        *,
+        session_ids: list[int],
+        session_dates: dict[int, date | None],
+        modes: Sequence[str] | None = None,
+        store_results: bool = True,
+        max_workers: int = 4,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> BatchAnalysisResult:
+        """Execute batch analysis and return aggregated results.
+
+        Each session is processed in a detached I/O → compute → write pipeline:
+
+        1. **Read phase**: open a short ``session_scope()``, load the session
+           record and analysis inputs, return a detached ``AnalysisResult`` DTO.
+           The read session is closed *before* entering compute.
+        2. **Compute phase**: pure Python / numpy, no ORM session held.
+        3. **Write phase**: open a fresh ``session_scope()``, INSERT the result.
+           The write lock is held only for the INSERT duration.
+
+        This separation prevents SQLite write-lock contention when multiple
+        workers finish concurrently under ``autocommit=False``.
+
+        Args:
+            session_ids: DB session IDs to analyse.
+            session_dates: Maps session ID → calendar date (for result labelling).
+            modes: Detection modes to run (``None`` = default).
+            store_results: If True, write each result to the DB.
+            max_workers: Thread-pool concurrency cap.
+            progress_callback: Called with (completed, total) after each session.
+
+        Returns:
+            Aggregated ``BatchAnalysisResult``.
+        """
+        import time  # noqa: PLC0415
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
+
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
+
+        total = len(session_ids)
+        self._total = total
+        self._completed = 0
+        self._cancel_requested = False
+
         batch_results: list[BatchSessionResult] = []
-        completed = 0
         modes_list: list[str] | None = list(modes) if modes is not None else None
 
         def analyze_one(sid: int) -> None:
-            # Read + compute phase: session closed before the write.
-            # This separates the long-running read/compute transaction from the
-            # short write transaction, preventing SQLite write-lock contention
-            # when multiple workers finish concurrently.
+            if self._cancel_requested:
+                return
+
+            # --- Read + compute phase ---
+            # Time the full analysis so processing_time_ms is accurate.
+            t_start = time.monotonic()
             result = None
             with session_scope() as read_session:
                 svc = AnalysisService(read_session)
                 result = svc.analyze_session(
                     session_id=sid, modes=modes_list, store_results=False
                 )
-            # Write phase: a fresh, short-lived session holds the write lock
-            # only for the INSERT, not for the full analysis duration.
-            # Guard: if analyze_session returned None (e.g. nothing to store),
-            # skip the write entirely.
+            processing_time_ms = int((time.monotonic() - t_start) * 1000)
+
+            # --- Write phase ---
+            # Guard: skip the write if analyze_session returned None.
             if store_results and result is not None:
                 with session_scope() as write_session:
                     write_svc = AnalysisService(write_session)
-                    write_svc._store_result(result, 0)
+                    write_svc._store_result(result, processing_time_ms)
 
         with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
             futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}
@@ -441,9 +530,9 @@ class AnalysisFacade:
                         error=error,
                     )
                 )
-                completed += 1
+                self._completed += 1
                 if progress_callback:
-                    progress_callback(completed, total)
+                    progress_callback(self._completed, total)
 
         successful = sum(1 for r in batch_results if r.success)
         return BatchAnalysisResult(

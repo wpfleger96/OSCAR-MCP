@@ -117,6 +117,14 @@ class UTCDateTime(TypeDecorator[datetime]):
     - **Loads**: restores ``tzinfo=UTC`` on every result regardless of dialect,
       interpreting the stored value as UTC.
 
+    **Dialect behaviour:**
+
+    - SQLite: uses ``DateTime`` (no native TZ); value stored as naive ISO string;
+      UTC is re-attached on load.
+    - PostgreSQL (and other TIMESTAMP WITH TIME ZONE dialects): uses
+      ``DateTime(timezone=True)``; the driver receives and returns offset-aware
+      datetimes; we still normalise to UTC on load for consistency.
+
     Use this for absolute audit instants (created_at, updated_at, last_import …).
     Do NOT use it for device/session wall-clock columns (Session.start_time,
     Event.start_time, etc.) whose source timezone is unknown.
@@ -126,6 +134,15 @@ class UTCDateTime(TypeDecorator[datetime]):
 
     impl = DateTime
     cache_ok = True
+
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        """Return dialect-specific implementation.
+
+        PostgreSQL supports TIMESTAMP WITH TIME ZONE; SQLite does not.
+        """
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(DateTime(timezone=False))
+        return dialect.type_descriptor(DateTime(timezone=True))
 
     def process_bind_param(self, value: Any, dialect: Any) -> datetime | None:
         """Normalise a tz-aware datetime to UTC before storage.
