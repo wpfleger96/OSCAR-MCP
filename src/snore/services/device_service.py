@@ -3,6 +3,7 @@
 from datetime import date
 from itertools import groupby
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.database import models
@@ -33,8 +34,12 @@ class DeviceService:
     def list_devices(self) -> list[DeviceInfo]:
         """List all devices ordered by manufacturer and model."""
         devices = (
-            self.db_session.query(models.Device)
-            .order_by(models.Device.manufacturer, models.Device.model)
+            self.db_session.execute(
+                select(models.Device).order_by(
+                    models.Device.manufacturer, models.Device.model
+                )
+            )
+            .scalars()
             .all()
         )
         return [DeviceInfo.model_validate(d) for d in devices]
@@ -59,8 +64,10 @@ class DeviceService:
             NotFoundError: If device_id is not found
         """
         device = (
-            self.db_session.query(models.Device)
-            .filter(models.Device.id == device_id)
+            self.db_session.execute(
+                select(models.Device).where(models.Device.id == device_id)
+            )
+            .scalars()
             .first()
         )
         if not device:
@@ -68,12 +75,15 @@ class DeviceService:
 
         # Enabled sessions ordered chronologically for usage summary
         sessions = (
-            self.db_session.query(models.Session)
-            .filter(
-                models.Session.device_id == device_id,
-                models.Session.enabled.is_(True),
+            self.db_session.execute(
+                select(models.Session)
+                .where(
+                    models.Session.device_id == device_id,
+                    models.Session.enabled.is_(True),
+                )
+                .order_by(models.Session.start_time)
             )
-            .order_by(models.Session.start_time)
+            .scalars()
             .all()
         )
 
@@ -93,16 +103,15 @@ class DeviceService:
                 therapy_modes.append(s.therapy_mode)
 
         # All settings for this device in one query, ordered by session start_time
-        all_setting_rows = (
-            self.db_session.query(models.Setting, models.Session)
+        all_setting_rows = self.db_session.execute(
+            select(models.Setting, models.Session)
             .join(models.Session, models.Setting.session_id == models.Session.id)
-            .filter(
+            .where(
                 models.Session.device_id == device_id,
                 models.Session.enabled.is_(True),
             )
             .order_by(models.Session.start_time, models.Setting.key)
-            .all()
-        )
+        ).all()
 
         # Group into [(session_id, session_date, {key: value})] skipping sessions
         # that have no settings rows.

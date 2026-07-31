@@ -2,6 +2,20 @@
 Session import functionality for converting UnifiedSession to database records.
 
 Handles the complete import process including waveforms, events, and statistics.
+
+Transaction ownership (§6)
+---------------------------
+- ``import_session``: opens one batch-scoped session via ``session_scope()``;
+  ``SessionImporter`` owns commit and rollback.
+- ``import_sessions_batch``: one ``session_scope()`` per batch; each session
+  import is wrapped in a ``begin_nested()`` savepoint so one failed session
+  cannot poison the whole batch.
+
+Bulk strategy (frozen in §7/PR-2)
+-----------------------------------
+Waveforms, events, and settings use ``bulk_save_objects`` (no post-insert PK
+reads; matches previous behaviour).  Statistics uses ``db.add()`` because it
+has a single row per session and is used via the identity map.
 """
 
 import json
@@ -12,6 +26,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.database import models
@@ -97,6 +112,8 @@ class SessionImporter:
         Import a single session. Returns (imported, day_id).
 
         This method NEVER aggregates - aggregation is handled by the caller.
+        It does NOT open its own savepoint; callers that want per-session
+        isolation must wrap each call in ``db.begin_nested()``.
 
         Args:
             db: SQLAlchemy database session
@@ -106,11 +123,10 @@ class SessionImporter:
         Returns:
             Tuple of (was_imported, day_id)
         """
-        device = (
-            db.query(models.Device)
-            .filter_by(serial_number=session_data.device_info.serial_number)
-            .first()
+        stmt = select(models.Device).filter_by(
+            serial_number=session_data.device_info.serial_number
         )
+        device = db.execute(stmt).scalars().first()
 
         if device:
             device.manufacturer = session_data.device_info.manufacturer
@@ -118,7 +134,7 @@ class SessionImporter:
             device.firmware_version = session_data.device_info.firmware_version
             device.hardware_version = session_data.device_info.hardware_version
             device.product_code = session_data.device_info.product_code
-            device.last_import = datetime.now(UTC).replace(tzinfo=None)
+            device.last_import = datetime.now(UTC)
         else:
             device = models.Device(
                 manufacturer=session_data.device_info.manufacturer,
@@ -131,14 +147,11 @@ class SessionImporter:
             db.add(device)
             db.flush()
 
-        existing = (
-            db.query(models.Session)
-            .filter_by(
-                device_id=device.id,
-                device_session_id=session_data.device_session_id,
-            )
-            .first()
+        existing_stmt = select(models.Session).filter_by(
+            device_id=device.id,
+            device_session_id=session_data.device_session_id,
         )
+        existing = db.execute(existing_stmt).scalars().first()
 
         if existing and not force:
             logger.debug(
@@ -227,10 +240,11 @@ class SessionImporter:
         progress_callback: Callable[[str], None] | None = None,
     ) -> tuple[int, int, int]:
         """
-        Import multiple sessions in batched transactions.
+        Import multiple sessions in batched transactions with per-session savepoints.
 
-        Processes sessions in configurable batch sizes with single transaction per batch.
-        Aggregates day statistics at end of EACH batch for crash safety.
+        Each session import is wrapped in ``begin_nested()`` so a single failed session
+        releases its savepoint and increments ``failed`` without poisoning the rest of
+        the batch.  Day statistics are aggregated at the end of each batch.
 
         Args:
             sessions: List of UnifiedSession objects to import
@@ -253,10 +267,13 @@ class SessionImporter:
 
             with session_scope() as db:
                 for session_data in batch:
+                    # Per-session savepoint: one failed session cannot poison the batch.
+                    sp = db.begin_nested()
                     try:
                         was_imported, day_id = self._import_single_session(
                             db, session_data, force
                         )
+                        sp.commit()
                         if was_imported:
                             imported += 1
                             if day_id:
@@ -264,6 +281,7 @@ class SessionImporter:
                         else:
                             skipped += 1
                     except Exception as e:
+                        sp.rollback()
                         logger.error(
                             f"Failed to import session {session_data.device_session_id}: {e}"
                         )

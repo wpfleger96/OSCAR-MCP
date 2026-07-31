@@ -29,21 +29,25 @@ def _make_mock_sessions(count: int) -> list[MagicMock]:
 
 
 def _make_session_scope(mock_sessions: list[MagicMock]) -> Any:
-    """Return a context-manager factory whose query chain yields mock_sessions.
+    """Return a context-manager factory whose execute() chain yields mock_sessions.
 
-    The mock is configured so that chained .filter() calls (there are two when both
-    --from and --to are supplied) still resolve to the same query object, allowing
-    .order_by(...).all() to return the desired session list regardless of how many
-    filter predicates are applied.
+    The mock is configured so that session.execute(stmt).all() returns mock rows
+    with .Session and .day_date attributes, matching the SQLAlchemy 2.0 style used
+    by AnalysisFacade.run_batch_analysis().
     """
-    query_mock = MagicMock()
-    # Make .filter() return the same query_mock so repeated filter calls still chain
-    query_mock.filter.return_value = query_mock
-    query_mock.order_by.return_value = query_mock
-    query_mock.all.return_value = mock_sessions
+    # Build mock rows: each row has .Session (the mock session) and .day_date
+    mock_rows = []
+    for s in mock_sessions:
+        row = MagicMock()
+        row.Session = s
+        row.day_date = s.day.date
+        mock_rows.append(row)
+
+    execute_result = MagicMock()
+    execute_result.all.return_value = mock_rows
 
     mock_db_session = MagicMock()
-    mock_db_session.query.return_value.join.return_value = query_mock
+    mock_db_session.execute.return_value = execute_result
 
     @contextmanager
     def _scope():

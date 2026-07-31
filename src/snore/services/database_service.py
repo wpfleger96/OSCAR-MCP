@@ -4,7 +4,7 @@ import os
 
 from datetime import datetime
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from snore.database import models
@@ -36,26 +36,67 @@ class DatabaseService:
         Returns:
             DatabaseStats with all counts, percentages, and date range
         """
-        profile_count = self.db_session.query(models.Profile).count()
-        device_count = self.db_session.query(models.Device).count()
-        session_count = self.db_session.query(models.Session).count()
-        day_count = self.db_session.query(models.Day).count()
+        profile_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Profile)
+            ).scalar()
+            or 0
+        )
+        device_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Device)
+            ).scalar()
+            or 0
+        )
+        session_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Session)
+            ).scalar()
+            or 0
+        )
+        day_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Day)
+            ).scalar()
+            or 0
+        )
         event_count = (
             self.db_session.execute(text("SELECT COUNT(*) FROM events")).scalar() or 0
         )
-        waveform_count = self.db_session.query(models.Waveform).count()
-        analysis_count = self.db_session.query(models.AnalysisResult).count()
-        pattern_count = self.db_session.query(models.DetectedPattern).count()
+        waveform_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Waveform)
+            ).scalar()
+            or 0
+        )
+        analysis_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.AnalysisResult)
+            ).scalar()
+            or 0
+        )
+        pattern_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.DetectedPattern)
+            ).scalar()
+            or 0
+        )
 
         sessions_with_waveforms = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.has_waveform_data == True)
-            .count()
+            self.db_session.execute(
+                select(func.count())
+                .select_from(models.Session)
+                .where(models.Session.has_waveform_data.is_(True))
+            ).scalar()
+            or 0
         )
         sessions_with_events = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.has_event_data == True)
-            .count()
+            self.db_session.execute(
+                select(func.count())
+                .select_from(models.Session)
+                .where(models.Session.has_event_data.is_(True))
+            ).scalar()
+            or 0
         )
 
         first_session_raw = self.db_session.execute(
@@ -115,13 +156,27 @@ class DatabaseService:
         )
 
     def vacuum(self, db_path: str) -> VacuumResult:
-        """Vacuum the database to reclaim space after deletions."""
+        """Vacuum the database to reclaim space after deletions.
+
+        VACUUM requires AUTOCOMMIT on SQLite; it runs on a dedicated connection
+        separate from the normal session pool so it cannot affect in-flight
+        transactions.
+        """
         size_before = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
         )
 
-        self.db_session.execute(text("VACUUM"))
-        self.db_session.commit()
+        # VACUUM cannot run inside a transaction.  Use a dedicated AUTOCOMMIT
+        # engine so the PRAGMA recipe on the pool does not interfere.
+        vacuum_engine = create_engine(
+            f"sqlite:///{db_path}",
+            isolation_level="AUTOCOMMIT",
+        )
+        try:
+            with vacuum_engine.connect() as conn:
+                conn.execute(text("VACUUM"))
+        finally:
+            vacuum_engine.dispose()
 
         size_after = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
@@ -137,6 +192,8 @@ class DatabaseService:
         """Delete all rows from all data tables and vacuum to reclaim space.
 
         Tables are cleared in FK-safe order (leaf tables first). Schema is preserved.
+        VACUUM runs on a separate AUTOCOMMIT connection after the deletes are
+        committed (SQLite forbids VACUUM inside a transaction).
         """
         size_before = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
@@ -150,9 +207,19 @@ class DatabaseService:
             tables_cleared[table.name] = count
             total += count
 
-        self.db_session.commit()  # commit deletes before VACUUM — SQLite forbids VACUUM in a transaction
-        self.db_session.execute(text("VACUUM"))
+        # Commit deletes before VACUUM — SQLite forbids VACUUM in a transaction.
         self.db_session.commit()
+
+        # VACUUM on its own AUTOCOMMIT connection.
+        vacuum_engine = create_engine(
+            f"sqlite:///{db_path}",
+            isolation_level="AUTOCOMMIT",
+        )
+        try:
+            with vacuum_engine.connect() as conn:
+                conn.execute(text("VACUUM"))
+        finally:
+            vacuum_engine.dispose()
 
         size_after = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0

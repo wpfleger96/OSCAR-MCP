@@ -6,6 +6,7 @@ import logging
 
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.analysis.modes.config import AASM_CONFIG
@@ -54,21 +55,28 @@ class BatchValidator:
         Returns:
             ValidationReport with aggregate and per-session metrics
         """
-        query = self.db_session.query(models.Session).filter(
+        stmt = select(models.Session).where(
             models.Session.start_time >= datetime.fromisoformat(date_from),
             models.Session.start_time <= datetime.fromisoformat(f"{date_to} 23:59:59"),
         )
 
         if self.profile:
-            device_ids_query = (
-                self.db_session.query(models.Device.id)
-                .join(models.Day, models.Day.device_id == models.Device.id)
-                .filter(models.Device.serial_number == self.profile)
+            device_ids = list(
+                self.db_session.execute(
+                    select(models.Device.id)
+                    .join(models.Day, models.Day.device_id == models.Device.id)
+                    .where(models.Device.serial_number == self.profile)
+                )
+                .scalars()
+                .all()
             )
-            device_ids = [device_id for (device_id,) in device_ids_query.all()]
-            query = query.filter(models.Session.device_id.in_(device_ids))
+            stmt = stmt.where(models.Session.device_id.in_(device_ids))
 
-        sessions = query.order_by(models.Session.start_time).all()
+        sessions = (
+            self.db_session.execute(stmt.order_by(models.Session.start_time))
+            .scalars()
+            .all()
+        )
 
         logger.info(f"Found {len(sessions)} sessions between {date_from} and {date_to}")
 

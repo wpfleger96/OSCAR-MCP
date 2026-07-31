@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.analysis.svg_charts import render_trend_line
@@ -123,7 +124,11 @@ class ReportService:
         self._stats = StatsService(db_session)
 
     def _first_device(self) -> models.Device | None:
-        return self._db.query(models.Device).order_by(models.Device.first_seen).first()
+        return (
+            self._db.execute(select(models.Device).order_by(models.Device.first_seen))
+            .scalars()
+            .first()
+        )
 
     def generate_summary_report(self, from_date: date, to_date: date) -> str:
         """

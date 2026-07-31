@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.analysis.data.waveform_loader import WaveformLoader
@@ -46,9 +47,12 @@ class WaveformService:
             List of WaveformInfo objects with metadata
         """
         waveforms = (
-            self.db_session.query(models.Waveform)
-            .filter(models.Waveform.session_id == session_id)
-            .order_by(models.Waveform.waveform_type)
+            self.db_session.execute(
+                select(models.Waveform)
+                .where(models.Waveform.session_id == session_id)
+                .order_by(models.Waveform.waveform_type)
+            )
+            .scalars()
             .all()
         )
 

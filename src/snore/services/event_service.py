@@ -7,6 +7,7 @@ import bisect
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
@@ -47,19 +48,20 @@ class EventService:
         from snore.database import models
 
         session = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.id == session_id)
+            self.db_session.execute(
+                select(models.Session).where(models.Session.id == session_id)
+            )
+            .scalars()
             .first()
         )
         if session is None:
             raise NotFoundError(f"Session {session_id} not found")
 
-        query = self.db_session.query(models.Event).filter(
-            models.Event.session_id == session_id
-        )
+        stmt = select(models.Event).where(models.Event.session_id == session_id)
         if event_type:
-            query = query.filter(models.Event.event_type == event_type)
-        events = query.order_by(models.Event.start_time).all()
+            stmt = stmt.where(models.Event.event_type == event_type)
+        stmt = stmt.order_by(models.Event.start_time)
+        events = list(self.db_session.execute(stmt).scalars().all())
         return events, session.start_time
 
     def get_machine_event_times(self, session_id: int) -> list[float]:
@@ -77,16 +79,20 @@ class EventService:
         from snore.database import models
 
         session = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.id == session_id)
+            self.db_session.execute(
+                select(models.Session).where(models.Session.id == session_id)
+            )
+            .scalars()
             .first()
         )
         if session is None:
             raise NotFoundError(f"Session {session_id} not found")
 
         events = (
-            self.db_session.query(models.Event)
-            .filter(models.Event.session_id == session_id)
+            self.db_session.execute(
+                select(models.Event).where(models.Event.session_id == session_id)
+            )
+            .scalars()
             .all()
         )
         return sorted(e.start_time.timestamp() for e in events)

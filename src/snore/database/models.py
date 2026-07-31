@@ -4,6 +4,26 @@ SQLAlchemy ORM models for SNORE database.
 Defines the complete database schema including:
 - Core CPAP data tables (devices, sessions, waveforms, events, statistics, settings)
 - Medical analysis infrastructure (knowledge base, patterns, analysis results)
+
+Relationship loading policy
+---------------------------
+All relationships use ``lazy="raise"`` to prevent implicit N+1 queries and to
+guarantee that ``MissingGreenlet`` errors cannot occur when these models are
+used from async sessions (PR-2).  Every traversal must be explicit: use
+``selectinload`` / ``joinedload`` in the calling query or call the relationship
+within the open session.
+
+Timestamp classification
+------------------------
+*Absolute instants* (audit times, import times) use ``UTCDateTime``.  These
+values are always written with ``utc_now()`` and must survive a SQLite round-
+trip with full timezone information intact.
+
+*Device / session wall-clock columns* (``Session.start_time``, ``Event.start_time``,
+``AnalysisResult.timestamp_start`` / ``timestamp_end``,
+``DetectedPattern.start_time``) use plain ``DateTime`` without timezone because
+CPAP devices record local wall-clock time without a timezone offset.  Storing
+them as UTC would invent timezone facts the source data does not contain.
 """
 
 from datetime import UTC, date, datetime
@@ -24,7 +44,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from snore.database.types import ValidatedJSONWithDefault
+from snore.database.types import UTCDateTime, ValidatedJSONWithDefault
 
 
 class Base(DeclarativeBase):
@@ -52,11 +72,10 @@ class Profile(Base):
     settings: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, default=dict
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now
-    )
+    # Absolute audit instants — stored as UTC, restored with tzinfo=UTC.
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+        UTCDateTime, default=utc_now, onupdate=utc_now
     )
 
     __table_args__ = (CheckConstraint("length(username) > 0", name="chk_username"),)
@@ -77,13 +96,22 @@ class Device(Base):
     firmware_version: Mapped[str | None] = mapped_column(String)
     hardware_version: Mapped[str | None] = mapped_column(String)
     product_code: Mapped[str | None] = mapped_column(String)
-    first_seen: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
-    last_import: Mapped[datetime | None] = mapped_column(DateTime)
+    # Absolute audit instants.
+    first_seen: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    last_import: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     sessions = relationship(
-        "Session", back_populates="device", cascade="all, delete-orphan"
+        "Session",
+        back_populates="device",
+        cascade="all, delete-orphan",
+        lazy="raise",
     )
-    days = relationship("Day", back_populates="device", cascade="all, delete-orphan")
+    days = relationship(
+        "Day",
+        back_populates="device",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
 
     __table_args__ = (
         CheckConstraint("length(manufacturer) > 0", name="chk_manufacturer"),
@@ -139,15 +167,14 @@ class Day(Base):
     spo2_max: Mapped[float | None] = mapped_column(Float)
     spo2_mean: Mapped[float | None] = mapped_column(Float)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now
-    )
+    # Absolute audit instants.
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+        UTCDateTime, default=utc_now, onupdate=utc_now
     )
 
-    device = relationship("Device", back_populates="days")
-    sessions = relationship("Session", back_populates="day")
+    device = relationship("Device", back_populates="days", lazy="raise")
+    sessions = relationship("Session", back_populates="day", lazy="raise")
 
     __table_args__ = (UniqueConstraint("device_id", "date", name="uq_device_date"),)
 
@@ -166,11 +193,13 @@ class Session(Base):
         ForeignKey("days.id", ondelete="CASCADE")
     )
     device_session_id: Mapped[str] = mapped_column(String)
+    # Device wall-clock times: no source timezone, never convert.
     start_time: Mapped[datetime] = mapped_column(DateTime)
     end_time: Mapped[datetime] = mapped_column(DateTime)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     therapy_mode: Mapped[str | None] = mapped_column(String)
-    import_date: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    # Absolute audit instant.
+    import_date: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     import_source: Mapped[str | None] = mapped_column(String)
     parser_version: Mapped[str | None] = mapped_column(String)
     data_quality_notes: Mapped[dict[str, Any]] = mapped_column(
@@ -181,25 +210,38 @@ class Session(Base):
     has_statistics: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    device = relationship("Device", back_populates="sessions")
-    day = relationship("Day", back_populates="sessions")
+    device = relationship("Device", back_populates="sessions", lazy="raise")
+    day = relationship("Day", back_populates="sessions", lazy="raise")
     waveforms = relationship(
-        "Waveform", back_populates="session", cascade="all, delete-orphan"
+        "Waveform",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        lazy="raise",
     )
     events = relationship(
-        "Event", back_populates="session", cascade="all, delete-orphan"
+        "Event",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        lazy="raise",
     )
     statistics = relationship(
         "Statistics",
         back_populates="session",
         uselist=False,
         cascade="all, delete-orphan",
+        lazy="raise",
     )
     settings = relationship(
-        "Setting", back_populates="session", cascade="all, delete-orphan"
+        "Setting",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        lazy="raise",
     )
     analysis_results = relationship(
-        "AnalysisResult", back_populates="session", cascade="all, delete-orphan"
+        "AnalysisResult",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        lazy="raise",
     )
 
     __table_args__ = (
@@ -232,7 +274,7 @@ class Waveform(Base):
     data_blob: Mapped[bytes] = mapped_column(LargeBinary)
     sample_count: Mapped[int | None] = mapped_column(Integer)
 
-    session = relationship("Session", back_populates="waveforms")
+    session = relationship("Session", back_populates="waveforms", lazy="raise")
 
     __table_args__ = (
         UniqueConstraint("session_id", "waveform_type", name="uq_session_waveform"),
@@ -253,12 +295,13 @@ class Event(Base):
         ForeignKey("sessions.id", ondelete="CASCADE")
     )
     event_type: Mapped[str] = mapped_column(String)
+    # Device wall-clock time: no source timezone, never convert.
     start_time: Mapped[datetime] = mapped_column(DateTime)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     spo2_drop: Mapped[float | None] = mapped_column(Float)
     peak_flow_limitation: Mapped[float | None] = mapped_column(Float)
 
-    session = relationship("Session", back_populates="events")
+    session = relationship("Session", back_populates="events", lazy="raise")
 
     __table_args__ = (
         CheckConstraint(
@@ -337,7 +380,7 @@ class Statistics(Base):
 
     usage_hours: Mapped[float | None] = mapped_column(Float)
 
-    session = relationship("Session", back_populates="statistics")
+    session = relationship("Session", back_populates="statistics", lazy="raise")
 
     def __repr__(self) -> str:
         return f"<Statistics(session_id={self.session_id}, ahi={self.ahi})>"
@@ -355,7 +398,7 @@ class Setting(Base):
     key: Mapped[str] = mapped_column(String)
     value: Mapped[str | None] = mapped_column(String)
 
-    session = relationship("Session", back_populates="settings")
+    session = relationship("Session", back_populates="settings", lazy="raise")
 
     __table_args__ = (UniqueConstraint("session_id", "key", name="uq_session_key"),)
 
@@ -372,6 +415,7 @@ class AnalysisResult(Base):
     session_id: Mapped[int] = mapped_column(
         ForeignKey("sessions.id", ondelete="CASCADE")
     )
+    # Device/session wall-clock windows: no source timezone, never convert.
     timestamp_start: Mapped[datetime] = mapped_column(DateTime)
     timestamp_end: Mapped[datetime] = mapped_column(DateTime)
     programmatic_result_json: Mapped[dict[str, Any]] = mapped_column(
@@ -381,11 +425,15 @@ class AnalysisResult(Base):
     engine_versions_json: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, default=dict
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    # Absolute audit instant — used for latest-result selection.
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 
-    session = relationship("Session", back_populates="analysis_results")
+    session = relationship("Session", back_populates="analysis_results", lazy="raise")
     detected_patterns = relationship(
-        "DetectedPattern", back_populates="analysis", cascade="all, delete-orphan"
+        "DetectedPattern",
+        back_populates="analysis",
+        cascade="all, delete-orphan",
+        lazy="raise",
     )
 
     def __repr__(self) -> str:
@@ -407,6 +455,7 @@ class DetectedPattern(Base):
         ForeignKey("analysis_results.id", ondelete="CASCADE")
     )
     pattern_id: Mapped[str] = mapped_column(String(100))
+    # Device/session wall-clock time: no source timezone, never convert.
     start_time: Mapped[datetime] = mapped_column(DateTime)
     duration: Mapped[float | None] = mapped_column(Float)  # seconds
     confidence: Mapped[float] = mapped_column(Float)
@@ -416,7 +465,9 @@ class DetectedPattern(Base):
     )
     notes: Mapped[str | None] = mapped_column(Text)
 
-    analysis = relationship("AnalysisResult", back_populates="detected_patterns")
+    analysis = relationship(
+        "AnalysisResult", back_populates="detected_patterns", lazy="raise"
+    )
 
     def __repr__(self) -> str:
         return f"<DetectedPattern(id={self.id}, pattern={self.pattern_id}, confidence={self.confidence})>"

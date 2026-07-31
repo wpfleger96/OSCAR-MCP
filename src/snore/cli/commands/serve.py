@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 import click
 import uvicorn
+
+logger = logging.getLogger(__name__)
 
 
 @click.command()
@@ -18,11 +21,28 @@ def serve(host: str, port: int, reload: bool, db: str | None) -> None:
 
     Serves the REST API at /api/v1/. If the web UI has been built
     (ui/dist/ exists), it is served at all other paths.
+
+    Database resolution uses the precedence chain:
+        --db > SNORE_DATABASE_URL > SNORE_DB_PATH > default SQLite path
+
+    The parent process resolves the target and exports the canonical URL as
+    SNORE_DATABASE_URL so the uvicorn child process opens the same database.
+    SNORE_DB_PATH is removed from the environment to avoid lower-precedence
+    leakage.
     """
-    if db:
-        # uvicorn spawns the app via factory; env var is the only cross-process
-        # channel available at this point
-        os.environ["SNORE_DB_PATH"] = db
+    from snore.database.target import DatabaseTarget
+
+    target = DatabaseTarget.from_env_and_flags(db_flag=db, warn_ignored=True)
+    canonical_url = target.resolve_sync_url()
+
+    # Export the canonical URL for the child process; clear the lower-precedence
+    # path variable so it cannot override what the child receives.
+    os.environ["SNORE_DATABASE_URL"] = canonical_url
+    os.environ.pop("SNORE_DB_PATH", None)
+
+    logger.debug(
+        "serve: resolved database target %r → %r", target.raw_url, canonical_url
+    )
 
     uvicorn.run(
         "snore.api.app:create_app",

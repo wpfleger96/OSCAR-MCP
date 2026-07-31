@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from sqlalchemy import select
+
 from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.parsers.base import RawFileManifest
 
@@ -349,8 +351,10 @@ class ExportService:
             )
             for s in sessions:
                 waveforms = (
-                    db_session.query(models.Waveform)
-                    .filter_by(session_id=s["id"])
+                    db_session.execute(
+                        select(models.Waveform).filter_by(session_id=s["id"])
+                    )
+                    .scalars()
                     .all()
                 )
                 for w in waveforms:
@@ -624,9 +628,12 @@ class ExportService:
             return {}
 
         events = (
-            db_session.query(models.Event)
-            .filter(models.Event.session_id.in_(session_ids))
-            .order_by(models.Event.session_id, models.Event.start_time)
+            db_session.execute(
+                select(models.Event)
+                .filter(models.Event.session_id.in_(session_ids))
+                .order_by(models.Event.session_id, models.Event.start_time)
+            )
+            .scalars()
             .all()
         )
         grouped: dict[int, list[Any]] = defaultdict(list)
@@ -647,9 +654,12 @@ class ExportService:
             return {}
 
         settings = (
-            db_session.query(models.Setting)
-            .filter(models.Setting.session_id.in_(session_ids))
-            .order_by(models.Setting.session_id, models.Setting.key)
+            db_session.execute(
+                select(models.Setting)
+                .filter(models.Setting.session_id.in_(session_ids))
+                .order_by(models.Setting.session_id, models.Setting.key)
+            )
+            .scalars()
             .all()
         )
         grouped: dict[int, list[Any]] = defaultdict(list)

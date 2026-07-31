@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import bindparam, func, select, text
-from sqlalchemy.orm import Query, Session
+from sqlalchemy.orm import Session
 
 from snore.analysis.types import AnalysisResult
 from snore.database import models
@@ -36,28 +36,30 @@ class AnalysisFacade:
         """
         self.db_session = db_session
 
-    def _status_query(
+    def _status_select(
         self,
         start: datetime | None,
         end: datetime | None,
         analyzed_only: bool,
-    ) -> Query[models.Session]:
-        """Build the shared session query for list/count of analysis status."""
-        query = self.db_session.query(models.Session).join(models.Day)
+    ) -> Any:
+        """Build the shared 2.0-style select for list/count of analysis status."""
+        stmt = select(models.Session).join(
+            models.Day, models.Session.day_id == models.Day.id
+        )
 
         if start:
-            query = query.filter(models.Day.date >= start.date())
+            stmt = stmt.where(models.Day.date >= start.date())
         if end:
-            query = query.filter(models.Day.date <= end.date())
+            stmt = stmt.where(models.Day.date <= end.date())
 
         if analyzed_only:
-            query = query.filter(
-                self.db_session.query(models.AnalysisResult)
-                .filter(models.AnalysisResult.session_id == models.Session.id)
+            stmt = stmt.where(
+                select(models.AnalysisResult.id)
+                .where(models.AnalysisResult.session_id == models.Session.id)
                 .exists()
             )
 
-        return query
+        return stmt
 
     def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
         """Map each session ID to its latest AnalysisResult ID (by created_at)."""
@@ -104,7 +106,7 @@ class AnalysisFacade:
         Returns:
             List of AnalysisListItem with has_analysis and analysis_id fields
         """
-        query = self._status_query(start, end, analyzed_only)
+        stmt = self._status_select(start, end, analyzed_only)
 
         sort_clauses: dict[str, Any] = {
             "date-asc": models.Day.date.asc(),
@@ -113,17 +115,21 @@ class AnalysisFacade:
         }
 
         sort_clause = sort_clauses.get(sort_by, models.Day.date.desc())
-        query = query.order_by(sort_clause)
+        stmt = stmt.order_by(sort_clause)
 
         if offset > 0:
-            query = query.offset(offset)
+            stmt = stmt.offset(offset)
 
         if limit > 0:
-            query = query.limit(limit)
+            stmt = stmt.limit(limit)
         else:
-            query = query.limit(10000)
+            stmt = stmt.limit(10000)
 
-        sessions = query.all()
+        # Load Day inline to avoid lazy-load access below.
+        from sqlalchemy.orm import joinedload as _joinedload
+
+        stmt = stmt.options(_joinedload(models.Session.day))
+        sessions = self.db_session.execute(stmt).unique().scalars().all()
 
         latest_analysis = self._latest_analysis_ids([s.id for s in sessions])
 
@@ -131,6 +137,7 @@ class AnalysisFacade:
         for session in sessions:
             analysis_id = latest_analysis.get(session.id)
 
+            # day is loaded via joinedload; use start_time.date() as fallback.
             session_date = (
                 session.day.date if session.day else session.start_time.date()
             )
@@ -161,7 +168,10 @@ class AnalysisFacade:
 
         Used by the API to populate the `total` field in paginated responses.
         """
-        return self._status_query(start, end, analyzed_only).count()
+        count_stmt = select(func.count()).select_from(
+            self._status_select(start, end, analyzed_only).subquery()
+        )
+        return self.db_session.execute(count_stmt).scalar() or 0
 
     def get_delete_preview(
         self,
@@ -368,18 +378,20 @@ class AnalysisFacade:
         from snore.analysis.service import AnalysisService
         from snore.database.session import session_scope
 
-        query = self.db_session.query(models.Session).join(models.Day)
+        stmt = select(models.Session, models.Day.date.label("day_date")).join(
+            models.Day, models.Session.day_id == models.Day.id
+        )
         if from_date:
-            query = query.filter(models.Day.date >= from_date.date())
+            stmt = stmt.where(models.Day.date >= from_date.date())
         if to_date:
-            query = query.filter(models.Day.date <= to_date.date())
+            stmt = stmt.where(models.Day.date <= to_date.date())
+        stmt = stmt.order_by(models.Day.date)
 
-        sessions = query.order_by(models.Day.date).all()
-        # Build date map before spawning threads to avoid DB access in workers
+        rows = self.db_session.execute(stmt).all()
         session_dates: dict[int, date | None] = {
-            s.id: s.day.date if s.day else s.start_time.date() for s in sessions
+            row.Session.id: row.day_date for row in rows
         }
-        session_ids = [s.id for s in sessions]
+        session_ids = [row.Session.id for row in rows]
         total = len(session_ids)
 
         if not session_ids:
@@ -390,11 +402,24 @@ class AnalysisFacade:
         modes_list: list[str] | None = list(modes) if modes is not None else None
 
         def analyze_one(sid: int) -> None:
-            with session_scope() as thread_session:
-                svc = AnalysisService(thread_session)
-                svc.analyze_session(
-                    session_id=sid, modes=modes_list, store_results=store_results
+            # Read + compute phase: session closed before the write.
+            # This separates the long-running read/compute transaction from the
+            # short write transaction, preventing SQLite write-lock contention
+            # when multiple workers finish concurrently.
+            result = None
+            with session_scope() as read_session:
+                svc = AnalysisService(read_session)
+                result = svc.analyze_session(
+                    session_id=sid, modes=modes_list, store_results=False
                 )
+            # Write phase: a fresh, short-lived session holds the write lock
+            # only for the INSERT, not for the full analysis duration.
+            # Guard: if analyze_session returned None (e.g. nothing to store),
+            # skip the write entirely.
+            if store_results and result is not None:
+                with session_scope() as write_session:
+                    write_svc = AnalysisService(write_session)
+                    write_svc._store_result(result, 0)
 
         with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
             futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}

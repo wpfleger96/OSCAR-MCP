@@ -6,17 +6,23 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from queue import Empty
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from snore.api.import_jobs import ImportJob, JobType, create_job, get_job, remove_job
+from snore.api.import_jobs import (
+    ImportJob,
+    JobType,
+    cancel_job,
+    create_job,
+    get_job,
+)
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
@@ -63,6 +69,66 @@ def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     return service.detect_sources(Path(body.path))
 
 
+def _run_import(job: ImportJob) -> None:
+    """Worker function — runs in a background thread.  Must be started exactly once."""
+    try:
+        service = ImportService()
+        if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
+            job.report_progress("Detecting data sources...")
+            if job.cancel_requested:
+                return
+            sources = service.detect_sources(job.temp_dir)
+            job.report_progress(f"Detected {len(sources)} source(s)")
+            result = service.import_sources(
+                sources,
+                backup=True,
+                progress_callback=lambda msg: (
+                    job.report_progress(msg) if not job.cancel_requested else None
+                ),
+            )
+        elif job.job_type == JobType.PATH and job.sources is not None:
+            result = service.import_sources(
+                job.sources,
+                backup=True,
+                progress_callback=lambda msg: (
+                    job.report_progress(msg) if not job.cancel_requested else None
+                ),
+            )
+        else:
+            raise ValueError("Invalid job configuration")
+
+        if job.cancel_requested:
+            job._finish(
+                succeeded=False,
+                terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+            )
+            return
+
+        terminal_msg = {"event": "complete", "data": {"result": result.model_dump()}}
+        job._finish(succeeded=True, terminal_msg=terminal_msg)
+    except Exception as e:
+        logger.exception("Import job %s failed", job.job_id)
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": str(e)}},
+        )
+    finally:
+        # Cleanup upload temp dir only after worker has fully exited.
+        job.cleanup_files()
+
+
+def _start_worker(job: ImportJob) -> None:
+    """Attempt to start the worker thread for *job* (start-once guarantee)."""
+    if not job.try_start():
+        return  # Already running or terminal.
+    t = threading.Thread(
+        target=_run_import, args=(job,), daemon=True, name=f"import-{job.job_id}"
+    )
+    with job._lock:
+        job._worker_thread = t
+    t.start()
+
+
 @router.post(
     "/",
     response_model=JobResponse,
@@ -88,84 +154,82 @@ def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     },
 )
 async def import_files(request: Request) -> JobResponse:
-    async with request.form(max_files=MAX_UPLOAD_FILES) as form:
-        uploads = [
-            f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
-        ]
-        if not uploads:
-            raise HTTPException(status_code=422, detail="No files provided")
-        total_size = sum(f.size or 0 for f in uploads)
-        if total_size > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Total upload size exceeds {MAX_UPLOAD_BYTES // (1024**3)} GiB limit",
-            )
+    tmp: str | None = None
+    try:
+        async with request.form(max_files=MAX_UPLOAD_FILES) as form:
+            uploads = [
+                f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
+            ]
+            if not uploads:
+                raise HTTPException(status_code=422, detail="No files provided")
+            total_size = sum(f.size or 0 for f in uploads)
+            if total_size > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Total upload size exceeds {MAX_UPLOAD_BYTES // (1024**3)} GiB limit",
+                )
 
-        tmp = tempfile.mkdtemp()
-        tmp_path = Path(tmp)
-        tmp_root = tmp_path.resolve()
-        for upload in uploads:
-            filename = upload.filename or "unknown"
-            rel = safe_relative_path(filename) or "unknown"
-            dest = tmp_path / rel
-            if not dest.resolve().is_relative_to(tmp_root):
-                logger.warning("Skipping file with unsafe path: %r", filename)
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            content = await upload.read()
-            dest.write_bytes(content)
+            tmp = tempfile.mkdtemp()
+            tmp_path = Path(tmp)
+            tmp_root = tmp_path.resolve()
+            for upload in uploads:
+                filename = upload.filename or "unknown"
+                rel = safe_relative_path(filename) or "unknown"
+                dest = tmp_path / rel
+                if not dest.resolve().is_relative_to(tmp_root):
+                    logger.warning("Skipping file with unsafe path: %r", filename)
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                content = await upload.read()
+                dest.write_bytes(content)
 
+        # create_job may raise; if so, clean up the temp dir.
         job = create_job(JobType.UPLOAD, temp_dir=tmp_path)
-        return JobResponse(job_id=job.job_id)
+        tmp = None  # Job owns the directory now.
+    except HTTPException:
+        raise
+    except Exception:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+    # Start worker immediately — /progress is observer-only.
+    _start_worker(job)
+    return JobResponse(job_id=job.job_id)
 
 
 @router.post("/path", response_model=JobResponse, status_code=202)
 def import_from_path(body: ImportPathRequest, request: Request) -> JobResponse:
     _require_localhost(request)
     job = create_job(JobType.PATH, sources=body.sources)
+    _start_worker(job)
     return JobResponse(job_id=job.job_id)
 
 
-def _run_import(job: ImportJob) -> None:
-    def progress_callback(msg: str) -> None:
-        job.progress_queue.put({"event": "progress", "data": {"message": msg}})
-
-    try:
-        service = ImportService()
-        if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
-            progress_callback("Detecting data sources...")
-            sources = service.detect_sources(job.temp_dir)
-            progress_callback(f"Detected {len(sources)} source(s)")
-            result = service.import_sources(
-                sources, backup=True, progress_callback=progress_callback
-            )
-        elif job.job_type == JobType.PATH and job.sources is not None:
-            result = service.import_sources(
-                job.sources, backup=True, progress_callback=progress_callback
-            )
-        else:
-            raise ValueError("Invalid job configuration")
-
-        job.progress_queue.put(
-            {"event": "complete", "data": {"result": result.model_dump()}}
-        )
-    except Exception as e:
-        logger.exception("Import job %s failed", job.job_id)
-        job.progress_queue.put({"event": "error", "data": {"message": str(e)}})
+@router.delete("/{job_id}", status_code=204)
+def cancel_import(job_id: str) -> None:
+    """Cancel an import job.  Idempotent — returns 204 whether or not the job existed."""
+    cancel_job(job_id)
 
 
 async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
+    """SSE stream for one observer.  Attaches, drains events, then detaches."""
     loop = asyncio.get_running_loop()
+    ch = job.attach_observer()
     try:
         while True:
             try:
                 msg = await asyncio.wait_for(
-                    loop.run_in_executor(None, job.progress_queue.get, True, 1.0),
+                    loop.run_in_executor(None, ch.get, 1.0),
                     timeout=2.0,
                 )
-            except (TimeoutError, Empty):
+            except TimeoutError:
                 yield ": keepalive\n\n"
                 continue
+
+            if msg is None:
+                # Channel closed (job cancelled / shutdown).
+                break
 
             event_type = msg.get("event", "progress")
             data = json.dumps(msg.get("data", {}))
@@ -174,19 +238,15 @@ async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
             if event_type in ("complete", "error"):
                 break
     finally:
-        if job.temp_dir is not None:
-            shutil.rmtree(job.temp_dir, ignore_errors=True)
-        remove_job(job.job_id)
+        job.detach_observer(ch)
 
 
 @router.get("/{job_id}/progress")
 async def import_progress(job_id: str) -> StreamingResponse:
+    """Attach an SSE observer to an existing job.  Never starts/restarts the worker."""
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Import job not found")
-
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _run_import, job)
 
     return StreamingResponse(
         _sse_generator(job),

@@ -2,9 +2,10 @@
 
 import json
 
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Text, TypeDecorator
+from sqlalchemy import DateTime, Text, TypeDecorator
 
 
 class ValidatedJSON(TypeDecorator[dict[str, Any]]):
@@ -103,3 +104,91 @@ class ValidatedJSONWithDefault(ValidatedJSON):
         """
         result = super().process_result_value(value, dialect)
         return result if result is not None else {}
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    """A DateTime column type that preserves UTC timezone info across all dialects.
+
+    SQLite discards tzinfo on storage/retrieval; ``DateTime(timezone=True)``
+    is a false promise on that dialect.  This type:
+
+    - **Binds**: normalises any tz-aware datetime to UTC before storage; rejects
+      naive datetimes (raise ``ValueError``).
+    - **Loads**: restores ``tzinfo=UTC`` on every result regardless of dialect,
+      interpreting the stored value as UTC.
+
+    Use this for absolute audit instants (created_at, updated_at, last_import …).
+    Do NOT use it for device/session wall-clock columns (Session.start_time,
+    Event.start_time, etc.) whose source timezone is unknown.
+
+    cache_ok = True: the type carries no instance-specific state.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Any) -> datetime | None:
+        """Normalise a tz-aware datetime to UTC before storage.
+
+        Args:
+            value: datetime to store; must be tz-aware.
+            dialect: SQLAlchemy dialect (unused).
+
+        Returns:
+            Naive UTC datetime for storage (SQLite has no native TZ storage).
+
+        Raises:
+            ValueError: If value is a naive datetime.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, datetime):
+            raise ValueError(f"UTCDateTime expects a datetime, got {type(value)!r}")
+        if value.tzinfo is None:
+            raise ValueError(
+                "UTCDateTime requires tz-aware datetimes; "
+                "use datetime.now(UTC) or datetime(..., tzinfo=UTC)"
+            )
+        # Normalise non-UTC offsets to UTC, then strip tzinfo for storage
+        # (SQLite stores the bare string; PostgreSQL stores with offset = +00).
+        utc_value = value.astimezone(UTC)
+        return utc_value.replace(tzinfo=None)
+
+    def process_result_value(self, value: Any, dialect: Any) -> datetime | None:
+        """Restore UTC tzinfo on every retrieved datetime.
+
+        Args:
+            value: Raw value from the database driver.
+            dialect: SQLAlchemy dialect (unused).
+
+        Returns:
+            tz-aware datetime in UTC, or None.
+        """
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            # May already carry tzinfo from PostgreSQL driver; normalise to UTC.
+            if value.tzinfo is not None:
+                return value.astimezone(UTC)
+            return value.replace(tzinfo=UTC)
+        # SQLite may return an ISO string in some configurations.
+        if isinstance(value, str):
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(UTC)
+            return parsed.replace(tzinfo=UTC)
+        raise ValueError(f"UTCDateTime: unexpected stored value type {type(value)!r}")
+
+
+# Convenience alias: zero UTC offset as a timedelta, for test assertions.
+UTC_ZERO = timedelta(0)
+
+# Re-export so callers can do: from snore.database.types import UTC
+_UTC = UTC
+__all__ = [
+    "ValidatedJSON",
+    "ValidatedJSONWithDefault",
+    "UTCDateTime",
+    "UTC_ZERO",
+    "timezone",
+]

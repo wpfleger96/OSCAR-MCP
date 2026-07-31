@@ -31,7 +31,7 @@ from snore.api.routers import (
     validation,
     waveforms,
 )
-from snore.database.session import init_database
+from snore.database.session import init_database, init_database_from_url
 
 API_V1_PREFIX = "/api/v1"
 
@@ -43,8 +43,14 @@ except PackageNotFoundError:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    db_path = os.environ.get("SNORE_DB_PATH")
-    init_database(db_path)
+    # Honour the canonical URL exported by `snore serve` first; fall back to
+    # SNORE_DB_PATH for direct uvicorn invocations and the e2e test harness.
+    database_url = os.environ.get("SNORE_DATABASE_URL")
+    if database_url:
+        init_database_from_url(database_url)
+    else:
+        db_path = os.environ.get("SNORE_DB_PATH")
+        init_database(db_path)
     yield
 
 

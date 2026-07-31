@@ -12,6 +12,7 @@ from datetime import datetime
 
 import numpy as np
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.analysis.data.waveform_loader import WaveformLoader
@@ -86,16 +87,23 @@ class AnalysisService:
         Returns:
             List of respiratory events with session-relative timestamps
         """
-        session = self.db_session.query(models.Session).filter_by(id=session_id).first()
+        session = (
+            self.db_session.execute(select(models.Session).filter_by(id=session_id))
+            .scalars()
+            .first()
+        )
         if not session:
             return []
 
         session_start_ts = session.start_time.timestamp()
 
         events = (
-            self.db_session.query(models.Event)
-            .filter_by(session_id=session_id)
-            .order_by(models.Event.start_time)
+            self.db_session.execute(
+                select(models.Event)
+                .filter_by(session_id=session_id)
+                .order_by(models.Event.start_time)
+            )
+            .scalars()
             .all()
         )
 
@@ -141,7 +149,11 @@ class AnalysisService:
         logger.info(f"Starting analysis for session {session_id} with modes: {modes}")
         start_time = time.time()
 
-        session = self.db_session.query(models.Session).filter_by(id=session_id).first()
+        session = (
+            self.db_session.execute(select(models.Session).filter_by(id=session_id))
+            .scalars()
+            .first()
+        )
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
@@ -317,9 +329,12 @@ class AnalysisService:
             AnalysisResult dataclass or None if not found
         """
         analysis = (
-            self.db_session.query(models.AnalysisResult)
-            .filter_by(session_id=session_id)
-            .order_by(models.AnalysisResult.created_at.desc())
+            self.db_session.execute(
+                select(models.AnalysisResult)
+                .filter_by(session_id=session_id)
+                .order_by(models.AnalysisResult.created_at.desc())
+            )
+            .scalars()
             .first()
         )
 

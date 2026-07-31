@@ -9,6 +9,9 @@ from typing import Any
 
 import click
 
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
+
 from snore.cli.decorators import (
     date_range_options,
     db_option,
@@ -187,9 +190,12 @@ def show(
     with open_db_session(db) as session:
         if date is not None:
             db_session = (
-                session.query(models.Session)
-                .join(models.Day)
-                .filter(models.Day.date == date.date())
+                session.execute(
+                    select(models.Session)
+                    .join(models.Day)
+                    .where(models.Day.date == date.date())
+                )
+                .scalars()
                 .first()
             )
             if not db_session:
@@ -198,7 +204,15 @@ def show(
 
         assert session_id is not None, "session_id should not be None"
 
-        db_session = session.query(models.Session).filter_by(id=session_id).first()
+        db_session = (
+            session.execute(
+                select(models.Session)
+                .filter_by(id=session_id)
+                .options(joinedload(models.Session.day))
+            )
+            .scalars()
+            .first()
+        )
         if not db_session:
             raise click.ClickException(f"Session {session_id} not found")
 
@@ -386,9 +400,12 @@ def _analyze_single_session(
 
     if date:
         db_session = (
-            session.query(models.Session)
-            .join(models.Day)
-            .filter(models.Day.date == date.date())
+            session.execute(
+                select(models.Session)
+                .join(models.Day)
+                .where(models.Day.date == date.date())
+            )
+            .scalars()
             .first()
         )
         if not db_session:
@@ -396,7 +413,15 @@ def _analyze_single_session(
         session_id = db_session.id
         session_date_str = date.date().isoformat()
     else:
-        db_session = session.query(models.Session).filter_by(id=session_id).first()
+        db_session = (
+            session.execute(
+                select(models.Session)
+                .filter_by(id=session_id)
+                .options(joinedload(models.Session.day))
+            )
+            .scalars()
+            .first()
+        )
         if not db_session:
             raise click.ClickException(f"Session {session_id} not found")
         day_date = (

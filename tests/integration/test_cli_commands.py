@@ -8,7 +8,7 @@ These tests verify the command-line interface functionality including:
 - session list command with limits and truncation
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -474,7 +474,7 @@ def db_with_analysis(temp_db):
                     programmatic_result_json=analysis_json,
                     processing_time_ms=100,
                     engine_versions_json={"version": "1.0.0"},
-                    created_at=start_time + timedelta(minutes=j),
+                    created_at=datetime.now(UTC) + timedelta(minutes=j),
                 )
                 session.add(analysis)
                 session.flush()

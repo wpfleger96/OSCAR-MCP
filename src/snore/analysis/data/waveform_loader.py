@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from scipy import signal
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.database.models import Waveform
@@ -192,8 +193,12 @@ def load_waveform_from_db(
         ... )
     """
     waveform = (
-        db_session.query(Waveform)
-        .filter_by(session_id=session_id, waveform_type=waveform_type)
+        db_session.execute(
+            select(Waveform).filter_by(
+                session_id=session_id, waveform_type=waveform_type
+            )
+        )
+        .scalars()
         .first()
     )
 

@@ -1,7 +1,7 @@
 """Unit tests for AnalysisFacade."""
 
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -34,7 +34,7 @@ def _create_session_with_analysis(
             timestamp_start=sess.start_time,
             timestamp_end=sess.end_time,
             programmatic_result_json={"version": i + 1},
-            created_at=datetime.now() + timedelta(minutes=i),
+            created_at=datetime.now(UTC) + timedelta(minutes=i),
         )
         db_session.add(ar)
     db_session.flush()
