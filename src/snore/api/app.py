@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import logging
 import os
 
 from collections.abc import AsyncIterator
@@ -37,6 +38,8 @@ from snore.database.session import init_database, init_database_from_url
 
 API_V1_PREFIX = "/api/v1"
 
+logger = logging.getLogger(__name__)
+
 try:
     __version__ = get_version("snore")
 except PackageNotFoundError:
@@ -53,15 +56,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         db_path = os.environ.get("SNORE_DB_PATH")
         init_database(db_path)
-    # Start the background TTL reaper so expired terminal jobs are removed
-    # every 60 seconds without requiring a new job to be created.
-    _start_import_reaper(interval=60.0)
+    # Start a single lifespan-owned TTL reaper.  The stop event and thread
+    # handle are kept so the reaper is joined cleanly on exit — each lifespan
+    # entry gets exactly one reaper; it is stopped on exit rather than left as
+    # an immortal daemon.
+    reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
     try:
         yield
     finally:
-        # Cancel all in-flight import jobs and await their threads before the
-        # process exits.  Idempotent — safe to call with no active jobs.
-        _shutdown_import_jobs()
+        # Stop the reaper first so it doesn't race with shutdown cleanup.
+        reaper_stop.set()
+        reaper_thread.join(timeout=5.0)
+        # Cancel all in-flight import jobs and await their threads.
+        # Surface any workers still alive after the timeout instead of
+        # swallowing the failure silently.
+        still_alive = _shutdown_import_jobs()
+        if still_alive:
+            logger.warning(
+                "Shutdown incomplete: %d worker(s) still alive: %s",
+                len(still_alive),
+                still_alive,
+            )
 
 
 def create_app() -> FastAPI:

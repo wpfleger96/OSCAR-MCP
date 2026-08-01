@@ -1093,6 +1093,12 @@ export interface components {
              */
             failed: number
             /**
+             * Cancelled
+             * @description Sessions skipped due to cancellation
+             * @default 0
+             */
+            cancelled: number
+            /**
              * Results
              * @description Per-session results
              */
@@ -1118,6 +1124,12 @@ export interface components {
              * @description Whether analysis succeeded
              */
             success: boolean
+            /**
+             * Cancelled
+             * @description Whether this session was skipped due to cancellation
+             * @default false
+             */
+            cancelled: boolean
             /**
              * Error
              * @description Error message if failed

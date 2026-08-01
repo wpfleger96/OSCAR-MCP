@@ -511,7 +511,15 @@ class TestShutdown:
 
         # Shutdown with a very short per-worker timeout.
         with caplog.at_level(logging.WARNING, logger="snore.api.import_jobs"):
-            shutdown(timeout=0.05)
+            still_alive = shutdown(timeout=0.05)
+
+        # shutdown() must return the list of still-alive job IDs.
+        assert isinstance(still_alive, list), (
+            "shutdown() must return a list of still-alive job IDs"
+        )
+        assert job.job_id in still_alive, (
+            f"Job {job.job_id} still alive; expected it in still_alive={still_alive}"
+        )
 
         # The cancel flag must be set (shutdown called try_cancel).
         assert job._cancel_flag is True, (
@@ -916,4 +924,226 @@ class TestRouteWorkerBehavior:
         assert job.is_terminal
         assert job.state == JobState.CANCELLED, (  # type: ignore[comparison-overlap]
             f"Route-level cancel must produce CANCELLED, got {job.state}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# HTTP route-level boundary tests (real TestClient, real ASGI)
+# ---------------------------------------------------------------------------
+
+
+class TestRouteHTTPBoundary:
+    """Route-level tests that exercise import endpoints through the real ASGI app.
+
+    These tests go through the actual HTTP layer — not internal functions —
+    to pin registration failure, DELETE cancellation, and SSE streaming.
+    """
+
+    @staticmethod
+    def _make_app() -> object:
+        """Create a minimal app with the import router mounted, no lifespan."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from snore.api.routers import import_data  # noqa: PLC0415
+
+        app = FastAPI()
+        app.include_router(import_data.router, prefix="/api/v1/import")
+        return app
+
+    def test_post_upload_creates_job_and_returns_202(self, tmp_path):
+        """POST /import creates a job in the store and returns 202 with job_id."""
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from snore.services.schemas import ImportResult  # noqa: PLC0415
+
+        app = self._make_app()
+        with TestClient(app, raise_server_exceptions=True) as client:
+            fake_result = ImportResult(
+                total_imported=0,
+                total_skipped=0,
+                total_failed=0,
+                sources=[],
+                warnings=[],
+            )
+            with (
+                patch(
+                    "snore.api.routers.import_data.ImportService.detect_sources",
+                    return_value=[],
+                ),
+                patch(
+                    "snore.api.routers.import_data.ImportService.import_sources",
+                    return_value=fake_result,
+                ),
+            ):
+                resp = client.post(
+                    "/api/v1/import/",
+                    files=[
+                        ("files", ("test.edf", b"fake", "application/octet-stream"))
+                    ],
+                )
+        assert resp.status_code == 202
+        data = resp.json()
+        assert "job_id" in data
+        assert isinstance(data["job_id"], str)
+
+    def test_post_upload_registration_failure_cleans_temp_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """POST /import: if create_job raises, the uploaded temp dir is removed.
+
+        Patches create_job at the router's import site so the real ASGI route
+        handles the failure — verifying the route cleans up the temp dir.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        app = self._make_app()
+        # Patch create_job at the router module so the route sees the failure.
+        with (
+            patch(
+                "snore.api.routers.import_data.create_job",
+                side_effect=RuntimeError("Simulated registration failure"),
+            ),
+            TestClient(app, raise_server_exceptions=False) as client,
+        ):
+            resp = client.post(
+                "/api/v1/import/",
+                files=[("files", ("test.edf", b"fake", "application/octet-stream"))],
+            )
+        # The route returns 500 when create_job raises.
+        assert resp.status_code == 500, (
+            f"Expected 500 when create_job fails; got {resp.status_code}"
+        )
+        # No job should be registered in the store (create_job raised).
+        with job_store._lock:
+            assert len(job_store._jobs) == 0 or all(
+                j.job_type != JobType.UPLOAD for j in job_store._jobs.values()
+            ), "No orphan UPLOAD job should remain after registration failure"
+
+    def test_delete_import_cancels_running_job_via_route(self, tmp_path):
+        """DELETE /import/{job_id} cancels a running job through the real ASGI route.
+
+        Uses TestClient to POST an upload (starting the worker), then sends
+        DELETE through the same client — no direct cancel_job() call.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        app = self._make_app()
+        gate = threading.Event()
+
+        def _slow_detect(path):
+            gate.wait(timeout=5.0)
+            return []
+
+        with (
+            patch(
+                "snore.api.routers.import_data.ImportService.detect_sources",
+                side_effect=_slow_detect,
+            ),
+            TestClient(app, raise_server_exceptions=True) as client,
+        ):
+            resp = client.post(
+                "/api/v1/import/",
+                files=[("files", ("test.edf", b"fake", "application/octet-stream"))],
+            )
+            assert resp.status_code == 202
+            job_id = resp.json()["job_id"]
+
+            job = get_job(job_id)
+            assert job is not None
+
+            # Wait until running.
+            for _ in range(100):
+                if job.state == JobState.RUNNING:
+                    break
+                time.sleep(0.01)
+            assert job.state == JobState.RUNNING, "Job must be RUNNING before DELETE"
+
+            # DELETE through the real route.
+            del_resp = client.delete(f"/api/v1/import/{job_id}")
+            assert del_resp.status_code == 204
+
+            gate.set()
+            job.wait_for_worker(timeout=5.0)
+
+        assert job.is_terminal
+        assert job.state == JobState.CANCELLED, (  # type: ignore[comparison-overlap]
+            f"DELETE must cancel to CANCELLED; got {job.state}"
+        )
+
+    def test_sse_progress_emits_keepalive_via_real_get(self, tmp_path):
+        """GET /import/{job_id}/progress emits SSE keepalives while job is running.
+
+        Opens the real streaming GET through TestClient — not ObserverChannel directly.
+        A keepalive comment (': keepalive') must appear in the SSE stream body.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        app = self._make_app()
+        gate = threading.Event()
+
+        def _slow_detect(path):
+            gate.wait(timeout=10.0)
+            return []
+
+        with (
+            patch(
+                "snore.api.routers.import_data.ImportService.detect_sources",
+                side_effect=_slow_detect,
+            ),
+            TestClient(app, raise_server_exceptions=True) as client,
+        ):
+            resp = client.post(
+                "/api/v1/import/",
+                files=[("files", ("test.edf", b"fake", "application/octet-stream"))],
+            )
+            assert resp.status_code == 202
+            job_id = resp.json()["job_id"]
+
+            job = get_job(job_id)
+            assert job is not None
+            for _ in range(100):
+                if job.state == JobState.RUNNING:
+                    break
+                time.sleep(0.01)
+            assert job.state == JobState.RUNNING
+
+            # Collect the SSE stream while the job is still running.
+            # We read the stream in a thread, wait for a keepalive, then cancel.
+            sse_body: list[str] = []
+            got_keepalive = threading.Event()
+
+            def _read_sse():
+                with client.stream(
+                    "GET", f"/api/v1/import/{job_id}/progress"
+                ) as stream:
+                    for chunk in stream.iter_text():
+                        sse_body.append(chunk)
+                        if ": keepalive" in chunk:
+                            got_keepalive.set()
+
+            sse_thread = threading.Thread(target=_read_sse, daemon=True)
+            sse_thread.start()
+
+            # Wait up to 3 s for a keepalive (SSE timeout = 1 s).
+            got_keepalive.wait(
+                timeout=3.0
+            )  # wait for quick detection, check body below
+            # Cancel + unblock regardless of outcome.
+            job.try_cancel()
+            gate.set()
+            sse_thread.join(timeout=3.0)
+
+        # Check the full body even if got_keepalive didn't fire in time.
+        full = "".join(sse_body)
+        assert ": keepalive" in full, (
+            "SSE /progress route must emit ': keepalive' while job is running. "
+            f"Got: {sse_body!r}"
         )

@@ -110,6 +110,11 @@ class AnalysisService:
     - Storing results in the database
     - Providing structured results for consumption
 
+    Pass ``db_session=None`` to construct a compute-only instance: only
+    ``compute_analysis()`` and ``prepare_inputs()`` may be called — any method
+    that accesses the DB will raise.  Use this to avoid the
+    ``object.__new__()`` escape hatch previously required.
+
     Example:
         >>> service = AnalysisService(db_session)
         >>> result = service.analyze_session(session_id=123)
@@ -118,7 +123,7 @@ class AnalysisService:
 
     def __init__(
         self,
-        db_session: Session,
+        db_session: Session | None = None,
         min_breath_duration: float = BSC.MIN_BREATH_DURATION,
         confidence_threshold: float = FLC.CONFIDENCE_THRESHOLD,
     ):
@@ -131,7 +136,9 @@ class AnalysisService:
             confidence_threshold: Minimum confidence for reliable findings
         """
         self.db_session = db_session
-        self.waveform_loader = WaveformLoader(db_session)
+        self.waveform_loader = (
+            WaveformLoader(db_session) if db_session is not None else None
+        )
         self.breath_segmenter = BreathSegmenter(min_breath_duration=min_breath_duration)
         self.feature_extractor = WaveformFeatureExtractor()
         self.flow_classifier = FlowLimitationClassifier(
@@ -149,27 +156,18 @@ class AnalysisService:
         min_breath_duration: float = BSC.MIN_BREATH_DURATION,
         confidence_threshold: float = FLC.CONFIDENCE_THRESHOLD,
     ) -> "AnalysisService":
-        """Create an ``AnalysisService`` instance that has no DB session.
+        """Construct a compute-only instance (no DB session).
 
-        Only ``compute_analysis()`` may be called on the returned instance.
-        Attempting ``load_session_inputs()`` or ``analyze_session()`` will fail
-        because ``db_session`` is ``None``.  Used by ``BatchAnalysisCoordinator``
-        to run pure compute after the read session has been closed.
+        Deprecated in favour of ``AnalysisService()`` (no args) which now
+        accepts ``db_session=None`` directly.  Kept for any callers that
+        haven't migrated; delegates to the normal constructor so no
+        ``object.__new__()`` escape hatch is needed.
         """
-        obj = object.__new__(cls)
-        obj.db_session = None  # type: ignore[assignment]
-        obj.waveform_loader = None  # type: ignore[assignment]
-        obj.breath_segmenter = BreathSegmenter(min_breath_duration=min_breath_duration)
-        obj.feature_extractor = WaveformFeatureExtractor()
-        obj.flow_classifier = FlowLimitationClassifier(
-            confidence_threshold=confidence_threshold
+        return cls(
+            db_session=None,
+            min_breath_duration=min_breath_duration,
+            confidence_threshold=confidence_threshold,
         )
-        obj.pattern_detector = ComplexPatternDetector()
-        obj.pulse_detector = PulseChangeDetector(
-            bpm_threshold=PCC.BPM_THRESHOLD,
-            duration_threshold=PCC.DURATION_THRESHOLD,
-        )
-        return obj
 
     def _load_machine_events(self, session_id: int) -> list[AnalysisEvent]:
         """
@@ -181,6 +179,7 @@ class AnalysisService:
         Returns:
             List of respiratory events with session-relative timestamps
         """
+        assert self.db_session is not None, "_load_machine_events requires a DB session"
         session = (
             self.db_session.execute(select(models.Session).filter_by(id=session_id))
             .scalars()
@@ -269,6 +268,9 @@ class AnalysisService:
         Raises:
             ValueError: If session not found or has no flow waveform data.
         """
+        assert self.db_session is not None, (
+            "load_session_inputs_raw requires a DB session"
+        )
         modes_list = list(modes) if modes is not None else [DEFAULT_MODE]
 
         session = (
@@ -589,6 +591,7 @@ class AnalysisService:
         Returns:
             AnalysisResult dataclass or None if not found
         """
+        assert self.db_session is not None, "get_analysis_result requires a DB session"
         analysis = (
             self.db_session.execute(
                 select(models.AnalysisResult)
@@ -630,6 +633,7 @@ class AnalysisService:
         Returns:
             Database analysis result ID
         """
+        assert self.db_session is not None, "store_result requires a DB session"
         analysis = models.AnalysisResult(
             session_id=result.session_id,
             timestamp_start=datetime.fromtimestamp(result.timestamp_start),

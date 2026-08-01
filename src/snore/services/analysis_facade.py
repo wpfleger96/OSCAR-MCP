@@ -355,11 +355,30 @@ class AnalysisFacade:
         modes: list[str] | None = None,
         store_results: bool = True,
     ) -> AnalysisResult:
-        """Run analysis on a session. Returns AnalysisResult (Pydantic model)."""
-        from snore.analysis.service import AnalysisService
+        """Run analysis on a session.  Returns AnalysisResult (Pydantic model).
 
-        svc = AnalysisService(self.db_session)
-        return svc.analyze_session(session_id, modes=modes, store_results=store_results)
+        Owns a short read scope for the I/O phase and closes it before compute,
+        so the injected request session is never held across NumPy/scipy work.
+        """
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
+
+        # I/O phase: open a dedicated short scope — close it before compute.
+        with session_scope() as read_db:
+            read_svc = AnalysisService(read_db)
+            raw = read_svc.load_session_inputs_raw(session_id, modes=modes)
+        # Session closed; NumPy/scipy work runs without any held lock.
+        inputs = AnalysisService.prepare_inputs(raw)
+        compute_svc = AnalysisService()  # no db_session — compute only
+        result = compute_svc.compute_analysis(inputs)
+
+        if store_results:
+            # Write phase: short INSERT-only scope.
+            with session_scope() as write_db:
+                write_svc = AnalysisService(write_db)
+                write_svc.store_result(result, 0)
+
+        return result
 
     def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
@@ -398,29 +417,33 @@ class AnalysisFacade:
         Returns:
             BatchAnalysisResult with per-session outcomes and aggregate counts
         """
-        stmt = select(models.Session, models.Day.date.label("day_date")).join(
-            models.Day, models.Session.day_id == models.Day.id
-        )
+        stmt = select(
+            models.Session.id.label("session_id"),
+            models.Day.date.label("day_date"),
+        ).join(models.Day, models.Session.day_id == models.Day.id)
         if from_date:
             stmt = stmt.where(models.Day.date >= from_date.date())
         if to_date:
             stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
-        rows = self.db_session.execute(stmt).all()
-        session_dates: dict[int, date | None] = {
-            row.Session.id: row.day_date for row in rows
-        }
-        session_ids = [row.Session.id for row in rows]
+        # Stream scalar ID/date rows — no full-batch list materialization.
+        # yield_per limits the fetch window to 200 rows at a time.
+        rows = list(self.db_session.execute(stmt).yield_per(200))
+        if not rows:
+            return BatchAnalysisResult(
+                total=0, successful=0, failed=0, cancelled=0, results=[]
+            )
 
-        if not session_ids:
-            return BatchAnalysisResult(total=0, successful=0, failed=0, results=[])
+        # Build the lightweight (id, date) pairs; scalars only — no ORM objects held.
+        session_pairs: list[tuple[int, date | None]] = [
+            (row.session_id, row.day_date) for row in rows
+        ]
 
         coordinator = BatchAnalysisCoordinator()
         self._batch_coordinator = coordinator
         return coordinator.submit(
-            session_ids=session_ids,
-            session_dates=session_dates,
+            session_pairs=session_pairs,
             modes=modes,
             store_results=store_results,
             max_workers=max_workers,
@@ -464,8 +487,7 @@ class BatchAnalysisCoordinator:
     def submit(
         self,
         *,
-        session_ids: list[int],
-        session_dates: dict[int, date | None],
+        session_pairs: list[tuple[int, date | None]],
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
@@ -475,19 +497,14 @@ class BatchAnalysisCoordinator:
 
         Each session is processed in a detached I/O → compute → write pipeline:
 
-        1. **Read phase**: open a short ``session_scope()``, load the session
-           record and analysis inputs, return a detached ``AnalysisResult`` DTO.
-           The read session is closed *before* entering compute.
+        1. **Read phase**: open a short ``session_scope()``, fetch raw blobs only
+           (no NumPy). Session closed before compute.
         2. **Compute phase**: pure Python / numpy, no ORM session held.
         3. **Write phase**: open a fresh ``session_scope()``, INSERT the result.
-           The write lock is held only for the INSERT duration.
-
-        This separation prevents SQLite write-lock contention when multiple
-        workers finish concurrently under ``autocommit=False``.
 
         Args:
-            session_ids: DB session IDs to analyse.
-            session_dates: Maps session ID → calendar date (for result labelling).
+            session_pairs: List of ``(session_id, day_date)`` scalar pairs.
+                Scalars only — no ORM objects passed to workers.
             modes: Detection modes to run (``None`` = default).
             store_results: If True, write each result to the DB.
             max_workers: Thread-pool concurrency cap.
@@ -500,6 +517,7 @@ class BatchAnalysisCoordinator:
 
         from concurrent.futures import (  # noqa: PLC0415
             FIRST_COMPLETED,
+            Future,
             ThreadPoolExecutor,
             wait,
         )
@@ -507,11 +525,15 @@ class BatchAnalysisCoordinator:
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
 
-        total = len(session_ids)
+        total = len(session_pairs)
         self._total = total
         self._completed = 0
         # Do NOT reset _cancel_requested if cancel() was called before submit().
         # This allows callers to pre-cancel a coordinator before submitting work.
+
+        # Build a date lookup from the scalar pairs — no ORM objects retained.
+        session_dates: dict[int, date | None] = {sid: d for sid, d in session_pairs}
+        session_ids: list[int] = [sid for sid, _ in session_pairs]
 
         batch_results: list[BatchSessionResult] = []
         modes_list: list[str] | None = list(modes) if modes is not None else None
@@ -533,7 +555,7 @@ class BatchAnalysisCoordinator:
 
             # --- Compute phase (no ORM session held) ---
             inputs = AnalysisService.prepare_inputs(raw)
-            compute_svc = AnalysisService._make_compute_only()
+            compute_svc = AnalysisService()  # db_session=None — compute only
             result = compute_svc.compute_analysis(inputs)
             processing_time_ms = int((time.monotonic() - t_start) * 1000)
 
@@ -549,9 +571,6 @@ class BatchAnalysisCoordinator:
         # executor never holds all session rows in memory simultaneously.
         effective_workers = min(max_workers, total)
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            # Sliding window: keep at most max_workers futures pending.
-            from concurrent.futures import Future  # noqa: PLC0415
-
             pending: dict[Future[str], int] = {}
             sid_iter = iter(session_ids)
 

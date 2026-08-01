@@ -26,6 +26,8 @@ Guarantees
 - POST failure: if temp-dir creation succeeds but job registration fails, the caller is
   responsible for cleanup; the job store never holds a reference to an incomplete job.
 - Shutdown: `shutdown()` cancels all non-terminal jobs and awaits worker threads.
+  Returns a list of job IDs still alive after the timeout; the lifespan logs or
+  raises on non-empty to surface verified failure rather than swallowing it.
 """
 
 from __future__ import annotations
@@ -359,12 +361,17 @@ def cancel_job(job_id: str) -> bool:
     return job.try_cancel()
 
 
-def shutdown(timeout: float = 10.0) -> None:
+def shutdown(timeout: float = 10.0) -> list[str]:
     """Cancel all non-terminal jobs and wait for worker threads to exit.
 
-    Iterates over the worker list and joins each one until it stops or the
-    per-worker timeout is exhausted.  Any worker still alive after the timeout
-    is logged as a warning rather than silently ignored.
+    Cancels all active jobs, then joins each worker thread.  Any worker still
+    alive after the per-worker timeout is logged as a warning AND collected in
+    the returned list so the caller (lifespan) can surface the failure rather
+    than swallowing it.
+
+    Returns:
+        List of job IDs whose workers were still alive after the timeout.
+        An empty list means clean shutdown.
 
     Called during application shutdown to ensure clean teardown.
     """
@@ -372,6 +379,7 @@ def shutdown(timeout: float = 10.0) -> None:
         active = [j for j in _jobs.values() if not j.is_terminal]
     for job in active:
         job.try_cancel()
+    still_alive: list[str] = []
     for job in active:
         job.wait_for_worker(timeout=timeout)
         t = job._worker_thread
@@ -381,18 +389,27 @@ def shutdown(timeout: float = 10.0) -> None:
                 job.job_id,
                 timeout,
             )
+            still_alive.append(job.job_id)
+    return still_alive
 
 
-def start_reaper(interval: float = 60.0) -> threading.Thread:
+def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Event]:
     """Start a background daemon thread that reaps terminal jobs every *interval* seconds.
 
-    Returns the started thread so the caller can join it on shutdown if desired.
-    The thread is a daemon so it does not prevent clean process exit.
+    Returns ``(thread, stop_event)``.  The caller must set the stop event and
+    join the thread on shutdown to avoid leaking a daemon per lifespan entry.
+
+    Usage::
+
+        reaper_thread, reaper_stop = start_reaper(interval=60.0)
+        # ... serve requests ...
+        reaper_stop.set()
+        reaper_thread.join(timeout=5.0)
     """
+    stop_event = threading.Event()
 
     def _reap_loop() -> None:
-        while True:
-            time.sleep(interval)
+        while not stop_event.wait(timeout=interval):
             try:
                 _reap_terminal()
             except Exception:
@@ -400,7 +417,7 @@ def start_reaper(interval: float = 60.0) -> threading.Thread:
 
     t = threading.Thread(target=_reap_loop, daemon=True, name="import-job-reaper")
     t.start()
-    return t
+    return t, stop_event
 
 
 def _reap_terminal() -> None:

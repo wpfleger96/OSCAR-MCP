@@ -163,20 +163,25 @@ separation in PR-1:
 
 1. **Batch analysis** (`BatchAnalysisCoordinator`): read-only phase (`load_session_inputs_raw`,
    session closed before NumPy), compute phase (`prepare_inputs` + `compute_analysis`, no session),
-   write phase (fresh session for INSERT only).
-2. **Single-session analysis** (`AnalysisService.analyze_session`): calls `load_session_inputs_raw`
-   then `prepare_inputs` then `compute_analysis`; the session is bounded by the request context
-   and no NumPy work runs while holding a query lock.
-3. **Waveform load** (`load_waveform_from_db`): `fetch_waveform_blob` (I/O, returns raw bytes)
-   then `deserialize_waveform_blob` (compute, no session needed).
+   write phase (fresh session for INSERT only).  Batch ID/date rows streamed via `yield_per()`;
+   no full-batch prefetch.
+2. **Single-session analysis** (`AnalysisFacade.run_analysis`): opens its own short
+   `session_scope()` for the I/O phase, closes it before compute/persist.  The
+   injected request session is not held across NumPy/scipy work.
+3. **Waveform load** (`WaveformService.get_waveform_data`): `fetch_waveform_blob` (I/O,
+   raw bytes from injected session) then `deserialize_waveform_blob` (compute, no session).
 4. **Report generation** (`ReportService`): `_fetch_summary_data` / `_fetch_comparison_data`
-   (I/O, returns plain Python objects) then `_render_summary` / `_render_comparison`
-   (pure Jinja2, static methods, no session).
-5. **Export** (`ExportService`): `_build_export_rows` generator yields `(session_dict, events, settings)`
-   in bounded chunks of `_EXPORT_CHUNK_SIZE` rows using `yield_per()` — no full materialisation
-   of all sessions, events, or settings before rendering.
-6. **Import** (`import_sessions_batch`): `parse_sessions()` returns a lazy iterator consumed
-   in bounded `batch_size` chunks — no full-batch prefetch.
+   (I/O, returns plain Python objects — Pydantic schemas) then `_render_summary` /
+   `_render_comparison` (pure Jinja2, no session access).  The session is injected
+   by the caller and the render phase never calls any DB methods.
+5. **Export** (`ExportService`): `_build_export_rows` generator yields `(session_dict, events,
+   settings)` in bounded chunks of `_EXPORT_CHUNK_SIZE` rows via `yield_per()`.  CSV writes
+   all three output files in a single generator pass; JSON encodes incrementally without
+   collecting a full session list.
+6. **Import** (`import_sessions_batch`): `ImportService` opens one `session_scope()` per
+   bounded chunk; `import_sessions_batch` requires a caller-provided `db` and uses only
+   `begin_nested()` savepoints.  `parse_sessions()` returns a lazy iterator consumed in
+   bounded chunks — no full-batch prefetch.
 
 ### 8. Import-job state machine
 
@@ -199,7 +204,9 @@ Replaces the destructive shared `Queue`.
   event under cancel/complete races
 - POST failure between temp-dir creation and job registration: immediate directory
   cleanup, no orphan job
-- App shutdown cancels then awaits all workers
+- App shutdown cancels all workers, joins each with a per-worker timeout, and returns
+  (or logs) a list of job IDs still alive after the timeout — never silently swallows
+  live workers.  The lifespan also stops and joins the TTL reaper thread.
 
 ---
 

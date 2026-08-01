@@ -50,17 +50,13 @@ def test_missing_session_returns_structured_404(running_api):
 def test_openapi_matches_committed_generated_types(running_api, request):
     """Guard against schema drift between the live API and the UI codegen.
 
-    The UI generates `ui/src/types/generated.ts` from the OpenAPI schema.  Two
-    directions are checked:
-    1. Every ``/api/v1/...`` path the generated file declares must still be
-       served by the live API — catching a backend change that silently breaks
-       the typed frontend contract.
-    2. Every ``/api/v1/...`` path served by the live API must appear in the
-       generated file — catching a new backend route whose types were never
-       regenerated.
+    Three directions are checked:
+    1. Paths: generated types must match live API paths bidirectionally.
+    2. Components: every Pydantic schema component must appear in generated.ts
+       — catches new fields (e.g. ``cancelled`` on ``BatchAnalysisResult``)
+       that were added to Python but never regenerated.
 
-    Skips cleanly when the generated file isn't present (e.g. before the
-    UI-codegen PR lands).
+    Skips cleanly when the generated file is not present.
     """
     import re
 
@@ -72,22 +68,42 @@ def test_openapi_matches_committed_generated_types(running_api, request):
     schema = running_api.get("/openapi.json").json()
     live_paths = set(schema["paths"].keys())
 
-    # openapi-typescript emits the path templates as quoted object keys.
     generated_text = generated.read_text()
-    referenced = set(re.findall(r"['\"](?P<p>/api/v1/[^'\"]+)['\"]", generated_text))
+    referenced = set(re.findall(r"['\"](?P<p>/api/v1/[^\'\"]+)[\'\"]", generated_text))
     if not referenced:
         pytest.skip("generated types declare no /api/v1 path keys to compare")
 
-    # Direction 1: generated types reference paths that no longer exist.
+    # Direction 1a: generated references paths that no longer exist.
     stale = referenced - live_paths
     assert not stale, (
         f"ui generated types reference paths the live API no longer serves: {sorted(stale)}"
     )
 
-    # Direction 2: live API paths not yet in generated types.
+    # Direction 1b: live API paths not yet in generated types.
     ungenerated = live_paths - referenced
     assert not ungenerated, (
         "live API paths missing from ui generated types "
         "(regenerate with pnpm generate:types): "
         f"{sorted(ungenerated)}"
     )
+
+    # Direction 2: schema components must appear in generated.ts.
+    live_components = set(schema.get("components", {}).get("schemas", {}).keys())
+    if live_components:
+        # openapi-typescript may emit component names as bare identifiers or quoted keys,
+        # and as object types ({) or string union types (string literals with |).
+        _bare = set(
+            re.findall(r"([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(?:\{|'[^']*')", generated_text)
+        )
+        _quoted = set(
+            re.findall(
+                r"['\"]([A-Za-z][A-Za-z0-9_-]*)['\"]:\s*(?:\{|'[^']*')", generated_text
+            )
+        )
+        gen_components = _bare | _quoted
+        missing_components = live_components - gen_components
+        assert not missing_components, (
+            "Live API schema components missing from generated types "
+            "(regenerate with pnpm generate:types): "
+            f"{sorted(missing_components)}"
+        )

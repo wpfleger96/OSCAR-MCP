@@ -211,18 +211,35 @@ class ImportService:
                 total_imported += len(sessions_list)
                 continue
 
-            # Import — ImportService opens the batch session and injects it.
+            # Import — ImportService opens ONE scope per bounded batch chunk.
+            # Each chunk is committed separately; a failed chunk does not poison
+            # subsequent chunks.
             importer = SessionImporter()
             emit("Importing sessions...")
-            with session_scope() as batch_db:
-                imported, skipped, failed = importer.import_sessions_batch(
-                    session_iter,
-                    force=force,
-                    batch_size=batch_size,
-                    progress_callback=progress_callback,
-                    cancel_predicate=cancel_predicate,
-                    db=batch_db,
-                )
+            imported = 0
+            skipped = 0
+            failed = 0
+            session_iter_internal = iter(session_iter)
+            import itertools as _itertools  # noqa: PLC0415
+
+            for _chunk_num in _itertools.count(1):
+                if cancel_predicate is not None and cancel_predicate():
+                    break
+                chunk = list(_itertools.islice(session_iter_internal, batch_size))
+                if not chunk:
+                    break
+                with session_scope() as chunk_db:
+                    ci, cs, cf = importer.import_sessions_batch(
+                        iter(chunk),
+                        force=force,
+                        batch_size=batch_size,
+                        progress_callback=progress_callback,
+                        cancel_predicate=cancel_predicate,
+                        db=chunk_db,
+                    )
+                imported += ci
+                skipped += cs
+                failed += cf
 
             total_imported += imported
             total_skipped += skipped

@@ -298,10 +298,12 @@ class TestImporterForcedFailureContinuation:
 
         importer = SessionImporter()
         with patch.object(DayManager, "get_or_create_day", patched_day):
-            imported, skipped, failed = importer.import_sessions_batch(
-                [good1, bad_session, good2],
-                batch_size=3,
-            )
+            with session_scope() as batch_db:
+                imported, skipped, failed = importer.import_sessions_batch(
+                    iter([good1, bad_session, good2]),
+                    batch_size=3,
+                    db=batch_db,
+                )
 
         assert failed == 1, f"Expected 1 failure, got {failed}"
         assert imported == 2, f"Expected 2 imported, got {imported}"
@@ -356,32 +358,36 @@ class TestImporterForcedFailureContinuation:
 
         original_import_statistics = SessionImporter._import_statistics
 
-        def _raise_for_bad(self, db, session_id, session_data):
-            """Raise after waveforms+events are flushed, but before statistics commit."""
-            # Check if this is the bad session by querying the flushed Session row.
-            from sqlalchemy import select as _sel  # noqa: PLC0415
+        def _raise_after_all_children(self, db, session_id, session_data):
+            """Call real _import_statistics, then raise to inject failure after ALL children."""
+            # Let statistics be written first (waveforms + events already written).
+            result = original_import_statistics(self, db, session_id, session_data)
+            # Now raise — this is after EVERY child table (waveform/event/stat) has been
+            # flushed.  Settings are the only child NOT yet written (called after this).
+            # We verify settings absence via assert below.
+            from sqlalchemy import select as _sel2  # noqa: PLC0415
 
             sess_rows = (
-                db.execute(
-                    _sel(DBSession).where(
-                        DBSession.id == session_id,
-                    )
-                )
+                db.execute(_sel2(DBSession).where(DBSession.id == session_id))
                 .scalars()
                 .all()
             )
             if sess_rows and sess_rows[0].device_session_id == "SESS_CHILD_BAD":
                 raise RuntimeError(
-                    "Forced failure after child writes (waveforms+events flushed)"
+                    "Forced failure after waveforms+events+statistics flushed"
                 )
-            return original_import_statistics(self, db, session_id, session_data)
+            return result
 
         importer = SessionImporter()
-        with patch.object(SessionImporter, "_import_statistics", _raise_for_bad):
-            imported, skipped, failed = importer.import_sessions_batch(
-                [good, bad],
-                batch_size=2,
-            )
+        with patch.object(
+            SessionImporter, "_import_statistics", _raise_after_all_children
+        ):
+            with session_scope() as chunk_db:
+                imported, skipped, failed = importer.import_sessions_batch(
+                    iter([good, bad]),
+                    batch_size=2,
+                    db=chunk_db,
+                )
 
         assert failed == 1, f"Expected 1 failure, got {failed}"
         assert imported == 1, f"Expected 1 imported, got {imported}"

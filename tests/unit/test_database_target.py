@@ -358,14 +358,12 @@ class TestServeCommandEnvExport:
         )
 
     def test_lifespan_opens_flagged_database(self, monkeypatch, tmp_path):
-        """The app lifespan opens the database specified by SNORE_DATABASE_URL.
+        """The app lifespan opens the flagged database, not inherited env vars.
 
         Invokes the real ``snore serve`` Click command to capture the exported
-        URL, then actually runs the FastAPI lifespan with that URL to confirm
-        ``init_database_from_url`` is called with the flag-specified database.
-
-        This proves the child/lifespan opens the flagged DB, not just that the
-        env variable is set correctly.
+        URL, then runs the FastAPI lifespan with the real ``init_database_from_url``
+        (not patched).  Proves the flagged DB file is created on disk — not just
+        that the env variable is set.
         """
         import asyncio  # noqa: PLC0415
         import os  # noqa: PLC0415
@@ -398,34 +396,37 @@ class TestServeCommandEnvExport:
             f"Exported URL must reference the flag DB; got {exported_url!r}"
         )
 
-        # Now exercise the lifespan directly with the exported URL.
-        # Patch init_database_from_url to capture the URL it receives.
-        init_calls: list[str] = []
-
-        def _capture_init(url: str) -> None:
-            init_calls.append(url)
-
+        # Run the real lifespan with the exported URL.  init_database_from_url
+        # is called WITHOUT patching so the SQLite file is actually created on disk.
+        # This proves the lifespan opens the flagged DB, not an inherited path.
         from snore.api.app import create_app  # noqa: PLC0415
+        from snore.database.session import cleanup_database  # noqa: PLC0415
 
         app = create_app()
         monkeypatch.setenv("SNORE_DATABASE_URL", exported_url)
         monkeypatch.delenv("SNORE_DB_PATH", raising=False)
 
         async def run_lifespan() -> None:
+            import threading as _threading  # noqa: PLC0415
+
+            _dummy_stop = _threading.Event()
+            _dummy_thread = _threading.Thread(target=_dummy_stop.wait, daemon=True)
+            _dummy_thread.start()
             with (
-                patch("snore.api.app.init_database_from_url", _capture_init),
-                patch("snore.api.app._start_import_reaper"),
-                patch("snore.api.app._shutdown_import_jobs"),
+                patch(
+                    "snore.api.app._start_import_reaper",
+                    return_value=(_dummy_thread, _dummy_stop),
+                ),
+                patch("snore.api.app._shutdown_import_jobs", return_value=[]),
             ):
                 async with app.router.lifespan_context(app):
                     pass  # Startup + immediate shutdown
 
         asyncio.run(run_lifespan())
+        cleanup_database()
 
-        assert len(init_calls) == 1, (
-            f"init_database_from_url must be called exactly once; called {len(init_calls)} times"
-        )
-        assert "lifespan_test.db" in init_calls[0], (
-            f"init_database_from_url must be called with the flagged DB URL; "
-            f"got {init_calls[0]!r}"
+        # The flagged database file must exist on disk — the lifespan opened it.
+        assert (tmp_path / "lifespan_test.db").exists(), (
+            "The flagged SQLite DB file must be created by the lifespan. "
+            "If absent, the lifespan opened a different database."
         )

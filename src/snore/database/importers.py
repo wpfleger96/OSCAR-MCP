@@ -5,11 +5,12 @@ Handles the complete import process including waveforms, events, and statistics.
 
 Transaction ownership (§6)
 ---------------------------
-- ``import_session``: opens one batch-scoped session via ``session_scope()``;
-  ``SessionImporter`` owns commit and rollback.
-- ``import_sessions_batch``: one ``session_scope()`` per batch; each session
-  import is wrapped in a ``begin_nested()`` savepoint so one failed session
-  cannot poison the whole batch.
+- ``import_session``: delegates to ``import_sessions_batch`` with a single-element
+  list and an explicit ``session_scope()`` — same UoW pattern as the batch path.
+- ``import_sessions_batch``: requires a caller-provided ``db`` session; uses only
+  ``begin_nested()`` savepoints so one failed session cannot poison the batch.
+  The caller (``ImportService``) opens one ``session_scope()`` per bounded chunk
+  and injects it here so the UoW boundary is owned at the service layer.
 
 Bulk strategy (frozen in §7/PR-2)
 -----------------------------------
@@ -225,6 +226,10 @@ class SessionImporter:
         """
         Import a complete session to database.
 
+        Opens an explicit ``session_scope()`` and delegates to
+        ``import_sessions_batch()`` so the UoW ownership is the same as
+        the batch path — no separate session-scope logic to maintain.
+
         Args:
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
@@ -233,14 +238,13 @@ class SessionImporter:
             True if imported, False if skipped (already exists)
         """
         with session_scope() as db:
-            imported, day_id = self._import_single_session(db, session_data, force)
-
-            if imported and day_id:
-                day_record = db.get(models.Day, day_id)
-                if day_record:
-                    DayManager._aggregate_day_statistics(day_record, db)
-
-        return imported
+            imported, _skipped, _failed = self.import_sessions_batch(
+                [session_data],
+                force=force,
+                batch_size=1,
+                db=db,
+            )
+        return imported > 0
 
     def import_sessions_batch(
         self,
@@ -249,7 +253,7 @@ class SessionImporter:
         batch_size: int = 50,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
-        db: Session | None = None,
+        db: Session = None,  # type: ignore[assignment]
     ) -> tuple[int, int, int]:
         """
         Import multiple sessions in batched transactions with per-session savepoints.
@@ -264,15 +268,13 @@ class SessionImporter:
         ``sessions`` may be any iterable (list or lazy iterator); the method consumes
         it in bounded chunks of ``batch_size`` so no full-batch prefetch is required.
 
-        Transaction ownership:
+        Transaction ownership: the CALLER owns the transaction.  This method uses
+        ``begin_nested()`` savepoints only.  The production caller is ``ImportService``,
+        which opens one ``session_scope()`` per bounded chunk and injects the session
+        here so the UoW boundary is explicit and owned at the service layer.
 
-        - If ``db`` is supplied, the CALLER owns the transaction; this method uses
-          ``begin_nested()`` savepoints only.  This is the preferred path from
-          ``ImportService``, which opens each batch-scoped ``session_scope()`` and
-          injects the session here so the UoW boundary is explicit and owned by the
-          service layer.
-        - If ``db`` is ``None`` (legacy / standalone use), this method opens its own
-          ``session_scope()`` per batch — retained for backward compatibility.
+        For standalone one-session imports, use ``import_session()`` which opens its
+        own explicit service-owned scope.
 
         Args:
             sessions: Iterable of UnifiedSession objects to import.  Need not be
@@ -282,12 +284,18 @@ class SessionImporter:
             progress_callback: Optional callback for progress messages
             cancel_predicate: Optional callable; returns True when cancellation
                 is requested.  Checked between batches (not mid-batch).
-            db: Optional injected SQLAlchemy session.  When provided, the caller
-                owns commit/rollback of the outer transaction.
+            db: Required injected SQLAlchemy session.  The caller owns
+                commit/rollback of the outer transaction.
 
         Returns:
             Tuple of (imported_count, skipped_count, failed_count)
         """
+        if db is None:
+            raise TypeError(
+                "import_sessions_batch() requires an injected 'db' session. "
+                "Call ImportService.import_sources() or open a session_scope() "
+                "in the caller and pass db=<session>."
+            )
         imported = 0
         skipped = 0
         failed = 0
@@ -307,45 +315,22 @@ class SessionImporter:
 
             logger.debug(f"Importing batch {batch_num} ({len(batch)} sessions)")
 
-            if db is not None:
-                # Caller-owned transaction: use savepoints only.
-                imported, skipped, failed, batch_day_ids = (
-                    self._import_batch_with_session(
-                        db,
-                        batch,
-                        force,
-                        imported,
-                        skipped,
-                        failed,
-                        batch_day_ids,
-                        progress_callback,
-                    )
-                )
-                if batch_day_ids:
-                    for day_id in batch_day_ids:
-                        day_record = db.get(models.Day, day_id)
-                        if day_record:
-                            DayManager._aggregate_day_statistics(day_record, db)
-            else:
-                # Legacy path: open own session_scope per batch.
-                with session_scope() as own_db:
-                    imported, skipped, failed, batch_day_ids = (
-                        self._import_batch_with_session(
-                            own_db,
-                            batch,
-                            force,
-                            imported,
-                            skipped,
-                            failed,
-                            batch_day_ids,
-                            progress_callback,
-                        )
-                    )
-                    if batch_day_ids:
-                        for day_id in batch_day_ids:
-                            day_record = own_db.get(models.Day, day_id)
-                            if day_record:
-                                DayManager._aggregate_day_statistics(day_record, own_db)
+            # Caller-owned transaction: use savepoints only.
+            imported, skipped, failed, batch_day_ids = self._import_batch_with_session(
+                db,
+                batch,
+                force,
+                imported,
+                skipped,
+                failed,
+                batch_day_ids,
+                progress_callback,
+            )
+            if batch_day_ids:
+                for day_id in batch_day_ids:
+                    day_record = db.get(models.Day, day_id)
+                    if day_record:
+                        DayManager._aggregate_day_statistics(day_record, db)
 
         return imported, skipped, failed
 

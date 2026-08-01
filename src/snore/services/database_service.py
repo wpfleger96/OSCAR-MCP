@@ -198,27 +198,36 @@ class DatabaseService:
             size_after_mb=size_after,
         )
 
+    def reset_rows(self) -> dict[str, int]:
+        """Delete all rows from all data tables.  Caller-transaction-owned.
+
+        Performs generic typed ``table.delete()`` statements in FK-safe order.
+        Does NOT commit — the caller owns the transaction.
+        Does NOT VACUUM — call ``vacuum_sqlite()`` separately if needed.
+
+        Returns:
+            Mapping of table name → rows deleted.
+        """
+        tables_cleared: dict[str, int] = {}
+        for table in reversed(Base.metadata.sorted_tables):
+            cursor = self.db_session.execute(table.delete())
+            count = cursor.rowcount or 0  # type: ignore[attr-defined]
+            tables_cleared[table.name] = count
+        return tables_cleared
+
     def reset(self, db_path: str) -> ResetResult:
         """Delete all rows from all data tables.
 
-        Split into two capabilities:
+        Orchestrates two explicit capabilities:
 
-        1. **Generic row reset** (any dialect): clears all user data rows in FK-safe
-           order via typed ``table.delete()`` statements.  The caller's session
-           commits the deletes.
-        2. **SQLite file VACUUM** (SQLite targets only): runs on a separate AUTOCOMMIT
-           connection after the delete commit.  Dispatched only when the target
-           explicitly reports ``is_sqlite_target()`` — not via an empty-string
-           implicit switch.  VACUUM cannot execute inside a transaction.
+        1. ``reset_rows()`` — generic typed deletes (any dialect).
+           Commit happens here so VACUUM can run outside a transaction.
+        2. ``vacuum_sqlite()`` — SQLite file maintenance, gated on the target
+           dialect via ``is_sqlite_target()`` (DatabaseTarget-aware).
 
         Args:
-            db_path: Path to the SQLite database file.  Required for VACUUM and
-                     size measurement.  Ignored for non-SQLite targets (pass ``""``
-                     to skip file operations).
-
-        Note:
-            To check whether VACUUM will run, callers should test
-            ``DatabaseService.is_sqlite_target(db_path)`` before calling.
+            db_path: SQLite file path for VACUUM and size measurement.
+                     Pass ``""`` for non-SQLite targets to skip file ops.
         """
         size_before = (
             os.path.getsize(db_path) / (1024 * 1024)
@@ -226,31 +235,15 @@ class DatabaseService:
             else 0.0
         )
 
-        # Generic phase: typed row deletion (any dialect).
-        tables_cleared: dict[str, int] = {}
-        total = 0
-        for table in reversed(Base.metadata.sorted_tables):
-            cursor = self.db_session.execute(table.delete())
-            count = cursor.rowcount or 0  # type: ignore[attr-defined]
-            tables_cleared[table.name] = count
-            total += count
+        tables_cleared = self.reset_rows()
+        total = sum(tables_cleared.values())
 
-        # Commit deletes before VACUUM — SQLite forbids VACUUM in a transaction.
-        # This is intentional: reset is a destructive, single-request operation
-        # and the route dependency creates a fresh session per request.
+        # Commit before VACUUM — SQLite forbids VACUUM inside a transaction.
         self.db_session.commit()
 
-        # SQLite file maintenance phase: dispatched only for SQLite file targets.
+        # SQLite file maintenance: gated on dialect, not string truthiness.
         if self.is_sqlite_target(db_path):
-            vacuum_engine = create_engine(
-                f"sqlite:///{db_path}",
-                isolation_level="AUTOCOMMIT",
-            )
-            try:
-                with vacuum_engine.connect() as conn:
-                    conn.execute(text("VACUUM"))
-            finally:
-                vacuum_engine.dispose()
+            self.vacuum_sqlite(db_path)
 
         size_after = (
             os.path.getsize(db_path) / (1024 * 1024)
@@ -266,13 +259,63 @@ class DatabaseService:
             size_after_mb=size_after,
         )
 
+    def vacuum_sqlite(self, db_path: str) -> VacuumResult:
+        """Run VACUUM on a SQLite file-backed database.
+
+        Dispatched separately from row-reset so callers can vacuum without
+        deleting, or skip vacuum on non-SQLite targets.
+
+        Args:
+            db_path: Path to the SQLite file.
+
+        Raises:
+            RuntimeError: If db_path is not a valid SQLite file target.
+        """
+        if not self.is_sqlite_target(db_path):
+            raise RuntimeError(
+                f"vacuum_sqlite() requires a SQLite file target; got {db_path!r}"
+            )
+        vacuum_engine = create_engine(
+            f"sqlite:///{db_path}",
+            isolation_level="AUTOCOMMIT",
+        )
+        try:
+            with vacuum_engine.connect() as conn:
+                conn.execute(text("VACUUM"))
+        finally:
+            vacuum_engine.dispose()
+
+        size = (
+            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+        )
+        return VacuumResult(status="success", size_before_mb=size, size_after_mb=size)
+
     @staticmethod
     def is_sqlite_target(db_path: str) -> bool:
         """Return True if *db_path* identifies a SQLite file target.
 
-        Non-empty, non-memory paths are SQLite file targets.  Empty strings
-        and ``:memory:`` are treated as non-file targets.  This is the explicit
-        capability gate that controls whether VACUUM and file-size measurements
-        run — replaces the previous implicit ``if db_path:`` switch.
+        Routes through ``DatabaseTarget`` to determine the dialect rather than
+        relying on path-string heuristics.  A bare file path (no ``://``) is
+        treated as a SQLite path by ``DatabaseTarget.from_url()``.  An explicit
+        URL is parsed to extract the dialect; only ``"sqlite"`` with a non-memory
+        location returns True.
+
+        Examples:
+            >>> DatabaseService.is_sqlite_target("/home/user/snore.db")
+            True
+            >>> DatabaseService.is_sqlite_target(":memory:")
+            False
+            >>> DatabaseService.is_sqlite_target("postgresql://user@host/db")
+            False
+            >>> DatabaseService.is_sqlite_target("sqlite:////abs/path.db")
+            True
         """
-        return bool(db_path) and db_path != ":memory:"
+        if not db_path or db_path == ":memory:":
+            return False
+        from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+        try:
+            target = DatabaseTarget.from_url(db_path)
+        except (ValueError, Exception):
+            return False  # Unrecognised — treat as non-SQLite to be safe
+        return target.dialect == "sqlite" and target.location not in ("", ":memory:")

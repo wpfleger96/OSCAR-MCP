@@ -31,20 +31,21 @@ def _make_mock_sessions(count: int) -> list[MagicMock]:
 def _make_session_scope(mock_sessions: list[MagicMock]) -> Any:
     """Return a context-manager factory whose execute() chain yields mock_sessions.
 
-    The mock is configured so that session.execute(stmt).all() returns mock rows
-    with .Session and .day_date attributes, matching the SQLAlchemy 2.0 style used
+    The mock is configured so that session.execute(stmt).yield_per(n) returns mock rows
+    with .session_id and .day_date attributes, matching the SQLAlchemy 2.0 style used
     by AnalysisFacade.run_batch_analysis().
     """
-    # Build mock rows: each row has .Session (the mock session) and .day_date
+    # Build mock rows: each row has .session_id and .day_date (scalar columns)
     mock_rows = []
     for s in mock_sessions:
         row = MagicMock()
-        row.Session = s
+        row.session_id = s.id
         row.day_date = s.day.date
         mock_rows.append(row)
 
     execute_result = MagicMock()
-    execute_result.all.return_value = mock_rows
+    # yield_per returns an iterable — use __iter__ to make it work with list()
+    execute_result.yield_per.return_value = iter(mock_rows)
 
     mock_db_session = MagicMock()
     mock_db_session.execute.return_value = execute_result
@@ -330,8 +331,7 @@ class TestBatchCoordinatorHandle:
 
         # submit() must honour the pre-set flag and not clear it.
         result = coord.submit(
-            session_ids=[1, 2, 3],
-            session_dates={1: None, 2: None, 3: None},
+            session_pairs=[(1, None), (2, None), (3, None)],
             store_results=False,
             max_workers=1,
         )
