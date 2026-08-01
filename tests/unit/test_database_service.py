@@ -229,21 +229,49 @@ class TestDeviceServiceListDevices:
 class TestVacuum:
     def test_vacuum_returns_success_status(self, db_session, temp_db):
         service = DatabaseService(db_session)
-        result = service.vacuum(str(temp_db))
+        result = service.vacuum_sqlite(str(temp_db))
         assert result.status == "success"
 
 
 class TestReset:
+    """Test the split reset_rows() + vacuum_sqlite() API."""
+
+    def _do_reset(self, service: object, db_session: object, temp_db: object) -> object:
+        """Helper: reset_rows() + commit + vacuum_sqlite() — the composed reset."""
+        import os  # noqa: PLC0415
+
+        from snore.services.schemas import ResetResult  # noqa: PLC0415
+
+        db_path = str(temp_db)
+        size_before = (
+            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+        )
+        tables_cleared = service.reset_rows()
+        total = sum(tables_cleared.values())
+        db_session.commit()
+        if DatabaseService.is_sqlite_target(db_path):
+            service.vacuum_sqlite(db_path)
+        size_after = (
+            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+        )
+        return ResetResult(
+            status="success",
+            tables_cleared=tables_cleared,
+            total_rows_deleted=total,
+            size_before_mb=size_before,
+            size_after_mb=size_after,
+        )
+
     def test_empty_db_returns_zeros(self, db_session, temp_db):
         service = DatabaseService(db_session)
-        result = service.reset(str(temp_db))
+        result = self._do_reset(service, db_session, temp_db)
         assert result.status == "success"
         assert result.total_rows_deleted == 0
         assert all(v == 0 for v in result.tables_cleared.values())
 
     def test_includes_all_tables(self, db_session, temp_db):
         service = DatabaseService(db_session)
-        result = service.reset(str(temp_db))
+        result = self._do_reset(service, db_session, temp_db)
         from snore.database.models import Base
 
         assert set(result.tables_cleared.keys()) == set(Base.metadata.tables.keys())
@@ -265,7 +293,7 @@ class TestReset:
         db_session.commit()
 
         service = DatabaseService(db_session)
-        result = service.reset(str(temp_db))
+        result = self._do_reset(service, db_session, temp_db)
 
         assert result.tables_cleared["sessions"] == 1
         assert result.tables_cleared["devices"] >= 1
@@ -288,7 +316,7 @@ class TestReset:
         db_session.commit()
 
         service = DatabaseService(db_session)
-        service.reset(str(temp_db))
+        self._do_reset(service, db_session, temp_db)
 
         stats = service.get_stats(str(temp_db))
         assert stats.session_count == 0
@@ -296,6 +324,6 @@ class TestReset:
 
     def test_size_reported(self, db_session, temp_db):
         service = DatabaseService(db_session)
-        result = service.reset(str(temp_db))
+        result = self._do_reset(service, db_session, temp_db)
         assert result.size_before_mb >= 0
         assert result.size_after_mb >= 0

@@ -222,28 +222,30 @@ class SessionImporter:
         )
         return True, day_id
 
-    def import_session(self, session_data: UnifiedSession, force: bool = False) -> bool:
-        """
-        Import a complete session to database.
+    def import_session(
+        self, session_data: UnifiedSession, force: bool = False, *, db: Session
+    ) -> bool:
+        """Import a complete session using a caller-provided session.
 
-        Opens an explicit ``session_scope()`` and delegates to
-        ``import_sessions_batch()`` so the UoW ownership is the same as
-        the batch path — no separate session-scope logic to maintain.
+        The caller owns the UoW — this method uses only ``begin_nested()``
+        savepoints via ``import_sessions_batch``.  No ``session_scope()`` is
+        opened here; use the module-level ``import_session`` function for
+        standalone imports with automatic scope ownership.
 
         Args:
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
+            db: Required caller-provided session.
 
         Returns:
             True if imported, False if skipped (already exists)
         """
-        with session_scope() as db:
-            imported, _skipped, _failed = self.import_sessions_batch(
-                [session_data],
-                force=force,
-                batch_size=1,
-                db=db,
-            )
+        imported, _skipped, _failed = self.import_sessions_batch(
+            [session_data],
+            force=force,
+            batch_size=1,
+            db=db,
+        )
         return imported > 0
 
     def import_sessions_batch(
@@ -253,7 +255,8 @@ class SessionImporter:
         batch_size: int = 50,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
-        db: Session = None,  # type: ignore[assignment]
+        *,
+        db: Session,
     ) -> tuple[int, int, int]:
         """
         Import multiple sessions in batched transactions with per-session savepoints.
@@ -290,12 +293,6 @@ class SessionImporter:
         Returns:
             Tuple of (imported_count, skipped_count, failed_count)
         """
-        if db is None:
-            raise TypeError(
-                "import_sessions_batch() requires an injected 'db' session. "
-                "Call ImportService.import_sources() or open a session_scope() "
-                "in the caller and pass db=<session>."
-            )
         imported = 0
         skipped = 0
         failed = 0
@@ -481,6 +478,10 @@ def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
     """
     Convenience function to import a session.
 
+    Opens an explicit ``session_scope()`` (service-layer UoW ownership) and
+    delegates to ``SessionImporter.import_session``.  The importer itself
+    does not open any scopes.
+
     Args:
         session_data: UnifiedSession to import
         force: Force re-import if exists
@@ -489,4 +490,5 @@ def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
         True if imported, False if skipped
     """
     importer = SessionImporter()
-    return importer.import_session(session_data, force=force)
+    with session_scope() as db:
+        return importer.import_session(session_data, force=force, db=db)

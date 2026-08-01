@@ -6,18 +6,22 @@ analysis, loading data from the database, and storing results.
 
 I/O–compute separation (§7)
 -----------------------------
-``AnalysisService.load_session_inputs()`` performs **only** database reads,
-returning a plain ``AnalysisInputs`` dataclass.  The ORM session is closed before
-any numpy/scipy work begins.
+``AnalysisService.load_session_inputs_raw()`` performs **only** database reads,
+returning raw bytes in a ``RawSessionBlobs`` dataclass.
 
-``AnalysisService.compute_analysis()`` is pure Python/numpy — it takes an
-``AnalysisInputs`` DTO and returns an ``AnalysisResult``.  No session is held.
+``AnalysisService.prepare_inputs()`` deserialises blobs into numpy arrays
+(compute phase — no DB session required).
 
-``AnalysisService.analyze_session()`` is the convenience wrapper that calls
-``load_session_inputs`` then ``compute_analysis`` in one call (used by
-single-session paths where session lifetime is already bounded by the request
-context).  Batch analysis (``BatchAnalysisCoordinator``) calls the two phases
-separately so the session is released before compute.
+``AnalysisService.load_session_inputs()`` is a convenience wrapper that calls
+both methods in sequence; the session remains open across the NumPy work.
+Callers that need the session closed before compute should call the two methods
+separately — see ``AnalysisFacade.run_analysis`` and ``BatchAnalysisCoordinator``.
+
+``AnalysisService.compute_analysis()`` runs the full analysis pipeline on a
+detached ``AnalysisInputs`` DTO.  No session is held.
+
+``AnalysisService.analyze_session()`` orchestrates the three phases
+(raw-fetch + deserialise + compute + persist) with the caller-provided session.
 """
 
 import logging
@@ -150,25 +154,6 @@ class AnalysisService:
             duration_threshold=PCC.DURATION_THRESHOLD,
         )
 
-    @classmethod
-    def _make_compute_only(
-        cls,
-        min_breath_duration: float = BSC.MIN_BREATH_DURATION,
-        confidence_threshold: float = FLC.CONFIDENCE_THRESHOLD,
-    ) -> "AnalysisService":
-        """Construct a compute-only instance (no DB session).
-
-        Deprecated in favour of ``AnalysisService()`` (no args) which now
-        accepts ``db_session=None`` directly.  Kept for any callers that
-        haven't migrated; delegates to the normal constructor so no
-        ``object.__new__()`` escape hatch is needed.
-        """
-        return cls(
-            db_session=None,
-            min_breath_duration=min_breath_duration,
-            confidence_threshold=confidence_threshold,
-        )
-
     def _load_machine_events(self, session_id: int) -> list[AnalysisEvent]:
         """
         Load machine-flagged events from database.
@@ -223,16 +208,11 @@ class AnalysisService:
     ) -> AnalysisInputs:
         """Load all DB inputs for a session and return them as a detached DTO.
 
-        **I/O only** — all work done here is database reads.  No numpy/scipy
-        computation is performed.  The caller is expected to close the ORM
-        session immediately after this call so that compute runs without a
-        held session.
-
-        Internally calls ``load_session_inputs_raw()`` (pure I/O) and then
-        ``prepare_inputs()`` (pure compute) so that single-session callers get a
-        ready-to-use ``AnalysisInputs`` DTO in one call.  Batch callers that want
-        the session closed between I/O and compute should call those two methods
-        separately — see ``BatchAnalysisCoordinator.analyze_one``.
+        Convenience wrapper: calls ``load_session_inputs_raw()`` (DB I/O only)
+        then ``prepare_inputs()`` (NumPy deserialization + artifact detection).
+        Both phases run while the ORM session is still held.  Callers that need
+        the session closed *before* NumPy work should call those two methods
+        directly — see ``AnalysisFacade.run_analysis`` and the batch coordinator.
 
         Args:
             session_id: Database session ID
@@ -606,18 +586,6 @@ class AnalysisService:
             return None
 
         return AnalysisResult.model_validate(analysis.programmatic_result_json)
-
-    def _store_result(self, result: AnalysisResult, processing_time_ms: int) -> int:
-        """Store analysis result to database.
-
-        Args:
-            result: Analysis result to store
-            processing_time_ms: Processing time in milliseconds
-
-        Returns:
-            Database analysis result ID
-        """
-        return self.store_result(result, processing_time_ms)
 
     def store_result(self, result: AnalysisResult, processing_time_ms: int) -> int:
         """

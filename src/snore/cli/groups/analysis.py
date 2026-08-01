@@ -395,9 +395,10 @@ def _analyze_single_session(
     plain: bool,
 ) -> None:
     from snore.analysis.modes import AVAILABLE_CONFIGS
-    from snore.analysis.service import AnalysisService
     from snore.database import models
+    from snore.services.analysis_facade import AnalysisFacade
 
+    # I/O: look up session_id / date while the injected session is open.
     if date:
         db_session = (
             session.execute(
@@ -429,9 +430,10 @@ def _analyze_single_session(
         )
         session_date_str = day_date.isoformat()
 
-    console.print(f"\nAnalyzing session {session_date_str} (ID: {session_id})...")
+    # Close the injected session BEFORE analysis so it is not held across compute.
+    session.close()
 
-    analysis_service = AnalysisService(session)
+    console.print(f"\nAnalyzing session {session_date_str} (ID: {session_id})...")
 
     assert session_id is not None, "session_id should not be None"
 
@@ -442,7 +444,12 @@ def _analyze_single_session(
         modes = list(mode)
 
     try:
-        result = analysis_service.analyze_session(
+        # AnalysisFacade.run_analysis owns its own short read/write scopes;
+        # the injected session (already closed) is not used here.
+        facade = AnalysisFacade(
+            session
+        )  # session only needed for listing, not analysis
+        result = facade.run_analysis(
             session_id=session_id,
             modes=modes,
             store_results=not no_store,

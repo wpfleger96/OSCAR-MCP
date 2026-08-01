@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import text
 
 from snore.database import models
-from snore.database.importers import SessionImporter
+from snore.database.importers import import_session
 from snore.database.session import init_database, session_scope
 
 
@@ -48,9 +48,7 @@ class TestImportPipeline:
         assert len(sessions) > 0
 
         session_data = sessions[0]
-
-        importer = SessionImporter()
-        result = importer.import_session(session_data)
+        result = import_session(session_data)
         assert result is True, "Session should be imported"
 
         with session_scope() as session:
@@ -70,12 +68,10 @@ class TestImportPipeline:
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
 
-        importer = SessionImporter()
-
-        result1 = importer.import_session(session_data)
+        result1 = import_session(session_data)
         assert result1 is True
 
-        result2 = importer.import_session(session_data)
+        result2 = import_session(session_data)
         assert result2 is False
 
         with session_scope() as session:
@@ -89,11 +85,9 @@ class TestImportPipeline:
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
 
-        importer = SessionImporter()
+        import_session(session_data)
 
-        importer.import_session(session_data)
-
-        result = importer.import_session(session_data, force=True)
+        result = import_session(session_data, force=True)
         assert result is True
 
         with session_scope() as session:
@@ -106,9 +100,7 @@ class TestImportPipeline:
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
-
-        importer = SessionImporter()
-        importer.import_session(session_data)
+        import_session(session_data)
 
         with session_scope() as session:
             waveforms = session.query(models.Waveform).all()
@@ -130,9 +122,7 @@ class TestImportPipeline:
 
         if not session_data.has_event_data or len(session_data.events) == 0:
             pytest.skip("Test session has no events")
-
-        importer = SessionImporter()
-        importer.import_session(session_data)
+        import_session(session_data)
 
         with session_scope() as session:
             event_count = session.query(models.Event).count()
@@ -145,9 +135,7 @@ class TestImportPipeline:
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
-
-        importer = SessionImporter()
-        importer.import_session(session_data)
+        import_session(session_data)
 
         with session_scope() as session:
             stats = session.query(models.Statistics).first()
@@ -169,9 +157,7 @@ class TestImportPipeline:
         # Dict mutation bypasses pydantic validation, mirroring a parser that
         # populates an optional setting with None. The importer must drop it.
         session_data.settings.other_settings["unexpected_none"] = None
-
-        importer = SessionImporter()
-        importer.import_session(session_data)
+        import_session(session_data)
 
         with session_scope() as session:
             values = [s.value for s in session.query(models.Setting).all()]
@@ -184,10 +170,8 @@ class TestImportPipeline:
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
 
-        importer = SessionImporter()
-
         for session_data in sessions:
-            importer.import_session(session_data)
+            import_session(session_data)
 
         with session_scope() as session:
             device_count = session.query(models.Device).count()

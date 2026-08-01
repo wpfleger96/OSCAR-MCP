@@ -87,23 +87,30 @@ def test_openapi_matches_committed_generated_types(running_api, request):
         f"{sorted(ungenerated)}"
     )
 
-    # Direction 2: schema components must appear in generated.ts.
-    live_components = set(schema.get("components", {}).get("schemas", {}).keys())
-    if live_components:
-        # openapi-typescript may emit component names as bare identifiers or quoted keys,
-        # and as object types ({) or string union types (string literals with |).
-        _bare = set(
-            re.findall(r"([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(?:\{|'[^']*')", generated_text)
-        )
-        _quoted = set(
-            re.findall(
-                r"['\"]([A-Za-z][A-Za-z0-9_-]*)['\"]:\s*(?:\{|'[^']*')", generated_text
+    # Direction 2: live schema components and their properties must be reflected in
+    # the committed openapi.json artifact.  This catches new/changed fields (like
+    # `cancelled` on BatchAnalysisResult) that were never regenerated.
+    committed_openapi = repo_root / "ui" / "openapi.json"
+    if committed_openapi.exists():
+        import json as _json  # noqa: PLC0415
+
+        committed_schema = _json.loads(committed_openapi.read_text())
+        live_comps = schema.get("components", {}).get("schemas", {})
+        committed_comps = committed_schema.get("components", {}).get("schemas", {})
+
+        # Check every live component's required fields are in the committed artifact.
+        # A missing or changed required field means regeneration is needed.
+        for comp_name, live_comp in live_comps.items():
+            committed_comp = committed_comps.get(comp_name)
+            assert committed_comp is not None, (
+                f"Schema component {comp_name!r} not in committed openapi.json "
+                "(regenerate ui/openapi.json with pnpm generate:types)"
             )
-        )
-        gen_components = _bare | _quoted
-        missing_components = live_components - gen_components
-        assert not missing_components, (
-            "Live API schema components missing from generated types "
-            "(regenerate with pnpm generate:types): "
-            f"{sorted(missing_components)}"
-        )
+            live_props = set(live_comp.get("properties", {}).keys())
+            committed_props = set(committed_comp.get("properties", {}).keys())
+            missing_props = live_props - committed_props
+            assert not missing_props, (
+                f"Component {comp_name!r} has properties in live API not in committed "
+                f"openapi.json: {sorted(missing_props)}. "
+                "Regenerate ui/openapi.json and ui/src/types/generated.ts."
+            )

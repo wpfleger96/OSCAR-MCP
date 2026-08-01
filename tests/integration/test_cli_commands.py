@@ -969,13 +969,12 @@ class TestSessionShowCommand:
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test --settings flag displays settings."""
-        from snore.database.importers import SessionImporter
+        from snore.database.importers import import_session
 
         init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
-        importer = SessionImporter()
-        importer.import_session(sessions[0])
+        import_session(sessions[0])
 
         runner = CliRunner()
         result = runner.invoke(

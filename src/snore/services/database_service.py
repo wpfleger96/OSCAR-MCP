@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from snore.database import models
 from snore.database.models import Base
-from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
+from snore.services.schemas import DatabaseStats, VacuumResult
 
 __all__ = ["DatabaseService"]
 
@@ -158,46 +158,6 @@ class DatabaseService:
             last_session=last_session,
         )
 
-    def vacuum(self, db_path: str) -> VacuumResult:
-        """Vacuum the database to reclaim space after deletions.
-
-        SQLite-only operation.  Raises ``RuntimeError`` for non-SQLite targets.
-        VACUUM requires AUTOCOMMIT on SQLite; it runs on a dedicated connection
-        separate from the normal session pool so it cannot affect in-flight
-        transactions.
-        """
-        if not db_path:
-            raise RuntimeError(
-                "VACUUM is a SQLite-only operation and requires a file-backed database. "
-                "This operation is not available for in-memory or non-SQLite databases."
-            )
-
-        size_before = (
-            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
-        )
-
-        # VACUUM cannot run inside a transaction.  Use a dedicated AUTOCOMMIT
-        # engine so the PRAGMA recipe on the pool does not interfere.
-        vacuum_engine = create_engine(
-            f"sqlite:///{db_path}",
-            isolation_level="AUTOCOMMIT",
-        )
-        try:
-            with vacuum_engine.connect() as conn:
-                conn.execute(text("VACUUM"))
-        finally:
-            vacuum_engine.dispose()
-
-        size_after = (
-            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
-        )
-
-        return VacuumResult(
-            status="success",
-            size_before_mb=size_before,
-            size_after_mb=size_after,
-        )
-
     def reset_rows(self) -> dict[str, int]:
         """Delete all rows from all data tables.  Caller-transaction-owned.
 
@@ -214,50 +174,6 @@ class DatabaseService:
             count = cursor.rowcount or 0  # type: ignore[attr-defined]
             tables_cleared[table.name] = count
         return tables_cleared
-
-    def reset(self, db_path: str) -> ResetResult:
-        """Delete all rows from all data tables.
-
-        Orchestrates two explicit capabilities:
-
-        1. ``reset_rows()`` — generic typed deletes (any dialect).
-           Commit happens here so VACUUM can run outside a transaction.
-        2. ``vacuum_sqlite()`` — SQLite file maintenance, gated on the target
-           dialect via ``is_sqlite_target()`` (DatabaseTarget-aware).
-
-        Args:
-            db_path: SQLite file path for VACUUM and size measurement.
-                     Pass ``""`` for non-SQLite targets to skip file ops.
-        """
-        size_before = (
-            os.path.getsize(db_path) / (1024 * 1024)
-            if db_path and os.path.exists(db_path)
-            else 0.0
-        )
-
-        tables_cleared = self.reset_rows()
-        total = sum(tables_cleared.values())
-
-        # Commit before VACUUM — SQLite forbids VACUUM inside a transaction.
-        self.db_session.commit()
-
-        # SQLite file maintenance: gated on dialect, not string truthiness.
-        if self.is_sqlite_target(db_path):
-            self.vacuum_sqlite(db_path)
-
-        size_after = (
-            os.path.getsize(db_path) / (1024 * 1024)
-            if db_path and os.path.exists(db_path)
-            else 0.0
-        )
-
-        return ResetResult(
-            status="success",
-            tables_cleared=tables_cleared,
-            total_rows_deleted=total,
-            size_before_mb=size_before,
-            size_after_mb=size_after,
-        )
 
     def vacuum_sqlite(self, db_path: str) -> VacuumResult:
         """Run VACUUM on a SQLite file-backed database.

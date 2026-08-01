@@ -2,7 +2,7 @@
 
 import logging
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -360,8 +360,12 @@ class AnalysisFacade:
         Owns a short read scope for the I/O phase and closes it before compute,
         so the injected request session is never held across NumPy/scipy work.
         """
+        import time  # noqa: PLC0415
+
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
+
+        t_start = time.monotonic()
 
         # I/O phase: open a dedicated short scope — close it before compute.
         with session_scope() as read_db:
@@ -372,11 +376,13 @@ class AnalysisFacade:
         compute_svc = AnalysisService()  # no db_session — compute only
         result = compute_svc.compute_analysis(inputs)
 
+        processing_time_ms = int((time.monotonic() - t_start) * 1000)
+
         if store_results:
             # Write phase: short INSERT-only scope.
             with session_scope() as write_db:
                 write_svc = AnalysisService(write_db)
-                write_svc.store_result(result, 0)
+                write_svc.store_result(result, processing_time_ms)
 
         return result
 
@@ -427,23 +433,29 @@ class AnalysisFacade:
             stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
-        # Stream scalar ID/date rows — no full-batch list materialization.
-        # yield_per limits the fetch window to 200 rows at a time.
-        rows = list(self.db_session.execute(stmt).yield_per(200))
-        if not rows:
+        # Stream scalar ID/date rows lazily — the generator is consumed one row
+        # at a time inside the coordinator's sliding window.  No list materialization.
+        from collections.abc import Iterator as _Iterator  # noqa: PLC0415
+
+        def _row_gen() -> _Iterator[tuple[int, date | None]]:
+            for row in self.db_session.execute(stmt).yield_per(200):
+                yield row.session_id, row.day_date
+
+        # Peek at the first pair to detect an empty result without consuming all.
+        row_iter = _row_gen()
+        try:
+            first_pair = next(row_iter)
+        except StopIteration:
             return BatchAnalysisResult(
                 total=0, successful=0, failed=0, cancelled=0, results=[]
             )
 
-        # Build the lightweight (id, date) pairs; scalars only — no ORM objects held.
-        session_pairs: list[tuple[int, date | None]] = [
-            (row.session_id, row.day_date) for row in rows
-        ]
+        import itertools as _it  # noqa: PLC0415
 
         coordinator = BatchAnalysisCoordinator()
         self._batch_coordinator = coordinator
         return coordinator.submit(
-            session_pairs=session_pairs,
+            session_pairs=_it.chain([first_pair], row_iter),
             modes=modes,
             store_results=store_results,
             max_workers=max_workers,
@@ -487,7 +499,7 @@ class BatchAnalysisCoordinator:
     def submit(
         self,
         *,
-        session_pairs: list[tuple[int, date | None]],
+        session_pairs: Iterable[tuple[int, date | None]],
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
@@ -525,18 +537,18 @@ class BatchAnalysisCoordinator:
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
 
-        total = len(session_pairs)
-        self._total = total
+        self._total = -1  # Unknown until exhausted; updated at completion.
         self._completed = 0
         # Do NOT reset _cancel_requested if cancel() was called before submit().
         # This allows callers to pre-cancel a coordinator before submitting work.
 
-        # Build a date lookup from the scalar pairs — no ORM objects retained.
-        session_dates: dict[int, date | None] = {sid: d for sid, d in session_pairs}
-        session_ids: list[int] = [sid for sid, _ in session_pairs]
+        # Build date lookup lazily — only entries for the active window are held.
+        session_dates: dict[int, date | None] = {}
 
         batch_results: list[BatchSessionResult] = []
         modes_list: list[str] | None = list(modes) if modes is not None else None
+        # Lazy pair iterator — never materialized into a full list.
+        pair_iter = iter(session_pairs)
 
         def analyze_one(sid: int) -> str:
             """Return 'cancelled', 'success', or 'error' for this session."""
@@ -567,23 +579,23 @@ class BatchAnalysisCoordinator:
 
             return "success"
 
-        # Bounded in-flight: submit at most max_workers futures at a time so the
-        # executor never holds all session rows in memory simultaneously.
-        effective_workers = min(max_workers, total)
-        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        # Bounded sliding window — at most max_workers futures in flight at a time.
+        # The pair iterator is consumed lazily; no full-batch list is ever built.
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             pending: dict[Future[str], int] = {}
-            sid_iter = iter(session_ids)
 
             def _submit_next() -> None:
+                """Pull the next (sid, day_date) from the lazy iterator and submit."""
                 try:
-                    sid = next(sid_iter)
+                    sid, day_date = next(pair_iter)
+                    session_dates[sid] = day_date  # register only when submitted
                     fut = executor.submit(analyze_one, sid)
                     pending[fut] = sid
                 except StopIteration:
                     pass
 
-            # Prime the window.
-            for _ in range(effective_workers):
+            # Prime the window — at most max_workers futures queued at once.
+            for _ in range(max_workers):
                 _submit_next()
 
             while pending:
@@ -615,10 +627,12 @@ class BatchAnalysisCoordinator:
                     )
                     self._completed += 1
                     if progress_callback:
-                        progress_callback(self._completed, total)
+                        progress_callback(self._completed, self._completed)
                     # Slide the window forward.
                     _submit_next()
 
+        total = len(batch_results)
+        self._total = total
         successful = sum(1 for r in batch_results if r.success)
         cancelled_count = sum(1 for r in batch_results if r.cancelled)
         return BatchAnalysisResult(

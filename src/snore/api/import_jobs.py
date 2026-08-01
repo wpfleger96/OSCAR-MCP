@@ -26,8 +26,9 @@ Guarantees
 - POST failure: if temp-dir creation succeeds but job registration fails, the caller is
   responsible for cleanup; the job store never holds a reference to an incomplete job.
 - Shutdown: `shutdown()` cancels all non-terminal jobs and awaits worker threads.
-  Returns a list of job IDs still alive after the timeout; the lifespan logs or
-  raises on non-empty to surface verified failure rather than swallowing it.
+  Returns a list of job IDs still alive after the timeout; the lifespan raises
+  `RuntimeError` on a non-empty list so the process does not exit cleanly while
+  active import writes are in flight.
 """
 
 from __future__ import annotations

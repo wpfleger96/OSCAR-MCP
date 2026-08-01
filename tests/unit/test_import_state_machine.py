@@ -476,12 +476,13 @@ class TestShutdown:
         assert job2.is_terminal
 
     def test_shutdown_with_live_worker_cancels_and_warns(self, tmp_path, caplog):
-        """shutdown() cancels a running job; worker that outlives timeout triggers a warning.
+        """shutdown() returns the still-alive job ID when a worker outlives the timeout.
 
         This test starts a real background thread that blocks on a threading.Event,
         calls shutdown() with a very short timeout, then verifies:
-        1. The job is transitioned to CANCELLED.
-        2. A warning is logged for the still-alive worker.
+        1. shutdown() returns the job's ID in the still-alive list.
+        2. The cancel flag is set on the running job.
+        3. After unblocking, the worker reaches a terminal state.
         """
         import logging  # noqa: PLC0415
 
@@ -541,6 +542,46 @@ class TestShutdown:
 
         # After the worker exits, it must be terminal (cancelled because flag was set).
         assert job.is_terminal, "Worker must be terminal after it exits"
+
+    def test_lifespan_raises_when_workers_alive_after_shutdown(self, tmp_path):
+        """Lifespan raises RuntimeError when shutdown() returns live workers.
+
+        Exercises the actual lifespan context to prove the failure is not
+        swallowed — a live worker on exit must NOT produce a clean teardown.
+        """
+        import asyncio  # noqa: PLC0415
+        import threading as _threading  # noqa: PLC0415
+
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.api.app import create_app  # noqa: PLC0415
+
+        # Simulate shutdown() returning a non-empty still-alive list.
+        def _fake_shutdown(timeout=10.0):
+            return ["fake-job-id"]  # non-empty = still alive
+
+        app = create_app()
+        _dummy_stop = _threading.Event()
+        _dummy_thread = _threading.Thread(target=_dummy_stop.wait, daemon=True)
+        _dummy_thread.start()
+
+        async def run_lifespan() -> None:
+            with (
+                patch("snore.api.app.init_database"),
+                patch(
+                    "snore.api.app._start_import_reaper",
+                    return_value=(_dummy_thread, _dummy_stop),
+                ),
+                patch("snore.api.app._shutdown_import_jobs", _fake_shutdown),
+            ):
+                async with app.router.lifespan_context(app):
+                    pass  # yield and immediately exit
+
+        with pytest.raises(RuntimeError, match="Shutdown incomplete"):
+            asyncio.run(run_lifespan())
+
+        _dummy_stop.set()
+        _dummy_thread.join(timeout=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -993,16 +1034,27 @@ class TestRouteHTTPBoundary:
     ):
         """POST /import: if create_job raises, the uploaded temp dir is removed.
 
-        Patches create_job at the router's import site so the real ASGI route
-        handles the failure — verifying the route cleans up the temp dir.
+        Patches tempfile.mkdtemp to return a known path, patches create_job at
+        the router's import site to raise, then asserts the temp dir is gone.
         """
+
         from unittest.mock import patch  # noqa: PLC0415
 
         from fastapi.testclient import TestClient  # noqa: PLC0415
 
         app = self._make_app()
-        # Patch create_job at the router module so the route sees the failure.
+        known_tmp = str(tmp_path / "known_upload_dir")
+
+        def _known_mkdtemp():
+            import os  # noqa: PLC0415
+
+            os.makedirs(known_tmp, exist_ok=True)
+            return known_tmp
+
+        # Patch mkdtemp so we know the exact directory; patch create_job to raise
+        # after mkdtemp has been called (simulating registration failure).
         with (
+            patch("snore.api.routers.import_data.tempfile.mkdtemp", _known_mkdtemp),
             patch(
                 "snore.api.routers.import_data.create_job",
                 side_effect=RuntimeError("Simulated registration failure"),
@@ -1013,11 +1065,17 @@ class TestRouteHTTPBoundary:
                 "/api/v1/import/",
                 files=[("files", ("test.edf", b"fake", "application/octet-stream"))],
             )
-        # The route returns 500 when create_job raises.
+        # Route returns 500 when create_job raises.
         assert resp.status_code == 500, (
             f"Expected 500 when create_job fails; got {resp.status_code}"
         )
-        # No job should be registered in the store (create_job raised).
+        # The temp directory must have been removed by the route's cleanup.
+        import os  # noqa: PLC0415
+
+        assert not os.path.exists(known_tmp), (
+            f"Temp dir {known_tmp!r} must be removed after registration failure"
+        )
+        # No job should remain in the store.
         with job_store._lock:
             assert len(job_store._jobs) == 0 or all(
                 j.job_type != JobType.UPLOAD for j in job_store._jobs.values()

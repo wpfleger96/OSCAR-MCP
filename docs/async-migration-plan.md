@@ -128,9 +128,10 @@ entry point.
 | `DatabaseService.reset` | No (caller provides via dep) | Yes (intentional, before VACUUM) | No | VACUUM requires committed state; route dep creates a fresh session per request |
 | `BatchAnalysisCoordinator.analyze_one` (read) | Yes (via `session_scope()`) | On scope exit | On scope exception | Closed before compute phase begins |
 | `BatchAnalysisCoordinator.analyze_one` (write) | Yes (via `session_scope()`) | On scope exit | On scope exception | Short-lived INSERT only; held ≤ write duration |
-| `AnalysisFacade.run_analysis` | No (injects caller's session) | No (caller owns) | No (caller owns) | FastAPI dep injects a request-scoped session; `session_scope` closes it on response |
-| `AnalysisFacade.delete_analysis` | No (injects caller's session) | No (caller owns) | No (caller owns) | Same as above; bulk DELETE via typed `delete()` |
-| `AnalysisFacade.run_batch_analysis` | No (injects caller's session for query) | No | No | Session used only to fetch session IDs; coordinator opens its own scoped sessions per worker |
+| `AnalysisFacade.run_analysis` | Yes (two short `session_scope()`) | On scope exit | On scope exception | Opens short read scope (I/O only), closes before compute, opens short write scope for INSERT only |
+| `AnalysisFacade.delete_analysis` | No (injects caller's session) | No (caller owns) | No (caller owns) | Bulk DELETE via typed `delete()` |
+| `AnalysisFacade.run_batch_analysis` | No (injects caller's session for scalar query) | No | No | Session streams session_id/date scalars via yield_per; coordinator opens its own scoped sessions per worker |
+| `SessionImporter.import_session` | No (caller provides `db=`) | No (caller owns) | No (caller owns) | Module-level `import_session()` opens the scope; the class opens no scopes |
 | `POST /sessions/{id}/analysis` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | `service_dep` creates a `session_scope` per request |
 | `DELETE /analysis` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Same |
 | `POST /analysis/batch` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Coordinator internally opens additional `session_scope` instances per thread |
@@ -138,7 +139,7 @@ entry point.
 | `DELETE /sessions/` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Bulk session delete via `SessionService.delete_sessions` |
 | `POST /import/` worker thread | Via `session_scope` inside `ImportService.import_sources` | Per batch, by `ImportService` (outer) and `import_sessions_batch` (savepoints) | Per batch exception | `ImportService` opens and injects the batch session; `import_sessions_batch` uses `begin_nested()` savepoints only |
 
-Import UoW: `ImportService.import_sources` opens a `session_scope()` per source batch and injects the live session into `SessionImporter.import_sessions_batch` via the `db=` parameter.  `import_sessions_batch` never opens its own `session_scope()` when called from `ImportService`; it uses `begin_nested()` savepoints only.  The forced-failure test asserts zero child rows (device, day, session, waveform, event, statistics) survive when an import raises mid-batch.
+Import UoW: `ImportService.import_sources` opens a `session_scope()` per source batch and injects the live session into `SessionImporter.import_sessions_batch` via the `db=` keyword argument.  `import_sessions_batch` never opens its own `session_scope()`; it uses `begin_nested()` savepoints only.  `SessionImporter.import_session` also requires a caller-provided `db`; the module-level `import_session()` convenience function opens the scope.  The forced-failure test asserts zero bad rows survive across all seven child tables (device, day, session, waveform, event, statistics, setting) when an import raises after all children are flushed.
 
 ### 7. I/O–compute DTO split
 
@@ -163,8 +164,8 @@ separation in PR-1:
 
 1. **Batch analysis** (`BatchAnalysisCoordinator`): read-only phase (`load_session_inputs_raw`,
    session closed before NumPy), compute phase (`prepare_inputs` + `compute_analysis`, no session),
-   write phase (fresh session for INSERT only).  Batch ID/date rows streamed via `yield_per()`;
-   no full-batch prefetch.
+   write phase (fresh session for INSERT only).  Batch session_id/date rows are
+   streamed lazily from the DB into the coordinator via a generator — no list materialization.
 2. **Single-session analysis** (`AnalysisFacade.run_analysis`): opens its own short
    `session_scope()` for the I/O phase, closes it before compute/persist.  The
    injected request session is not held across NumPy/scipy work.
@@ -205,8 +206,9 @@ Replaces the destructive shared `Queue`.
 - POST failure between temp-dir creation and job registration: immediate directory
   cleanup, no orphan job
 - App shutdown cancels all workers, joins each with a per-worker timeout, and returns
-  (or logs) a list of job IDs still alive after the timeout — never silently swallows
-  live workers.  The lifespan also stops and joins the TTL reaper thread.
+  a list of still-alive job IDs.  The lifespan raises `RuntimeError` if any workers
+  remain alive — the process does not complete clean teardown while active import
+  writes are in flight.  The lifespan also stops and joins the TTL reaper thread.
 
 ---
 

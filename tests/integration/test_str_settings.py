@@ -124,7 +124,7 @@ class TestSTRSettingsParsing:
     ):
         """Test that settings are stored in database after import."""
         from snore.database import models
-        from snore.database.importers import SessionImporter
+        from snore.database.importers import import_session
         from snore.database.session import init_database, session_scope
 
         init_database(str(temp_db))
@@ -134,9 +134,7 @@ class TestSTRSettingsParsing:
 
         session = sessions[0]
         assert session.settings is not None, "Session should have settings"
-
-        importer = SessionImporter()
-        importer.import_session(session)
+        import_session(session)
 
         with session_scope() as db:
             settings = db.query(models.Setting).all()

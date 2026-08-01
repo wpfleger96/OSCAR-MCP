@@ -220,7 +220,12 @@ class ExportService:
         warnings: list[str] = []
         files_written = 0
         nights: set[date] = set()
-        session_ids_seen: list[int] = []
+
+        if include_waveforms:
+            warnings.append(
+                "Waveform export enabled. Files may be very large "
+                "(~720K rows per 8-hour session at 25Hz)."
+            )
 
         rows_gen = self._build_export_rows(
             db_session, date_from, date_to, device_serial
@@ -282,7 +287,6 @@ class ExportService:
 
             for s, evs, stts in rows_gen:
                 found_any = True
-                session_ids_seen.append(s["id"])
                 stats = s.get("statistics") or {}
                 night = (
                     s["start_time"].date()
@@ -344,43 +348,47 @@ class ExportService:
                         ]
                     )
 
+                # Waveform export — per session, uses serial+date+time filenames
+                # matching the pre-branch format: serial_YYYYMMDD_HHMMSS_type.csv
+                if include_waveforms:
+                    sid = s["id"]
+                    waveforms_dir = output / "waveforms"
+                    waveforms_dir.mkdir(exist_ok=True)
+                    waveforms = (
+                        db_session.execute(
+                            select(models.Waveform).filter_by(session_id=sid)
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    for w in waveforms:
+                        if not w.data_blob:
+                            continue
+                        # Restore the original filename format: serial_date_time_type.csv
+                        fname = (
+                            f"{s['serial_number']}_{s['start_time']:%Y%m%d}_"
+                            f"{s['start_time']:%H%M%S}_{w.waveform_type}.csv"
+                        )
+                        wpath = waveforms_dir / fname
+                        flat = np.frombuffer(w.data_blob, dtype=np.float32)
+                        if len(flat) % 2 != 0:
+                            continue
+                        wf_rows = flat.reshape(-1, 2)
+                        with open(wpath, "w", newline="") as wf:
+                            writer = csv.writer(wf)
+                            writer.writerow(["offset_seconds", "value"])
+                            for wrow in wf_rows:
+                                writer.writerow([f"{wrow[0]:.3f}", f"{wrow[1]:.3f}"])
+                        files_written += 1
+
         if not found_any:
             warnings.append("No sessions found for the specified filters.")
             return ExportResult(format="csv", output_path=output, warnings=warnings)
 
         files_written = 3
 
-        # waveforms (optional)
-        if include_waveforms:
-            waveforms_dir = output / "waveforms"
-            waveforms_dir.mkdir(exist_ok=True)
-            warnings.append(
-                "Waveform export enabled. Files may be very large "
-                "(~720K rows per 8-hour session at 25Hz)."
-            )
-            for sid in session_ids_seen:
-                waveforms = (
-                    db_session.execute(
-                        select(models.Waveform).filter_by(session_id=sid)
-                    )
-                    .scalars()
-                    .all()
-                )
-                for w in waveforms:
-                    if not w.data_blob:
-                        continue
-                    fname = f"{sid}_{w.waveform_type}.csv"
-                    wpath = waveforms_dir / fname
-                    flat = np.frombuffer(w.data_blob, dtype=np.float32)
-                    if len(flat) % 2 != 0:
-                        continue
-                    wf_rows = flat.reshape(-1, 2)
-                    with open(wpath, "w", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["offset_seconds", "value"])
-                        for wrow in wf_rows:
-                            writer.writerow([f"{wrow[0]:.3f}", f"{wrow[1]:.3f}"])
-                    files_written += 1
+        # waveforms (optional) — already exported per-session during the main
+        # generator pass above.  The count was accumulated in files_written.
 
         return ExportResult(
             format="csv",
@@ -536,44 +544,6 @@ class ExportService:
                     events_by_session.get(s["id"], []),
                     settings_by_session.get(s["id"], []),
                 )
-
-    def _build_export_sessions(
-        self,
-        db_session: DBSession,
-        date_from: date | None,
-        date_to: date | None,
-        device_serial: str | None,
-    ) -> tuple[
-        list[dict[str, Any]],
-        dict[int, list[Any]],
-        dict[int, list[Any]],
-        set[date],
-    ]:
-        """Fetch sessions plus bulk-loaded events/settings and night aggregation.
-
-        Kept for backward compatibility with callers that expect the full tuple.
-        New code should prefer ``_build_export_rows`` for bounded memory usage.
-
-        Returns:
-            Tuple of (sessions, events_by_session, settings_by_session, nights).
-        """
-        sessions: list[dict[str, Any]] = []
-        events_by_session: dict[int, list[Any]] = {}
-        settings_by_session: dict[int, list[Any]] = {}
-        nights: set[date] = set()
-        for s, evs, stts in self._build_export_rows(
-            db_session, date_from, date_to, device_serial
-        ):
-            sessions.append(s)
-            events_by_session[s["id"]] = evs
-            settings_by_session[s["id"]] = stts
-            night = (
-                s["start_time"].date()
-                if s["start_time"].hour >= 12
-                else (s["start_time"] - timedelta(days=1)).date()
-            )
-            nights.add(night)
-        return sessions, events_by_session, settings_by_session, nights
 
     def _resolve_device_serial(self, device_serial: str | None) -> str:
         """Resolve device serial, failing fast on ambiguity."""

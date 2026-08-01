@@ -116,6 +116,9 @@ class WaveformService:
         except ValueError as e:
             raise NotFoundError(str(e)) from e
 
+        # Close the session now — deserialization and LTTB are pure compute.
+        self.db_session.close()
+
         # --- Compute phase: no DB session needed after this point ---
         timestamps, values = deserialize_waveform_blob(data_blob, sample_count)
 

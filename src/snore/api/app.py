@@ -68,14 +68,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reaper_stop.set()
         reaper_thread.join(timeout=5.0)
         # Cancel all in-flight import jobs and await their threads.
-        # Surface any workers still alive after the timeout instead of
-        # swallowing the failure silently.
+        # Raise a RuntimeError if any worker is still alive after the timeout
+        # so the lifespan does NOT complete clean teardown with active work.
         still_alive = _shutdown_import_jobs()
         if still_alive:
-            logger.warning(
-                "Shutdown incomplete: %d worker(s) still alive: %s",
-                len(still_alive),
-                still_alive,
+            raise RuntimeError(
+                f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
+                f"after timeout: {still_alive}. Active import writes may be interrupted."
             )
 
 

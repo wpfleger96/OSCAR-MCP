@@ -246,16 +246,12 @@ class ReportService:
         Render a complete HTML summary therapy report for the given date range.
 
         Structured as fetch (DB I/O, session required) then render (pure
-        Jinja2, no session needed).
-
-        Args:
-            from_date: Start of the reporting period (inclusive).
-            to_date: End of the reporting period (inclusive).
-
-        Returns:
-            Complete HTML document string starting with ``<!DOCTYPE html>``.
+        Jinja2, no session needed).  The injected session is explicitly closed
+        after the fetch phase so the render runs without any held transaction.
         """
         data = self._fetch_summary_data(from_date, to_date)
+        # Close the injected session — Jinja2 render needs no DB access.
+        self._db.close()
         return self._render_summary(from_date, to_date, data)
 
     def generate_comparison_report(
@@ -267,14 +263,10 @@ class ReportService:
         Render a complete HTML comparison report for two date ranges.
 
         Structured as fetch (DB I/O, session required) then render (pure
-        Jinja2, no session needed).
-
-        Args:
-            range_a: (from_date, to_date) for the first period.
-            range_b: (from_date, to_date) for the second period.
-
-        Returns:
-            Complete HTML document string starting with ``<!DOCTYPE html>``.
+        Jinja2, no session needed).  The injected session is explicitly closed
+        after the fetch phase.
         """
         data = self._fetch_comparison_data(range_a, range_b)
+        # Close the injected session — render needs no DB access.
+        self._db.close()
         return self._render_comparison(range_a, range_b, data)
