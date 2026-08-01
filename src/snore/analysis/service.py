@@ -24,8 +24,6 @@ detached ``AnalysisInputs`` DTO.  No session is held.
 (raw-fetch + deserialise + compute + persist) with the caller-provided session.
 """
 
-# mypy: ignore-errors
-
 import logging
 import time
 

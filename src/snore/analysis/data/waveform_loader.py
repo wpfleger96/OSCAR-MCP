@@ -226,11 +226,12 @@ async def fetch_waveform_blob(
 def fetch_waveform_blob_sync(
     db_session: Session, session_id: int, waveform_type: str
 ) -> tuple[bytes, int, dict[str, Any]]:
-    """Sync shim of ``fetch_waveform_blob`` for volatile analysis service path.
+    """Sync fetch of waveform blob for coordinator worker threads.
 
-    Used by ``AnalysisService.load_session_inputs_raw`` which still takes a sync
-    Session (being restructured in Duncan's async-prep branch PR-1).  Do NOT use
-    this for new code — prefer the async ``fetch_waveform_blob``.
+    Worker threads opened by ``BatchAnalysisCoordinator.submit`` run in
+    ``asyncio.to_thread()`` and hold a short-lived sync SQLite session — they
+    cannot use the async ``fetch_waveform_blob``.  This function is the
+    correct seam for that path per the v8 spec.
     """
     waveform = (
         db_session.execute(

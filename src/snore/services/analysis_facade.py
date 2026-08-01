@@ -464,8 +464,9 @@ class AnalysisFacade:
             stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
-        # Fetch all session ID/date pairs upfront so the ThreadPoolExecutor
-        # workers don't need async context (yield_per requires sync engine).
+        # Fetch all session ID/date pairs upfront so worker threads don't need
+        # async context (yield_per requires a sync engine; scalars passed to
+        # asyncio.to_thread workers, not ORM objects).
         rows = (await self.db_session.execute(stmt)).all()
         if not rows:
             return BatchAnalysisResult(
@@ -529,7 +530,7 @@ class BatchAnalysisCoordinator:
         no ORM session crosses a thread boundary.
 
         CPU-bound NumPy/scipy work runs between the two sync sessions without any
-        session held — identical to the previous ThreadPoolExecutor pipeline.
+        session held — identical to the previous per-session pipeline.
 
         Args:
             session_pairs: List of ``(session_id, day_date)`` scalar pairs.
