@@ -21,15 +21,15 @@ class DatabaseStatsPublic(DatabaseStats):
 
 
 @router.get("/stats", response_model=DatabaseStatsPublic)
-def get_stats(service: DatabaseServiceDep) -> DatabaseStats:
-    return service.get_stats(get_db_path())
+async def get_stats(service: DatabaseServiceDep) -> DatabaseStats:
+    return await service.get_stats(get_db_path())
 
 
 @router.post("/vacuum", response_model=VacuumResult)
-def vacuum_db(service: DatabaseServiceDep) -> VacuumResult:
-    return service.vacuum(get_db_path())
+async def vacuum_db(service: DatabaseServiceDep) -> VacuumResult:
+    return await service.vacuum(get_db_path())
 
 
 @router.post("/reset", response_model=ResetResult)
-def reset_db(service: DatabaseServiceDep) -> ResetResult:
-    return service.reset(get_db_path())
+async def reset_db(service: DatabaseServiceDep) -> ResetResult:
+    return await service.reset(get_db_path())

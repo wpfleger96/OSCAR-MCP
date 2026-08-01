@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from pathlib import Path
 
 import click
@@ -60,44 +62,47 @@ def db_stats(db: str | None) -> None:
     """Show database statistics."""
     db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
 
-    with db_session(db) as session:
-        service = DatabaseService(session)
-        stats = service.get_stats(str(db_path))
+    async def _run() -> None:
+        async with db_session(db) as session:
+            service = DatabaseService(session)
+            stats = await service.get_stats(str(db_path))
 
-        print_header("Database Statistics", ICON_STATS)
-        print_kv("Database", str(stats.db_path), indent=0)
-        print_kv("Size", f"{stats.size_mb:.1f} MB", indent=0)
+            print_header("Database Statistics", ICON_STATS)
+            print_kv("Database", str(stats.db_path), indent=0)
+            print_kv("Size", f"{stats.size_mb:.1f} MB", indent=0)
 
-        print_subsection("Row Counts")
-        print_kv("Profiles", str(stats.profile_count))
-        print_kv("Devices", str(stats.device_count))
-        print_kv("Sessions", str(stats.session_count))
-        print_kv("Days", str(stats.day_count))
-        print_kv("Events", str(stats.event_count))
-        print_kv("Waveforms", str(stats.waveform_count))
-        print_kv("Analysis Results", str(stats.analysis_count))
-        print_kv("Detected Patterns", str(stats.pattern_count))
+            print_subsection("Row Counts")
+            print_kv("Profiles", str(stats.profile_count))
+            print_kv("Devices", str(stats.device_count))
+            print_kv("Sessions", str(stats.session_count))
+            print_kv("Days", str(stats.day_count))
+            print_kv("Events", str(stats.event_count))
+            print_kv("Waveforms", str(stats.waveform_count))
+            print_kv("Analysis Results", str(stats.analysis_count))
+            print_kv("Detected Patterns", str(stats.pattern_count))
 
-        print_subsection("Data Coverage")
-        print_kv(
-            "Sessions with waveforms",
-            f"{stats.sessions_with_waveforms}/{stats.session_count} ({stats.waveform_coverage_pct:.1f}%)",
-        )
-        print_kv(
-            "Sessions with events",
-            f"{stats.sessions_with_events}/{stats.session_count} ({stats.event_coverage_pct:.1f}%)",
-        )
-        print_kv(
-            "Sessions analyzed",
-            f"{stats.analysis_count}/{stats.session_count} ({stats.analysis_coverage_pct:.1f}%)",
-        )
-
-        if stats.first_session and stats.last_session:
-            console.print(
-                f"\nDate range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
+            print_subsection("Data Coverage")
+            print_kv(
+                "Sessions with waveforms",
+                f"{stats.sessions_with_waveforms}/{stats.session_count} ({stats.waveform_coverage_pct:.1f}%)",
+            )
+            print_kv(
+                "Sessions with events",
+                f"{stats.sessions_with_events}/{stats.session_count} ({stats.event_coverage_pct:.1f}%)",
+            )
+            print_kv(
+                "Sessions analyzed",
+                f"{stats.analysis_count}/{stats.session_count} ({stats.analysis_coverage_pct:.1f}%)",
             )
 
-        print_footer()
+            if stats.first_session and stats.last_session:
+                console.print(
+                    f"\nDate range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
+                )
+
+            print_footer()
+
+    asyncio.run(_run())
 
 
 @db.command()
@@ -109,13 +114,16 @@ def vacuum(db: str | None) -> None:
 
     console.print("Vacuuming database...")
 
-    with db_session(db) as session:
-        service = DatabaseService(session)
-        result = service.vacuum(str(db_path))
+    async def _run() -> None:
+        async with db_session(db) as session:
+            service = DatabaseService(session)
+            result = await service.vacuum(str(db_path))
 
-    print_success(
-        f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)"
-    )
+        print_success(
+            f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)"
+        )
+
+    asyncio.run(_run())
 
 
 @db.command()
@@ -129,25 +137,27 @@ def drop(db: str | None, force: bool) -> None:
         console.print(f"Database does not exist at {db_path}")
         return
 
-    try:
-        init_database(str(db_path))
-        with session_scope() as session:
-            service = DatabaseService(session)
-            stats = service.get_stats(str(db_path))
+    async def _show_stats() -> None:
+        try:
+            init_database(str(db_path))
+            async with session_scope() as session:
+                service = DatabaseService(session)
+                stats = await service.get_stats(str(db_path))
 
-            console.print(f"\nDatabase: {db_path}")
-            console.print(f"Size: {stats.size_mb:.1f} MB")
-            console.print(f"Devices: {stats.device_count}")
-            console.print(f"Sessions: {stats.session_count}")
-            console.print(f"Events: {stats.event_count:,}")
+                console.print(f"\nDatabase: {db_path}")
+                console.print(f"Size: {stats.size_mb:.1f} MB")
+                console.print(f"Devices: {stats.device_count}")
+                console.print(f"Sessions: {stats.session_count}")
+                console.print(f"Events: {stats.event_count:,}")
 
-            if stats.first_session and stats.last_session:
-                console.print(
-                    f"Date range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
-                )
+                if stats.first_session and stats.last_session:
+                    console.print(
+                        f"Date range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
+                    )
+        except Exception as e:
+            print_warning(f"Could not read database stats: {e}")
 
-    except Exception as e:
-        print_warning(f"Could not read database stats: {e}")
+    asyncio.run(_show_stats())
 
     if not force:
         print_warning("WARNING: This will permanently delete all CPAP data!")
@@ -158,7 +168,7 @@ def drop(db: str | None, force: bool) -> None:
             return
 
     try:
-        cleanup_database()
+        asyncio.run(cleanup_database())
     except Exception as e:
         print_warning(f"Warning during cleanup: {e}")
 

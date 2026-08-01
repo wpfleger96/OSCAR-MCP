@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.data.waveform_loader import WaveformLoader
 from snore.database import models
@@ -24,33 +24,19 @@ __all__ = ["WaveformService"]
 class WaveformService:
     """Service for waveform listing and loading operations."""
 
-    def __init__(self, db_session: Session):
-        """
-        Initialize waveform service.
-
-        Args:
-            db_session: SQLAlchemy database session
-        """
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
         self._loader = WaveformLoader(db_session)
 
-    def list_waveforms(self, session_id: int) -> list[WaveformInfo]:
-        """
-        List available waveform types for a session.
-
-        Returns empty list if no waveforms found.
-
-        Args:
-            session_id: Database session ID
-
-        Returns:
-            List of WaveformInfo objects with metadata
-        """
+    async def list_waveforms(self, session_id: int) -> list[WaveformInfo]:
+        """List available waveform types for a session."""
         waveforms = (
-            self.db_session.execute(
-                select(models.Waveform)
-                .where(models.Waveform.session_id == session_id)
-                .order_by(models.Waveform.waveform_type)
+            (
+                await self.db_session.execute(
+                    select(models.Waveform)
+                    .where(models.Waveform.session_id == session_id)
+                    .order_by(models.Waveform.waveform_type)
+                )
             )
             .scalars()
             .all()
@@ -73,7 +59,7 @@ class WaveformService:
             )
         return result
 
-    def get_waveform_data(
+    async def get_waveform_data(
         self,
         session_id: int,
         waveform_type: str,
@@ -81,24 +67,9 @@ class WaveformService:
         start_seconds: float | None = None,
         end_seconds: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-        """
-        Load waveform data with optional windowing and LTTB downsampling.
-
-        Args:
-            session_id: Database session ID
-            waveform_type: Type of waveform to load
-            max_points: If set, downsample to this many points using LTTB
-            start_seconds: If set, filter timestamps >= this value
-            end_seconds: If set, filter timestamps <= this value
-
-        Returns:
-            Tuple of (timestamps, values, metadata)
-
-        Raises:
-            ValueError: If waveform not found
-        """
+        """Load waveform data with optional windowing and LTTB downsampling."""
         try:
-            timestamps, values, metadata = self._loader.load_waveform(
+            timestamps, values, metadata = await self._loader.load_waveform(
                 session_id=session_id,
                 waveform_type=waveform_type,
                 apply_filter=False,
@@ -120,30 +91,17 @@ class WaveformService:
 
         return timestamps, values, metadata
 
-    def compare_events(
+    async def compare_events(
         self,
         session_id: int,
         mode: str = "aasm",
         tolerance_seconds: float = 5.0,
     ) -> EventComparisonResult:
-        """
-        Compare machine vs programmatic events for a session.
+        """Compare machine vs programmatic events for a session."""
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.analysis.utils import convert_machine_events  # noqa: PLC0415
 
-        Args:
-            session_id: Database session ID
-            mode: Detection mode to compare
-            tolerance_seconds: Time tolerance in seconds for matching events
-
-        Returns:
-            EventComparisonResult with false negatives and false positives
-
-        Raises:
-            NotFoundError: If no analysis result found or mode not available
-        """
-        from snore.analysis.service import AnalysisService
-        from snore.analysis.utils import convert_machine_events
-
-        result = AnalysisService(self.db_session).get_analysis_result(session_id)
+        result = AnalysisService(self.db_session).get_analysis_result(session_id)  # type: ignore[arg-type]  # TODO: AnalysisService volatile — awaiting PR-1 AsyncSession conversion
 
         if result is None:
             raise NotFoundError("No analysis results found for this session")
@@ -224,3 +182,5 @@ class WaveformService:
             false_positives_apnea=false_positives_apnea,
             false_positives_hypopnea=false_positives_hypopnea,
         )
+
+

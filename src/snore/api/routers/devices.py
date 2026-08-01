@@ -12,10 +12,10 @@ DeviceServiceDep = Annotated[DeviceService, Depends(service_dep(DeviceService))]
 
 
 @router.get("/", response_model=list[DeviceInfo])
-def list_devices(service: DeviceServiceDep) -> list[DeviceInfo]:
-    return service.list_devices()
+async def list_devices(service: DeviceServiceDep) -> list[DeviceInfo]:
+    return await service.list_devices()
 
 
 @router.get("/{device_id}", response_model=DeviceDetail)
-def get_device_detail(device_id: int, service: DeviceServiceDep) -> DeviceDetail:
-    return service.get_device_detail(device_id)
+async def get_device_detail(device_id: int, service: DeviceServiceDep) -> DeviceDetail:
+    return await service.get_device_detail(device_id)

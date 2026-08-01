@@ -7,7 +7,7 @@ from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.svg_charts import render_trend_line
 from snore.database import models
@@ -134,14 +134,18 @@ class ReportService:
     unchanged.
     """
 
-    def __init__(self, db_session: Session) -> None:
+    def __init__(self, db_session: AsyncSession) -> None:
         self._db = db_session
         self._stats = StatsService(db_session)
 
-    def _first_device(self) -> DeviceInfo | None:
+    async def _first_device(self) -> DeviceInfo | None:
         """Return the first device as a plain detached schema, or None."""
         device = (
-            self._db.execute(select(models.Device).order_by(models.Device.first_seen))
+            (
+                await self._db.execute(
+                    select(models.Device).order_by(models.Device.first_seen)
+                )
+            )
             .scalars()
             .first()
         )
@@ -151,17 +155,14 @@ class ReportService:
 
     # --- Fetch helpers (I/O phase) ---
 
-    def _fetch_summary_data(self, from_date: date, to_date: date) -> dict[str, Any]:
-        """Fetch all data needed to render a summary report.
-
-        Returns plain Python objects; no ORM session access after this call.
-        """
-        summary = self._stats.get_summary(from_date=from_date, to_date=to_date)
-        monthly = self._stats.get_period_statistics(
+    async def _fetch_summary_data(self, from_date: date, to_date: date) -> dict[str, Any]:
+        """Fetch all data needed to render a summary report."""
+        summary = await self._stats.get_summary(from_date=from_date, to_date=to_date)
+        monthly = await self._stats.get_period_statistics(
             "month", from_date=from_date, to_date=to_date
         )
-        trends = self._stats.get_trends("week", from_date=from_date, to_date=to_date)
-        device = self._first_device()
+        trends = await self._stats.get_trends("week", from_date=from_date, to_date=to_date)
+        device = await self._first_device()
         return {
             "summary": summary,
             "monthly": monthly,
@@ -169,18 +170,15 @@ class ReportService:
             "device": device,
         }
 
-    def _fetch_comparison_data(
+    async def _fetch_comparison_data(
         self,
         range_a: tuple[date, date],
         range_b: tuple[date, date],
     ) -> dict[str, Any]:
-        """Fetch all data needed to render a comparison report.
-
-        Returns plain Python objects; no ORM session access after this call.
-        """
-        summary_a = self._stats.get_summary(from_date=range_a[0], to_date=range_a[1])
-        summary_b = self._stats.get_summary(from_date=range_b[0], to_date=range_b[1])
-        device = self._first_device()
+        """Fetch all data needed to render a comparison report."""
+        summary_a = await self._stats.get_summary(from_date=range_a[0], to_date=range_a[1])
+        summary_b = await self._stats.get_summary(from_date=range_b[0], to_date=range_b[1])
+        device = await self._first_device()
         deltas = _build_deltas(summary_a, summary_b)
         return {
             "summary_a": summary_a,
@@ -241,40 +239,16 @@ class ReportService:
 
     # --- Public API (fetch then render) ---
 
-    def generate_summary_report(self, from_date: date, to_date: date) -> str:
-        """
-        Render a complete HTML summary therapy report for the given date range.
-
-        Structured as fetch (DB I/O, session required) then render (pure
-        Jinja2, no session needed).
-
-        Args:
-            from_date: Start of the reporting period (inclusive).
-            to_date: End of the reporting period (inclusive).
-
-        Returns:
-            Complete HTML document string starting with ``<!DOCTYPE html>``.
-        """
-        data = self._fetch_summary_data(from_date, to_date)
+    async def generate_summary_report(self, from_date: date, to_date: date) -> str:
+        """Render a complete HTML summary therapy report."""
+        data = await self._fetch_summary_data(from_date, to_date)
         return self._render_summary(from_date, to_date, data)
 
-    def generate_comparison_report(
+    async def generate_comparison_report(
         self,
         range_a: tuple[date, date],
         range_b: tuple[date, date],
     ) -> str:
-        """
-        Render a complete HTML comparison report for two date ranges.
-
-        Structured as fetch (DB I/O, session required) then render (pure
-        Jinja2, no session needed).
-
-        Args:
-            range_a: (from_date, to_date) for the first period.
-            range_b: (from_date, to_date) for the second period.
-
-        Returns:
-            Complete HTML document string starting with ``<!DOCTYPE html>``.
-        """
-        data = self._fetch_comparison_data(range_a, range_b)
+        """Render a complete HTML comparison report for two date ranges."""
+        data = await self._fetch_comparison_data(range_a, range_b)
         return self._render_comparison(range_a, range_b, data)

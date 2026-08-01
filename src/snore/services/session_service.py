@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, UnaryExpression, delete, func, select
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
 from snore.database import models
@@ -26,13 +26,7 @@ __all__ = ["SessionService"]
 class SessionService:
     """Service for session listing, detail, deletion, and management."""
 
-    def __init__(self, db_session: Session):
-        """
-        Initialize session service.
-
-        Args:
-            db_session: SQLAlchemy database session
-        """
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
 
     @staticmethod
@@ -59,7 +53,7 @@ class SessionService:
 
         return filters
 
-    def list_sessions(
+    async def list_sessions(
         self,
         device: str | None = None,
         from_date: datetime | None = None,
@@ -69,21 +63,7 @@ class SessionService:
         sort_by: str = "date-desc",
         include_disabled: bool = False,
     ) -> SessionListResult:
-        """
-        List sessions with filters, sorting, and pagination.
-
-        Args:
-            device: Filter by device serial number
-            from_date: Filter by start date (inclusive)
-            to_date: Filter by end date (inclusive)
-            limit: Maximum sessions to return (0 = unlimited)
-            offset: Number of sessions to skip for pagination
-            sort_by: Sort order (date-asc, date-desc, session-id, duration)
-            include_disabled: Include disabled sessions
-
-        Returns:
-            SessionListResult with sessions and total count
-        """
+        """List sessions with filters, sorting, and pagination."""
         filters = self._session_filters(device, from_date, to_date, include_disabled)
 
         sort_map: dict[str, UnaryExpression[Any]] = {
@@ -100,7 +80,7 @@ class SessionService:
             .join(models.Device, models.Session.device_id == models.Device.id)
             .where(*filters)
         )
-        total_count = self.db_session.execute(count_query).scalar() or 0
+        total_count = (await self.db_session.execute(count_query)).scalar() or 0
 
         list_query = (
             select(models.Session, models.Device, models.Statistics.ahi)
@@ -119,7 +99,7 @@ class SessionService:
             list_query = list_query.offset(offset)
 
         sessions = []
-        for session, dev, ahi in self.db_session.execute(list_query):
+        for session, dev, ahi in (await self.db_session.execute(list_query)):
             sessions.append(
                 SessionListItem(
                     id=session.id,
@@ -137,25 +117,15 @@ class SessionService:
             sessions=sessions, total_count=total_count, limit=limit
         )
 
-    def get_session_detail(
+    async def get_session_detail(
         self, session_id: int, include_settings: bool = False
     ) -> SessionDetail:
-        """
-        Get detailed information for a single session.
-
-        Args:
-            session_id: Database session ID
-            include_settings: Whether to load settings (can be slow)
-
-        Returns:
-            SessionDetail with all metadata
-
-        Raises:
-            ValueError: If session not found
-        """
+        """Get detailed information for a single session."""
         session = (
-            self.db_session.execute(
-                select(models.Session).where(models.Session.id == session_id)
+            (
+                await self.db_session.execute(
+                    select(models.Session).where(models.Session.id == session_id)
+                )
             )
             .scalars()
             .first()
@@ -164,17 +134,21 @@ class SessionService:
             raise NotFoundError(f"Session {session_id} not found")
 
         device = (
-            self.db_session.execute(
-                select(models.Device).where(models.Device.id == session.device_id)
+            (
+                await self.db_session.execute(
+                    select(models.Device).where(models.Device.id == session.device_id)
+                )
             )
             .scalars()
             .first()
         )
 
         stats_record = (
-            self.db_session.execute(
-                select(models.Statistics).where(
-                    models.Statistics.session_id == session.id
+            (
+                await self.db_session.execute(
+                    select(models.Statistics).where(
+                        models.Statistics.session_id == session.id
+                    )
                 )
             )
             .scalars()
@@ -182,28 +156,28 @@ class SessionService:
         )
 
         event_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count())
                 .select_from(models.Event)
                 .where(models.Event.session_id == session.id)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
 
         waveform_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count())
                 .select_from(models.Waveform)
                 .where(models.Waveform.session_id == session.id)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
 
         waveform_types = (
-            self.db_session.execute(
-                select(models.Waveform.waveform_type)
-                .where(models.Waveform.session_id == session.id)
-                .distinct()
+            (
+                await self.db_session.execute(
+                    select(models.Waveform.waveform_type)
+                    .where(models.Waveform.session_id == session.id)
+                    .distinct()
+                )
             )
             .scalars()
             .all()
@@ -217,10 +191,12 @@ class SessionService:
         settings_list = None
         if include_settings:
             settings_records = (
-                self.db_session.execute(
-                    select(models.Setting)
-                    .where(models.Setting.session_id == session.id)
-                    .order_by(models.Setting.key)
+                (
+                    await self.db_session.execute(
+                        select(models.Setting)
+                        .where(models.Setting.session_id == session.id)
+                        .order_by(models.Setting.key)
+                    )
                 )
                 .scalars()
                 .all()
@@ -258,7 +234,7 @@ class SessionService:
             settings=settings_list,
         )
 
-    def get_delete_preview(
+    async def get_delete_preview(
         self,
         device: str | None = None,
         session_ids: list[int] | None = None,
@@ -266,22 +242,7 @@ class SessionService:
         to_date: datetime | None = None,
         delete_all: bool = False,
     ) -> DeletePreview:
-        """
-        Preview sessions and related data that would be deleted.
-
-        Args:
-            device: Filter by device serial number
-            session_ids: Specific session IDs to delete
-            from_date: Delete sessions from this date
-            to_date: Delete sessions up to this date
-            delete_all: Delete all sessions (dangerous)
-
-        Returns:
-            DeletePreview with sessions and counts of related data
-
-        Raises:
-            ValueError: If no filters specified
-        """
+        """Preview sessions and related data that would be deleted."""
         if not any([device, session_ids, from_date, to_date, delete_all]):
             raise ValueError(
                 "At least one filter must be specified: "
@@ -311,7 +272,7 @@ class SessionService:
 
         sessions = []
         session_ids_to_delete: list[int] = []
-        for session, dev in self.db_session.execute(query):
+        for session, dev in await self.db_session.execute(query):
             sessions.append(
                 SessionListItem(
                     id=session.id,
@@ -339,12 +300,13 @@ class SessionService:
                 .scalar_subquery()
             )
 
-        # One round-trip for all three related-row counts.
-        event_count, waveform_count, stats_count = self.db_session.execute(
-            select(
-                _count_subquery(models.Event),
-                _count_subquery(models.Waveform),
-                _count_subquery(models.Statistics),
+        event_count, waveform_count, stats_count = (
+            await self.db_session.execute(
+                select(
+                    _count_subquery(models.Event),
+                    _count_subquery(models.Waveform),
+                    _count_subquery(models.Statistics),
+                )
             )
         ).one()
 
@@ -355,44 +317,23 @@ class SessionService:
             stats_count=stats_count,
         )
 
-    def delete_sessions(self, session_ids: list[int]) -> int:
-        """
-        Delete sessions by ID list.
-
-        CASCADE foreign keys will automatically delete related:
-        - Events, Waveforms, Statistics, Settings, AnalysisResults
-
-        Args:
-            session_ids: List of session IDs to delete
-
-        Returns:
-            Number of sessions deleted
-        """
+    async def delete_sessions(self, session_ids: list[int]) -> int:
+        """Delete sessions by ID list."""
         if not session_ids:
             return 0
 
-        # Use ORM delete for proper rowcount tracking
-        cursor: CursorResult[Any] = self.db_session.execute(  # type: ignore[assignment]
+        cursor: CursorResult[Any] = await self.db_session.execute(  # type: ignore[assignment]
             delete(models.Session).where(models.Session.id.in_(session_ids))
         )
         return cursor.rowcount or 0
 
-    def set_session_enabled(self, session_id: int, enabled: bool) -> None:
-        """
-        Toggle session enabled/disabled status.
-
-        When enabled status changes, recalculates Day statistics via DayManager.
-
-        Args:
-            session_id: Database session ID
-            enabled: New enabled state
-
-        Raises:
-            ValueError: If session not found
-        """
+    async def set_session_enabled(self, session_id: int, enabled: bool) -> None:
+        """Toggle session enabled/disabled status."""
         session = (
-            self.db_session.execute(
-                select(models.Session).where(models.Session.id == session_id)
+            (
+                await self.db_session.execute(
+                    select(models.Session).where(models.Session.id == session_id)
+                )
             )
             .scalars()
             .first()
@@ -404,33 +345,25 @@ class SessionService:
             return
 
         session.enabled = enabled
-        self.db_session.flush()
+        await self.db_session.flush()
 
         if session.day_id:
             day = (
-                self.db_session.execute(
-                    select(models.Day).where(models.Day.id == session.day_id)
+                (
+                    await self.db_session.execute(
+                        select(models.Day).where(models.Day.id == session.day_id)
+                    )
                 )
                 .scalars()
                 .first()
             )
             if day:
-                DayManager.recalculate_day(day, self.db_session)
+                await DayManager.recalculate_day(day, self.db_session)
 
-    def resolve_session_id(self, session_id: int | None, date: datetime | None) -> int:
-        """
-        Resolve session ID from either explicit ID or date.
-
-        Args:
-            session_id: Explicit session ID (pass-through if provided)
-            date: Date to find session for (via Day table join)
-
-        Returns:
-            Resolved session ID
-
-        Raises:
-            ValueError: If neither ID nor date provided, or no session found for date
-        """
+    async def resolve_session_id(
+        self, session_id: int | None, date: datetime | None
+    ) -> int:
+        """Resolve session ID from either explicit ID or date."""
         if session_id is not None:
             return session_id
 
@@ -438,10 +371,12 @@ class SessionService:
             raise ValueError("Either session_id or date must be provided")
 
         session = (
-            self.db_session.execute(
-                select(models.Session)
-                .join(models.Day)
-                .where(models.Day.date == date.date())
+            (
+                await self.db_session.execute(
+                    select(models.Session)
+                    .join(models.Day)
+                    .where(models.Day.date == date.date())
+                )
             )
             .scalars()
             .first()

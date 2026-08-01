@@ -20,27 +20,27 @@ StatsServiceDep = Annotated[StatsService, Depends(service_dep(StatsService))]
         204: {"description": "No therapy data available"},
     },
 )
-def get_summary(
+async def get_summary(
     service: StatsServiceDep,
     days_limit: int | None = Query(default=None),
 ) -> TherapySummary | Response:
-    result = service.get_summary(days_limit)
+    result = await service.get_summary(days_limit)
     if result is None:
         return Response(status_code=204)
     return result
 
 
 @router.get("/periods", response_model=list[PeriodStatistics])
-def get_periods(
+async def get_periods(
     service: StatsServiceDep,
     period_type: PeriodType = Query(default="month"),
     days_limit: int | None = Query(default=None),
 ) -> list[PeriodStatistics]:
-    return service.get_period_statistics(period_type, days_limit)
+    return await service.get_period_statistics(period_type, days_limit)
 
 
 @router.get("/trends", response_model=dict[str, list[list[Any]]])
-def get_trends(
+async def get_trends(
     service: StatsServiceDep,
     period_type: PeriodType = Query(default="month"),
     days_limit: int | None = Query(
@@ -55,11 +55,11 @@ def get_trends(
     # JSON arrays, so response_model=dict[str, list[list[Any]]] reflects the wire shape.
     if period_type == "day" and days_limit is None:
         days_limit = 180
-    return service.get_trends(period_type, days_limit)
+    return await service.get_trends(period_type, days_limit)
 
 
 @router.get("/records", response_model=dict[str, dict[str, list[list[Any]]]])
-def get_records(
+async def get_records(
     service: StatsServiceDep,
     days_limit: int | None = Query(default=None),
     top_n: int = Query(default=5),
@@ -67,4 +67,4 @@ def get_records(
     # Service returns dict[str, dict[str, list[tuple[date, float]]]]; tuples serialize
     # as JSON arrays, so response_model=dict[str, dict[str, list[list[Any]]]] reflects
     # the wire shape.
-    return service.get_records(days_limit, top_n)
+    return await service.get_records(days_limit, top_n)

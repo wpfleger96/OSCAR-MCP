@@ -8,6 +8,7 @@ These tests verify:
 
 from pathlib import Path
 
+import asyncio
 import pytest
 
 from alembic.config import Config as AlembicConfig
@@ -88,7 +89,7 @@ class TestStartupMigrations:
 
         # Reset global engine so the second init_database call actually re-runs
         # _apply_migrations; without this the early-return guard silently skips it.
-        cleanup_database()
+        asyncio.run(cleanup_database())
 
         init_database(db_path)
         version_second = _read_version(db_path)
@@ -106,7 +107,7 @@ class TestStartupMigrations:
         db_path = str(tmp_path / "stale.db")
 
         init_database(db_path)
-        cleanup_database()
+        asyncio.run(cleanup_database())
 
         # Overwrite alembic_version with a revision absent from the migration chain.
         engine = create_engine(f"sqlite:///{db_path}")

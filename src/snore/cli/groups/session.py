@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime
 
 import click
@@ -64,58 +66,61 @@ def session_list(
     """List imported sessions."""
     from snore.services.session_service import SessionService
 
-    with open_db_session(db) as db_session:
-        service = SessionService(db_session)
-        result = service.list_sessions(
-            device=device,
-            from_date=date_from,
-            to_date=date_to,
-            limit=limit,
-            sort_by=sort_by,
-            include_disabled=show_all,
-        )
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            service = SessionService(db_session)
+            result = await service.list_sessions(
+                device=device,
+                from_date=date_from,
+                to_date=date_to,
+                limit=limit,
+                sort_by=sort_by,
+                include_disabled=show_all,
+            )
 
-        if not result.sessions:
-            console.print("No sessions found")
-            return
+            if not result.sessions:
+                console.print("No sessions found")
+                return
 
-        rows = []
-        for sess in result.sessions:
-            device_name = f"{sess.manufacturer} {sess.model}"
-            ahi_str = f"{sess.ahi:.1f}" if sess.ahi is not None else "N/A"
-            status_marker = "" if sess.enabled else "[disabled]"
-            rows.append(
-                (
-                    str(sess.id),
-                    f"{sess.start_time:%Y-%m-%d}",
-                    f"{sess.start_time:%H:%M:%S}",
-                    f"{sess.duration_hours:>6.1f}h",
-                    device_name,
-                    sess.serial_number,
-                    f"{ahi_str:<8} {status_marker}",
+            rows = []
+            for sess in result.sessions:
+                device_name = f"{sess.manufacturer} {sess.model}"
+                ahi_str = f"{sess.ahi:.1f}" if sess.ahi is not None else "N/A"
+                status_marker = "" if sess.enabled else "[disabled]"
+                rows.append(
+                    (
+                        str(sess.id),
+                        f"{sess.start_time:%Y-%m-%d}",
+                        f"{sess.start_time:%H:%M:%S}",
+                        f"{sess.duration_hours:>6.1f}h",
+                        device_name,
+                        sess.serial_number,
+                        f"{ahi_str:<8} {status_marker}",
+                    )
                 )
+
+            print_table(
+                [
+                    ("ID", 5),
+                    ("Date", 12),
+                    ("Time", 8),
+                    ("Duration", 10),
+                    ("Device", 30),
+                    ("Serial", 15),
+                    ("AHI", 8),
+                ],
+                rows,
             )
 
-        print_table(
-            [
-                ("ID", 5),
-                ("Date", 12),
-                ("Time", 8),
-                ("Duration", 10),
-                ("Device", 30),
-                ("Serial", 15),
-                ("AHI", 8),
-            ],
-            rows,
-        )
+            if result.total_count > 0 and limit > 0 and result.total_count > limit:
+                console.print(
+                    f"\nShowing {len(result.sessions)} of {result.total_count} sessions"
+                )
+                print_tip(f"Use '--limit {result.total_count}' or '--limit 0' to show all")
+            else:
+                console.print(f"\nShowing all {len(result.sessions)} sessions")
 
-        if result.total_count > 0 and limit > 0 and result.total_count > limit:
-            console.print(
-                f"\nShowing {len(result.sessions)} of {result.total_count} sessions"
-            )
-            print_tip(f"Use '--limit {result.total_count}' or '--limit 0' to show all")
-        else:
-            console.print(f"\nShowing all {len(result.sessions)} sessions")
+    asyncio.run(_run())
 
 
 @session.command("show")
@@ -127,17 +132,20 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
     from snore.cli.display.analysis import display_session_detail
     from snore.services.session_service import SessionService
 
-    with open_db_session(db) as db_session:
-        service = SessionService(db_session)
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            service = SessionService(db_session)
 
-        try:
-            detail = service.get_session_detail(
-                session_id, include_settings=show_settings
-            )
-        except ValueError as e:
-            raise click.ClickException(str(e)) from e
+            try:
+                detail = await service.get_session_detail(
+                    session_id, include_settings=show_settings
+                )
+            except ValueError as e:
+                raise click.ClickException(str(e)) from e
 
-        display_session_detail(detail, show_settings)
+            display_session_detail(detail, show_settings)
+
+    asyncio.run(_run())
 
 
 @session.command("delete")
@@ -172,98 +180,101 @@ def session_delete(
     if session_ids:
         id_list = parse_id_list(session_ids)
 
-    with open_db_session(db) as db_session:
-        service = SessionService(db_session)
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            service = SessionService(db_session)
 
-        try:
-            preview = service.get_delete_preview(
-                device=device,
-                session_ids=id_list,
-                from_date=date_from,
-                to_date=date_to,
-                delete_all=delete_all,
-            )
-        except ValueError as e:
-            raise click.ClickException(str(e)) from e
-
-        if not preview.sessions:
-            print_warning("No sessions found matching the specified criteria")
-            return
-
-        print_footer(wide=True)
-        if dry_run:
-            print_dry_run_header("deleted")
-        else:
-            print_warning("Sessions to be DELETED")
-        print_footer(wide=True)
-        console.print()
-
-        print_table(
-            [
-                ("ID", 5),
-                ("Date", 12),
-                ("Time", 8),
-                ("Duration", 10),
-                ("Device", 30),
-                ("Serial", 15),
-            ],
-            (
-                (
-                    str(sess.id),
-                    f"{sess.start_time:%Y-%m-%d}",
-                    f"{sess.start_time:%H:%M:%S}",
-                    f"{sess.duration_hours:>6.1f}h",
-                    f"{sess.manufacturer} {sess.model}",
-                    sess.serial_number,
+            try:
+                preview = await service.get_delete_preview(
+                    device=device,
+                    session_ids=id_list,
+                    from_date=date_from,
+                    to_date=date_to,
+                    delete_all=delete_all,
                 )
-                for sess in preview.sessions
-            ),
-        )
+            except ValueError as e:
+                raise click.ClickException(str(e)) from e
 
-        print_header("Deletion Summary", ICON_STATS, wide=True)
-        console.print(f"Sessions:    {len(preview.sessions)}")
-        console.print(f"Events:      {preview.event_count}")
-        console.print(f"Waveforms:   {preview.waveform_count}")
-        console.print(f"Statistics:  {preview.stats_count}")
-        print_footer(wide=True)
-        console.print()
-
-        if dry_run:
-            print_dry_run_complete("delete")
-            return
-
-        if not force:
-            print_warning("WARNING: This action cannot be undone!")
-            if not click.confirm("Are you sure you want to delete these sessions?"):
-                console.print("Deletion cancelled")
+            if not preview.sessions:
+                print_warning("No sessions found matching the specified criteria")
                 return
 
-        session_ids_to_delete = [s.id for s in preview.sessions]
-        deleted_count = service.delete_sessions(session_ids_to_delete)
+            print_footer(wide=True)
+            if dry_run:
+                print_dry_run_header("deleted")
+            else:
+                print_warning("Sessions to be DELETED")
+            print_footer(wide=True)
+            console.print()
 
-        print_success(
-            f"Successfully deleted {deleted_count} session(s) and related data"
-        )
+            print_table(
+                [
+                    ("ID", 5),
+                    ("Date", 12),
+                    ("Time", 8),
+                    ("Duration", 10),
+                    ("Device", 30),
+                    ("Serial", 15),
+                ],
+                (
+                    (
+                        str(sess.id),
+                        f"{sess.start_time:%Y-%m-%d}",
+                        f"{sess.start_time:%H:%M:%S}",
+                        f"{sess.duration_hours:>6.1f}h",
+                        f"{sess.manufacturer} {sess.model}",
+                        sess.serial_number,
+                    )
+                    for sess in preview.sessions
+                ),
+            )
 
-        if deleted_count > 10:
-            print_tip("Run 'snore db vacuum' to reclaim disk space")
+            print_header("Deletion Summary", ICON_STATS, wide=True)
+            console.print(f"Sessions:    {len(preview.sessions)}")
+            console.print(f"Events:      {preview.event_count}")
+            console.print(f"Waveforms:   {preview.waveform_count}")
+            console.print(f"Statistics:  {preview.stats_count}")
+            print_footer(wide=True)
+            console.print()
+
+            if dry_run:
+                print_dry_run_complete("delete")
+                return
+
+            if not force:
+                print_warning("WARNING: This action cannot be undone!")
+                if not click.confirm("Are you sure you want to delete these sessions?"):
+                    console.print("Deletion cancelled")
+                    return
+
+            session_ids_to_delete = [s.id for s in preview.sessions]
+            deleted_count = await service.delete_sessions(session_ids_to_delete)
+
+            print_success(
+                f"Successfully deleted {deleted_count} session(s) and related data"
+            )
+
+            if deleted_count > 10:
+                print_tip("Run 'snore db vacuum' to reclaim disk space")
+
+    asyncio.run(_run())
 
 
-def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
+async def _toggle_session_async(session_id: int, enabled: bool, db: str | None) -> None:
     """Enable or disable a session and recalculate day statistics."""
     from snore.services.session_service import SessionService
 
-    with open_db_session(db) as db_session:
+    async with open_db_session(db) as db_session:
         service = SessionService(db_session)
 
         try:
-            detail = service.get_session_detail(session_id)
+            detail = await service.get_session_detail(session_id)
             if detail.enabled == enabled:
                 status = "enabled" if enabled else "disabled"
                 console.print(f"Session {session_id} is already {status}")
                 return
 
-            service.set_session_enabled(session_id, enabled)
+            await service.set_session_enabled(session_id, enabled)
 
             status = "enabled" if enabled else "disabled"
             console.print(
@@ -278,7 +289,7 @@ def _toggle_session(session_id: int, enabled: bool, db: str | None) -> None:
 @db_option
 def session_enable(session_id: int, db: str | None) -> None:
     """Enable a session and recalculate day statistics."""
-    _toggle_session(session_id, enabled=True, db=db)
+    asyncio.run(_toggle_session_async(session_id, enabled=True, db=db))
 
 
 @session.command("disable")
@@ -286,4 +297,4 @@ def session_enable(session_id: int, db: str | None) -> None:
 @db_option
 def session_disable(session_id: int, db: str | None) -> None:
     """Disable a session and recalculate day statistics."""
-    _toggle_session(session_id, enabled=False, db=db)
+    asyncio.run(_toggle_session_async(session_id, enabled=False, db=db))

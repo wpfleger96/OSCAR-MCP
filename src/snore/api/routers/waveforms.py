@@ -28,23 +28,23 @@ VALID_WAVEFORM_TYPES = Literal[
 
 
 @router.get("/{session_id}/waveforms", response_model=list[WaveformInfo])
-def list_waveforms(session_id: int, service: WaveformServiceDep) -> list[WaveformInfo]:
-    return service.list_waveforms(session_id)
+async def list_waveforms(session_id: int, service: WaveformServiceDep) -> list[WaveformInfo]:
+    return await service.list_waveforms(session_id)
 
 
 @router.get("/{session_id}/waveforms/compare", response_model=EventComparisonResult)
-def compare_waveform_events(
+async def compare_waveform_events(
     session_id: int,
     service: WaveformServiceDep,
     mode: Literal["aasm", "aasm_relaxed", "resmed"] = Query(default="aasm"),
 ) -> EventComparisonResult:
-    return service.compare_events(session_id, mode=mode)
+    return await service.compare_events(session_id, mode=mode)
 
 
 @router.get(
     "/{session_id}/waveforms/{waveform_type}", response_model=WaveformDataResponse
 )
-def get_waveform(
+async def get_waveform(
     session_id: int,
     waveform_type: VALID_WAVEFORM_TYPES,
     service: WaveformServiceDep,
@@ -52,7 +52,7 @@ def get_waveform(
     start_seconds: float | None = Query(default=None),
     end_seconds: float | None = Query(default=None),
 ) -> WaveformDataResponse:
-    timestamps, values, metadata = service.get_waveform_data(
+    timestamps, values, metadata = await service.get_waveform_data(
         session_id=session_id,
         waveform_type=waveform_type,
         max_points=max_points,

@@ -4,7 +4,7 @@ from datetime import date
 from itertools import groupby
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.exceptions import NotFoundError
@@ -22,21 +22,17 @@ __all__ = ["DeviceService"]
 class DeviceService:
     """Service for device listing and per-device detail with usage and settings history."""
 
-    def __init__(self, db_session: Session):
-        """
-        Initialize device service.
-
-        Args:
-            db_session: SQLAlchemy database session
-        """
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
 
-    def list_devices(self) -> list[DeviceInfo]:
+    async def list_devices(self) -> list[DeviceInfo]:
         """List all devices ordered by manufacturer and model."""
         devices = (
-            self.db_session.execute(
-                select(models.Device).order_by(
-                    models.Device.manufacturer, models.Device.model
+            (
+                await self.db_session.execute(
+                    select(models.Device).order_by(
+                        models.Device.manufacturer, models.Device.model
+                    )
                 )
             )
             .scalars()
@@ -44,28 +40,13 @@ class DeviceService:
         )
         return [DeviceInfo.model_validate(d) for d in devices]
 
-    def get_device_detail(self, device_id: int) -> DeviceDetail:
-        """
-        Get full device detail including usage summary, current settings, and settings history.
-
-        Settings history is computed by loading all settings for the device in a single
-        joined query, grouping by session, then diffing consecutive sessions that have
-        settings. Sessions with no settings rows are skipped (not treated as clearing all
-        keys). The first session with settings is the baseline — no history entry is emitted
-        for it.
-
-        Args:
-            device_id: Database device ID
-
-        Returns:
-            DeviceDetail with identity, usage, current settings, and settings history
-
-        Raises:
-            NotFoundError: If device_id is not found
-        """
+    async def get_device_detail(self, device_id: int) -> DeviceDetail:
+        """Get full device detail including usage summary, current settings, and settings history."""
         device = (
-            self.db_session.execute(
-                select(models.Device).where(models.Device.id == device_id)
+            (
+                await self.db_session.execute(
+                    select(models.Device).where(models.Device.id == device_id)
+                )
             )
             .scalars()
             .first()
@@ -73,15 +54,16 @@ class DeviceService:
         if not device:
             raise NotFoundError(f"Device {device_id} not found")
 
-        # Enabled sessions ordered chronologically for usage summary
         sessions = (
-            self.db_session.execute(
-                select(models.Session)
-                .where(
-                    models.Session.device_id == device_id,
-                    models.Session.enabled.is_(True),
+            (
+                await self.db_session.execute(
+                    select(models.Session)
+                    .where(
+                        models.Session.device_id == device_id,
+                        models.Session.enabled.is_(True),
+                    )
+                    .order_by(models.Session.start_time)
                 )
-                .order_by(models.Session.start_time)
             )
             .scalars()
             .all()
@@ -102,19 +84,18 @@ class DeviceService:
                 seen.add(s.therapy_mode)
                 therapy_modes.append(s.therapy_mode)
 
-        # All settings for this device in one query, ordered by session start_time
-        all_setting_rows = self.db_session.execute(
-            select(models.Setting, models.Session)
-            .join(models.Session, models.Setting.session_id == models.Session.id)
-            .where(
-                models.Session.device_id == device_id,
-                models.Session.enabled.is_(True),
+        all_setting_rows = (
+            await self.db_session.execute(
+                select(models.Setting, models.Session)
+                .join(models.Session, models.Setting.session_id == models.Session.id)
+                .where(
+                    models.Session.device_id == device_id,
+                    models.Session.enabled.is_(True),
+                )
+                .order_by(models.Session.start_time, models.Setting.key)
             )
-            .order_by(models.Session.start_time, models.Setting.key)
         ).all()
 
-        # Group into [(session_id, session_date, {key: value})] skipping sessions
-        # that have no settings rows.
         sessions_with_settings: list[tuple[int, date, dict[str, str]]] = []
         for (_sid, _start), grp in groupby(
             all_setting_rows, key=lambda r: (r[1].id, r[1].start_time)
@@ -126,12 +107,10 @@ class DeviceService:
                 (int(session_obj.id), session_obj.start_time.date(), settings_dict)
             )
 
-        # Current settings: latest session's settings (last group)
         current_settings: dict[str, str] | None = None
         if sessions_with_settings:
             current_settings = sessions_with_settings[-1][2] or None
 
-        # Diff consecutive sessions-with-settings; first is baseline, no entry
         settings_history: list[SettingsChange] = []
         for i in range(1, len(sessions_with_settings)):
             _prev_sid, _prev_date, prev_settings = sessions_with_settings[i - 1]

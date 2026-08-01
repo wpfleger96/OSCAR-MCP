@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.exceptions import NotFoundError
@@ -15,10 +15,10 @@ __all__ = ["DayService"]
 
 
 class DayService:
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
 
-    def list_days(
+    async def list_days(
         self,
         from_date: date | None = None,
         to_date: date | None = None,
@@ -37,33 +37,31 @@ class DayService:
             query = query.where(models.Day.device_id == device_id)
 
         count_query = select(func.count()).select_from(query.subquery())
-        total = self.db_session.execute(count_query).scalar_one()
+        total = (await self.db_session.execute(count_query)).scalar_one()
 
         query = query.order_by(models.Day.date.desc())
         if limit > 0:
             query = query.limit(limit)
         query = query.offset(offset)
 
-        rows = self.db_session.execute(query).scalars().all()
+        rows = (await self.db_session.execute(query)).scalars().all()
         items = [DayListItem.model_validate(d) for d in rows]
         return items, total
 
-    def get_day(self, day_date: date) -> DayDetail:
-        """Return detailed day record with session IDs.
-
-        Raises:
-            NotFoundError: If no Day record exists for the date.
-        """
+    async def get_day(self, day_date: date) -> DayDetail:
+        """Return detailed day record with session IDs."""
         stmt = select(models.Day).where(models.Day.date == day_date)
-        day = self.db_session.execute(stmt).scalar_one_or_none()
+        day = (await self.db_session.execute(stmt)).scalar_one_or_none()
 
         if day is None:
             raise NotFoundError(f"No data found for date {day_date}")
 
         session_ids = [
             row[0]
-            for row in self.db_session.execute(
-                select(models.Session.id).where(models.Session.day_id == day.id)
+            for row in (
+                await self.db_session.execute(
+                    select(models.Session.id).where(models.Session.day_id == day.id)
+                )
             ).all()
         ]
 

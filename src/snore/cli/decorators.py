@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import click
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator
 
-    from sqlalchemy.orm import Session
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def init_db(db: str | None) -> None:
@@ -21,13 +21,18 @@ def init_db(db: str | None) -> None:
     init_database(str(Path(db).expanduser()) if db else None)
 
 
-@contextmanager
-def db_session(db: str | None) -> Iterator[Session]:
-    """Initialize the database and provide a transactional session scope."""
+@asynccontextmanager
+async def db_session(db: str | None) -> AsyncIterator[AsyncSession]:
+    """Async CLI bridge: initialise the database and yield an AsyncSession.
+
+    Each CLI command wraps its body in ``asyncio.run`` and uses this context
+    manager to obtain a session.  The session is committed on clean exit and
+    rolled back on exception.
+    """
     from snore.database.session import session_scope
 
     init_db(db)
-    with session_scope() as session:
+    async with session_scope() as session:
         yield session
 
 

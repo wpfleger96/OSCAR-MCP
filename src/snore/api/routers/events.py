@@ -29,25 +29,25 @@ def _event_to_item(event: models.Event, session_start: datetime) -> EventItem:
 
 
 @router.get("/{session_id}/events", response_model=list[EventItem])
-def list_events(
+async def list_events(
     session_id: int,
     svc: EventServiceDep,
     event_type: str | None = Query(default=None),
 ) -> list[EventItem]:
-    events, session_start = svc.list_session_events(session_id, event_type)
+    events, session_start = await svc.list_session_events(session_id, event_type)
     return [_event_to_item(e, session_start) for e in events]
 
 
 @router.get("/{session_id}/events/match", response_model=EventMatchResult)
-def match_events(
+async def match_events(
     session_id: int,
     svc: EventServiceDep,
     facade: AnalysisFacadeDep,
     mode: str = Query(default="aasm"),
 ) -> EventMatchResult:
-    machine_times = svc.get_machine_event_times(session_id)
+    machine_times = await svc.get_machine_event_times(session_id)
 
-    analysis = facade.get_analysis_result(session_id)
+    analysis = await facade.get_analysis_result(session_id)
     if not analysis:
         raise NotFoundError(f"No analysis results found for session {session_id}")
 

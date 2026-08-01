@@ -132,6 +132,33 @@ def db_session(temp_db):
 
 
 @pytest.fixture
+async def async_db_session(temp_db):
+    """Create fresh async database session for each test.
+
+    Used by tests for services that have been converted to AsyncSession in PR-2.
+    The underlying database is the same temporary SQLite file as ``db_session``.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from snore.database.models import Base
+
+    async_url = f"sqlite+aiosqlite:///{temp_db}"
+    engine = create_async_engine(async_url, echo=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+    session = factory()
+
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.fixture
 def test_device(db_session):
     """Create a test device."""
     import uuid
@@ -145,6 +172,23 @@ def test_device(db_session):
     )
     db_session.add(device)
     db_session.flush()
+    return device
+
+
+@pytest.fixture
+async def async_test_device(async_db_session):
+    """Create a test device using the async session fixture."""
+    import uuid
+
+    from snore.database.models import Device
+
+    device = Device(
+        manufacturer="Test Manufacturer",
+        model="Test Model",
+        serial_number=f"TEST_{uuid.uuid4().hex[:8]}",
+    )
+    async_db_session.add(device)
+    await async_db_session.flush()
     return device
 
 
@@ -172,6 +216,40 @@ def test_session_factory(db_session):
             db_session.add(stats)
             db_session.flush()
             db_session.refresh(session)
+
+        return session
+
+    return _create_session
+
+
+@pytest.fixture
+def async_test_session_factory(async_db_session):
+    """Async factory for creating test sessions with statistics.
+
+    Returns a coroutine factory — callers must await each call:
+        session = await async_test_session_factory(device_id, start_time)
+    """
+    import uuid
+
+    from snore.database.models import Session, Statistics
+
+    async def _create_session(device_id, start_time, duration_hours=8.0, **stats_kwargs):
+        session = Session(
+            device_id=device_id,
+            device_session_id=f"test_{start_time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}",
+            start_time=start_time,
+            end_time=start_time + timedelta(hours=duration_hours),
+            duration_seconds=duration_hours * 3600,
+            has_statistics=bool(stats_kwargs),
+        )
+        async_db_session.add(session)
+        await async_db_session.flush()
+
+        if stats_kwargs:
+            stats = Statistics(session_id=session.id, **stats_kwargs)
+            async_db_session.add(stats)
+            await async_db_session.flush()
+            await async_db_session.refresh(session)
 
         return session
 

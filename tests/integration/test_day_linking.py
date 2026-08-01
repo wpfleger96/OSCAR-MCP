@@ -12,24 +12,26 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from sqlalchemy import select
+
 from snore.database import models
 from snore.database.day_manager import DayManager
 from snore.database.session import init_database, session_scope
 
 
 @pytest.fixture
-def test_device_fixture(temp_db):
+async def test_device_fixture(temp_db):
     """Create a device for testing."""
     init_database(str(temp_db))
 
-    with session_scope() as session:
+    async with session_scope() as session:
         device = models.Device(
             manufacturer="Test",
             model="Test Model",
             serial_number="TEST123",
         )
         session.add(device)
-        session.commit()
+        await session.flush()
 
         return device.id
 
@@ -37,15 +39,15 @@ def test_device_fixture(temp_db):
 class TestDayRecordCreation:
     """Test that Day records are created and linked properly."""
 
-    def test_create_session_with_day_record(self, temp_db, test_device_fixture):
+    async def test_create_session_with_day_record(self, temp_db, test_device_fixture):
         """Test that creating a session with day linking works."""
         device_id = test_device_fixture
 
         start_time = datetime(2025, 10, 15, 22, 0, 0)
 
-        with session_scope() as session:
+        async with session_scope() as session:
             day_date = DayManager.get_day_for_session(start_time)
-            day = DayManager.create_or_update_day(device_id, day_date, session)
+            day = await DayManager.create_or_update_day(device_id, day_date, session)
 
             new_session = models.Session(
                 device_id=device_id,
@@ -56,29 +58,31 @@ class TestDayRecordCreation:
                 day_id=day.id,
             )
             session.add(new_session)
-            session.commit()
+            await session.flush()
 
             assert new_session.day_id is not None, "Session should have day_id set"
 
-            day = session.query(models.Day).filter_by(id=new_session.day_id).first()
+            day = (await session.execute(
+                select(models.Day).where(models.Day.id == new_session.day_id)
+            )).scalars().first()
             assert day is not None, "Day record should exist"
             assert day.device_id == device_id
             assert day.date == datetime(2025, 10, 15).date()
 
-    def test_link_sessions_to_same_day(self, temp_db, test_device_fixture):
+    async def test_link_sessions_to_same_day(self, temp_db, test_device_fixture):
         """Test that multiple sessions on same day link to same Day record."""
         device_id = test_device_fixture
 
         start_time_1 = datetime(2025, 10, 15, 22, 0, 0)
         start_time_2 = datetime(2025, 10, 16, 0, 30, 0)
 
-        with session_scope() as session:
+        async with session_scope() as session:
             day_date_1 = DayManager.get_day_for_session(start_time_1)
             day_date_2 = DayManager.get_day_for_session(start_time_2)
 
             assert day_date_1 == day_date_2, "Both sessions should map to same day"
 
-            day = DayManager.create_or_update_day(device_id, day_date_1, session)
+            day = await DayManager.create_or_update_day(device_id, day_date_1, session)
 
             sess1 = models.Session(
                 device_id=device_id,
@@ -98,7 +102,7 @@ class TestDayRecordCreation:
             )
             session.add(sess1)
             session.add(sess2)
-            session.commit()
+            await session.flush()
 
             assert sess1.day_id is not None
             assert sess2.day_id is not None
@@ -111,16 +115,16 @@ class TestDayRecordCreation:
 class TestDeviceDayIntegration:
     """Test that device-day relationships work correctly."""
 
-    def test_device_shows_correct_session_count(self, temp_db, test_device_fixture):
+    async def test_device_shows_correct_session_count(self, temp_db, test_device_fixture):
         """Test that queries work correctly with day-linked sessions."""
         device_id = test_device_fixture
 
-        with session_scope() as session:
+        async with session_scope() as session:
             for i in range(3):
                 start_time = datetime(2025, 10, 15 + i, 22, 0, 0)
 
                 day_date = DayManager.get_day_for_session(start_time)
-                day = DayManager.create_or_update_day(device_id, day_date, session)
+                day = await DayManager.create_or_update_day(device_id, day_date, session)
 
                 sess = models.Session(
                     device_id=device_id,
@@ -132,29 +136,28 @@ class TestDeviceDayIntegration:
                 )
                 session.add(sess)
 
-            session.commit()
+            await session.flush()
 
-            total_sessions = (
-                session.query(models.Session)
-                .join(models.Day)
-                .filter(models.Day.device_id == device_id)
-                .count()
-            )
+            total_sessions = len((await session.execute(
+                select(models.Session)
+                .join(models.Day, models.Session.day_id == models.Day.id)
+                .where(models.Day.device_id == device_id)
+            )).scalars().all())
 
             assert total_sessions == 3, (
                 "Should find all 3 sessions through Day relationship"
             )
 
-            days_count = (
-                session.query(models.Day).filter_by(device_id=device_id).count()
-            )
+            days_count = len((await session.execute(
+                select(models.Day).where(models.Day.device_id == device_id)
+            )).scalars().all())
             assert days_count == 3, "Should have 3 separate days"
 
-    def test_sessions_without_day_id_not_counted(self, temp_db, test_device_fixture):
+    async def test_sessions_without_day_id_not_counted(self, temp_db, test_device_fixture):
         """Test that sessions without day_id are not counted (tests the bug we fixed)."""
         device_id = test_device_fixture
 
-        with session_scope() as session:
+        async with session_scope() as session:
             orphan_session = models.Session(
                 device_id=device_id,
                 device_session_id="orphan_session",
@@ -164,22 +167,21 @@ class TestDeviceDayIntegration:
                 day_id=None,
             )
             session.add(orphan_session)
-            session.commit()
+            await session.flush()
 
-            sessions_through_day = (
-                session.query(models.Session)
-                .join(models.Day)
-                .filter(models.Day.device_id == device_id)
-                .count()
-            )
+            sessions_through_day = len((await session.execute(
+                select(models.Session)
+                .join(models.Day, models.Session.day_id == models.Day.id)
+                .where(models.Day.device_id == device_id)
+            )).scalars().all())
 
             assert sessions_through_day == 0, (
                 "Sessions without day_id should not be counted"
             )
 
-            direct_count = (
-                session.query(models.Session).filter_by(device_id=device_id).count()
-            )
+            direct_count = len((await session.execute(
+                select(models.Session).where(models.Session.device_id == device_id)
+            )).scalars().all())
             assert direct_count == 1, "Direct query should still find the session"
 
 
@@ -204,45 +206,47 @@ class TestDayManagerFunctions:
 
         assert day_date == datetime(2025, 10, 15).date()
 
-    def test_create_or_update_day_creates_new(self, temp_db, test_device_fixture):
+    async def test_create_or_update_day_creates_new(self, temp_db, test_device_fixture):
         """Test that create_or_update_day creates new Day when none exists."""
         device_id = test_device_fixture
 
-        with session_scope() as session:
+        async with session_scope() as session:
             day_date = datetime(2025, 10, 16).date()
 
-            existing = (
-                session.query(models.Day)
-                .filter_by(device_id=device_id, date=day_date)
-                .first()
-            )
+            existing = (await session.execute(
+                select(models.Day).where(
+                    models.Day.device_id == device_id,
+                    models.Day.date == day_date,
+                )
+            )).scalars().first()
             assert existing is None
 
-            day = DayManager.create_or_update_day(device_id, day_date, session)
-            session.commit()
+            day = await DayManager.create_or_update_day(device_id, day_date, session)
+            await session.flush()
 
             assert day.id is not None
             assert day.device_id == device_id
             assert day.date == day_date
 
-    def test_create_or_update_day_updates_existing(self, temp_db, test_device_fixture):
+    async def test_create_or_update_day_updates_existing(self, temp_db, test_device_fixture):
         """Test that create_or_update_day returns existing Day."""
         device_id = test_device_fixture
 
-        with session_scope() as session:
+        async with session_scope() as session:
             day_date = datetime(2025, 10, 16).date()
 
-            day1 = DayManager.create_or_update_day(device_id, day_date, session)
-            session.commit()
+            day1 = await DayManager.create_or_update_day(device_id, day_date, session)
+            await session.flush()
             day1_id = day1.id
 
-            day2 = DayManager.create_or_update_day(device_id, day_date, session)
+            day2 = await DayManager.create_or_update_day(device_id, day_date, session)
 
             assert day2.id == day1_id
 
-            count = (
-                session.query(models.Day)
-                .filter_by(device_id=device_id, date=day_date)
-                .count()
-            )
+            count = len((await session.execute(
+                select(models.Day).where(
+                    models.Day.device_id == device_id,
+                    models.Day.date == day_date,
+                )
+            )).scalars().all())
             assert count == 1

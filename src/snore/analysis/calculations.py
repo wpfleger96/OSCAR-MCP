@@ -1,11 +1,15 @@
 """Statistical calculations for OSCAR therapy data."""
 
+from __future__ import annotations
+
 from datetime import date, timedelta
 from statistics import median
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from snore.database import models
-from snore.services.schemas import PeriodStatistics
+
+if TYPE_CHECKING:
+    from snore.services.schemas import PeriodStatistics
 
 PeriodType = Literal["day", "week", "month", "6month", "year"]
 
@@ -189,6 +193,8 @@ def calculate_period_statistics(
     """
     if not day_records:
         return []
+
+    from snore.services.schemas import PeriodStatistics  # noqa: PLC0415
 
     dates = [day.date for day in day_records]
     start_date = min(dates)

@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.types import AnalysisResult
 from snore.database import models
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class AnalysisFacade:
     """Facade for analysis listing and deletion operations."""
 
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: AsyncSession):
         """
         Initialize analysis facade.
 
@@ -72,7 +72,7 @@ class AnalysisFacade:
 
         return stmt
 
-    def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
+    async def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
         """Map each session ID to its latest AnalysisResult ID (by created_at)."""
         if not session_ids:
             return {}
@@ -91,12 +91,12 @@ class AnalysisFacade:
             .where(models.AnalysisResult.session_id.in_(session_ids))
             .subquery()
         )
-        rows = self.db_session.execute(
+        rows = (await self.db_session.execute(
             select(ranked.c.session_id, ranked.c.id).where(ranked.c.recency_rank == 1)
-        ).all()
+        )).all()
         return {session_id: analysis_id for session_id, analysis_id in rows}
 
-    def list_sessions_with_status(
+    async def list_sessions_with_status(
         self,
         start: datetime | None = None,
         end: datetime | None = None,
@@ -140,9 +140,9 @@ class AnalysisFacade:
         from sqlalchemy.orm import joinedload as _joinedload
 
         stmt = stmt.options(_joinedload(models.Session.day))
-        sessions = self.db_session.execute(stmt).unique().scalars().all()
+        sessions = (await self.db_session.execute(stmt)).unique().scalars().all()
 
-        latest_analysis = self._latest_analysis_ids([s.id for s in sessions])
+        latest_analysis = await self._latest_analysis_ids([s.id for s in sessions])
 
         results = []
         for session in sessions:
@@ -169,7 +169,7 @@ class AnalysisFacade:
 
         return results
 
-    def count_sessions_with_status(
+    async def count_sessions_with_status(
         self,
         start: datetime | None = None,
         end: datetime | None = None,
@@ -182,9 +182,9 @@ class AnalysisFacade:
         count_stmt = select(func.count()).select_from(
             self._status_select(start, end, analyzed_only).subquery()
         )
-        return self.db_session.execute(count_stmt).scalar() or 0
+        return (await self.db_session.execute(count_stmt)).scalar() or 0
 
-    def get_delete_preview(
+    async def get_delete_preview(
         self,
         session_ids: list[int] | None = None,
         from_date: datetime | None = None,
@@ -240,7 +240,7 @@ class AnalysisFacade:
 
         query = query.order_by(models.Session.start_time.desc())
 
-        sessions_with_analysis = self.db_session.execute(query).fetchall()
+        sessions_with_analysis = (await self.db_session.execute(query)).fetchall()
 
         if not sessions_with_analysis:
             return AnalysisDeletePreview(
@@ -253,11 +253,11 @@ class AnalysisFacade:
 
         session_ids_list = [s.id for s in sessions_with_analysis]
 
-        analysis_counts = self.db_session.execute(
+        analysis_counts = (await self.db_session.execute(
             select(models.AnalysisResult.session_id, func.count())
             .where(models.AnalysisResult.session_id.in_(session_ids_list))
             .group_by(models.AnalysisResult.session_id)
-        ).fetchall()
+        )).fetchall()
 
         analysis_count_dict = {row[0]: int(row[1]) for row in analysis_counts}
 
@@ -266,7 +266,7 @@ class AnalysisFacade:
             total_analysis_records if all_versions else len(sessions_with_analysis)
         )
 
-        patterns_count = self.db_session.execute(
+        patterns_count = (await self.db_session.execute(
             select(func.count())
             .select_from(models.DetectedPattern)
             .where(
@@ -276,7 +276,7 @@ class AnalysisFacade:
                     )
                 )
             )
-        ).scalar()
+        )).scalar()
 
         session_details = [
             AnalysisSessionDetail(
@@ -297,7 +297,7 @@ class AnalysisFacade:
             session_details=session_details,
         )
 
-    def delete_analysis(
+    async def delete_analysis(
         self,
         session_ids: list[int],
         all_versions: bool = False,
@@ -313,7 +313,7 @@ class AnalysisFacade:
         """
         if all_versions:
             # Delete all analysis results for these sessions.
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 delete(models.AnalysisResult).where(
                     models.AnalysisResult.session_id.in_(session_ids)
                 )
@@ -336,13 +336,13 @@ class AnalysisFacade:
                 .subquery()
             )
             latest_ids = (
-                self.db_session.execute(select(ranked.c.id).where(ranked.c.rn == 1))
+                (await self.db_session.execute(select(ranked.c.id).where(ranked.c.rn == 1)))
                 .scalars()
                 .all()
             )
             if not latest_ids:
                 return 0
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 delete(models.AnalysisResult).where(
                     models.AnalysisResult.id.in_(latest_ids)
                 )
@@ -361,19 +361,32 @@ class AnalysisFacade:
         svc = AnalysisService(self.db_session)
         return svc.analyze_session(session_id, modes=modes, store_results=store_results)
 
-    def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
+    async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
 
         Intentionally returns None (rather than raising NotFoundError like the
         resource lookups elsewhere): "not yet analyzed" is a normal state that
         callers branch on, not a 404 condition.
+
+        NOTE: AnalysisService.get_analysis_result() is volatile (being rewritten
+        in Duncan's PR-1/PR-2). This facade method queries the DB directly and
+        deserializes inline rather than delegating to AnalysisService, so the
+        router layer stays async without touching the volatile service.
         """
-        from snore.analysis.service import AnalysisService
+        row = (
+            await self.db_session.execute(
+                select(models.AnalysisResult)
+                .filter_by(session_id=session_id)
+                .order_by(models.AnalysisResult.created_at.desc())
+            )
+        ).scalars().first()
 
-        svc = AnalysisService(self.db_session)
-        return svc.get_analysis_result(session_id)
+        if row is None:
+            return None
 
-    def run_batch_analysis(
+        return AnalysisResult.model_validate(row.programmatic_result_json)
+
+    async def run_batch_analysis(
         self,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
@@ -407,7 +420,7 @@ class AnalysisFacade:
             stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
-        rows = self.db_session.execute(stmt).all()
+        rows = (await self.db_session.execute(stmt)).all()
         session_dates: dict[int, date | None] = {
             row.Session.id: row.day_date for row in rows
         }
