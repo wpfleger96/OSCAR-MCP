@@ -754,51 +754,115 @@ class TestTypedBulkInsert:
         ``add_all()`` registers every instance in the session's identity map,
         causing memory to grow with the child-row count.  ``execute(insert(Model),
         mappings)`` bypasses the ORM unit-of-work entirely, so the identity map
-        should not accumulate child rows across multiple bulk inserts.
+        should not accumulate child rows during a bulk insert.
 
-        This test imports N sessions' worth of waveforms/events/settings and
-        asserts that the session identity map size does not scale with N.
+        This test imports N sessions each with 50 events and measures the ORM
+        new-object set (``db.new``) plus identity-map size INSIDE the savepoint,
+        immediately after ``_import_single_session`` returns and before the
+        nested transaction flushes.  That is the point where ``add_all()``
+        accumulates all child instances; typed INSERT leaves ``db.new`` empty.
         """
-        import gc  # noqa: PLC0415
+        from datetime import datetime  # noqa: PLC0415
+
+        import numpy as np  # noqa: PLC0415
 
         from snore.database.importers import SessionImporter  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.parsers.unified import (  # noqa: PLC0415
+            DeviceInfo,
+            RespiratoryEvent,
+            RespiratoryEventType,
+            SessionStatistics,
+            TherapyMode,
+            TherapySettings,
+            UnifiedSession,
+            WaveformData,
+            WaveformType,
+        )
 
         await init_database(str(temp_db))
 
-        n_sessions = 20  # enough to show O(n) growth if present
+        n_sessions = 20
+        n_events_per_session = 50  # large enough to make add_all() peak clearly visible
+
+        def _make_heavy_session(idx: int) -> UnifiedSession:
+            arr = np.array([[0.0, 1.0]], dtype=np.float32)
+            device_info = DeviceInfo(
+                manufacturer="BulkMfr", model="BulkMdl", serial_number=f"SN_BND_{idx}"
+            )
+            start = datetime(2024, 2, 1, 21, 0, 0)
+            end = datetime(2024, 2, 2, 5, 0, 0)
+            wf = WaveformData(
+                waveform_type=WaveformType.FLOW_RATE,
+                sample_rate=25.0,
+                unit="L/min",
+                min_value=-10.0,
+                max_value=10.0,
+                mean_value=0.0,
+                sample_count=1,
+                data_blob=arr.tobytes(),
+                timestamps=[0.0],
+                values=[1.0],
+            )
+            events = [
+                RespiratoryEvent(
+                    event_type=RespiratoryEventType.OBSTRUCTIVE_APNEA,
+                    start_time=start,
+                    duration_seconds=float(j),
+                )
+                for j in range(n_events_per_session)
+            ]
+            settings = TherapySettings(mode=TherapyMode.CPAP, pressure_fixed=10.0)
+            stats = SessionStatistics(usage_hours=8.0, ahi=1.5)
+            sess = UnifiedSession(
+                device_info=device_info,
+                device_session_id=f"SESS_BND_{idx}",
+                start_time=start,
+                end_time=end,
+                settings=settings,
+                statistics=stats,
+                has_waveform_data=True,
+                has_event_data=True,
+                has_statistics=True,
+            )
+            sess.waveforms = {WaveformType.FLOW_RATE: wf}
+            sess.events = events
+            return sess
 
         importer = SessionImporter()
-        identity_map_sizes: list[int] = []
+        peak_orm_sizes: list[int] = []
 
         async with session_scope() as db:
             for i in range(n_sessions):
-                session_data = self._make_session_with_waveforms(
-                    f"SN_BOUNDED_{i}", f"SESS_BOUNDED_{i}"
-                )
+                session_data = _make_heavy_session(i)
                 async with db.begin_nested():
-                    await importer._import_single_session(db, session_data)
+                    # Disable autoflush so add_all() child objects accumulate in
+                    # db.new throughout the import rather than being silently
+                    # flushed when _import_settings calls db.execute().
+                    # Explicit db.flush() calls inside the importer still run —
+                    # only automatic pre-execute flushes are suppressed.
+                    with db.no_autoflush:
+                        await importer._import_single_session(db, session_data)
+                    # Measure INSIDE the savepoint, before flush on exit.
+                    # add_all() accumulates all child instances in db.new here;
+                    # typed INSERT leaves db.new empty.
+                    peak_orm_sizes.append(len(db.new) + len(db.identity_map))
 
-                # Measure identity-map size after each session import.
-                # expunge_all is not called — we are testing natural growth.
-                gc.collect()
-                identity_map_sizes.append(len(db.identity_map))
-
-        # The identity map should not grow proportionally with n_sessions.
-        # After N bulk inserts, its size should reflect only parent objects
-        # (Device, Day, Session) — not the child Waveform/Event/Setting rows.
-        # Typed INSERT executemany bypasses the ORM unit-of-work entirely,
-        # so the identity map should hold only the handful of parent rows
-        # explicitly add()ed, not the bulk children.  A cap of 5 is generous
-        # for the parent rows (Device + Session per import = 2 objects) while
-        # still being tight enough to fail under add_all(), which accumulates
-        # all child instances (identity map reaches ~50+ for 20 sessions).
-        max_allowed = 5  # typed inserts yield 0 child entries; add_all() fails here
-        final_size = identity_map_sizes[-1]
-        assert final_size <= max_allowed, (
-            f"Identity map grew to {final_size} after {n_sessions} imports "
-            f"(max allowed {max_allowed}). Typed INSERT may be falling back to "
-            f"add_all() or accumulating child rows in the identity map."
+        # With no_autoflush, typed INSERT (execute(insert(Model), mappings))
+        # never adds instances to db.new or the identity map — child rows are
+        # inserted via raw SQL and bypass the ORM unit-of-work entirely.
+        # add_all() regression: instances accumulate in db.new (50 events +
+        # 1 Statistics object = 51 pending), clearly exceeding the cap of 5.
+        # Cap is generous for the parent objects that ARE tracked via add():
+        # Device (flushed to identity_map) + Session (flushed) = identity_map
+        # size of ~2; Statistics is in db.new but is a single object.
+        max_allowed = 5
+        max_observed = max(peak_orm_sizes)
+        assert max_observed <= max_allowed, (
+            f"ORM new+identity_map peaked at {max_observed} inside savepoint "
+            f"(max allowed {max_allowed}, n_events={n_events_per_session}). "
+            f"Typed INSERT may be falling back to add_all() or accumulating "
+            f"child rows in the ORM unit-of-work."
         )
 
 

@@ -508,6 +508,7 @@ class TestBatchCoordinatorHandle:
         coord = BatchAnalysisCoordinator()
 
         peak_in_flight: list[int] = []
+        peak_session_dates: list[int] = []
         in_flight = 0
         in_flight_lock = asyncio.Lock()
 
@@ -517,7 +518,7 @@ class TestBatchCoordinatorHandle:
                 in_flight += 1
                 peak_in_flight.append(in_flight)
                 # Snapshot session_dates size at each enqueue — must be window-bounded.
-                peak_in_flight.append(len(coord.session_dates))
+                peak_session_dates.append(len(coord.session_dates))
             await asyncio.sleep(0)  # yield to let other tasks start
             async with in_flight_lock:
                 in_flight -= 1
@@ -537,7 +538,7 @@ class TestBatchCoordinatorHandle:
         assert result.cancelled == 0
         assert result.failed == 0
 
-        observed_peak = max(peak_in_flight[0::2]) if peak_in_flight else 0
+        observed_peak = max(peak_in_flight) if peak_in_flight else 0
         assert observed_peak <= max_workers, (
             f"Peak in-flight tasks was {observed_peak}, expected <= {max_workers}. "
             "Sliding window is not bounding task concurrency correctly."
@@ -545,7 +546,7 @@ class TestBatchCoordinatorHandle:
         # session_dates is keyed by the same sid set as `pending` — entries are
         # added at enqueue and popped at task completion.  Snapshots taken at
         # each enqueue must also stay window-bounded.
-        observed_sd_peak = max(peak_in_flight[1::2]) if peak_in_flight else 0
+        observed_sd_peak = max(peak_session_dates) if peak_session_dates else 0
         assert observed_sd_peak <= max_workers, (
             f"session_dates peak was {observed_sd_peak}, expected <= {max_workers}. "
             "Retained metadata is not staying window-bounded."
