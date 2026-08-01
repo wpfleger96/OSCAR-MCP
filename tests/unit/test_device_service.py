@@ -21,7 +21,9 @@ async def _add_settings(
 
 
 class TestSettingsHistoryDiffing:
-    async def test_no_sessions_returns_empty_history(self, async_db_session, async_test_device):
+    async def test_no_sessions_returns_empty_history(
+        self, async_db_session, async_test_device
+    ):
         svc = DeviceService(async_db_session)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.settings_history == []
@@ -29,8 +31,12 @@ class TestSettingsHistoryDiffing:
     async def test_single_session_with_settings_is_baseline_no_history(
         self, async_db_session, async_test_device, async_test_session_factory
     ):
-        s = await async_test_session_factory(async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0))
-        await _add_settings(async_db_session, s.id, {"mode": "AutoSet", "pressure_min": "4.0"})
+        s = await async_test_session_factory(
+            async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
+        await _add_settings(
+            async_db_session, s.id, {"mode": "AutoSet", "pressure_min": "4.0"}
+        )
         svc = DeviceService(async_db_session)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.settings_history == []
@@ -44,8 +50,12 @@ class TestSettingsHistoryDiffing:
         s2 = await async_test_session_factory(
             async_test_device.id, start_time=datetime(2024, 1, 2, 22, 0)
         )
-        await _add_settings(async_db_session, s1.id, {"mode": "AutoSet", "pressure_min": "4.0"})
-        await _add_settings(async_db_session, s2.id, {"mode": "AutoSet", "pressure_min": "4.0"})
+        await _add_settings(
+            async_db_session, s1.id, {"mode": "AutoSet", "pressure_min": "4.0"}
+        )
+        await _add_settings(
+            async_db_session, s2.id, {"mode": "AutoSet", "pressure_min": "4.0"}
+        )
         svc = DeviceService(async_db_session)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.settings_history == []
@@ -117,7 +127,9 @@ class TestSettingsHistoryDiffing:
             async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
         )
         # s2 has no settings rows — should be skipped entirely
-        await async_test_session_factory(async_test_device.id, start_time=datetime(2024, 1, 2, 22, 0))
+        await async_test_session_factory(
+            async_test_device.id, start_time=datetime(2024, 1, 2, 22, 0)
+        )
         s3 = await async_test_session_factory(
             async_test_device.id, start_time=datetime(2024, 1, 3, 22, 0)
         )
@@ -142,7 +154,9 @@ class TestGetDeviceDetail:
     async def test_usage_summary_counts_enabled_sessions_only(
         self, async_db_session, async_test_device, async_test_session_factory
     ):
-        await async_test_session_factory(async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0))
+        await async_test_session_factory(
+            async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
         disabled = await async_test_session_factory(
             async_test_device.id, start_time=datetime(2024, 1, 2, 22, 0)
         )
@@ -170,12 +184,16 @@ class TestGetDeviceDetail:
     async def test_current_settings_none_when_no_settings(
         self, async_db_session, async_test_device, async_test_session_factory
     ):
-        await async_test_session_factory(async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0))
+        await async_test_session_factory(
+            async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
         svc = DeviceService(async_db_session)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.current_settings is None
 
-    async def test_no_sessions_gives_zero_usage(self, async_db_session, async_test_device):
+    async def test_no_sessions_gives_zero_usage(
+        self, async_db_session, async_test_device
+    ):
         svc = DeviceService(async_db_session)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.usage.session_count == 0

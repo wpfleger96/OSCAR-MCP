@@ -38,7 +38,9 @@ async def _create_day(
     return day
 
 
-async def _create_session_for_day(db_session: AsyncSession, device: Device, day: Day) -> Session:
+async def _create_session_for_day(
+    db_session: AsyncSession, device: Device, day: Day
+) -> Session:
     """Create a Session linked to a Day."""
     sess = Session(
         device_id=device.id,
@@ -63,9 +65,15 @@ class TestDayServiceList:
 
     async def test_list_returns_all_days(self, async_db_session, async_test_device):
         """All days returned when no filters applied."""
-        await _create_day(async_db_session, async_test_device, date(2025, 1, 1), ahi=2.0)
-        await _create_day(async_db_session, async_test_device, date(2025, 1, 2), ahi=3.0)
-        await _create_day(async_db_session, async_test_device, date(2025, 1, 3), ahi=4.0)
+        await _create_day(
+            async_db_session, async_test_device, date(2025, 1, 1), ahi=2.0
+        )
+        await _create_day(
+            async_db_session, async_test_device, date(2025, 1, 2), ahi=3.0
+        )
+        await _create_day(
+            async_db_session, async_test_device, date(2025, 1, 3), ahi=4.0
+        )
         await async_db_session.flush()
 
         service = DayService(async_db_session)
@@ -88,7 +96,9 @@ class TestDayServiceList:
         assert items[1].date == date(2025, 1, 2)
         assert items[2].date == date(2025, 1, 1)
 
-    async def test_list_with_from_date_filter(self, async_db_session, async_test_device):
+    async def test_list_with_from_date_filter(
+        self, async_db_session, async_test_device
+    ):
         """from_date filter excludes older records."""
         await _create_day(async_db_session, async_test_device, date(2025, 1, 1))
         await _create_day(async_db_session, async_test_device, date(2025, 1, 5))
@@ -130,7 +140,9 @@ class TestDayServiceList:
         assert total == 2
         assert {item.date for item in items} == {date(2025, 1, 5), date(2025, 1, 10)}
 
-    async def test_list_with_device_id_filter(self, async_db_session, async_test_device):
+    async def test_list_with_device_id_filter(
+        self, async_db_session, async_test_device
+    ):
         """device_id filter restricts to that device only."""
         from snore.database.models import Device
 
@@ -153,7 +165,11 @@ class TestDayServiceList:
     async def test_list_limit_applied(self, async_db_session, async_test_device):
         """limit parameter restricts number of items returned."""
         for i in range(10):
-            await _create_day(async_db_session, async_test_device, date(2025, 1, 1) + timedelta(days=i))
+            await _create_day(
+                async_db_session,
+                async_test_device,
+                date(2025, 1, 1) + timedelta(days=i),
+            )
         await async_db_session.flush()
 
         service = DayService(async_db_session)
@@ -165,7 +181,11 @@ class TestDayServiceList:
     async def test_list_offset_applied(self, async_db_session, async_test_device):
         """offset parameter skips records."""
         for i in range(5):
-            await _create_day(async_db_session, async_test_device, date(2025, 1, 1) + timedelta(days=i))
+            await _create_day(
+                async_db_session,
+                async_test_device,
+                date(2025, 1, 1) + timedelta(days=i),
+            )
         await async_db_session.flush()
 
         service = DayService(async_db_session)
@@ -183,7 +203,11 @@ class TestDayServiceList:
     async def test_list_item_fields(self, async_db_session, async_test_device):
         """DayListItem contains expected fields with correct values."""
         await _create_day(
-            async_db_session, async_test_device, date(2025, 6, 15), ahi=2.5, total_therapy_hours=7.0
+            async_db_session,
+            async_test_device,
+            date(2025, 6, 15),
+            ahi=2.5,
+            total_therapy_hours=7.0,
         )
         await async_db_session.flush()
 
@@ -209,7 +233,11 @@ class TestDayServiceGet:
     async def test_get_existing_day(self, async_db_session, async_test_device):
         """Returns full DayDetail with all stats fields."""
         await _create_day(
-            async_db_session, async_test_device, date(2025, 4, 10), ahi=3.5, total_therapy_hours=8.0
+            async_db_session,
+            async_test_device,
+            date(2025, 4, 10),
+            ahi=3.5,
+            total_therapy_hours=8.0,
         )
         await async_db_session.flush()
 

@@ -94,7 +94,9 @@ class TestSessionServiceList:
     ):
         """Default excludes disabled sessions."""
         now = datetime.now()
-        s1 = await async_test_session_factory(async_test_device.id, now, duration_hours=8.0)
+        s1 = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
         s2 = await async_test_session_factory(
             async_test_device.id, now + timedelta(days=1), duration_hours=8.0
         )
@@ -178,7 +180,9 @@ class TestSessionServiceDetail:
     ):
         """Includes settings when requested."""
         now = datetime.now()
-        session = await async_test_session_factory(async_test_device.id, now, duration_hours=8.0)
+        session = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
 
         from snore.database.models import Setting
 
@@ -202,7 +206,9 @@ class TestSessionServiceDelete:
     ):
         """Returns correct preview counts."""
         now = datetime.now()
-        s1 = await async_test_session_factory(async_test_device.id, now, duration_hours=8.0)
+        s1 = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
         s2 = await async_test_session_factory(
             async_test_device.id, now + timedelta(days=1), duration_hours=7.0
         )
@@ -246,7 +252,9 @@ class TestSessionServiceDelete:
     ):
         """Actually deletes sessions."""
         now = datetime.now()
-        s1 = await async_test_session_factory(async_test_device.id, now, duration_hours=8.0)
+        s1 = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
         s2 = await async_test_session_factory(
             async_test_device.id, now + timedelta(days=1), duration_hours=7.0
         )
@@ -271,14 +279,18 @@ class TestSessionServiceDelete:
 
         assert deleted == 1
 
-        remaining = (await async_db_session.execute(
-            select(func.count()).where(Session.id == s2_id)
-        )).scalar()
+        remaining = (
+            await async_db_session.execute(
+                select(func.count()).where(Session.id == s2_id)
+            )
+        ).scalar()
         assert remaining == 1
 
-        deleted_session = (await async_db_session.execute(
-            select(func.count()).where(Session.id == s1_id)
-        )).scalar()
+        deleted_session = (
+            await async_db_session.execute(
+                select(func.count()).where(Session.id == s1_id)
+            )
+        ).scalar()
         assert deleted_session == 0
 
 
@@ -290,7 +302,9 @@ class TestSessionServiceEnable:
     ):
         """Toggles enabled flag."""
         now = datetime.now()
-        session = await async_test_session_factory(async_test_device.id, now, duration_hours=8.0)
+        session = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
         assert session.enabled is True
 
         service = SessionService(async_db_session)
@@ -311,7 +325,9 @@ class TestSessionServiceEnable:
     ):
         """Idempotent when already in desired state."""
         now = datetime.now()
-        session = await async_test_session_factory(async_test_device.id, now, duration_hours=8.0)
+        session = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
 
         service = SessionService(async_db_session)
         await service.set_session_enabled(session.id, True)
@@ -335,7 +351,9 @@ class TestSessionServiceResolve:
     ):
         """Resolves via Day join when date provided."""
         now = datetime(2025, 1, 15, 12, 0, 0)
-        session = await async_test_session_factory(async_test_device.id, now, duration_hours=8.0)
+        session = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
 
         day = Day(
             device_id=async_test_device.id,

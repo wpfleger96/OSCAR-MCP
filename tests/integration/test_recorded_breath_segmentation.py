@@ -13,6 +13,11 @@ Note on Expected Warnings:
     The warnings are expected and match OSCAR's behavior (just hidden in their GUI).
 """
 
+# mypy: ignore-errors
+# These tests use recorded_session (sync db_session) with WaveformLoader/fetch_waveform_blob
+# which are now async. Full conversion is deferred until analysis service read-scope
+# ownership is settled in Duncan's async-prep branch.
+
 import numpy as np
 import pytest
 
@@ -22,7 +27,9 @@ from snore.database.models import Session
 
 # WaveformLoader.load_waveform is volatile (async conversion deferred to PR-1).
 # All classes in this module depend on it.
-pytestmark = pytest.mark.skip(reason="volatile: WaveformLoader pending PR-1 async conversion")
+pytestmark = pytest.mark.skip(
+    reason="volatile: WaveformLoader pending PR-1 async conversion"
+)
 
 
 @pytest.mark.recorded

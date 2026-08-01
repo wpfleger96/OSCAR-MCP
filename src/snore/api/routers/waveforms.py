@@ -28,7 +28,9 @@ VALID_WAVEFORM_TYPES = Literal[
 
 
 @router.get("/{session_id}/waveforms", response_model=list[WaveformInfo])
-async def list_waveforms(session_id: int, service: WaveformServiceDep) -> list[WaveformInfo]:
+async def list_waveforms(
+    session_id: int, service: WaveformServiceDep
+) -> list[WaveformInfo]:
     return await service.list_waveforms(session_id)
 
 

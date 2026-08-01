@@ -125,7 +125,9 @@ class RxTracker:
         """
         return self._compute_changes(await self._days_by_device(db_session))
 
-    async def get_all(self, db_session: AsyncSession, min_days: int = 7) -> RxAllResponse:
+    async def get_all(
+        self, db_session: AsyncSession, min_days: int = 7
+    ) -> RxAllResponse:
         """Return all RX data from a single database query."""
         device_groups = await self._days_by_device(db_session)
 
@@ -204,7 +206,9 @@ class RxTracker:
         all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
         return RxChangesResponse(changes=all_changes)
 
-    async def _days_by_device(self, db_session: AsyncSession) -> list[tuple[int, str, list[Day]]]:
+    async def _days_by_device(
+        self, db_session: AsyncSession
+    ) -> list[tuple[int, str, list[Day]]]:
         """Query all days grouped by device, ordered by (device_id, date).
 
         Returns a list of (device_id, device_name, days) tuples, one per
@@ -212,14 +216,16 @@ class RxTracker:
         matching Device row (device is None) are skipped with a warning.
         """
         days = (
-            (await db_session.execute(
-                select(Day)
-                .order_by(Day.device_id, Day.date)
-                .options(
-                    joinedload(Day.sessions).joinedload(SessionModel.settings),
-                    joinedload(Day.device),
+            (
+                await db_session.execute(
+                    select(Day)
+                    .order_by(Day.device_id, Day.date)
+                    .options(
+                        joinedload(Day.sessions).joinedload(SessionModel.settings),
+                        joinedload(Day.device),
+                    )
                 )
-            ))
+            )
             .unique()
             .scalars()
             .all()
@@ -406,11 +412,13 @@ class RxTracker:
         Uses an inner join so Day rows with no matching Device are naturally
         excluded — same outcome as the missing-device guard in _days_by_device.
         """
-        rows = (await db_session.execute(
-            select(Day.device_id, Device.manufacturer, Device.model)
-            .join(Device, Day.device_id == Device.id)
-            .distinct()
-        )).all()
+        rows = (
+            await db_session.execute(
+                select(Day.device_id, Device.manufacturer, Device.model)
+                .join(Device, Day.device_id == Device.id)
+                .distinct()
+            )
+        ).all()
         return [
             (
                 device_id,
@@ -436,11 +444,13 @@ class RxTracker:
         if before is not None:
             q = q.where(Day.date < before)
         return list(
-            (await db_session.execute(
-                q.options(
-                    selectinload(Day.sessions).selectinload(SessionModel.settings),
-                ).limit(limit)
-            ))
+            (
+                await db_session.execute(
+                    q.options(
+                        selectinload(Day.sessions).selectinload(SessionModel.settings),
+                    ).limit(limit)
+                )
+            )
             .unique()
             .scalars()
             .all()

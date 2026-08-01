@@ -81,7 +81,9 @@ class TestWaveformLoading:
         mock_session.execute.return_value = execute_result
 
         with pytest.raises(ValueError, match="Waveform not found"):
-            await load_waveform_from_db(mock_session, session_id=999, waveform_type="flow")
+            await load_waveform_from_db(
+                mock_session, session_id=999, waveform_type="flow"
+            )
 
     async def test_load_waveform_returns_metadata(self):
         """Should return timestamps, values, and complete metadata."""

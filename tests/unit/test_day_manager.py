@@ -121,7 +121,9 @@ class TestStatisticalAggregation:
         )
 
         await DayManager.link_session_to_day(session1, device.id, async_db_session)
-        day = await DayManager.link_session_to_day(session2, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.session_count == 2
         assert day.obstructive_apneas == 25
@@ -150,7 +152,9 @@ class TestStatisticalAggregation:
         )
 
         await DayManager.link_session_to_day(session1, device.id, async_db_session)
-        day = await DayManager.link_session_to_day(session2, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.ahi == pytest.approx(8.0, abs=0.01)
 
@@ -179,7 +183,9 @@ class TestStatisticalAggregation:
         )
 
         await DayManager.link_session_to_day(session1, device.id, async_db_session)
-        day = await DayManager.link_session_to_day(session2, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.pressure_min == pytest.approx(6.0, abs=0.01)
         assert day.pressure_max == pytest.approx(15.0, abs=0.01)
@@ -231,7 +237,9 @@ class TestStatisticalAggregation:
         )
 
         await DayManager.link_session_to_day(session1, device.id, async_db_session)
-        day = await DayManager.link_session_to_day(session2, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.ahi == pytest.approx(8.0, abs=0.01)
 
@@ -278,7 +286,9 @@ class TestStatisticalAggregation:
 
         await DayManager.link_session_to_day(session1, device.id, async_db_session)
         await DayManager.link_session_to_day(session2, device.id, async_db_session)
-        day = await DayManager.link_session_to_day(session3, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session3, device.id, async_db_session
+        )
 
         assert day.total_therapy_hours == pytest.approx(8.0, abs=0.01)
         assert day.session_count == 3

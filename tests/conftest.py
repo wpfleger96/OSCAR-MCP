@@ -138,7 +138,11 @@ async def async_db_session(temp_db):
     Used by tests for services that have been converted to AsyncSession in PR-2.
     The underlying database is the same temporary SQLite file as ``db_session``.
     """
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
 
     from snore.database.models import Base
 
@@ -148,7 +152,9 @@ async def async_db_session(temp_db):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+    factory = async_sessionmaker(
+        bind=engine, expire_on_commit=False, class_=AsyncSession
+    )
     session = factory()
 
     try:
@@ -233,7 +239,9 @@ def async_test_session_factory(async_db_session):
 
     from snore.database.models import Session, Statistics
 
-    async def _create_session(device_id, start_time, duration_hours=8.0, **stats_kwargs):
+    async def _create_session(
+        device_id, start_time, duration_hours=8.0, **stats_kwargs
+    ):
         session = Session(
             device_id=device_id,
             device_session_id=f"test_{start_time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}",

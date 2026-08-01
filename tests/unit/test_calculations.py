@@ -25,7 +25,9 @@ from snore.database.models import Day
 class TestCalculateMedianAhi:
     """Test median AHI calculation."""
 
-    async def test_median_odd_count(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_median_odd_count(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Median with odd number of days returns middle value."""
         device = async_test_device
 
@@ -37,14 +39,18 @@ class TestCalculateMedianAhi:
                 duration_hours=8.0,
                 ahi=ahi,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_median_ahi(days)
 
         assert result == pytest.approx(5.0, abs=0.01)
 
-    async def test_median_even_count(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_median_even_count(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Median with even number of days returns average of two middle values."""
         device = async_test_device
 
@@ -56,7 +62,9 @@ class TestCalculateMedianAhi:
                 duration_hours=8.0,
                 ahi=ahi,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_median_ahi(days)
@@ -69,7 +77,9 @@ class TestCalculateMedianAhi:
 
         assert result is None
 
-    async def test_median_single(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_median_single(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Median with single day returns that day's AHI."""
         device = async_test_device
 
@@ -85,7 +95,9 @@ class TestCalculateMedianAhi:
 
         assert result == pytest.approx(7.5, abs=0.01)
 
-    async def test_median_all_none(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_median_all_none(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Median when all days have no AHI returns None."""
         device = async_test_device
 
@@ -96,7 +108,9 @@ class TestCalculateMedianAhi:
                 start_time=datetime(2024, 11, i + 1, 12, 0, 0),
                 duration_hours=8.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_median_ahi(days)
@@ -107,7 +121,9 @@ class TestCalculateMedianAhi:
 class TestCalculatePeriodStatistics:
     """Test period-based statistics grouping."""
 
-    async def test_monthly_buckets(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_monthly_buckets(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Monthly bucketing creates correct number of periods."""
         device = async_test_device
         start_date = date(2024, 10, 1)
@@ -123,7 +139,9 @@ class TestCalculatePeriodStatistics:
                 duration_hours=8.0,
                 ahi=5.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_period_statistics(days, "month")
@@ -134,7 +152,9 @@ class TestCalculatePeriodStatistics:
         assert result[1].period_start == date(2024, 11, 1)
         assert result[1].period_end == date(2024, 11, 30)
 
-    async def test_weekly_buckets(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_weekly_buckets(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Weekly bucketing aligns to week boundaries."""
         device = async_test_device
         start_date = date(2024, 11, 4)
@@ -150,14 +170,18 @@ class TestCalculatePeriodStatistics:
                 duration_hours=8.0,
                 ahi=5.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_period_statistics(days, "week")
 
         assert len(result) >= 2
 
-    async def test_yearly_buckets(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_yearly_buckets(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Yearly bucketing spans multiple years."""
         device = async_test_device
 
@@ -169,7 +193,9 @@ class TestCalculatePeriodStatistics:
                 duration_hours=8.0,
                 ahi=5.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_period_statistics(days, "year")
@@ -180,7 +206,9 @@ class TestCalculatePeriodStatistics:
         assert result[1].period_start == date(2025, 1, 1)
         assert result[1].period_end == date(2025, 12, 31)
 
-    async def test_6month_buckets(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_6month_buckets(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """6-month bucketing creates half-year periods."""
         device = async_test_device
 
@@ -192,7 +220,9 @@ class TestCalculatePeriodStatistics:
                 duration_hours=8.0,
                 ahi=5.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_period_statistics(days, "6month")
@@ -209,7 +239,9 @@ class TestCalculatePeriodStatistics:
 
         assert result == []
 
-    async def test_period_metrics(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_period_metrics(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Period statistics compute correct metrics."""
         device = async_test_device
         start_date = date(2024, 11, 1)
@@ -227,7 +259,9 @@ class TestCalculatePeriodStatistics:
                 pressure_median=10.0,
                 leak_median=8.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         result = calculate_period_statistics(days, "month")
@@ -241,7 +275,9 @@ class TestCalculatePeriodStatistics:
         assert period.avg_pressure == pytest.approx(10.0, abs=0.01)
         assert period.avg_leak == pytest.approx(8.0, abs=0.01)
 
-    async def test_invalid_period_type(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_invalid_period_type(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Invalid period type raises ValueError."""
         device = async_test_device
 
@@ -274,7 +310,9 @@ class TestDayGranularity:
                 duration_hours=7.0,
                 ahi=3.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days_orm.append(day)
 
         result = calculate_period_statistics(days_orm, "day")
@@ -302,10 +340,14 @@ class TestDayGranularity:
             await DayManager.link_session_to_day(session, device.id, async_db_session)
 
         day_records = (
-            await async_db_session.execute(
-                select(Day).where(Day.device_id == device.id)
+            (
+                await async_db_session.execute(
+                    select(Day).where(Day.device_id == device.id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         result = calculate_period_statistics(day_records, "day")
 
         result_dates = [p.period_start for p in result]
@@ -315,7 +357,9 @@ class TestDayGranularity:
         assert date(2024, 5, 2) not in result_dates
         assert len(result) == 2
 
-    async def test_day_multidevice_same_date_merges(self, async_db_session, async_test_session_factory):
+    async def test_day_multidevice_same_date_merges(
+        self, async_db_session, async_test_session_factory
+    ):
         """Multiple Day rows sharing a date (one per device) merge into one bucket."""
         import uuid
 
@@ -496,7 +540,9 @@ class TestNewPeriodFields:
 class TestCalculateTrends:
     """Test trend data extraction."""
 
-    async def test_trends_structure(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_trends_structure(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Trends returns dict with all 13 expected keys."""
         device = async_test_device
         start_date = date(2024, 11, 1)
@@ -512,7 +558,9 @@ class TestCalculateTrends:
                 duration_hours=7.5,
                 ahi=5.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         period_stats = calculate_period_statistics(days, "week")
@@ -537,7 +585,9 @@ class TestCalculateTrends:
         assert isinstance(result["ahi"], list)
         assert isinstance(result["usage"], list)
 
-    async def test_trends_values(self, async_db_session, async_test_device, async_test_session_factory):
+    async def test_trends_values(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """Trend values match period statistics."""
         device = async_test_device
         start_date = date(2024, 11, 1)
@@ -553,7 +603,9 @@ class TestCalculateTrends:
                 duration_hours=7.5,
                 ahi=5.0,
             )
-            day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+            day = await DayManager.link_session_to_day(
+                session, device.id, async_db_session
+            )
             days.append(day)
 
         period_stats = calculate_period_statistics(days, "week")

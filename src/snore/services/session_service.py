@@ -99,7 +99,7 @@ class SessionService:
             list_query = list_query.offset(offset)
 
         sessions = []
-        for session, dev, ahi in (await self.db_session.execute(list_query)):
+        for session, dev, ahi in await self.db_session.execute(list_query):
             sessions.append(
                 SessionListItem(
                     id=session.id,

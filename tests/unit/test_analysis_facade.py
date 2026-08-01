@@ -56,7 +56,9 @@ class TestListSessionsWithStatus:
         today = date.today()
         yesterday = today - timedelta(days=1)
 
-        day1, sess1 = await _create_session_with_analysis(async_db_session, async_test_device, yesterday)
+        day1, sess1 = await _create_session_with_analysis(
+            async_db_session, async_test_device, yesterday
+        )
         day2 = Day(device_id=async_test_device.id, date=today, total_therapy_hours=7.0)
         async_db_session.add(day2)
         await async_db_session.flush()
@@ -89,7 +91,9 @@ class TestListSessionsWithStatus:
         today = date.today()
         yesterday = today - timedelta(days=1)
 
-        await _create_session_with_analysis(async_db_session, async_test_device, yesterday)
+        await _create_session_with_analysis(
+            async_db_session, async_test_device, yesterday
+        )
 
         day2 = Day(device_id=async_test_device.id, date=today, total_therapy_hours=7.0)
         async_db_session.add(day2)
@@ -152,7 +156,9 @@ class TestGetDeletePreview:
         _, sess1 = await _create_session_with_analysis(
             async_db_session, async_test_device, yesterday, num_analyses=2
         )
-        _, sess2 = await _create_session_with_analysis(async_db_session, async_test_device, today)
+        _, sess2 = await _create_session_with_analysis(
+            async_db_session, async_test_device, today
+        )
         await async_db_session.commit()
 
         service = AnalysisFacade(async_db_session)
@@ -169,7 +175,9 @@ class TestGetDeletePreview:
         detail2 = next(d for d in preview.session_details if d.id == sess2.id)
         assert detail2.version_count == 1
 
-    async def test_delete_preview_latest_only(self, async_db_session, async_test_device):
+    async def test_delete_preview_latest_only(
+        self, async_db_session, async_test_device
+    ):
         """Preview with all_versions=False only counts latest analysis."""
         today = date.today()
         yesterday = today - timedelta(days=1)
@@ -177,7 +185,9 @@ class TestGetDeletePreview:
         await _create_session_with_analysis(
             async_db_session, async_test_device, yesterday, num_analyses=3
         )
-        await _create_session_with_analysis(async_db_session, async_test_device, today, num_analyses=2)
+        await _create_session_with_analysis(
+            async_db_session, async_test_device, today, num_analyses=2
+        )
         await async_db_session.commit()
 
         service = AnalysisFacade(async_db_session)
@@ -193,7 +203,8 @@ class TestDeleteAnalysis:
 
     async def test_delete_all_versions(self, async_db_session, async_test_device):
         """Deletes all analysis records when all_versions=True."""
-        from sqlalchemy import func, select as sa_select  # noqa: PLC0415
+        from sqlalchemy import func  # noqa: PLC0415
+        from sqlalchemy import select as sa_select
 
         today = date.today()
         _, sess = await _create_session_with_analysis(
@@ -208,14 +219,17 @@ class TestDeleteAnalysis:
 
         remaining = (
             await async_db_session.execute(
-                sa_select(func.count()).select_from(AnalysisResult).filter_by(session_id=sess.id)
+                sa_select(func.count())
+                .select_from(AnalysisResult)
+                .filter_by(session_id=sess.id)
             )
         ).scalar()
         assert remaining == 0
 
     async def test_delete_latest_only(self, async_db_session, async_test_device):
         """Only deletes most recent analysis per session when all_versions=False."""
-        from sqlalchemy import func, select as sa_select  # noqa: PLC0415
+        from sqlalchemy import func  # noqa: PLC0415
+        from sqlalchemy import select as sa_select
 
         today = date.today()
         _, sess = await _create_session_with_analysis(
@@ -230,7 +244,9 @@ class TestDeleteAnalysis:
 
         remaining = (
             await async_db_session.execute(
-                sa_select(func.count()).select_from(AnalysisResult).filter_by(session_id=sess.id)
+                sa_select(func.count())
+                .select_from(AnalysisResult)
+                .filter_by(session_id=sess.id)
             )
         ).scalar()
         assert remaining == 2
@@ -257,13 +273,18 @@ class TestDeleteAnalysis:
 
     async def test_delete_multiple_sessions(self, async_db_session, async_test_device):
         """Deletes analysis for multiple sessions."""
-        from sqlalchemy import func, select as sa_select  # noqa: PLC0415
+        from sqlalchemy import func  # noqa: PLC0415
+        from sqlalchemy import select as sa_select
 
         today = date.today()
         yesterday = today - timedelta(days=1)
 
-        _, sess1 = await _create_session_with_analysis(async_db_session, async_test_device, yesterday)
-        _, sess2 = await _create_session_with_analysis(async_db_session, async_test_device, today)
+        _, sess1 = await _create_session_with_analysis(
+            async_db_session, async_test_device, yesterday
+        )
+        _, sess2 = await _create_session_with_analysis(
+            async_db_session, async_test_device, today
+        )
         await async_db_session.commit()
 
         service = AnalysisFacade(async_db_session)
@@ -290,7 +311,9 @@ class TestRunBatchAnalysis:
         assert result.failed == 0
         assert result.results == []
 
-    async def test_successful_analysis(self, async_db_session, async_test_device, monkeypatch):
+    async def test_successful_analysis(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
         """Mock load/compute phases to succeed; verify successful count."""
         from unittest.mock import MagicMock
 
@@ -307,7 +330,7 @@ class TestRunBatchAnalysis:
         mock_inputs = MagicMock()
         mock_result = MagicMock()
 
-        monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
+        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
         monkeypatch.setattr(
             "snore.analysis.service.AnalysisService.load_session_inputs_raw",
             lambda *a, **kw: mock_raw,
@@ -332,7 +355,9 @@ class TestRunBatchAnalysis:
         assert result.successful == 1
         assert result.failed == 0
 
-    async def test_failed_analysis(self, async_db_session, async_test_device, monkeypatch):
+    async def test_failed_analysis(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
         """Mock load phase to raise; verify failed count."""
         day, sess = await _create_session_with_analysis(
             async_db_session, async_test_device, date(2025, 1, 10), num_analyses=0
@@ -346,7 +371,7 @@ class TestRunBatchAnalysis:
         def raise_error(*a, **kw):
             raise RuntimeError("test error")
 
-        monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
+        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
         monkeypatch.setattr(
             "snore.analysis.service.AnalysisService.load_session_inputs_raw",
             raise_error,
@@ -359,7 +384,9 @@ class TestRunBatchAnalysis:
         assert result.failed == 1
         assert result.results[0].success is False
 
-    async def test_progress_callback_called(self, async_db_session, async_test_device, monkeypatch):
+    async def test_progress_callback_called(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
         """Progress callback fires once per session regardless of success/failure."""
         from unittest.mock import MagicMock
 
@@ -376,7 +403,7 @@ class TestRunBatchAnalysis:
         mock_inputs = MagicMock()
         mock_result = MagicMock()
 
-        monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
+        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
         monkeypatch.setattr(
             "snore.analysis.service.AnalysisService.load_session_inputs_raw",
             lambda *a, **kw: mock_raw,

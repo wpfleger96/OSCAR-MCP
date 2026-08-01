@@ -306,7 +306,9 @@ def show_waveform(
                             if wf_result is not None:
                                 waveform_data.append(wf_result)
                             else:
-                                warnings.append(f"No data for waveform type '{wf_type}'")
+                                warnings.append(
+                                    f"No data for waveform type '{wf_type}'"
+                                )
                         except Exception as e:
                             warnings.append(
                                 f"Failed to load waveform type '{wf_type}': {e}"
@@ -366,7 +368,9 @@ def compare_events(
 
             service = WaveformService(db_session)
             try:
-                comparison = await service.compare_events(resolved_id, mode, tolerance_seconds=5.0)
+                comparison = await service.compare_events(
+                    resolved_id, mode, tolerance_seconds=5.0
+                )
             except NotFoundError as e:
                 raise click.ClickException(str(e)) from e
 

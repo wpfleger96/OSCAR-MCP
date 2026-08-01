@@ -55,22 +55,31 @@ def validate(
         raise click.ClickException(f"Database not found: {db}")
 
     async def _run() -> None:
-        from snore.validation import BatchValidator, export_report_csv, export_report_json
+        from snore.validation import (
+            BatchValidator,
+            export_report_csv,
+            export_report_json,
+        )
 
-        async with open_db_session(db) as db_session:
+        async with open_db_session(db) as _db:
             try:
-                validator = BatchValidator(db_session, None)  # type: ignore[arg-type]  # TODO: BatchValidator volatile — awaiting PR-1 AsyncSession conversion
-
-                console.print(
-                    f"Running validation from {date_from.date()} to {date_to.date()}..."
+                from snore.database.session import (  # noqa: PLC0415
+                    sync_session_scope,
                 )
-                console.print(f"Mode: {mode}\n")
 
-                report = validator.validate_date_range(
-                    date_from.strftime("%Y-%m-%d"),
-                    date_to.strftime("%Y-%m-%d"),
-                    mode=mode,
-                )
+                with sync_session_scope() as sync_sess:
+                    validator = BatchValidator(sync_sess, None)
+
+                    console.print(
+                        f"Running validation from {date_from.date()} to {date_to.date()}..."
+                    )
+                    console.print(f"Mode: {mode}\n")
+
+                    report = validator.validate_date_range(
+                        date_from.strftime("%Y-%m-%d"),
+                        date_to.strftime("%Y-%m-%d"),
+                        mode=mode,
+                    )
 
                 print_footer()
                 print_header("VALIDATION REPORT")

@@ -43,7 +43,9 @@ class TestSQLitePragmas:
             result = (await session.execute(text("PRAGMA journal_mode"))).scalar()
             assert result == "wal", f"Expected journal_mode=wal, got {result}"
 
-    async def test_transaction_control_does_not_silence_foreign_key_pragma(self, temp_db):
+    async def test_transaction_control_does_not_silence_foreign_key_pragma(
+        self, temp_db
+    ):
         """Integrated recipe: autocommit toggle ensures both FK and WAL are applied atomically."""
         init_database(str(temp_db))
 
@@ -120,11 +122,15 @@ class TestSavepointRollback:
             from sqlalchemy import select
 
             outer_count = (
-                await verify.execute(select(Device).filter_by(id=outer_id))
-            ).scalars().all()
+                (await verify.execute(select(Device).filter_by(id=outer_id)))
+                .scalars()
+                .all()
+            )
             inner_count = (
-                await verify.execute(select(Device).filter_by(id=inner_id))
-            ).scalars().all()
+                (await verify.execute(select(Device).filter_by(id=inner_id)))
+                .scalars()
+                .all()
+            )
 
         assert len(outer_count) == 0, (
             "Outer batch row survived rollback — savepoint escaped outer transaction"
@@ -145,7 +151,9 @@ class TestImporterForcedFailureContinuation:
     Skipped: volatile — SessionImporter transaction ownership is being rewritten in PR-1.
     """
 
-    pytestmark = pytest.mark.skip(reason="volatile: SessionImporter pending PR-1 rewrite")
+    pytestmark = pytest.mark.skip(
+        reason="volatile: SessionImporter pending PR-1 rewrite"
+    )
 
     def _make_session_data(self, serial: str, session_id_str: str) -> UnifiedSession:
         """Build a minimal UnifiedSession with no optional data."""

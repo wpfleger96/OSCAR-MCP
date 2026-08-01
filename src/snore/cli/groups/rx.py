@@ -243,9 +243,7 @@ def rx_compare(db: str | None, min_days: int) -> None:
 
                 mode = period.settings.get("mode", "?")[:7]
                 if "epr_level" in period.settings and "epr_mode" in period.settings:
-                    epr = (
-                        f"{period.settings['epr_level']} {period.settings['epr_mode'][:2]}"
-                    )
+                    epr = f"{period.settings['epr_level']} {period.settings['epr_mode'][:2]}"
                 elif "ps" in period.settings:
                     epr = f"PS:{period.settings['ps']}"
                 else:
@@ -253,7 +251,9 @@ def rx_compare(db: str | None, min_days: int) -> None:
 
                 pressure_str = _format_pressure(period.settings, short=True)
 
-                ahi_str = f"{period.avg_ahi:.1f}" if period.avg_ahi is not None else "N/A"
+                ahi_str = (
+                    f"{period.avg_ahi:.1f}" if period.avg_ahi is not None else "N/A"
+                )
                 leak_str = (
                     f"{period.avg_leak:.1f}" if period.avg_leak is not None else "N/A"
                 )

@@ -33,7 +33,9 @@ class TestWaveformMultiTypeAllFail:
             patch("snore.waveform.WaveformRenderer"),
         ):
             mock_inspector = mock_inspector_cls.return_value
-            mock_inspector.get_window = AsyncMock(return_value=(np.array([]), np.array([]), {}))
+            mock_inspector.get_window = AsyncMock(
+                return_value=(np.array([]), np.array([]), {})
+            )
 
             result = runner.invoke(
                 waveform,

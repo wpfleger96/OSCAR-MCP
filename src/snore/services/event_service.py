@@ -47,9 +47,7 @@ class EventService:
         if event_type:
             stmt = stmt.where(models.Event.event_type == event_type)
         stmt = stmt.order_by(models.Event.start_time)
-        events = list(
-            (await self.db_session.execute(stmt)).scalars().all()
-        )
+        events = list((await self.db_session.execute(stmt)).scalars().all())
         return events, session.start_time
 
     async def get_machine_event_times(self, session_id: int) -> list[float]:

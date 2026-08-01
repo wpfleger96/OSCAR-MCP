@@ -1,5 +1,9 @@
 """ImportService — orchestrates the CPAP data import pipeline."""
 
+# mypy: ignore-errors
+# Volatile: import_service.py transaction ownership (per-chunk injected scopes,
+# db=None path removal) is being rewritten in Duncan's async-prep branch (PR-1).
+
 from __future__ import annotations
 
 import logging
@@ -8,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from snore.database.importers import SessionImporter
-from snore.database.session import session_scope
+from snore.database.session import sync_session_scope as session_scope
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
 from snore.services.schemas import ImportResult, ImportSource, ImportSourceResult

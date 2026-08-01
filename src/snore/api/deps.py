@@ -21,7 +21,7 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         await session.close()
 
 
-def sync_get_db() -> Generator[Session, None, None]:
+def sync_get_db() -> Generator[Session]:
     """FastAPI dependency that provides a committed/rolled-back sync Session.
 
     Intended for volatile service surfaces (RxTracker, BatchValidator, AnalysisFacade)

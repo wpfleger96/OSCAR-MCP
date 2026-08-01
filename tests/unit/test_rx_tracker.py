@@ -106,7 +106,9 @@ class TestRxTrackerHistory:
         assert result[0].device_id == async_test_device.id
         assert result[0].device_name == "Test Manufacturer Test Model"
 
-    async def test_history_two_periods_different_settings(self, async_db_session, async_test_device):
+    async def test_history_two_periods_different_settings(
+        self, async_db_session, async_test_device
+    ):
         """Settings change creates two distinct periods."""
         base = date(2025, 1, 1)
         settings_a = {"mode": "CPAP", "pressure_fixed": "8.0"}
@@ -194,7 +196,9 @@ class TestRxTrackerHistory:
             else:
                 assert r.device_name == "ResMed AirCurve 10"
 
-    async def test_history_ps_change_splits_period(self, async_db_session, async_test_device):
+    async def test_history_ps_change_splits_period(
+        self, async_db_session, async_test_device
+    ):
         """Changing the 'ps' bilevel key splits the RX period."""
         base = date(2025, 4, 1)
         settings_before = {"mode": "VAuto", "ps": "4.0", "epap": "6.0"}
@@ -222,7 +226,9 @@ class TestRxTrackerHistory:
         assert result[0].settings["ps"] == "4.0"
         assert result[1].settings["ps"] == "6.0"
 
-    async def test_history_disabled_session_ignored(self, async_db_session, async_test_device):
+    async def test_history_disabled_session_ignored(
+        self, async_db_session, async_test_device
+    ):
         """Disabled sessions are not used to extract RX settings."""
         base = date(2025, 5, 1)
         settings_enabled = {"mode": "CPAP", "pressure_fixed": "8.0"}
@@ -304,7 +310,10 @@ class TestRxTrackerHistory:
 
         # Day 1: enabled
         await _create_day_with_session(
-            async_db_session, async_test_device, base + timedelta(days=1), settings=RX_SETTINGS
+            async_db_session,
+            async_test_device,
+            base + timedelta(days=1),
+            settings=RX_SETTINGS,
         )
         await async_db_session.flush()
 
@@ -315,7 +324,9 @@ class TestRxTrackerHistory:
 
 
 class TestRxTrackerCurrent:
-    async def test_current_returns_last_period(self, async_db_session, async_test_device):
+    async def test_current_returns_last_period(
+        self, async_db_session, async_test_device
+    ):
         """Returns the most recent RX period when multiple exist."""
         base = date(2025, 1, 1)
         settings_a = {"mode": "CPAP", "pressure_fixed": "8.0"}
@@ -346,7 +357,9 @@ class TestRxTrackerCurrent:
 
 
 class TestRxTrackerCurrentTailWalk:
-    async def test_current_empty_db_returns_none(self, async_db_session: AsyncSession) -> None:
+    async def test_current_empty_db_returns_none(
+        self, async_db_session: AsyncSession
+    ) -> None:
         """Empty database returns None."""
         assert await RxTracker().get_current(async_db_session) is None
 
@@ -359,16 +372,25 @@ class TestRxTrackerCurrentTailWalk:
         settings_b = {"mode": "APAP", "pressure_min": "6.0", "pressure_max": "20.0"}
         for i in range(5):
             await _create_day_with_session(
-                async_db_session, async_test_device, base + timedelta(days=i), settings=settings_a
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings=settings_a,
             )
         for i in range(5, 10):
             await _create_day_with_session(
-                async_db_session, async_test_device, base + timedelta(days=i), settings=settings_b
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings=settings_b,
             )
         await async_db_session.flush()
 
         tracker = RxTracker()
-        assert await tracker.get_current(async_db_session) == (await tracker.get_history(async_db_session))[-1]
+        assert (
+            await tracker.get_current(async_db_session)
+            == (await tracker.get_history(async_db_session))[-1]
+        )
 
     async def test_current_equals_history_last_multi_device(
         self, async_db_session: AsyncSession
@@ -386,17 +408,26 @@ class TestRxTrackerCurrentTailWalk:
 
         for i in range(7):
             await _create_day_with_session(
-                async_db_session, device_a, base + timedelta(days=i), settings=settings_a
+                async_db_session,
+                device_a,
+                base + timedelta(days=i),
+                settings=settings_a,
             )
         # device_b starts later, so its period will have the higher start_date
         for i in range(14, 21):
             await _create_day_with_session(
-                async_db_session, device_b, base + timedelta(days=i), settings=settings_b
+                async_db_session,
+                device_b,
+                base + timedelta(days=i),
+                settings=settings_b,
             )
         await async_db_session.flush()
 
         tracker = RxTracker()
-        assert await tracker.get_current(async_db_session) == (await tracker.get_history(async_db_session))[-1]
+        assert (
+            await tracker.get_current(async_db_session)
+            == (await tracker.get_history(async_db_session))[-1]
+        )
 
     async def test_current_later_start_on_lower_device_id_wins(
         self, async_db_session: AsyncSession
@@ -424,7 +455,10 @@ class TestRxTrackerCurrentTailWalk:
             )
         for i in range(10, 15):
             await _create_day_with_session(
-                async_db_session, device_low, base + timedelta(days=i), settings=settings_low
+                async_db_session,
+                device_low,
+                base + timedelta(days=i),
+                settings=settings_low,
             )
         await async_db_session.flush()
 
@@ -475,11 +509,17 @@ class TestRxTrackerCurrentTailWalk:
         # Older different-fingerprint days
         for i in range(3):
             await _create_day_with_session(
-                async_db_session, async_test_device, base + timedelta(days=i), settings=settings_old
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings=settings_old,
             )
         # Newer period: valid day, then a None-settings day, then a valid day (newest)
         await _create_day_with_session(
-            async_db_session, async_test_device, base + timedelta(days=3), settings=settings_new
+            async_db_session,
+            async_test_device,
+            base + timedelta(days=3),
+            settings=settings_new,
         )
         await _create_day_with_session(
             async_db_session,
@@ -489,7 +529,10 @@ class TestRxTrackerCurrentTailWalk:
             enabled=False,
         )
         await _create_day_with_session(
-            async_db_session, async_test_device, base + timedelta(days=5), settings=settings_new
+            async_db_session,
+            async_test_device,
+            base + timedelta(days=5),
+            settings=settings_new,
         )
         await async_db_session.flush()
 
@@ -506,7 +549,10 @@ class TestRxTrackerCurrentTailWalk:
         settings = {"mode": "CPAP", "pressure_fixed": "10.0"}
         for i in range(30):
             await _create_day_with_session(
-                async_db_session, async_test_device, base + timedelta(days=i), settings=settings
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings=settings,
             )
         await async_db_session.flush()
 
@@ -527,7 +573,10 @@ class TestRxTrackerCurrentTailWalk:
         # 10 older days with different settings
         for i in range(10):
             await _create_day_with_session(
-                async_db_session, async_test_device, base + timedelta(days=i), settings=settings_old
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings=settings_old,
             )
         # 95 consecutive days with current settings (crosses the 90-day batch boundary)
         new_start = base + timedelta(days=10)
@@ -557,7 +606,9 @@ class TestRxTrackerComparison:
         assert result.best_index is None
         assert result.worst_index is None
 
-    async def test_comparison_insufficient_days(self, async_db_session, async_test_device):
+    async def test_comparison_insufficient_days(
+        self, async_db_session, async_test_device
+    ):
         """Periods with fewer days than min_days are excluded from best/worst."""
         base = date(2025, 1, 1)
         for i in range(3):
@@ -578,7 +629,9 @@ class TestRxTrackerComparison:
         assert result.best_index is None
         assert result.worst_index is None
 
-    async def test_comparison_best_worst_identified(self, async_db_session, async_test_device):
+    async def test_comparison_best_worst_identified(
+        self, async_db_session, async_test_device
+    ):
         """Best (lowest AHI) and worst (highest AHI) periods identified correctly."""
         base = date(2025, 1, 1)
         settings_a = {"mode": "CPAP", "pressure_fixed": "8.0"}
@@ -657,7 +710,9 @@ class TestRxTrackerChanges:
         result = await RxTracker().get_changes(async_db_session)
         assert result.changes == []
 
-    async def test_single_day_emits_no_changes(self, async_db_session, async_test_device):
+    async def test_single_day_emits_no_changes(
+        self, async_db_session, async_test_device
+    ):
         """First day with settings has no previous to diff against."""
         await _create_day_with_session(
             async_db_session,
@@ -670,7 +725,9 @@ class TestRxTrackerChanges:
         result = await RxTracker().get_changes(async_db_session)
         assert result.changes == []
 
-    async def test_multi_key_change_emits_one_entry_per_key(self, async_db_session, async_test_device):
+    async def test_multi_key_change_emits_one_entry_per_key(
+        self, async_db_session, async_test_device
+    ):
         """A day where two keys change yields two separate RxSettingChange entries."""
         base = date(2025, 2, 1)
         await _create_day_with_session(
@@ -695,7 +752,9 @@ class TestRxTrackerChanges:
             assert c.date == base + timedelta(days=1)
             assert c.device_id == async_test_device.id
 
-    async def test_days_without_settings_are_bridged(self, async_db_session, async_test_device):
+    async def test_days_without_settings_are_bridged(
+        self, async_db_session, async_test_device
+    ):
         """A gap day (no enabled sessions with settings) is skipped; diff uses last day WITH settings."""
         base = date(2025, 3, 1)
         # Day 0: settings A
@@ -811,7 +870,9 @@ class TestRxTrackerChanges:
             a, b = changes[i], changes[i + 1]
             assert (a.date, a.device_id, a.key) <= (b.date, b.device_id, b.key)
 
-    async def test_non_rx_key_change_is_tracked(self, async_db_session, async_test_device):
+    async def test_non_rx_key_change_is_tracked(
+        self, async_db_session, async_test_device
+    ):
         """A comfort-setting change (humidity_level) not in RX_KEYS appears in get_changes."""
         base = date(2025, 6, 1)
         await _create_day_with_session(

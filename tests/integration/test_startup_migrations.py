@@ -6,9 +6,10 @@ These tests verify:
 - Idempotence: calling init_database twice is a no-op
 """
 
+import asyncio
+
 from pathlib import Path
 
-import asyncio
 import pytest
 
 from alembic.config import Config as AlembicConfig

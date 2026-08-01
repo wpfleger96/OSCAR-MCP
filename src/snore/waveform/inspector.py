@@ -43,7 +43,9 @@ def parse_time_offset(time_str: str) -> float:
 class WaveformInspector:
     """Inspector for waveform data extraction and event filtering."""
 
-    def __init__(self, db_session: AsyncSession, service: WaveformService | None = None):
+    def __init__(
+        self, db_session: AsyncSession, service: WaveformService | None = None
+    ):
         """
         Initialize waveform inspector.
 

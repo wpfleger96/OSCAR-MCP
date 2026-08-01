@@ -97,7 +97,9 @@ class TestReportService:
         from_date = today - timedelta(days=60)
         to_date = today
 
-        await _seed_days(async_db_session, async_test_device, from_date, to_date, step_days=7)
+        await _seed_days(
+            async_db_session, async_test_device, from_date, to_date, step_days=7
+        )
 
         service = ReportService(async_db_session)
         html = await service.generate_summary_report(from_date, to_date)
@@ -115,8 +117,12 @@ class TestReportService:
         range_a = (today - timedelta(days=60), today - timedelta(days=31))
         range_b = (today - timedelta(days=30), today)
 
-        await _seed_days(async_db_session, async_test_device, range_a[0], range_a[1], step_days=7)
-        await _seed_days(async_db_session, async_test_device, range_b[0], range_b[1], step_days=7)
+        await _seed_days(
+            async_db_session, async_test_device, range_a[0], range_a[1], step_days=7
+        )
+        await _seed_days(
+            async_db_session, async_test_device, range_b[0], range_b[1], step_days=7
+        )
 
         service = ReportService(async_db_session)
         html = await service.generate_comparison_report(range_a, range_b)
@@ -133,7 +139,9 @@ class TestReportService:
         range_a = (today - timedelta(days=30), today)
         range_b = (today + timedelta(days=1), today + timedelta(days=30))
 
-        await _seed_days(async_db_session, async_test_device, range_a[0], range_a[1], step_days=7)
+        await _seed_days(
+            async_db_session, async_test_device, range_a[0], range_a[1], step_days=7
+        )
 
         service = ReportService(async_db_session)
         html = await service.generate_comparison_report(range_a, range_b)
@@ -141,7 +149,9 @@ class TestReportService:
         assert html.startswith("<!DOCTYPE html>")
         assert "No therapy data" in html
 
-    async def test_summary_autoescape_escapes_device_model_script_tag(self, async_db_session):
+    async def test_summary_autoescape_escapes_device_model_script_tag(
+        self, async_db_session
+    ):
         """Device model containing <script> arrives HTML-escaped in the report."""
         import uuid
 
@@ -171,9 +181,19 @@ class TestReportService:
         in_range_date = today - timedelta(days=5)
         out_of_range_date = today - timedelta(days=30)
 
-        await _create_day(async_db_session, async_test_device, in_range_date, duration_hours=8.0, ahi=2.0)
         await _create_day(
-            async_db_session, async_test_device, out_of_range_date, duration_hours=6.0, ahi=10.0
+            async_db_session,
+            async_test_device,
+            in_range_date,
+            duration_hours=8.0,
+            ahi=2.0,
+        )
+        await _create_day(
+            async_db_session,
+            async_test_device,
+            out_of_range_date,
+            duration_hours=6.0,
+            ahi=10.0,
         )
 
         service = StatsService(async_db_session)

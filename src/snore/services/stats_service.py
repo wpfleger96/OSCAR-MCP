@@ -51,7 +51,9 @@ class StatsService:
         to_date: date | None = None,
     ) -> TherapySummary | None:
         """Compute aggregated therapy summary statistics."""
-        day_records = await self._query_days(days_limit, from_date=from_date, to_date=to_date)
+        day_records = await self._query_days(
+            days_limit, from_date=from_date, to_date=to_date
+        )
 
         if not day_records:
             return None
@@ -138,12 +140,20 @@ class StatsService:
         )
 
         weighted_sums: dict[str, float] = {
-            "rr": 0.0, "tv": 0.0, "mv": 0.0,
-            "pulse": 0.0, "rei": 0.0, "epap": 0.0,
+            "rr": 0.0,
+            "tv": 0.0,
+            "mv": 0.0,
+            "pulse": 0.0,
+            "rei": 0.0,
+            "epap": 0.0,
         }
         usage_hours_for: dict[str, float] = {
-            "rr": 0.0, "tv": 0.0, "mv": 0.0,
-            "pulse": 0.0, "rei": 0.0, "epap": 0.0,
+            "rr": 0.0,
+            "tv": 0.0,
+            "mv": 0.0,
+            "pulse": 0.0,
+            "rei": 0.0,
+            "epap": 0.0,
         }
         total_spo2_time_below_90 = 0
 
@@ -207,7 +217,9 @@ class StatsService:
         to_date: date | None = None,
     ) -> list[PeriodStatistics]:
         """Calculate statistics grouped by time periods."""
-        day_records = await self._query_days(days_limit, from_date=from_date, to_date=to_date)
+        day_records = await self._query_days(
+            days_limit, from_date=from_date, to_date=to_date
+        )
         return calculate_period_statistics(day_records, period_type)
 
     async def _aggregate_session_stats_per_period(
@@ -295,7 +307,9 @@ class StatsService:
         to_date: date | None = None,
     ) -> dict[str, list[tuple[date, float | None]]]:
         """Compute extended trend data for the requested period granularity."""
-        day_records = await self._query_days(days_limit, from_date=from_date, to_date=to_date)
+        day_records = await self._query_days(
+            days_limit, from_date=from_date, to_date=to_date
+        )
         period_stats = calculate_period_statistics(day_records, period_type)
         session_extras = await self._aggregate_session_stats_per_period(
             day_records, period_stats

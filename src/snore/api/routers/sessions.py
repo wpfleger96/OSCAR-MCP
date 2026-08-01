@@ -62,7 +62,9 @@ async def bulk_delete_preview(
 
 
 @router.get("/{session_id}/delete-preview", response_model=DeletePreview)
-async def get_delete_preview(session_id: int, service: SessionServiceDep) -> DeletePreview:
+async def get_delete_preview(
+    session_id: int, service: SessionServiceDep
+) -> DeletePreview:
     return await service.get_delete_preview(session_ids=[session_id])
 
 
@@ -72,7 +74,9 @@ async def get_session(
     service: SessionServiceDep,
     include_settings: bool = Query(default=False),
 ) -> SessionDetail:
-    return await service.get_session_detail(session_id, include_settings=include_settings)
+    return await service.get_session_detail(
+        session_id, include_settings=include_settings
+    )
 
 
 @router.patch("/{session_id}", response_model=SessionDetail)

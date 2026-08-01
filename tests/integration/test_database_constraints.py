@@ -68,10 +68,12 @@ class TestForeignKeyConstraints:
             session_id = test_session.id
 
         async with session_scope() as session:
-            events_before = (await session.execute(
-                text("SELECT COUNT(*) FROM events WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            events_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM events WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert events_before == 1
 
             sess = await session.get(models.Session, session_id)
@@ -79,10 +81,12 @@ class TestForeignKeyConstraints:
             await session.commit()
 
         async with session_scope() as session:
-            events_after = (await session.execute(
-                text("SELECT COUNT(*) FROM events WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            events_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM events WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert events_after == 0, "Events should be deleted via CASCADE"
 
     async def test_cascade_delete_session_to_statistics(self, temp_db):
@@ -117,10 +121,12 @@ class TestForeignKeyConstraints:
             session_id = test_session.id
 
         async with session_scope() as session:
-            stats_before = (await session.execute(
-                text("SELECT COUNT(*) FROM statistics WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            stats_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM statistics WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert stats_before == 1
 
             sess = await session.get(models.Session, session_id)
@@ -128,10 +134,12 @@ class TestForeignKeyConstraints:
             await session.commit()
 
         async with session_scope() as session:
-            stats_after = (await session.execute(
-                text("SELECT COUNT(*) FROM statistics WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            stats_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM statistics WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert stats_after == 0, "Statistics should be deleted via CASCADE"
 
     async def test_cascade_delete_session_to_settings(self, temp_db):
@@ -167,10 +175,12 @@ class TestForeignKeyConstraints:
             session_id = test_session.id
 
         async with session_scope() as session:
-            settings_before = (await session.execute(
-                text("SELECT COUNT(*) FROM settings WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            settings_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM settings WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert settings_before == 1
 
             sess = await session.get(models.Session, session_id)
@@ -178,10 +188,12 @@ class TestForeignKeyConstraints:
             await session.commit()
 
         async with session_scope() as session:
-            settings_after = (await session.execute(
-                text("SELECT COUNT(*) FROM settings WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            settings_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM settings WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert settings_after == 0, "Settings should be deleted via CASCADE"
 
     async def test_cascade_delete_session_to_waveforms(self, temp_db):
@@ -221,10 +233,12 @@ class TestForeignKeyConstraints:
             session_id = test_session.id
 
         async with session_scope() as session:
-            waveforms_before = (await session.execute(
-                text("SELECT COUNT(*) FROM waveforms WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            waveforms_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM waveforms WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert waveforms_before == 1
 
             sess = await session.get(models.Session, session_id)
@@ -232,10 +246,12 @@ class TestForeignKeyConstraints:
             await session.commit()
 
         async with session_scope() as session:
-            waveforms_after = (await session.execute(
-                text("SELECT COUNT(*) FROM waveforms WHERE session_id = :sid"),
-                {"sid": session_id},
-            )).scalar()
+            waveforms_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM waveforms WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+            ).scalar()
             assert waveforms_after == 0, "Waveforms should be deleted via CASCADE"
 
 
@@ -488,7 +504,9 @@ class TestDataIntegrity:
             await session.commit()
 
         async with session_scope() as session:
-            test_session = (await session.execute(select(models.Session))).scalars().first()
+            test_session = (
+                (await session.execute(select(models.Session))).scalars().first()
+            )
             setting2 = models.Setting(
                 session_id=test_session.id, key="mode", value="APAP"
             )

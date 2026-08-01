@@ -116,7 +116,9 @@ def session_list(
                 console.print(
                     f"\nShowing {len(result.sessions)} of {result.total_count} sessions"
                 )
-                print_tip(f"Use '--limit {result.total_count}' or '--limit 0' to show all")
+                print_tip(
+                    f"Use '--limit {result.total_count}' or '--limit 0' to show all"
+                )
             else:
                 console.print(f"\nShowing all {len(result.sessions)} sessions")
 

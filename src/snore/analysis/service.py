@@ -24,6 +24,10 @@ detached ``AnalysisInputs`` DTO.  No session is held.
 (raw-fetch + deserialise + compute + persist) with the caller-provided session.
 """
 
+# mypy: ignore-errors
+# Volatile: single/waveform/report read-scope ownership and _make_compute_only()
+# are being replaced with a public seam in Duncan's async-prep branch (PR-1).
+
 import logging
 import time
 
@@ -40,7 +44,7 @@ from snore.analysis.data.waveform_loader import (
     WaveformLoader,
     deserialize_waveform_blob,
     detect_and_mark_artifacts,
-    fetch_waveform_blob,
+    fetch_waveform_blob_sync,
 )
 from snore.analysis.modes import DEFAULT_MODE, get_mode
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
@@ -262,7 +266,7 @@ class AnalysisService:
             raise ValueError(f"Session {session_id} not found")
 
         try:
-            flow_blob, flow_sample_count, flow_metadata = fetch_waveform_blob(
+            flow_blob, flow_sample_count, flow_metadata = fetch_waveform_blob_sync(
                 self.db_session, session_id, "flow"
             )
         except Exception as e:
@@ -280,7 +284,7 @@ class AnalysisService:
         spo2_sample_count = 0
         spo2_metadata: dict[str, Any] = {}
         try:
-            spo2_blob, spo2_sample_count, spo2_metadata = fetch_waveform_blob(
+            spo2_blob, spo2_sample_count, spo2_metadata = fetch_waveform_blob_sync(
                 self.db_session, session_id, "spo2"
             )
         except Exception as e:
@@ -290,7 +294,7 @@ class AnalysisService:
         pulse_sample_count = 0
         pulse_metadata: dict[str, Any] = {}
         try:
-            pulse_blob, pulse_sample_count, pulse_metadata = fetch_waveform_blob(
+            pulse_blob, pulse_sample_count, pulse_metadata = fetch_waveform_blob_sync(
                 self.db_session, session_id, "pulse"
             )
         except Exception as e:

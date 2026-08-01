@@ -83,7 +83,10 @@ def stats(
             if summary.avg_pressure is not None:
                 print_subsection("Pressure")
                 print_kv("Average", f"{summary.avg_pressure:.1f} cmH₂O")
-                if summary.min_pressure is not None and summary.max_pressure is not None:
+                if (
+                    summary.min_pressure is not None
+                    and summary.max_pressure is not None
+                ):
                     print_kv(
                         "Range",
                         f"{summary.min_pressure:.1f} - {summary.max_pressure:.1f} cmH₂O",
@@ -96,7 +99,9 @@ def stats(
             if summary.avg_leak is not None:
                 print_subsection("Leak")
                 print_kv("Average", f"{summary.avg_leak:.1f} L/min")
-                leak_assessment = "well controlled" if summary.avg_leak < 24 else "elevated"
+                leak_assessment = (
+                    "well controlled" if summary.avg_leak < 24 else "elevated"
+                )
                 print_kv("Assessment", leak_assessment)
 
             if summary.avg_spo2 is not None:
@@ -141,9 +146,9 @@ def stats(
                 from snore.analysis.calculations import PeriodType
 
                 period_literal = cast(PeriodType, period)
-                period_stats: list[PeriodStatistics] = await service.get_period_statistics(
-                    period_literal, days
-                )
+                period_stats: list[
+                    PeriodStatistics
+                ] = await service.get_period_statistics(period_literal, days)
 
                 if period_stats:
                     period_names = {
@@ -154,14 +159,18 @@ def stats(
                         "year": "Yearly",
                     }
 
-                    print_header(f"Therapy Statistics ({period_names[period]})", wide=True)
+                    print_header(
+                        f"Therapy Statistics ({period_names[period]})", wide=True
+                    )
 
                     period_rows = []
                     for period_stat in period_stats:  # type: PeriodStatistics
                         if period == "day":
                             period_label = str(period_stat.period_start)
                         elif period == "week":
-                            period_label = f"{period_stat.period_start.strftime('%Y-W%U')}"
+                            period_label = (
+                                f"{period_stat.period_start.strftime('%Y-W%U')}"
+                            )
                         elif period == "month":
                             period_label = period_stat.period_start.strftime("%b %Y")
                         elif period == "6month":
@@ -170,7 +179,9 @@ def stats(
                         else:
                             period_label = str(period_stat.period_start.year)
 
-                        days_str = f"{period_stat.days_used}/{period_stat.days_in_period}"
+                        days_str = (
+                            f"{period_stat.days_used}/{period_stat.days_in_period}"
+                        )
 
                         hours_str = (
                             f"{period_stat.avg_hours_per_day:.1f}h"
@@ -191,7 +202,13 @@ def stats(
                         )
 
                         period_rows.append(
-                            (period_label, days_str, hours_str, avg_ahi_str, med_ahi_str)
+                            (
+                                period_label,
+                                days_str,
+                                hours_str,
+                                avg_ahi_str,
+                                med_ahi_str,
+                            )
                         )
 
                     print_table(
@@ -216,7 +233,9 @@ def stats(
                         ahi_values = [v for _, v in ahi_trend if v is not None]
                         if ahi_values:
                             dates_for_plot = [d for d, v in ahi_trend if v is not None]
-                            date_labels = [d.strftime("%Y-%m-%d") for d in dates_for_plot]
+                            date_labels = [
+                                d.strftime("%Y-%m-%d") for d in dates_for_plot
+                            ]
                             x_indices = list(range(len(ahi_values)))
 
                             from snore.analysis.calculations import (

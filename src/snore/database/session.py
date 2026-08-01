@@ -19,13 +19,12 @@ accessible after a commit without triggering implicit I/O — required for
 async contexts where lazy loads raise MissingGreenlet.
 """
 
-import asyncio
 import logging
 import os
 import threading
 
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Generator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +64,7 @@ def _apply_migrations_sync(sync_url: str) -> None:
     Called from within ``asyncio.to_thread`` so it never blocks the event loop.
     Uses the sync pysqlite URL for Alembic — identical to PR-1.
     """
-    from sqlalchemy import create_engine, inspect  # noqa: PLC0415
+    from sqlalchemy import create_engine  # noqa: PLC0415
 
     engine = create_engine(sync_url, connect_args={"check_same_thread": False})
     table_names = set(inspect(engine).get_table_names())
@@ -105,10 +104,12 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
     @event.listens_for(async_engine.sync_engine, "connect")
     def set_sqlite_pragmas(dbapi_conn: Any, connection_record: Any) -> None:
         # aiosqlite wraps the raw connection; unwrap to access isolation_level.
-        raw_conn = getattr(getattr(dbapi_conn, "driver_connection", None), "_conn", None)
+        raw_conn = getattr(
+            getattr(dbapi_conn, "driver_connection", None), "_conn", None
+        )
         if raw_conn is None:
             # Fallback: try direct autocommit attribute (sync pysqlite path).
-            raw_conn = dbapi_conn  # type: ignore[assignment]
+            raw_conn = dbapi_conn
 
         prior_isolation = getattr(raw_conn, "isolation_level", "")
         try:
@@ -153,6 +154,7 @@ def _init_engine(database_url: str, async_url: str, db_path: str | None) -> None
 
     # Attach the SQLite PRAGMA recipe via sync_engine listener.
     from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
+
     dialect = _make_url(async_url).get_backend_name()
     if dialect == "sqlite":
         _register_sqlite_pragmas_on_async_engine(engine)
@@ -315,6 +317,41 @@ def get_sync_session() -> Session:
         raise RuntimeError("Database not initialized. Call init_database() first.")
     factory = sessionmaker(bind=_engine.sync_engine)
     return factory()
+
+
+@contextmanager
+def sync_session_scope() -> Generator[Session]:
+    """Provide a transactional scope for synchronous database operations.
+
+    Temporary bridge for volatile service surfaces (importers, import_service,
+    analysis batch) that use ``with session_scope()`` and are being restructured
+    in Duncan's async-prep branch (PR-1).  Creates a plain pysqlite engine from
+    ``_db_path`` so sync ORM operations work without greenlet context.
+
+    Do NOT use this for new code — prefer ``async with session_scope()`` (AsyncSession).
+
+    Commits on success; rolls back on any exception.
+    """
+    from sqlalchemy import create_engine  # noqa: PLC0415
+    from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
+
+    if _db_path is None:
+        raise RuntimeError("Database not initialized. Call init_database() first.")
+
+    engine = create_engine(
+        f"sqlite:///{_db_path}", connect_args={"check_same_thread": False}
+    )
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+        engine.dispose()
 
 
 async def cleanup_database() -> None:

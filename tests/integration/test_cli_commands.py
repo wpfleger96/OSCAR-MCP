@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from click.testing import CliRunner
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.cli import cli
 from snore.database import models
@@ -178,7 +178,9 @@ async def populated_test_db_full(temp_db):
 class TestSessionDeleteCommand:
     """Test session delete command with various scenarios."""
 
-    def test_delete_single_session_by_id(self, cli_runner, populated_test_db, db_session):
+    def test_delete_single_session_by_id(
+        self, cli_runner, populated_test_db, db_session
+    ):
         """Test deleting a single session by ID."""
         result = cli_runner.invoke(
             cli,
@@ -192,7 +194,9 @@ class TestSessionDeleteCommand:
         remaining = db_session.query(models.Session).filter_by(id=1).count()
         assert remaining == 0
 
-    def test_delete_multiple_sessions_by_id(self, cli_runner, populated_test_db, db_session):
+    def test_delete_multiple_sessions_by_id(
+        self, cli_runner, populated_test_db, db_session
+    ):
         """Test deleting multiple sessions by ID (tests SQL IN clause fix)."""
         result = cli_runner.invoke(
             cli,
@@ -217,7 +221,9 @@ class TestSessionDeleteCommand:
         )
         assert remaining == 0
 
-    def test_delete_sessions_by_date_range(self, cli_runner, populated_test_db, db_session):
+    def test_delete_sessions_by_date_range(
+        self, cli_runner, populated_test_db, db_session
+    ):
         """Test deleting sessions by date range."""
         result = cli_runner.invoke(
             cli,
@@ -240,7 +246,9 @@ class TestSessionDeleteCommand:
         total_remaining = db_session.query(models.Session).count()
         assert total_remaining < 10
 
-    def test_delete_cascades_to_child_tables(self, cli_runner, populated_test_db, db_session):
+    def test_delete_cascades_to_child_tables(
+        self, cli_runner, populated_test_db, db_session
+    ):
         """Test that deleting sessions cascades to events, waveforms, statistics."""
         events_before = db_session.execute(
             text("SELECT COUNT(*) FROM events WHERE session_id = 1")
@@ -365,7 +373,7 @@ class TestSessionListCommand:
 
         init_database(str(temp_db))
 
-        async def _setup():
+        async def _setup() -> None:
             async with session_scope() as session:
                 device = models.Device(
                     manufacturer="Test",
@@ -492,7 +500,9 @@ async def db_with_analysis(temp_db):
 class TestAnalysisDeleteCommand:
     """Test analysis delete command with various scenarios."""
 
-    def test_delete_analysis_single_session(self, cli_runner, db_with_analysis, db_session):
+    def test_delete_analysis_single_session(
+        self, cli_runner, db_with_analysis, db_session
+    ):
         """Test deleting analysis for a single session (latest only)."""
         analysis_before = (
             db_session.query(models.AnalysisResult).filter_by(session_id=1).count()
@@ -524,7 +534,9 @@ class TestAnalysisDeleteCommand:
         sess = db_session.query(models.Session).filter_by(id=1).first()
         assert sess is not None
 
-    def test_delete_analysis_all_versions(self, cli_runner, db_with_analysis, db_session):
+    def test_delete_analysis_all_versions(
+        self, cli_runner, db_with_analysis, db_session
+    ):
         """Test deleting all analysis versions for a session."""
         result = cli_runner.invoke(
             cli,
@@ -552,7 +564,9 @@ class TestAnalysisDeleteCommand:
         sess = db_session.query(models.Session).filter_by(id=1).first()
         assert sess is not None
 
-    def test_delete_analysis_multiple_sessions(self, cli_runner, db_with_analysis, db_session):
+    def test_delete_analysis_multiple_sessions(
+        self, cli_runner, db_with_analysis, db_session
+    ):
         """Test deleting analysis for multiple sessions."""
         result = cli_runner.invoke(
             cli,
@@ -635,7 +649,9 @@ class TestAnalysisDeleteCommand:
         analysis_after = db_session.query(models.AnalysisResult).count()
         assert analysis_after == analysis_before
 
-    def test_delete_analysis_cancellation(self, cli_runner, db_with_analysis, db_session):
+    def test_delete_analysis_cancellation(
+        self, cli_runner, db_with_analysis, db_session
+    ):
         """Test that user can cancel deletion."""
         result = cli_runner.invoke(
             cli,
@@ -666,7 +682,7 @@ class TestAnalysisDeleteCommand:
 
         init_database(str(temp_db))
 
-        async def _setup():
+        async def _setup() -> None:
             async with session_scope() as session:
                 device = models.Device(
                     manufacturer="Test",
@@ -695,7 +711,9 @@ class TestAnalysisDeleteCommand:
         assert result.exit_code == 0
         assert "No sessions with analysis results found" in result.output
 
-    def test_delete_analysis_cascades_to_patterns(self, cli_runner, db_with_analysis, db_session):
+    def test_delete_analysis_cascades_to_patterns(
+        self, cli_runner, db_with_analysis, db_session
+    ):
         """Test that deleting analysis cascades to detected patterns."""
         analysis = (
             db_session.query(models.AnalysisResult)
@@ -866,7 +884,7 @@ class TestAnalysisCommand:
 
         init_database(str(temp_db))
 
-        async def _setup():
+        async def _setup() -> None:
             async with session_scope() as session:
                 device = models.Device(
                     manufacturer="Test",
@@ -1223,7 +1241,7 @@ class TestRxChangesCommand:
 
 
 async def _make_rx_session(
-    session: OrmSession,
+    session: AsyncSession,
     device_id: int,
     start_time: datetime,
     settings: dict[str, str],

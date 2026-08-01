@@ -112,7 +112,9 @@ class TestAnalyzeBatch:
         assert "3" in captured
         assert "0" in captured
 
-    @pytest.mark.skip(reason="volatile: AnalysisFacade.analyze_one uses session_scope() sync — awaiting PR-1 AsyncSession conversion")
+    @pytest.mark.skip(
+        reason="volatile: AnalysisFacade.analyze_one uses session_scope() sync — awaiting PR-1 AsyncSession conversion"
+    )
     def test_analyze_batch_partial_failure_reports_failed_session_id(self):
         """When one session raises an error, stderr names the failed session and counts are correct."""
         mock_sessions = _make_mock_sessions(3)
@@ -257,7 +259,9 @@ class TestBatchCoordinatorHandle:
         from snore.services.analysis_facade import AnalysisFacade
 
         day = Day(
-            device_id=async_test_device.id, date=date(2025, 6, 1), total_therapy_hours=8.0
+            device_id=async_test_device.id,
+            date=date(2025, 6, 1),
+            total_therapy_hours=8.0,
         )
         async_db_session.add(day)
         await async_db_session.flush()

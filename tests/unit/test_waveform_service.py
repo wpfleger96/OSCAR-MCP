@@ -83,7 +83,9 @@ class TestWaveformService:
         assert result[0].unit == "L/min"
         assert result[1].waveform_type == "pressure"
 
-    async def test_list_waveforms_duration_calculation(self, async_db_session, async_test_device):
+    async def test_list_waveforms_duration_calculation(
+        self, async_db_session, async_test_device
+    ):
         """Duration hours computed correctly from sample_count/sample_rate."""
         now = datetime(2025, 1, 1, 0, 0, 0)
         session = Session(
@@ -114,7 +116,9 @@ class TestWaveformService:
         expected_hours = 90000 / 25.0 / 3600
         assert result[0].duration_hours == pytest.approx(expected_hours, rel=1e-6)
 
-    async def test_get_waveform_data_not_found(self, async_db_session, async_test_device):
+    async def test_get_waveform_data_not_found(
+        self, async_db_session, async_test_device
+    ):
         """Invalid session raises ValueError."""
         now = datetime(2025, 1, 1, 0, 0, 0)
         session = Session(
@@ -159,7 +163,9 @@ class TestWaveformService:
         await async_db_session.flush()
 
         service = WaveformService(async_db_session)
-        timestamps, values, metadata = await service.get_waveform_data(session.id, "flow")
+        timestamps, values, metadata = await service.get_waveform_data(
+            session.id, "flow"
+        )
 
         assert len(timestamps) == sample_count
         assert len(values) == sample_count
@@ -168,7 +174,9 @@ class TestWaveformService:
         assert metadata["sample_rate"] == sample_rate
         assert metadata["waveform_type"] == "flow"
 
-    async def test_get_waveform_data_with_downsampling(self, async_db_session, async_test_device):
+    async def test_get_waveform_data_with_downsampling(
+        self, async_db_session, async_test_device
+    ):
         """Downsampling reduces array to max_points."""
         now = datetime(2025, 1, 1, 0, 0, 0)
         session = Session(
@@ -205,7 +213,9 @@ class TestWaveformService:
         assert isinstance(timestamps, np.ndarray)
         assert isinstance(values, np.ndarray)
 
-    async def test_get_waveform_data_with_windowing(self, async_db_session, async_test_device):
+    async def test_get_waveform_data_with_windowing(
+        self, async_db_session, async_test_device
+    ):
         """Windowing filters data to specified time range."""
         now = datetime(2025, 1, 1, 0, 0, 0)
         session = Session(
@@ -243,7 +253,9 @@ class TestWaveformService:
         assert timestamps.max() <= 20.0
         assert len(timestamps) == len(values)
 
-    async def test_get_waveform_data_with_start_only(self, async_db_session, async_test_device):
+    async def test_get_waveform_data_with_start_only(
+        self, async_db_session, async_test_device
+    ):
         """Windowing with only start_seconds filters correctly."""
         now = datetime(2025, 1, 1, 0, 0, 0)
         session = Session(
@@ -280,7 +292,9 @@ class TestWaveformService:
         assert timestamps.min() >= 30.0
         assert len(timestamps) == len(values)
 
-    async def test_get_waveform_data_with_end_only(self, async_db_session, async_test_device):
+    async def test_get_waveform_data_with_end_only(
+        self, async_db_session, async_test_device
+    ):
         """Windowing with only end_seconds filters correctly."""
         now = datetime(2025, 1, 1, 0, 0, 0)
         session = Session(

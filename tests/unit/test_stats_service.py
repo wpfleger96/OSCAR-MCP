@@ -325,7 +325,9 @@ class TestStatsService:
 class TestQueryDaysFiltering:
     """Test _query_days with from_date and to_date parameters."""
 
-    async def test_from_date_excludes_earlier_days(self, async_db_session, async_test_device):
+    async def test_from_date_excludes_earlier_days(
+        self, async_db_session, async_test_device
+    ):
         """from_date filters out Day records before the cutoff."""
         await _create_day_with_session(
             async_db_session, async_test_device, date(2024, 1, 1), duration_hours=8.0
@@ -340,7 +342,9 @@ class TestQueryDaysFiltering:
         assert len(result) == 1
         assert result[0].date == date(2024, 6, 1)
 
-    async def test_to_date_excludes_later_days(self, async_db_session, async_test_device):
+    async def test_to_date_excludes_later_days(
+        self, async_db_session, async_test_device
+    ):
         """to_date filters out Day records after the cutoff."""
         await _create_day_with_session(
             async_db_session, async_test_device, date(2024, 1, 1), duration_hours=8.0
@@ -355,11 +359,16 @@ class TestQueryDaysFiltering:
         assert len(result) == 1
         assert result[0].date == date(2024, 1, 1)
 
-    async def test_from_date_and_to_date_combined(self, async_db_session, async_test_device):
+    async def test_from_date_and_to_date_combined(
+        self, async_db_session, async_test_device
+    ):
         """Both from_date and to_date can be applied simultaneously."""
         for month in [1, 4, 7, 10]:
             await _create_day_with_session(
-                async_db_session, async_test_device, date(2024, month, 15), duration_hours=8.0
+                async_db_session,
+                async_test_device,
+                date(2024, month, 15),
+                duration_hours=8.0,
             )
 
         service = StatsService(async_db_session)
@@ -370,22 +379,35 @@ class TestQueryDaysFiltering:
         result_dates = {d.date for d in result}
         assert result_dates == {date(2024, 4, 15), date(2024, 7, 15)}
 
-    async def test_days_limit_and_from_date_stack(self, async_db_session, async_test_device):
+    async def test_days_limit_and_from_date_stack(
+        self, async_db_session, async_test_device
+    ):
         """days_limit and from_date both apply as AND conditions."""
         today = date.today()
         await _create_day_with_session(
-            async_db_session, async_test_device, today - timedelta(days=100), duration_hours=8.0
+            async_db_session,
+            async_test_device,
+            today - timedelta(days=100),
+            duration_hours=8.0,
         )
         await _create_day_with_session(
-            async_db_session, async_test_device, today - timedelta(days=5), duration_hours=8.0
+            async_db_session,
+            async_test_device,
+            today - timedelta(days=5),
+            duration_hours=8.0,
         )
         await _create_day_with_session(
-            async_db_session, async_test_device, today - timedelta(days=2), duration_hours=8.0
+            async_db_session,
+            async_test_device,
+            today - timedelta(days=2),
+            duration_hours=8.0,
         )
 
         service = StatsService(async_db_session)
         # days_limit=30 excludes the oldest day; from_date also excludes days before 4 days ago
-        result = await service._query_days(days_limit=30, from_date=today - timedelta(days=4))
+        result = await service._query_days(
+            days_limit=30, from_date=today - timedelta(days=4)
+        )
 
         assert len(result) == 1
         assert result[0].date == today - timedelta(days=2)
@@ -442,7 +464,9 @@ class TestAggregateSessionStatsPerPeriod:
         day_records = await service._query_days()
         period_stats = await service.get_period_statistics("month")
 
-        extras = await service._aggregate_session_stats_per_period(day_records, period_stats)
+        extras = await service._aggregate_session_stats_per_period(
+            day_records, period_stats
+        )
 
         jan_start = date(2024, 1, 1)
         assert jan_start in extras
@@ -454,7 +478,9 @@ class TestAggregateSessionStatsPerPeriod:
         # pulse: (60*8 + 72*4) / 12 = (480 + 288)/12 = 768/12 = 64.0
         assert extras[jan_start]["pulse"] == pytest.approx(64.0, abs=0.01)
 
-    async def test_missing_usage_hours_skipped(self, async_db_session, async_test_device):
+    async def test_missing_usage_hours_skipped(
+        self, async_db_session, async_test_device
+    ):
         """Statistics rows with None or 0 usage_hours are excluded from weighting."""
         day, sess = await _create_day_with_session(
             async_db_session, async_test_device, date(2024, 2, 10), duration_hours=8.0
@@ -472,7 +498,9 @@ class TestAggregateSessionStatsPerPeriod:
         day_records = await service._query_days()
         period_stats = await service.get_period_statistics("month")
 
-        extras = await service._aggregate_session_stats_per_period(day_records, period_stats)
+        extras = await service._aggregate_session_stats_per_period(
+            day_records, period_stats
+        )
 
         feb_start = date(2024, 2, 1)
         assert extras[feb_start]["epap"] is None
@@ -500,7 +528,9 @@ class TestAggregateSessionStatsPerPeriod:
 class TestGetTrends:
     """Test StatsService.get_trends with the new (period_type, days_limit) signature."""
 
-    async def test_get_trends_returns_13_keys(self, async_db_session, async_test_device):
+    async def test_get_trends_returns_13_keys(
+        self, async_db_session, async_test_device
+    ):
         """get_trends returns all 13 metric keys."""
         today = date.today()
         await _create_day_with_session(
@@ -531,7 +561,9 @@ class TestGetTrends:
         }
         assert set(result.keys()) == expected
 
-    async def test_get_trends_day_granularity(self, async_db_session, async_test_device):
+    async def test_get_trends_day_granularity(
+        self, async_db_session, async_test_device
+    ):
         """get_trends with period_type='day' produces one entry per therapy day."""
         base = date.today() - timedelta(days=5)
         for i in range(3):
@@ -548,14 +580,22 @@ class TestGetTrends:
 
         assert len(result["ahi"]) == 3
 
-    async def test_get_trends_days_limit_filters(self, async_db_session, async_test_device):
+    async def test_get_trends_days_limit_filters(
+        self, async_db_session, async_test_device
+    ):
         """days_limit parameter passed to get_trends restricts the Day records used."""
         today = date.today()
         await _create_day_with_session(
-            async_db_session, async_test_device, today - timedelta(days=60), duration_hours=8.0
+            async_db_session,
+            async_test_device,
+            today - timedelta(days=60),
+            duration_hours=8.0,
         )
         await _create_day_with_session(
-            async_db_session, async_test_device, today - timedelta(days=2), duration_hours=8.0
+            async_db_session,
+            async_test_device,
+            today - timedelta(days=2),
+            duration_hours=8.0,
         )
 
         service = StatsService(async_db_session)
