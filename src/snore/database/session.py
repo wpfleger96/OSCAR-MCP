@@ -1,42 +1,52 @@
 """Database session management for SNORE.
 
-SQLite connection recipe (§4)
-------------------------------
-The sync engine uses Python ≥3.13 modern transaction control
-(``connect_args={"autocommit": False}``).  A plain ``cursor.execute("PRAGMA
-journal_mode=WAL")`` inside the connect listener fails with
-``OperationalError: cannot change into wal mode from within a transaction``
-because Python 3.13 modern-control mode opens an implicit transaction before
-the listener fires.
+Async SQLite connection recipe (§4, PR-2)
+------------------------------------------
+The async engine uses ``aiosqlite`` as the DBAPI.  aiosqlite wraps the raw
+``sqlite3.Connection`` in an ``AsyncAdapt_aiosqlite_connection`` adapter.
+The PRAGMA recipe on the ``"connect"`` event accesses the raw connection via
+``dbapi_conn.driver_connection._conn`` and sets ``isolation_level = None``
+(autocommit) before applying PRAGMAs, then restores the prior isolation level.
 
-The fix: the connect listener temporarily toggles ``dbapi_conn.autocommit =
-True`` before running PRAGMAs, then restores ``False``.  Both PRAGMAs and
-modern transaction control are applied atomically on each new connection.
+VACUUM uses a separate sync AUTOCOMMIT connection and is unaffected.
 
-This was probe-verified on Python 3.13.9 in the repository environment.
+Alembic stays fully synchronous.  Migrations run via
+``asyncio.get_event_loop().run_in_executor`` / ``asyncio.to_thread`` patterns
+in test helpers, or directly in CLI commands that bridge with ``asyncio.run``.
+
+expire_on_commit=False is set on all sessions so that ORM attributes remain
+accessible after a commit without triggering implicit I/O — required for
+async contexts where lazy loads raise MissingGreenlet.
 """
 
+import asyncio
 import logging
 import os
 import threading
 
-from collections.abc import Generator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import Engine, create_engine, event, inspect
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import inspect
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import Session
 
 from snore.constants import DEFAULT_DATABASE_PATH
 from snore.database.models import Base
 
 logger = logging.getLogger(__name__)
 
-_engine = None
-_SessionFactory = None
+_engine: AsyncEngine | None = None
+_AsyncSessionFactory: async_sessionmaker[AsyncSession] | None = None
 _db_path: str | None = None
 _init_lock = threading.Lock()
 
@@ -49,59 +59,117 @@ def _build_alembic_config(database_url: str) -> AlembicConfig:
     return cfg
 
 
-def _apply_migrations(engine: Engine, database_url: str) -> None:
+def _apply_migrations_sync(sync_url: str) -> None:
+    """Run Alembic migrations synchronously.
+
+    Called from within ``asyncio.to_thread`` so it never blocks the event loop.
+    Uses the sync pysqlite URL for Alembic — identical to PR-1.
+    """
+    from sqlalchemy import create_engine, inspect  # noqa: PLC0415
+
+    engine = create_engine(sync_url, connect_args={"check_same_thread": False})
     table_names = set(inspect(engine).get_table_names())
-    alembic_cfg = _build_alembic_config(database_url)
+    alembic_cfg = _build_alembic_config(sync_url)
 
     if "sessions" not in table_names:
         Base.metadata.create_all(engine)
         alembic_command.stamp(alembic_cfg, "head")
         logger.info("Fresh database created and stamped at head")
     else:
-        # Pre-squash or unstamped DBs fail loudly here (unknown revision / table
-        # already exists); pre-alpha contract is: delete the DB file and re-import.
         alembic_command.upgrade(alembic_cfg, "head")
         logger.info("Database migrations applied (upgrade to head)")
 
+    engine.dispose()
 
-def _register_sqlite_pragmas(engine: Engine) -> None:
-    """Attach the integrated SQLite connection recipe to *engine*.
 
-    The connect listener must:
-    1. Toggle ``autocommit = True`` before running PRAGMAs (Python 3.13 modern
-       transaction control opens an implicit transaction before the listener fires;
-       ``journal_mode=WAL`` raises OperationalError inside that transaction).
-    2. Apply PRAGMAs while autocommit is True.
-    3. Restore ``autocommit = False`` so normal SQLAlchemy transactions use
-       modern control.
+def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
+    """Attach the integrated SQLite connection recipe to *async_engine*.
 
-    VACUUM uses a separate AUTOCOMMIT connection and is not affected by this recipe.
+    The recipe attaches to ``async_engine.sync_engine`` (the underlying pysqlite
+    engine) so the autocommit toggle works on the real DBAPI connection.
+
+    For ``aiosqlite``, ``dbapi_conn`` is an ``AsyncAdapt_aiosqlite_connection``
+    wrapper.  The underlying ``sqlite3.Connection`` is at
+    ``dbapi_conn.driver_connection._conn``.  We set ``isolation_level = None``
+    (autocommit) on the raw connection before applying PRAGMAs, then restore it.
+
+    Steps:
+    1. Access the raw ``sqlite3.Connection`` via ``driver_connection._conn``.
+    2. Set ``isolation_level = None`` (autocommit) so PRAGMAs like
+       ``journal_mode=WAL`` can run outside a transaction.
+    3. Apply PRAGMAs.
+    4. Restore the original ``isolation_level``.
     """
+    from sqlalchemy import event  # noqa: PLC0415
 
-    @event.listens_for(engine, "connect")
+    @event.listens_for(async_engine.sync_engine, "connect")
     def set_sqlite_pragmas(dbapi_conn: Any, connection_record: Any) -> None:
-        # Step 1: exit implicit transaction so WAL pragma can execute.
-        # Preserve prior autocommit value so we restore exactly what was set.
-        prior_autocommit = dbapi_conn.autocommit
-        dbapi_conn.autocommit = True
-        cursor = dbapi_conn.cursor()
+        # aiosqlite wraps the raw connection; unwrap to access isolation_level.
+        raw_conn = getattr(getattr(dbapi_conn, "driver_connection", None), "_conn", None)
+        if raw_conn is None:
+            # Fallback: try direct autocommit attribute (sync pysqlite path).
+            raw_conn = dbapi_conn  # type: ignore[assignment]
+
+        prior_isolation = getattr(raw_conn, "isolation_level", "")
         try:
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
-            cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
-            cursor.execute("PRAGMA temp_store=MEMORY")
+            raw_conn.isolation_level = None  # autocommit
+            cursor = dbapi_conn.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
+                cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
+                cursor.execute("PRAGMA temp_store=MEMORY")
+            finally:
+                cursor.close()
         finally:
-            cursor.close()
-            # Step 2: restore to prior value (always False in practice, but
-            # wrapping in finally ensures cursor and state are cleaned up even
-            # if a PRAGMA raises).
-            dbapi_conn.autocommit = prior_autocommit
+            raw_conn.isolation_level = prior_isolation
+
+
+def _init_engine(database_url: str, async_url: str, db_path: str | None) -> None:
+    """Build the async engine and session factory (called under _init_lock)."""
+    global _engine, _AsyncSessionFactory, _db_path
+
+    if db_path and db_path != ":memory:":
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+            except PermissionError as e:
+                raise PermissionError(
+                    f"Cannot create database directory {db_dir}: {e}"
+                ) from e
+
+    _db_path = db_path
+
+    engine = create_async_engine(
+        async_url,
+        echo=False,
+        connect_args={
+            "check_same_thread": False,
+        },
+        pool_pre_ping=True,
+    )
+
+    # Attach the SQLite PRAGMA recipe via sync_engine listener.
+    from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
+    dialect = _make_url(async_url).get_backend_name()
+    if dialect == "sqlite":
+        _register_sqlite_pragmas_on_async_engine(engine)
+
+    _engine = engine
+    _AsyncSessionFactory = async_sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+    )
+
+    # Alembic migrations always use the sync pysqlite URL.
+    _apply_migrations_sync(database_url)
 
 
 def init_database(database_path: str | None = None) -> None:
-    """
-    Initialize the database connection in a thread-safe manner.
+    """Initialize the database connection in a thread-safe manner.
 
     Args:
         database_path: Path to the SQLite database file.
@@ -111,10 +179,12 @@ def init_database(database_path: str | None = None) -> None:
         PermissionError: If directory cannot be created
         ValueError: If database path is invalid
     """
-    global _engine, _SessionFactory, _db_path
+    from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+    global _engine, _AsyncSessionFactory
 
     with _init_lock:
-        if _engine is not None and _SessionFactory is not None:
+        if _engine is not None and _AsyncSessionFactory is not None:
             return
 
         if database_path is None:
@@ -123,34 +193,12 @@ def init_database(database_path: str | None = None) -> None:
         if not database_path or not isinstance(database_path, str):
             raise ValueError(f"Invalid database path: {database_path}")
 
-        _db_path = database_path
+        target = DatabaseTarget.from_url(database_path)
+        sync_url = target.resolve_sync_url()
+        async_url = target.resolve_async_url()
+        db_path = target.sqlite_path if target.is_sqlite else None
 
-        db_dir = os.path.dirname(database_path)
-        if db_dir:
-            try:
-                os.makedirs(db_dir, exist_ok=True)
-            except PermissionError as e:
-                raise PermissionError(
-                    f"Cannot create database directory {db_dir}: {e}"
-                ) from e
-
-        database_url = f"sqlite:///{database_path}"
-
-        _engine = create_engine(
-            database_url,
-            echo=False,
-            connect_args={
-                "check_same_thread": False,
-                "autocommit": False,  # Python ≥3.13 modern transaction control
-            },
-            pool_pre_ping=True,
-        )
-
-        _register_sqlite_pragmas(_engine)
-
-        _SessionFactory = sessionmaker(bind=_engine)
-
-        _apply_migrations(_engine, database_url)
+        _init_engine(sync_url, async_url, db_path)
 
 
 def init_database_from_url(database_url: str) -> None:
@@ -159,106 +207,65 @@ def init_database_from_url(database_url: str) -> None:
     Used by ``serve`` after the parent has resolved the canonical URL from the
     ``DatabaseTarget`` precedence chain and exported it as ``SNORE_DATABASE_URL``.
 
-    For SQLite URLs the path component is extracted via ``make_url().database``
-    (not slash-counting) and used for directory creation.  Non-SQLite URLs
-    (e.g. PostgreSQL) are forwarded once their drivers are installed.
-
     Args:
         database_url: A fully-formed SQLAlchemy URL string.
     """
-    from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
+    from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
-    global _engine, _SessionFactory, _db_path
+    global _engine, _AsyncSessionFactory
 
     with _init_lock:
-        if _engine is not None and _SessionFactory is not None:
+        if _engine is not None and _AsyncSessionFactory is not None:
             return
 
         if not database_url:
             raise ValueError(f"Invalid database URL: {database_url!r}")
 
-        parsed = _make_url(database_url)
-        dialect = parsed.get_backend_name()
+        target = DatabaseTarget.from_url(database_url)
+        sync_url = target.resolve_sync_url()
+        async_url = target.resolve_async_url()
+        db_path = target.sqlite_path if target.is_sqlite else None
 
-        if dialect == "sqlite":
-            # URL.database is the canonical path component regardless of how
-            # many slashes the URL has:
-            #   sqlite:///rel.db      → "rel.db"     (relative)
-            #   sqlite:////abs/p.db   → "/abs/p.db"  (absolute)
-            #   sqlite:///:memory:    → ":memory:"   (in-memory)
-            db_path_str = parsed.database or ""
-            _db_path = db_path_str if db_path_str != ":memory:" else None
-
-            if _db_path:
-                db_dir = os.path.dirname(_db_path)
-                if db_dir:
-                    try:
-                        os.makedirs(db_dir, exist_ok=True)
-                    except PermissionError as e:
-                        raise PermissionError(
-                            f"Cannot create database directory {db_dir}: {e}"
-                        ) from e
-        else:
-            _db_path = None  # non-SQLite; no local path
-
-        _engine = create_engine(
-            database_url,
-            echo=False,
-            connect_args={
-                "check_same_thread": False,
-                "autocommit": False,
-            },
-            pool_pre_ping=True,
-        )
-
-        if dialect == "sqlite":
-            _register_sqlite_pragmas(_engine)
-
-        _SessionFactory = sessionmaker(bind=_engine)
-
-        _apply_migrations(_engine, database_url)
+        _init_engine(sync_url, async_url, db_path)
 
 
-def get_session() -> Session:
-    """
-    Get a new database session.
-
-    Returns:
-        A new SQLAlchemy session.
+def get_session() -> AsyncSession:
+    """Return a new (unstarted) async database session.
 
     Raises:
         RuntimeError: If database has not been initialized.
     """
-    if _SessionFactory is None:
+    if _AsyncSessionFactory is None:
         raise RuntimeError("Database not initialized. Call init_database() first.")
+    return _AsyncSessionFactory()
 
-    return _SessionFactory()
 
+@asynccontextmanager
+async def session_scope() -> AsyncGenerator[AsyncSession]:
+    """Provide a transactional scope for async database operations.
 
-@contextmanager
-def session_scope() -> Generator[Session]:
-    """
-    Provide a transactional scope for database operations.
+    Usage::
 
-    Usage:
-        with session_scope() as session:
+        async with session_scope() as session:
             session.add(obj)
 
+    Commits on success; rolls back on any exception.
+
     Yields:
-        A database session.
+        An async database session.
     """
     session = get_session()
     try:
-        yield session
-        session.commit()
+        async with session.begin():
+            yield session
     except Exception:
-        session.rollback()
+        # begin() rolls back automatically on __aexit__ with an exception.
         raise
     finally:
-        session.close()
+        await session.close()
 
 
-def get_engine() -> Engine:
+def get_engine() -> AsyncEngine:
     """Get the database engine."""
     if _engine is None:
         raise RuntimeError("Database not initialized. Call init_database() first.")
@@ -272,18 +279,54 @@ def get_db_path() -> str:
     return _db_path
 
 
-def cleanup_database() -> None:
+def get_sync_session_for_alembic() -> Session:
+    """Return a synchronous session for Alembic operations only.
+
+    This is intentionally sync — Alembic's migration runner is synchronous.
+    Do NOT use this for application logic.
     """
-    Clean up database connections and reset global state.
+    from sqlalchemy import create_engine  # noqa: PLC0415
+    from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
+
+    if _db_path is None:
+        raise RuntimeError("Database not initialized.")
+    url = f"sqlite:///{_db_path}"
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    factory = sessionmaker(bind=engine)
+    return factory()
+
+
+def get_sync_session() -> Session:
+    """Return a new sync Session bound to the async engine's underlying sync engine.
+
+    Intended for volatile service surfaces (RxTracker, BatchValidator, AnalysisFacade)
+    that still use the sync ORM API during PR-2 while their full async conversion is
+    deferred to a later milestone.  Uses the already-initialised async engine's
+    underlying sync_engine so PRAGMAs and connection settings are inherited.
+
+    Do NOT use this for new code — prefer AsyncSession via get_session().
+
+    Raises:
+        RuntimeError: If the database has not been initialised.
+    """
+    from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
+
+    if _engine is None:
+        raise RuntimeError("Database not initialized. Call init_database() first.")
+    factory = sessionmaker(bind=_engine.sync_engine)
+    return factory()
+
+
+async def cleanup_database() -> None:
+    """Clean up database connections and reset global state.
 
     This function should be called during test cleanup to prevent resource warnings.
-    It properly disposes of the SQLAlchemy engine and resets global variables.
     """
-    global _engine, _SessionFactory, _db_path
+    global _engine, _AsyncSessionFactory, _db_path
 
     with _init_lock:
         if _engine is not None:
-            _engine.dispose()
+            await _engine.dispose()
             _engine = None
-        _SessionFactory = None
+        _AsyncSessionFactory = None
         _db_path = None

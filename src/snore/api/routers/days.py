@@ -13,13 +13,13 @@ DayServiceDep = Annotated[DayService, Depends(service_dep(DayService))]
 
 
 @router.get("/", response_model=PaginatedResponse[DayListItem])
-def list_days(
+async def list_days(
     service: DayServiceDep,
     pagination: PaginationParams = Depends(),
     dates: DateRangeParams = Depends(),
     device_id: int | None = Query(default=None),
 ) -> PaginatedResponse[DayListItem]:
-    items, total = service.list_days(
+    items, total = await service.list_days(
         from_date=dates.from_date,
         to_date=dates.to_date,
         device_id=device_id,
@@ -32,5 +32,5 @@ def list_days(
 
 
 @router.get("/{day_date}", response_model=DayDetail)
-def get_day(day_date: date, service: DayServiceDep) -> DayDetail:
-    return service.get_day(day_date)
+async def get_day(day_date: date, service: DayServiceDep) -> DayDetail:
+    return await service.get_day(day_date)

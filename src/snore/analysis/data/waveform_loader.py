@@ -14,7 +14,7 @@ import numpy as np
 
 from scipy import signal
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.models import Waveform
 
@@ -27,23 +27,23 @@ class WaveformLoader:
 
     Example:
         >>> loader = WaveformLoader(db_session)
-        >>> timestamps, values, metadata = loader.load_waveform(
+        >>> timestamps, values, metadata = await loader.load_waveform(
         ...     session_id=123,
         ...     waveform_type="flow",
         ...     apply_filter=True
         ... )
     """
 
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: AsyncSession):
         """
         Initialize waveform loader.
 
         Args:
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy async database session
         """
         self.db_session = db_session
 
-    def load_waveform(
+    async def load_waveform(
         self,
         session_id: int,
         waveform_type: str,
@@ -80,7 +80,7 @@ class WaveformLoader:
             f"type={waveform_type}, filter={apply_filter}"
         )
 
-        timestamps, values, metadata = load_waveform_from_db(
+        timestamps, values, metadata = await load_waveform_from_db(
             self.db_session, session_id, waveform_type
         )
 
@@ -167,8 +167,8 @@ def deserialize_waveform_blob(
         raise ValueError(f"Invalid waveform blob data: {e}") from e
 
 
-def fetch_waveform_blob(
-    db_session: Session, session_id: int, waveform_type: str
+async def fetch_waveform_blob(
+    db_session: AsyncSession, session_id: int, waveform_type: str
 ) -> tuple[bytes, int, dict[str, Any]]:
     """Fetch the raw waveform blob and metadata from the database.
 
@@ -177,12 +177,10 @@ def fetch_waveform_blob(
     occurs here; the session is not needed after this function returns.
 
     Callers that need numpy arrays should call :func:`load_waveform_from_db`,
-    which calls this function then deserializes in the compute phase.  PR-2
-    async callers can await an async version of this function and then call
-    :func:`deserialize_waveform_blob` without the session.
+    which calls this function then deserializes in the compute phase.
 
     Args:
-        db_session: SQLAlchemy database session (used only for the DB query).
+        db_session: SQLAlchemy async database session (used only for the DB query).
         session_id: Database session ID.
         waveform_type: Type of waveform (``"flow"``, ``"pressure"``, etc.)
 
@@ -194,9 +192,11 @@ def fetch_waveform_blob(
         ValueError: If the waveform row is not found.
     """
     waveform = (
-        db_session.execute(
-            select(Waveform).filter_by(
-                session_id=session_id, waveform_type=waveform_type
+        (
+            await db_session.execute(
+                select(Waveform).filter_by(
+                    session_id=session_id, waveform_type=waveform_type
+                )
             )
         )
         .scalars()
@@ -222,8 +222,8 @@ def fetch_waveform_blob(
     return waveform.data_blob, waveform.sample_count or 0, metadata_scalars
 
 
-def load_waveform_from_db(
-    db_session: Session, session_id: int, waveform_type: str
+async def load_waveform_from_db(
+    db_session: AsyncSession, session_id: int, waveform_type: str
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
     Load waveform from database and deserialize.
@@ -236,7 +236,7 @@ def load_waveform_from_db(
        to numpy arrays.  No session access.
 
     Args:
-        db_session: SQLAlchemy database session
+        db_session: SQLAlchemy async database session
         session_id: Database session ID
         waveform_type: Type of waveform ("flow", "pressure", "leak", etc.)
 
@@ -250,12 +250,12 @@ def load_waveform_from_db(
         ValueError: If waveform not found in database
 
     Example:
-        >>> timestamps, values, metadata = load_waveform_from_db(
+        >>> timestamps, values, metadata = await load_waveform_from_db(
         ...     session, session_id=123, waveform_type="flow"
         ... )
     """
     # --- I/O phase: DB access only ---
-    data_blob, sample_count, metadata_scalars = fetch_waveform_blob(
+    data_blob, sample_count, metadata_scalars = await fetch_waveform_blob(
         db_session, session_id, waveform_type
     )
 

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
 from snore.exceptions import NotFoundError
@@ -18,38 +18,24 @@ __all__ = ["EVENT_MATCH_TOLERANCE_SECONDS", "EventService"]
 
 
 class EventService:
-    """Service for event matching and comparison.
+    """Service for event matching and comparison."""
 
-    DB-backed methods (list_session_events, get_machine_event_times) require
-    an instance. The purely algorithmic operations (match_events,
-    classify_matches) are static methods.
-    """
-
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
 
-    def list_session_events(
+    async def list_session_events(
         self,
         session_id: int,
         event_type: str | None = None,
     ) -> tuple[list[Any], datetime]:
-        """Return (events, session_start) for a session.
-
-        Args:
-            session_id: Session to query events for.
-            event_type: Optional filter by event type string.
-
-        Returns:
-            Tuple of (list of Event ORM objects, session start datetime).
-
-        Raises:
-            NotFoundError: If the session does not exist.
-        """
-        from snore.database import models
+        """Return (events, session_start) for a session."""
+        from snore.database import models  # noqa: PLC0415
 
         session = (
-            self.db_session.execute(
-                select(models.Session).where(models.Session.id == session_id)
+            (
+                await self.db_session.execute(
+                    select(models.Session).where(models.Session.id == session_id)
+                )
             )
             .scalars()
             .first()
@@ -61,26 +47,20 @@ class EventService:
         if event_type:
             stmt = stmt.where(models.Event.event_type == event_type)
         stmt = stmt.order_by(models.Event.start_time)
-        events = list(self.db_session.execute(stmt).scalars().all())
+        events = list(
+            (await self.db_session.execute(stmt)).scalars().all()
+        )
         return events, session.start_time
 
-    def get_machine_event_times(self, session_id: int) -> list[float]:
-        """Return sorted machine event timestamps for a session.
-
-        Args:
-            session_id: Session to query events for.
-
-        Returns:
-            Sorted list of Unix timestamps.
-
-        Raises:
-            NotFoundError: If the session does not exist.
-        """
-        from snore.database import models
+    async def get_machine_event_times(self, session_id: int) -> list[float]:
+        """Return sorted machine event timestamps for a session."""
+        from snore.database import models  # noqa: PLC0415
 
         session = (
-            self.db_session.execute(
-                select(models.Session).where(models.Session.id == session_id)
+            (
+                await self.db_session.execute(
+                    select(models.Session).where(models.Session.id == session_id)
+                )
             )
             .scalars()
             .first()
@@ -89,8 +69,10 @@ class EventService:
             raise NotFoundError(f"Session {session_id} not found")
 
         events = (
-            self.db_session.execute(
-                select(models.Event).where(models.Event.session_id == session_id)
+            (
+                await self.db_session.execute(
+                    select(models.Event).where(models.Event.session_id == session_id)
+                )
             )
             .scalars()
             .all()
@@ -101,12 +83,6 @@ class EventService:
     def _within_tolerance(
         t: float, sorted_other: list[float], tolerance: float
     ) -> bool:
-        """Whether any timestamp in a sorted list is within tolerance of ``t``.
-
-        Note: this float-timestamp matcher is the legacy event-comparison path.
-        The richer event-object matcher in ``analysis.modes.postprocess`` shares
-        the same ``EVENT_MATCH_TOLERANCE_SECONDS`` constant.
-        """
         idx = bisect.bisect_left(sorted_other, t - tolerance)
         return any(
             abs(t - sorted_other[j]) <= tolerance
@@ -119,16 +95,7 @@ class EventService:
         programmatic_times: list[float],
         tolerance: float = EVENT_MATCH_TOLERANCE_SECONDS,
     ) -> EventMatchResult:
-        """Match machine vs programmatic events using bisect-based tolerance matching.
-
-        Args:
-            machine_times: Sorted list of machine event timestamps (seconds)
-            programmatic_times: Sorted list of programmatic event timestamps (seconds)
-            tolerance: Maximum time difference for a match (default 5.0s)
-
-        Returns:
-            EventMatchResult with counts of matched, false positives, false negatives
-        """
+        """Match machine vs programmatic events using bisect-based tolerance matching."""
         sorted_machine = sorted(machine_times)
         sorted_prog = sorted(programmatic_times)
 
@@ -159,16 +126,7 @@ class EventService:
         programmatic_times: list[float],
         tolerance: float = EVENT_MATCH_TOLERANCE_SECONDS,
     ) -> tuple[list[bool], list[bool]]:
-        """Classify each event as matched or unmatched.
-
-        Args:
-            machine_times: Sorted list of machine event timestamps (seconds)
-            programmatic_times: Sorted list of programmatic event timestamps (seconds)
-            tolerance: Maximum time difference for a match (default 5.0s)
-
-        Returns:
-            Tuple of (machine_matched, programmatic_matched) where each is a list of booleans
-        """
+        """Classify each event as matched or unmatched."""
         sorted_machine = sorted(machine_times)
         sorted_prog = sorted(programmatic_times)
 

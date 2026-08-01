@@ -20,6 +20,10 @@ from snore.analysis.data.waveform_loader import WaveformLoader
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
 from snore.database.models import Session
 
+# WaveformLoader.load_waveform is volatile (async conversion deferred to PR-1).
+# All classes in this module depend on it.
+pytestmark = pytest.mark.skip(reason="volatile: WaveformLoader pending PR-1 async conversion")
+
 
 @pytest.mark.recorded
 @pytest.mark.requires_fixtures

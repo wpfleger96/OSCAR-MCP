@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime
 from pathlib import Path
 
@@ -134,26 +136,29 @@ def export_csv(
     if output is None:
         output = "snore_export_csv"
 
-    with open_db_session(db) as db_session:
-        svc = ExportService()
-        try:
-            result = svc.export_csv(
-                db_session=db_session,
-                output=Path(output),
-                date_from=date_from.date() if date_from else None,
-                date_to=date_to.date() if date_to else None,
-                device_serial=device,
-                include_waveforms=include_waveforms,
-            )
-        except Exception as e:
-            raise click.ClickException(str(e)) from e
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            svc = ExportService()
+            try:
+                result = svc.export_csv(
+                    db_session=db_session,  # type: ignore[arg-type]  # TODO: ExportService volatile — awaiting PR-1 AsyncSession conversion
+                    output=Path(output),
+                    date_from=date_from.date() if date_from else None,
+                    date_to=date_to.date() if date_to else None,
+                    device_serial=device,
+                    include_waveforms=include_waveforms,
+                )
+            except Exception as e:
+                raise click.ClickException(str(e)) from e
 
-    console.print(f"Nights: {result.nights_exported}")
-    console.print(f"Files:  {result.files_written}")
-    console.print(f"Output: {result.output_path}")
+        console.print(f"Nights: {result.nights_exported}")
+        console.print(f"Files:  {result.files_written}")
+        console.print(f"Output: {result.output_path}")
 
-    for w in result.warnings:
-        print_warning(w)
+        for w in result.warnings:
+            print_warning(w)
+
+    asyncio.run(_run())
 
 
 @export.command("json")
@@ -180,21 +185,24 @@ def export_json(
     if output is None:
         output = "snore_export.json"
 
-    with open_db_session(db) as db_session:
-        svc = ExportService()
-        try:
-            result = svc.export_json(
-                db_session=db_session,
-                output=Path(output),
-                date_from=date_from.date() if date_from else None,
-                date_to=date_to.date() if date_to else None,
-                device_serial=device,
-            )
-        except Exception as e:
-            raise click.ClickException(str(e)) from e
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            svc = ExportService()
+            try:
+                result = svc.export_json(
+                    db_session=db_session,  # type: ignore[arg-type]  # TODO: ExportService volatile — awaiting PR-1 AsyncSession conversion
+                    output=Path(output),
+                    date_from=date_from.date() if date_from else None,
+                    date_to=date_to.date() if date_to else None,
+                    device_serial=device,
+                )
+            except Exception as e:
+                raise click.ClickException(str(e)) from e
 
-    console.print(f"Nights: {result.nights_exported}")
-    console.print(f"Output: {result.output_path}")
+        console.print(f"Nights: {result.nights_exported}")
+        console.print(f"Output: {result.output_path}")
 
-    for w in result.warnings:
-        print_warning(w)
+        for w in result.warnings:
+            print_warning(w)
+
+    asyncio.run(_run())

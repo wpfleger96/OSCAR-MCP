@@ -4,7 +4,7 @@ from bisect import bisect_right
 from datetime import date, timedelta
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.calculations import (
     PeriodType,
@@ -24,32 +24,16 @@ __all__ = ["StatsService"]
 class StatsService:
     """Service for therapy statistics computation and analysis."""
 
-    def __init__(self, db_session: Session):
-        """
-        Initialize statistics service.
-
-        Args:
-            db_session: SQLAlchemy database session
-        """
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
 
-    def _query_days(
+    async def _query_days(
         self,
         days_limit: int | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> list[models.Day]:
-        """
-        Query Day records, optionally filtered by date range or rolling window.
-
-        Args:
-            days_limit: Only include days within the last N days from today
-            from_date: Only include days on or after this date
-            to_date: Only include days on or before this date
-
-        Returns:
-            List of Day records
-        """
+        """Query Day records, optionally filtered by date range or rolling window."""
         query = select(models.Day)
         if days_limit:
             cutoff_date = date.today() - timedelta(days=days_limit)
@@ -58,26 +42,16 @@ class StatsService:
             query = query.where(models.Day.date >= from_date)
         if to_date is not None:
             query = query.where(models.Day.date <= to_date)
-        return list(self.db_session.execute(query).scalars().all())
+        return list((await self.db_session.execute(query)).scalars().all())
 
-    def get_summary(
+    async def get_summary(
         self,
         days_limit: int | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> TherapySummary | None:
-        """
-        Compute aggregated therapy summary statistics.
-
-        Args:
-            days_limit: Only include days within the last N days from today
-            from_date: Only include days on or after this date
-            to_date: Only include days on or before this date
-
-        Returns:
-            TherapySummary with all computed metrics, or None if no data
-        """
-        day_records = self._query_days(days_limit, from_date=from_date, to_date=to_date)
+        """Compute aggregated therapy summary statistics."""
+        day_records = await self._query_days(days_limit, from_date=from_date, to_date=to_date)
 
         if not day_records:
             return None
@@ -90,10 +64,12 @@ class StatsService:
         day_ids = [d.id for d in day_records]
         days_with_data = len(day_records)
 
-        total_duration = self.db_session.execute(
-            select(func.sum(models.Session.duration_seconds))
-            .join(models.Day)
-            .where(models.Day.id.in_(day_ids))
+        total_duration = (
+            await self.db_session.execute(
+                select(func.sum(models.Session.duration_seconds))
+                .join(models.Day)
+                .where(models.Day.id.in_(day_ids))
+            )
         ).scalar()
         total_hours = (total_duration or 0) / 3600
         avg_hours = total_hours / days_with_data if days_with_data > 0 else 0
@@ -101,7 +77,6 @@ class StatsService:
         avg_ahi = calculate_average_ahi(day_records)
         effectiveness = assess_therapy_effectiveness(avg_ahi) if avg_ahi else "unknown"
 
-        # Compute AHI trend over weekly period aggregates (matches CLI behavior)
         weekly_periods = calculate_period_statistics(day_records, "week")
         weekly_ahi_values = [
             ps.avg_ahi for ps in weekly_periods if ps.avg_ahi is not None
@@ -125,16 +100,18 @@ class StatsService:
         spo2_mins = [d.spo2_min for d in day_records if d.spo2_min is not None]
         min_spo2 = min(spo2_mins) if spo2_mins else None
 
-        event_counts = self.db_session.execute(
-            select(
-                models.Event.event_type,
-                func.count(models.Event.id).label("count"),
+        event_counts = (
+            await self.db_session.execute(
+                select(
+                    models.Event.event_type,
+                    func.count(models.Event.id).label("count"),
+                )
+                .join(models.Session)
+                .join(models.Day)
+                .where(models.Day.id.in_(day_ids))
+                .group_by(models.Event.event_type)
+                .order_by(func.count(models.Event.id).desc())
             )
-            .join(models.Session)
-            .join(models.Day)
-            .where(models.Day.id.in_(day_ids))
-            .group_by(models.Event.event_type)
-            .order_by(func.count(models.Event.id).desc())
         ).all()
 
         total_events = sum(count for _, count in event_counts)
@@ -148,31 +125,25 @@ class StatsService:
         ]
 
         stats_records = (
-            self.db_session.execute(
-                select(models.Statistics)
-                .join(models.Session)
-                .join(models.Day)
-                .where(models.Day.id.in_(day_ids))
+            (
+                await self.db_session.execute(
+                    select(models.Statistics)
+                    .join(models.Session)
+                    .join(models.Day)
+                    .where(models.Day.id.in_(day_ids))
+                )
             )
             .scalars()
             .all()
         )
 
         weighted_sums: dict[str, float] = {
-            "rr": 0.0,
-            "tv": 0.0,
-            "mv": 0.0,
-            "pulse": 0.0,
-            "rei": 0.0,
-            "epap": 0.0,
+            "rr": 0.0, "tv": 0.0, "mv": 0.0,
+            "pulse": 0.0, "rei": 0.0, "epap": 0.0,
         }
         usage_hours_for: dict[str, float] = {
-            "rr": 0.0,
-            "tv": 0.0,
-            "mv": 0.0,
-            "pulse": 0.0,
-            "rei": 0.0,
-            "epap": 0.0,
+            "rr": 0.0, "tv": 0.0, "mv": 0.0,
+            "pulse": 0.0, "rei": 0.0, "epap": 0.0,
         }
         total_spo2_time_below_90 = 0
 
@@ -228,65 +199,42 @@ class StatsService:
             event_counts=event_type_counts,
         )
 
-    def get_period_statistics(
+    async def get_period_statistics(
         self,
         period_type: PeriodType,
         days_limit: int | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> list[PeriodStatistics]:
-        """
-        Calculate statistics grouped by time periods.
-
-        Args:
-            period_type: One of 'day', 'week', 'month', '6month', 'year'
-            days_limit: Only include days within the last N days from today
-            from_date: Only include days on or after this date
-            to_date: Only include days on or before this date
-
-        Returns:
-            List of PeriodStatistics for each period
-        """
-        day_records = self._query_days(days_limit, from_date=from_date, to_date=to_date)
+        """Calculate statistics grouped by time periods."""
+        day_records = await self._query_days(days_limit, from_date=from_date, to_date=to_date)
         return calculate_period_statistics(day_records, period_type)
 
-    def _aggregate_session_stats_per_period(
+    async def _aggregate_session_stats_per_period(
         self,
         day_records: list[models.Day],
         period_stats: list[PeriodStatistics],
     ) -> dict[date, dict[str, float | None]]:
-        """
-        Compute usage-weighted session-level means per period.
-
-        Issues one Statistics query joined through Session→Day, then buckets each
-        row into its period using the passed period_stats boundaries.  The returned
-        dict is keyed by period_start and contains sub-keys epap, rr, pulse, mv.
-
-        Args:
-            day_records: Day records already queried for this request
-            period_stats: Period statistics whose period_start values become dict keys
-
-        Returns:
-            Dict mapping period_start → {epap, rr, pulse, mv} (None when no data)
-        """
+        """Compute usage-weighted session-level means per period."""
         if not day_records or not period_stats:
             return {
                 ps.period_start: {"epap": None, "rr": None, "pulse": None, "mv": None}
                 for ps in period_stats
             }
 
-        # Sort period boundaries for O(log P) lookup per Statistics row.
         sorted_starts = sorted(ps.period_start for ps in period_stats)
         period_end_by_start: dict[date, date] = {
             ps.period_start: ps.period_end for ps in period_stats
         }
 
         day_ids = [d.id for d in day_records]
-        rows = self.db_session.execute(
-            select(models.Statistics, models.Day.date)
-            .join(models.Session, models.Statistics.session_id == models.Session.id)
-            .join(models.Day, models.Session.day_id == models.Day.id)
-            .where(models.Day.id.in_(day_ids))
+        rows = (
+            await self.db_session.execute(
+                select(models.Statistics, models.Day.date)
+                .join(models.Session, models.Statistics.session_id == models.Session.id)
+                .join(models.Day, models.Session.day_id == models.Day.id)
+                .where(models.Day.id.in_(day_ids))
+            )
         ).all()
 
         _KEYS = ["epap", "rr", "pulse", "mv"]
@@ -339,45 +287,24 @@ class StatsService:
 
         return result
 
-    def get_trends(
+    async def get_trends(
         self,
         period_type: PeriodType,
         days_limit: int | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> dict[str, list[tuple[date, float | None]]]:
-        """
-        Compute extended trend data for the requested period granularity.
-
-        Args:
-            period_type: One of 'day', 'week', 'month', '6month', 'year'
-            days_limit: Only include days within the last N days from today
-            from_date: Only include days on or after this date
-            to_date: Only include days on or before this date
-
-        Returns:
-            Dictionary with 13 metric keys, each a list of (date, value) tuples:
-            ahi, usage, spo2, leak, pressure, oai, cai, hi, rera, epap, rr, pulse, mv
-        """
-        day_records = self._query_days(days_limit, from_date=from_date, to_date=to_date)
+        """Compute extended trend data for the requested period granularity."""
+        day_records = await self._query_days(days_limit, from_date=from_date, to_date=to_date)
         period_stats = calculate_period_statistics(day_records, period_type)
-        session_extras = self._aggregate_session_stats_per_period(
+        session_extras = await self._aggregate_session_stats_per_period(
             day_records, period_stats
         )
         return calculate_trends_extended(period_stats, session_extras)
 
-    def get_records(
+    async def get_records(
         self, days_limit: int | None = None, top_n: int = 5
     ) -> dict[str, dict[str, list[tuple[date, float]]]]:
-        """
-        Calculate top best/worst days for key metrics.
-
-        Args:
-            days_limit: Only include days within the last N days from today
-            top_n: Number of records to return
-
-        Returns:
-            Dictionary mapping metric names to best/worst records
-        """
-        day_records = self._query_days(days_limit)
+        """Calculate top best/worst days for key metrics."""
+        day_records = await self._query_days(days_limit)
         return calculate_records(day_records, top_n)

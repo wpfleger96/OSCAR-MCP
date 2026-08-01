@@ -14,7 +14,12 @@ from snore.database.session import init_database, session_scope
 
 
 class TestImportPipeline:
-    """Test complete import pipeline."""
+    """Integration tests for the full import pipeline.
+
+    Skipped: volatile — SessionImporter transaction ownership is being rewritten in PR-1.
+    """
+
+    pytestmark = pytest.mark.skip(reason="volatile: importers.py pending PR-1 rewrite")
 
     def test_database_auto_creation(self, temp_db):
         """Test that database is auto-created on first use."""

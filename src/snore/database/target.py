@@ -227,6 +227,29 @@ class DatabaseTarget:
         resolved = self._parsed_url.set(drivername=f"{self.dialect}+{driver}")
         return str(resolved)
 
+    def resolve_async_url(self) -> str:
+        """Return the async SQLAlchemy URL for this target.
+
+        PR-2: ``sqlite → aiosqlite``.  PostgreSQL async (asyncpg) is declared
+        in ``_FUTURE_ASYNC_DRIVERS`` but remains capability-gated until the
+        hosted milestone.
+
+        Returns:
+            SQLAlchemy URL string usable with ``create_async_engine()``.
+
+        Raises:
+            RuntimeError: If the dialect has no installed async driver.
+        """
+        # Only sqlite is installed in PR-2; postgresql async is future.
+        _ASYNC_RUNTIME_DRIVERS: dict[str, str] = {
+            "sqlite": "aiosqlite",
+        }
+        if self.dialect not in _ASYNC_RUNTIME_DRIVERS:
+            raise RuntimeError(_CAPABILITY_ERROR)
+        driver = _ASYNC_RUNTIME_DRIVERS[self.dialect]
+        resolved = self._parsed_url.set(drivername=f"{self.dialect}+{driver}")
+        return str(resolved)
+
     @property
     def is_sqlite(self) -> bool:
         """True if this target is a SQLite database."""
