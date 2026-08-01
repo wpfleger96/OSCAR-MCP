@@ -423,7 +423,7 @@ class TestServeCommandEnvExport:
                     pass  # Startup + immediate shutdown
 
         asyncio.run(run_lifespan())
-        cleanup_database()
+        asyncio.run(cleanup_database())
 
         # The flagged database file must exist on disk — the lifespan opened it.
         assert (tmp_path / "lifespan_test.db").exists(), (

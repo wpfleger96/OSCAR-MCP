@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import date
 from io import StringIO
 from typing import Any
@@ -31,7 +31,7 @@ def _make_mock_sessions(count: int) -> list[MagicMock]:
 def _make_session_scope(mock_sessions: list[MagicMock]) -> Any:
     """Return an async context-manager factory whose execute() chain yields mock_sessions.
 
-    The mock is configured so that session.execute(stmt).yield_per(n) returns mock rows
+    The mock is configured so that (await session.execute(stmt)).all() returns mock rows
     with .session_id and .day_date attributes, matching the SQLAlchemy 2.0 style used
     by AnalysisFacade.run_batch_analysis().
     """
@@ -44,8 +44,8 @@ def _make_session_scope(mock_sessions: list[MagicMock]) -> Any:
         mock_rows.append(row)
 
     execute_result = MagicMock()
-    # yield_per returns an iterable — use __iter__ to make it work with list()
-    execute_result.yield_per.return_value = iter(mock_rows)
+    # run_batch_analysis calls (await session.execute(stmt)).all()
+    execute_result.all.return_value = mock_rows
 
     mock_db_session = MagicMock()
     # execute must be awaitable since run_batch_analysis uses `await session.execute()`
@@ -81,9 +81,17 @@ class TestAnalyzeBatch:
         mock_raw = MagicMock()  # Represents RawSessionBlobs
 
         runner = CliRunner()
+        # sync_scope is for BatchAnalysisCoordinator workers (sync with session_scope)
+        mock_worker_session = MagicMock()
+
+        @contextmanager
+        def sync_scope():
+            yield mock_worker_session
+
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
+            patch("snore.database.session.sync_session_scope", sync_scope),
             patch(
                 "snore.analysis.service.AnalysisService.load_session_inputs_raw",
                 return_value=mock_raw,
@@ -112,9 +120,6 @@ class TestAnalyzeBatch:
         assert "3" in captured
         assert "0" in captured
 
-    @pytest.mark.skip(
-        reason="volatile: AnalysisFacade.analyze_one uses session_scope() sync — awaiting PR-1 AsyncSession conversion"
-    )
     def test_analyze_batch_partial_failure_reports_failed_session_id(self):
         """When one session raises an error, stderr names the failed session and counts are correct."""
         mock_sessions = _make_mock_sessions(3)
@@ -139,10 +144,17 @@ class TestAnalyzeBatch:
             file=stderr_buf, stderr=True, force_terminal=False, width=120
         )
 
+        mock_worker_session_pf = MagicMock()
+
+        @contextmanager
+        def sync_scope_pf():
+            yield mock_worker_session_pf
+
         runner = CliRunner()
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
+            patch("snore.database.session.sync_session_scope", sync_scope_pf),
             patch(
                 "snore.analysis.service.AnalysisService.load_session_inputs_raw",
                 load_side_effect,
@@ -210,9 +222,16 @@ class TestAnalyzeBatch:
         mock_raw = MagicMock()
 
         runner = CliRunner()
+        mock_worker_session2 = MagicMock()
+
+        @contextmanager
+        def sync_scope2():
+            yield mock_worker_session2
+
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
+            patch("snore.database.session.sync_session_scope", sync_scope2),
             patch(
                 "snore.analysis.service.AnalysisService.load_session_inputs_raw",
                 return_value=mock_raw,
@@ -283,7 +302,7 @@ class TestBatchCoordinatorHandle:
         mock_result = MagicMock()
         mock_raw = MagicMock()
 
-        monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
+        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
         monkeypatch.setattr(
             "snore.analysis.service.AnalysisService.load_session_inputs_raw",
             lambda *a, **kw: mock_raw,
@@ -316,9 +335,7 @@ class TestBatchCoordinatorHandle:
         assert total == 1
         assert completed == 1
 
-    def test_coordinator_cancel_stops_remaining_sessions(
-        self, db_session, test_device, monkeypatch
-    ):
+    def test_coordinator_cancel_stops_remaining_sessions(self, monkeypatch):
         """Calling coord.cancel() before submit starts causes sessions to be skipped.
 
         ``cancel()`` sets the flag; ``submit()`` does NOT clear a pre-set flag.

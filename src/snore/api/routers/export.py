@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from snore.api.deps import get_db
+from snore.api.deps import sync_get_db
 from snore.services.export_service import ExportService
 
 router = APIRouter()
@@ -42,7 +42,7 @@ def _streaming_export(
 
 @router.get("/csv")
 def export_csv(
-    db: Session = Depends(get_db),
+    db: Session = Depends(sync_get_db),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     device: str | None = Query(default=None),
@@ -64,7 +64,7 @@ def export_csv(
 
 @router.get("/json")
 def export_json(
-    db: Session = Depends(get_db),
+    db: Session = Depends(sync_get_db),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     device: str | None = Query(default=None),

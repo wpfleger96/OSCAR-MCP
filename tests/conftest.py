@@ -294,3 +294,30 @@ def recorded_session(db_session):
             pytest.skip(f"Fixture {session_id} not available: {e}")
 
     return _load
+
+
+@pytest.fixture
+def async_recorded_session(async_db_session):
+    """Async factory for loading recorded session fixtures by YYYYMMDD ID.
+
+    Usage:
+        async def test_something(self, async_recorded_session):
+            db, session = await async_recorded_session("20250808")
+            # db is the AsyncSession, session is the CPAPSession ORM object
+
+    Available sessions:
+        - 20250110: Early therapy session (January 2025)
+        - 20250808: Baseline session (August 2025)
+        - 20250910: Multi-segment session (September 2025, 4 therapy segments)
+        - 20251025: Event detection test session (October 2025)
+    """
+    from tests.helpers.fixtures_loader import async_import_to_test_db
+
+    async def _load(session_id: str) -> Any:
+        try:
+            session = await async_import_to_test_db(session_id, async_db_session)
+            return async_db_session, session
+        except (ValueError, FileNotFoundError) as e:
+            pytest.skip(f"Fixture {session_id} not available: {e}")
+
+    return _load

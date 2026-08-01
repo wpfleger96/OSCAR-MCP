@@ -117,13 +117,14 @@ class TestSTRSettingsParsing:
         assert session.settings is not None, "Session should have settings"
         assert session.settings.mode is not None, "Settings should have mode"
 
-    @pytest.mark.skip(reason="volatile: SessionImporter pending PR-1 rewrite")
     @pytest.mark.parser
     @pytest.mark.integration
-    def test_settings_imported_to_database(
+    async def test_settings_imported_to_database(
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test that settings are stored in database after import."""
+        from sqlalchemy import select
+
         from snore.database import models
         from snore.database.importers import import_session
         from snore.database.session import init_database, session_scope
@@ -135,10 +136,10 @@ class TestSTRSettingsParsing:
 
         session = sessions[0]
         assert session.settings is not None, "Session should have settings"
-        import_session(session)
+        await import_session(session)
 
-        with session_scope() as db:
-            settings = db.query(models.Setting).all()
+        async with session_scope() as db:
+            settings = (await db.execute(select(models.Setting))).scalars().all()
             assert len(settings) > 0, "Settings should be imported to database"
 
             keys = {s.key for s in settings}

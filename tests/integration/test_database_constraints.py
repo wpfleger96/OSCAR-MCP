@@ -255,14 +255,11 @@ class TestForeignKeyConstraints:
             assert waveforms_after == 0, "Waveforms should be deleted via CASCADE"
 
 
-@pytest.mark.skip(
-    reason="volatile: calls SessionImporter.cleanup_orphaned_records which uses "
-    "sync Session API; importers.py pending transaction ownership rewrite"
-)
+@pytest.mark.asyncio
 class TestOrphanedRecordCleanup:
     """Test orphaned record detection and cleanup functionality."""
 
-    def test_cleanup_orphaned_events(self, temp_db):
+    async def test_cleanup_orphaned_events(self, temp_db):
         """Test cleanup of orphaned event records."""
         init_database(str(temp_db))
 
@@ -280,21 +277,26 @@ class TestOrphanedRecordCleanup:
         finally:
             raw.close()
 
-        with session_scope() as session:
-            orphaned_before = session.execute(
-                text("SELECT COUNT(*) FROM events WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM events WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_before == 1
 
-            cleaned = SessionImporter.cleanup_orphaned_records(session)
+            cleaned = await SessionImporter.cleanup_orphaned_records(session)
             assert cleaned >= 1
 
-            orphaned_after = session.execute(
-                text("SELECT COUNT(*) FROM events WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM events WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_after == 0
 
-    def test_cleanup_orphaned_statistics(self, temp_db):
+    async def test_cleanup_orphaned_statistics(self, temp_db):
         """Test cleanup of orphaned statistics records."""
         init_database(str(temp_db))
 
@@ -310,21 +312,26 @@ class TestOrphanedRecordCleanup:
         finally:
             raw.close()
 
-        with session_scope() as session:
-            orphaned_before = session.execute(
-                text("SELECT COUNT(*) FROM statistics WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM statistics WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_before == 1
 
-            cleaned = SessionImporter.cleanup_orphaned_records(session)
+            cleaned = await SessionImporter.cleanup_orphaned_records(session)
             assert cleaned >= 1
 
-            orphaned_after = session.execute(
-                text("SELECT COUNT(*) FROM statistics WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM statistics WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_after == 0
 
-    def test_cleanup_orphaned_settings(self, temp_db):
+    async def test_cleanup_orphaned_settings(self, temp_db):
         """Test cleanup of orphaned settings records."""
         init_database(str(temp_db))
 
@@ -338,21 +345,26 @@ class TestOrphanedRecordCleanup:
         finally:
             raw.close()
 
-        with session_scope() as session:
-            orphaned_before = session.execute(
-                text("SELECT COUNT(*) FROM settings WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM settings WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_before == 1
 
-            cleaned = SessionImporter.cleanup_orphaned_records(session)
+            cleaned = await SessionImporter.cleanup_orphaned_records(session)
             assert cleaned >= 1
 
-            orphaned_after = session.execute(
-                text("SELECT COUNT(*) FROM settings WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM settings WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_after == 0
 
-    def test_cleanup_orphaned_waveforms(self, temp_db):
+    async def test_cleanup_orphaned_waveforms(self, temp_db):
         """Test cleanup of orphaned waveform records."""
         init_database(str(temp_db))
 
@@ -367,21 +379,26 @@ class TestOrphanedRecordCleanup:
         finally:
             raw.close()
 
-        with session_scope() as session:
-            orphaned_before = session.execute(
-                text("SELECT COUNT(*) FROM waveforms WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_before = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM waveforms WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_before == 1
 
-            cleaned = SessionImporter.cleanup_orphaned_records(session)
+            cleaned = await SessionImporter.cleanup_orphaned_records(session)
             assert cleaned >= 1
 
-            orphaned_after = session.execute(
-                text("SELECT COUNT(*) FROM waveforms WHERE session_id = 999")
+        async with session_scope() as session:
+            orphaned_after = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM waveforms WHERE session_id = 999")
+                )
             ).scalar()
             assert orphaned_after == 0
 
-    def test_cleanup_multiple_orphaned_records(self, temp_db):
+    async def test_cleanup_multiple_orphaned_records(self, temp_db):
         """Test cleanup of multiple orphaned records across tables."""
         init_database(str(temp_db))
 
@@ -404,28 +421,35 @@ class TestOrphanedRecordCleanup:
         finally:
             raw.close()
 
-        with session_scope() as session:
-            cleaned = SessionImporter.cleanup_orphaned_records(session)
+        async with session_scope() as session:
+            cleaned = await SessionImporter.cleanup_orphaned_records(session)
             assert cleaned == 3
 
-            total_orphaned = session.execute(
-                text("SELECT COUNT(*) FROM events WHERE session_id = 999")
+        async with session_scope() as session:
+            total_orphaned = (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM events WHERE session_id = 999")
+                )
             ).scalar()
-            total_orphaned += session.execute(
-                text("SELECT COUNT(*) FROM statistics WHERE session_id = 999")
+            total_orphaned += (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM statistics WHERE session_id = 999")
+                )
             ).scalar()
-            total_orphaned += session.execute(
-                text("SELECT COUNT(*) FROM settings WHERE session_id = 999")
+            total_orphaned += (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM settings WHERE session_id = 999")
+                )
             ).scalar()
 
             assert total_orphaned == 0
 
-    def test_cleanup_no_orphaned_records(self, temp_db):
+    async def test_cleanup_no_orphaned_records(self, temp_db):
         """Test cleanup returns 0 when no orphaned records exist."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            cleaned = SessionImporter.cleanup_orphaned_records(session)
+        async with session_scope() as session:
+            cleaned = await SessionImporter.cleanup_orphaned_records(session)
             assert cleaned == 0
 
 

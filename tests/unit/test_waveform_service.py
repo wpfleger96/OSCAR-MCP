@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -390,8 +391,9 @@ class TestCompareEvents:
         await async_db_session.flush()
 
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.get_analysis_result",
-            lambda self, sid: None,
+            WaveformService,
+            "_load_analysis_result",
+            AsyncMock(return_value=None),
         )
         service = WaveformService(async_db_session)
         with pytest.raises(NotFoundError, match="No analysis results"):
@@ -413,8 +415,9 @@ class TestCompareEvents:
 
         fake_result = _make_analysis_result(mode="aasm")
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.get_analysis_result",
-            lambda self, sid: fake_result,
+            WaveformService,
+            "_load_analysis_result",
+            AsyncMock(return_value=fake_result),
         )
         service = WaveformService(async_db_session)
         with pytest.raises(NotFoundError, match="Mode.*not found"):
@@ -436,8 +439,9 @@ class TestCompareEvents:
 
         fake_result = _make_analysis_result()
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.get_analysis_result",
-            lambda self, sid: fake_result,
+            WaveformService,
+            "_load_analysis_result",
+            AsyncMock(return_value=fake_result),
         )
         monkeypatch.setattr(
             "snore.analysis.utils.convert_machine_events",
@@ -468,8 +472,9 @@ class TestCompareEvents:
         m_event = _make_machine_event(start_time=100.0, event_type="OA")
         fake_result = _make_analysis_result(machine_events=[m_event])
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.get_analysis_result",
-            lambda self, sid: fake_result,
+            WaveformService,
+            "_load_analysis_result",
+            AsyncMock(return_value=fake_result),
         )
         monkeypatch.setattr(
             "snore.analysis.utils.convert_machine_events",
@@ -499,8 +504,9 @@ class TestCompareEvents:
         prog_event = _make_event(start_time=200.0, event_type="OA")
         fake_result = _make_analysis_result(apneas=[prog_event])
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.get_analysis_result",
-            lambda self, sid: fake_result,
+            WaveformService,
+            "_load_analysis_result",
+            AsyncMock(return_value=fake_result),
         )
         monkeypatch.setattr(
             "snore.analysis.utils.convert_machine_events",
@@ -533,8 +539,9 @@ class TestCompareEvents:
             machine_events=[m_event], apneas=[prog_event]
         )
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.get_analysis_result",
-            lambda self, sid: fake_result,
+            WaveformService,
+            "_load_analysis_result",
+            AsyncMock(return_value=fake_result),
         )
         monkeypatch.setattr(
             "snore.analysis.utils.convert_machine_events",

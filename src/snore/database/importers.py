@@ -14,8 +14,8 @@ Transaction ownership (§6)
 
 Bulk strategy (frozen in §7/PR-2)
 -----------------------------------
-Waveforms, events, and settings use ``bulk_save_objects`` (no post-insert PK
-reads; matches previous behaviour).  Statistics uses ``db.add()`` because it
+Waveforms, events, and settings use ``add_all`` (replaces ``bulk_save_objects``
+which is not available on AsyncSession).  Statistics uses ``add()`` because it
 has a single row per session and is used via the identity map.
 """
 
@@ -28,8 +28,8 @@ from datetime import UTC, datetime
 
 import numpy as np
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.database.day_manager import DayManager
@@ -74,7 +74,7 @@ class SessionImporter:
         pass
 
     @staticmethod
-    def cleanup_orphaned_records(db: Session) -> int:
+    async def cleanup_orphaned_records(db: AsyncSession) -> int:
         """
         Remove orphaned records from child tables that reference non-existent sessions.
 
@@ -84,13 +84,11 @@ class SessionImporter:
         SQL, no internal commit (the caller's transaction owns commit/rollback).
 
         Args:
-            db: SQLAlchemy session (caller owns the transaction)
+            db: SQLAlchemy async session (caller owns the transaction)
 
         Returns:
             Number of orphaned records removed
         """
-        from sqlalchemy import delete  # noqa: PLC0415
-
         orphan_tables = [
             models.Setting,
             models.Event,
@@ -105,7 +103,7 @@ class SessionImporter:
                     select(models.Session.id)
                 )
             )
-            result = db.execute(stmt)
+            result = await db.execute(stmt)
             count = result.rowcount if hasattr(result, "rowcount") else 0
             if count > 0:
                 logger.debug(
@@ -116,8 +114,8 @@ class SessionImporter:
         # No db.commit() — caller owns the transaction boundary.
         return total_cleaned
 
-    def _import_single_session(
-        self, db: Session, session_data: UnifiedSession, force: bool = False
+    async def _import_single_session(
+        self, db: AsyncSession, session_data: UnifiedSession, force: bool = False
     ) -> tuple[bool, int | None]:
         """
         Import a single session. Returns (imported, day_id).
@@ -127,7 +125,7 @@ class SessionImporter:
         isolation must wrap each call in ``db.begin_nested()``.
 
         Args:
-            db: SQLAlchemy database session
+            db: SQLAlchemy async database session
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
 
@@ -137,7 +135,7 @@ class SessionImporter:
         stmt = select(models.Device).filter_by(
             serial_number=session_data.device_info.serial_number
         )
-        device = db.execute(stmt).scalars().first()
+        device = (await db.execute(stmt)).scalars().first()
 
         if device:
             device.manufacturer = session_data.device_info.manufacturer
@@ -156,13 +154,13 @@ class SessionImporter:
                 product_code=session_data.device_info.product_code,
             )
             db.add(device)
-            db.flush()
+            await db.flush()
 
         existing_stmt = select(models.Session).filter_by(
             device_id=device.id,
             device_session_id=session_data.device_session_id,
         )
-        existing = db.execute(existing_stmt).scalars().first()
+        existing = (await db.execute(existing_stmt)).scalars().first()
 
         if existing and not force:
             logger.debug(
@@ -172,8 +170,8 @@ class SessionImporter:
 
         if existing and force:
             logger.debug(f"Force re-importing session {session_data.device_session_id}")
-            db.delete(existing)
-            db.flush()
+            await db.delete(existing)
+            await db.flush()
 
         notes_json = (
             json.dumps(session_data.data_quality_notes)
@@ -198,10 +196,10 @@ class SessionImporter:
             has_statistics=session_data.has_statistics,
         )
         db.add(new_session)
-        db.flush()
+        await db.flush()
 
         day_date = DayManager.get_day_for_session(session_data.start_time)
-        day = DayManager.get_or_create_day(device.id, day_date, db)
+        day = await DayManager.get_or_create_day(device.id, day_date, db)
         new_session.day_id = day.id
         day_id = day.id
 
@@ -222,10 +220,10 @@ class SessionImporter:
         )
         return True, day_id
 
-    def import_session(
-        self, session_data: UnifiedSession, force: bool = False, *, db: Session
+    async def import_session(
+        self, session_data: UnifiedSession, force: bool = False, *, db: AsyncSession
     ) -> bool:
-        """Import a complete session using a caller-provided session.
+        """Import a complete session using a caller-provided async session.
 
         The caller owns the UoW — this method uses only ``begin_nested()``
         savepoints via ``import_sessions_batch``.  No ``session_scope()`` is
@@ -235,12 +233,12 @@ class SessionImporter:
         Args:
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
-            db: Required caller-provided session.
+            db: Required caller-provided async session.
 
         Returns:
             True if imported, False if skipped (already exists)
         """
-        imported, _skipped, _failed = self.import_sessions_batch(
+        imported, _skipped, _failed = await self.import_sessions_batch(
             [session_data],
             force=force,
             batch_size=1,
@@ -248,7 +246,7 @@ class SessionImporter:
         )
         return imported > 0
 
-    def import_sessions_batch(
+    async def import_sessions_batch(
         self,
         sessions: Iterable[UnifiedSession],
         force: bool = False,
@@ -256,7 +254,7 @@ class SessionImporter:
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
         *,
-        db: Session,
+        db: AsyncSession,
     ) -> tuple[int, int, int]:
         """
         Import multiple sessions in batched transactions with per-session savepoints.
@@ -313,7 +311,12 @@ class SessionImporter:
             logger.debug(f"Importing batch {batch_num} ({len(batch)} sessions)")
 
             # Caller-owned transaction: use savepoints only.
-            imported, skipped, failed, batch_day_ids = self._import_batch_with_session(
+            (
+                imported,
+                skipped,
+                failed,
+                batch_day_ids,
+            ) = await self._import_batch_with_session(
                 db,
                 batch,
                 force,
@@ -325,15 +328,15 @@ class SessionImporter:
             )
             if batch_day_ids:
                 for day_id in batch_day_ids:
-                    day_record = db.get(models.Day, day_id)
+                    day_record = await db.get(models.Day, day_id)
                     if day_record:
-                        DayManager._aggregate_day_statistics(day_record, db)
+                        await DayManager._aggregate_day_statistics(day_record, db)
 
         return imported, skipped, failed
 
-    def _import_batch_with_session(
+    async def _import_batch_with_session(
         self,
-        db: Session,
+        db: AsyncSession,
         batch: list[UnifiedSession],
         force: bool,
         imported: int,
@@ -347,12 +350,11 @@ class SessionImporter:
         Returns updated (imported, skipped, failed, batch_day_ids).
         """
         for session_data in batch:
-            sp = db.begin_nested()
             try:
-                was_imported, day_id = self._import_single_session(
-                    db, session_data, force
-                )
-                sp.commit()
+                async with db.begin_nested():
+                    was_imported, day_id = await self._import_single_session(
+                        db, session_data, force
+                    )
                 if was_imported:
                     imported += 1
                     if day_id:
@@ -360,7 +362,6 @@ class SessionImporter:
                 else:
                     skipped += 1
             except Exception as e:
-                sp.rollback()
                 logger.error(
                     f"Failed to import session {session_data.device_session_id}: {e}"
                 )
@@ -373,7 +374,7 @@ class SessionImporter:
         return imported, skipped, failed, batch_day_ids
 
     def _import_waveforms(
-        self, db: Session, session_id: int, session_data: UnifiedSession
+        self, db: AsyncSession, session_id: int, session_data: UnifiedSession
     ) -> None:
         """Import all waveforms for session."""
         if not session_data.waveforms:
@@ -402,11 +403,11 @@ class SessionImporter:
                 )
             )
 
-        db.bulk_save_objects(waveform_records)
+        db.add_all(waveform_records)
         logger.debug(f"Bulk imported {len(waveform_records)} waveforms")
 
     def _import_events(
-        self, db: Session, session_id: int, session_data: UnifiedSession
+        self, db: AsyncSession, session_id: int, session_data: UnifiedSession
     ) -> None:
         """Import all respiratory events for session."""
         if not session_data.events:
@@ -423,12 +424,12 @@ class SessionImporter:
             )
             for event in session_data.events
         ]
-        db.bulk_save_objects(event_records)
+        db.add_all(event_records)
 
         logger.debug(f"Bulk imported {len(event_records)} events")
 
     def _import_statistics(
-        self, db: Session, session_id: int, session_data: UnifiedSession
+        self, db: AsyncSession, session_id: int, session_data: UnifiedSession
     ) -> None:
         """Import session statistics."""
         stats = session_data.statistics
@@ -439,7 +440,7 @@ class SessionImporter:
         logger.debug("Imported session statistics")
 
     def _import_settings(
-        self, db: Session, session_id: int, session_data: UnifiedSession
+        self, db: AsyncSession, session_id: int, session_data: UnifiedSession
     ) -> None:
         """Import session settings."""
         settings = session_data.settings
@@ -469,12 +470,12 @@ class SessionImporter:
         ]
 
         if setting_records:
-            db.bulk_save_objects(setting_records)
+            db.add_all(setting_records)
 
         logger.debug(f"Imported {len(setting_records)} settings")
 
 
-def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
+async def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
     """
     Convenience function to import a session.
 
@@ -490,5 +491,5 @@ def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
         True if imported, False if skipped
     """
     importer = SessionImporter()
-    with session_scope() as db:
-        return importer.import_session(session_data, force=force, db=db)
+    async with session_scope() as db:
+        return await importer.import_session(session_data, force=force, db=db)

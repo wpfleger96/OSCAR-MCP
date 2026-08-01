@@ -13,23 +13,11 @@ Note on Expected Warnings:
     The warnings are expected and match OSCAR's behavior (just hidden in their GUI).
 """
 
-# mypy: ignore-errors
-# These tests use recorded_session (sync db_session) with WaveformLoader/fetch_waveform_blob
-# which are now async. Full conversion is deferred until analysis service read-scope
-# ownership is settled in Duncan's async-prep branch.
-
 import numpy as np
 import pytest
 
 from snore.analysis.data.waveform_loader import WaveformLoader
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
-from snore.database.models import Session
-
-# WaveformLoader.load_waveform is volatile (async conversion deferred to PR-1).
-# All classes in this module depend on it.
-pytestmark = pytest.mark.skip(
-    reason="volatile: WaveformLoader pending PR-1 async conversion"
-)
 
 
 @pytest.mark.recorded
@@ -37,12 +25,11 @@ pytestmark = pytest.mark.skip(
 class TestRecordedSessionProcessing:
     """Process recorded sessions and validate basic correctness."""
 
-    def test_baseline_fixture_breath_count(self, recorded_session):
+    async def test_baseline_fixture_breath_count(self, async_recorded_session):
         """Baseline fixture should produce reasonable breath count."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -57,12 +44,11 @@ class TestRecordedSessionProcessing:
         assert len(breaths) >= 4000, f"Too few breaths detected: {len(breaths)}"
         assert len(breaths) <= 8000, f"Too many breaths detected: {len(breaths)}"
 
-    def test_early_therapy_fixture_processes(self, recorded_session):
+    async def test_early_therapy_fixture_processes(self, async_recorded_session):
         """Early therapy fixture should process without errors."""
-        db = recorded_session("20250110")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250110")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -73,12 +59,11 @@ class TestRecordedSessionProcessing:
 
         assert len(breaths) > 0, "No breaths detected"
 
-    def test_multi_segment_fixture_processes(self, recorded_session):
+    async def test_multi_segment_fixture_processes(self, async_recorded_session):
         """Multi-segment fixture should process despite discontinuities."""
-        db = recorded_session("20250910")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250910")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -95,12 +80,11 @@ class TestRecordedSessionProcessing:
 class TestMetricsRealism:
     """Validate calculated metrics are physiologically realistic across recorded sessions."""
 
-    def test_mean_respiratory_rate_in_sleep_range(self, recorded_session):
+    async def test_mean_respiratory_rate_in_sleep_range(self, async_recorded_session):
         """Mean RR should be in typical sleep range (8-25 breaths/min)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -112,12 +96,11 @@ class TestMetricsRealism:
         mean_rr = np.mean([b.respiratory_rate for b in breaths])
         assert 8 <= mean_rr <= 25, f"Mean RR unusual for sleep: {mean_rr}"
 
-    def test_mean_tidal_volume_in_adult_range(self, recorded_session):
+    async def test_mean_tidal_volume_in_adult_range(self, async_recorded_session):
         """Mean TV should be in typical adult range (300-800 mL)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -129,12 +112,11 @@ class TestMetricsRealism:
         mean_tv = np.mean([b.tidal_volume for b in breaths])
         assert 300 <= mean_tv <= 800, f"Mean TV unusual: {mean_tv}"
 
-    def test_minute_ventilation_realistic(self, recorded_session):
+    async def test_minute_ventilation_realistic(self, async_recorded_session):
         """Minute ventilation (TV × RR) should be in typical range (5-12 L/min)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -146,12 +128,11 @@ class TestMetricsRealism:
         mean_mv = np.mean([b.minute_ventilation for b in breaths])
         assert 5 <= mean_mv <= 15, f"Mean minute ventilation unusual: {mean_mv}"
 
-    def test_breath_duration_in_valid_range(self, recorded_session):
+    async def test_breath_duration_in_valid_range(self, async_recorded_session):
         """Breath durations should be between 1-20 seconds (filter limits)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -170,12 +151,11 @@ class TestMetricsRealism:
 class TestFeatureVariability:
     """Verify features detect variation in recorded breathing patterns."""
 
-    def test_flatness_shows_variation(self, recorded_session):
+    async def test_flatness_shows_variation(self, async_recorded_session):
         """Flatness index should vary across breaths (not all identical)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -203,12 +183,11 @@ class TestFeatureVariability:
 
         assert np.std(flatness_values) > 0.05, "No variation in flatness index"
 
-    def test_amplitude_shows_variation(self, recorded_session):
+    async def test_amplitude_shows_variation(self, async_recorded_session):
         """Amplitude should vary across breaths (normal breathing variability)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 

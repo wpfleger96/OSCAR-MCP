@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import pytest
-
 from snore.database.models import Device
 from snore.database.session import init_database, session_scope
 
@@ -146,14 +144,7 @@ class TestSavepointRollback:
 
 
 class TestImporterForcedFailureContinuation:
-    """Force a session import to fail mid-batch; subsequent sessions must succeed.
-
-    Skipped: volatile — SessionImporter transaction ownership is being rewritten in PR-1.
-    """
-
-    pytestmark = pytest.mark.skip(
-        reason="volatile: SessionImporter pending PR-1 rewrite"
-    )
+    """Force a session import to fail mid-batch; subsequent sessions must succeed."""
 
     def _make_session_data(self, serial: str, session_id_str: str) -> UnifiedSession:
         """Build a minimal UnifiedSession with no optional data."""
@@ -255,7 +246,7 @@ class TestImporterForcedFailureContinuation:
         sess.events = [evt]
         return sess
 
-    def test_failed_session_after_partial_flush_leaves_no_rows_next_session_succeeds(
+    async def test_failed_session_after_partial_flush_leaves_no_rows_next_session_succeeds(
         self, temp_db
     ):
         """Session failing AFTER partial rows are flushed leaves zero rows; next session commits.
@@ -280,17 +271,19 @@ class TestImporterForcedFailureContinuation:
 
         original_get_or_create = DayManager.get_or_create_day
 
-        def patched_day(device_id, day_date, db_session):
+        async def patched_day(device_id, day_date, db_session):
             # Identify the bad session by querying the already-flushed Session row.
             # The flush has fired for Device + Session at this point, so these
             # rows exist inside the savepoint and can be seen by this query.
             from sqlalchemy import select as _select  # noqa: PLC0415
 
             pending_sessions = (
-                db_session.execute(
-                    _select(DBSession).where(
-                        DBSession.device_session_id == "SESS_BAD_PF",
-                        DBSession.id.isnot(None),
+                (
+                    await db_session.execute(
+                        _select(DBSession).where(
+                            DBSession.device_session_id == "SESS_BAD_PF",
+                            DBSession.id.isnot(None),
+                        )
                     )
                 )
                 .scalars()
@@ -298,12 +291,12 @@ class TestImporterForcedFailureContinuation:
             )
             if pending_sessions:
                 raise RuntimeError("Forced mid-import failure after partial flush")
-            return original_get_or_create(device_id, day_date, db_session)
+            return await original_get_or_create(device_id, day_date, db_session)
 
         importer = SessionImporter()
         with patch.object(DayManager, "get_or_create_day", patched_day):
-            with session_scope() as batch_db:
-                imported, skipped, failed = importer.import_sessions_batch(
+            async with session_scope() as batch_db:
+                imported, skipped, failed = await importer.import_sessions_batch(
                     iter([good1, bad_session, good2]),
                     batch_size=3,
                     db=batch_db,
@@ -315,14 +308,14 @@ class TestImporterForcedFailureContinuation:
 
         # Verify at the DB level: good sessions present, bad session and its
         # device absent — the savepoint rolled back ALL rows flushed for bad.
-        with session_scope() as verify:
+        async with session_scope() as verify:
             from sqlalchemy import select as _sv_select  # noqa: PLC0415
 
-            sessions = verify.execute(_sv_select(DBSession)).scalars().all()
+            sessions = (await verify.execute(_sv_select(DBSession))).scalars().all()
             session_ids = {s.device_session_id for s in sessions}
             device_serials = {
                 d.serial_number
-                for d in verify.execute(_sv_select(DBDevice)).scalars().all()
+                for d in (await verify.execute(_sv_select(DBDevice))).scalars().all()
             }
 
         assert "SESS_GOOD1_PF" in session_ids, "SESS_GOOD1_PF should be in DB"
@@ -335,7 +328,9 @@ class TestImporterForcedFailureContinuation:
             "device row must not survive"
         )
 
-    def test_failed_session_after_child_writes_leaves_no_child_rows(self, temp_db):
+    async def test_failed_session_after_child_writes_leaves_no_child_rows(
+        self, temp_db
+    ):
         """ALL child rows rolled back when session import fails after every child flush.
 
         Failure is injected AFTER all children have been flushed (wrapping
@@ -365,18 +360,24 @@ class TestImporterForcedFailureContinuation:
 
         original_import_single = SessionImporter._import_single_session
 
-        def _raise_after_all_children_flushed(self_imp, db, session_data, force=False):
+        async def _raise_after_all_children_flushed(
+            self_imp, db, session_data, force=False
+        ):
             """Call real _import_single_session (which flushes all children),
             then raise — savepoint must roll back all child rows for the bad session."""
-            result = original_import_single(self_imp, db, session_data, force=force)
+            result = await original_import_single(
+                self_imp, db, session_data, force=force
+            )
             # All children (waveform/event/stat/setting) are now flushed inside the
             # savepoint.  Raise here to prove the savepoint rolls them all back.
             from sqlalchemy import select as _sel  # noqa: PLC0415
 
             sess_rows = (
-                db.execute(
-                    _sel(DBSession).where(
-                        DBSession.device_session_id == "SESS_CHILD_BAD"
+                (
+                    await db.execute(
+                        _sel(DBSession).where(
+                            DBSession.device_session_id == "SESS_CHILD_BAD"
+                        )
                     )
                 )
                 .scalars()
@@ -392,8 +393,8 @@ class TestImporterForcedFailureContinuation:
         with patch.object(
             SessionImporter, "_import_single_session", _raise_after_all_children_flushed
         ):
-            with session_scope() as chunk_db:
-                imported, skipped, failed = importer.import_sessions_batch(
+            async with session_scope() as chunk_db:
+                imported, skipped, failed = await importer.import_sessions_batch(
                     iter([good, bad]),
                     batch_size=2,
                     db=chunk_db,
@@ -403,14 +404,16 @@ class TestImporterForcedFailureContinuation:
         assert imported == 1, f"Expected 1 imported, got {imported}"
 
         # Verify: good session's rows present; ALL of bad session's rows absent.
-        with session_scope() as verify:
+        async with session_scope() as verify:
             from sqlalchemy import select as _sv  # noqa: PLC0415
 
             # --- Good session must survive ---
             good_sessions = (
-                verify.execute(
-                    _sv(DBSession).where(
-                        DBSession.device_session_id == "SESS_CHILD_GOOD"
+                (
+                    await verify.execute(
+                        _sv(DBSession).where(
+                            DBSession.device_session_id == "SESS_CHILD_GOOD"
+                        )
                     )
                 )
                 .scalars()
@@ -421,8 +424,10 @@ class TestImporterForcedFailureContinuation:
 
             assert (
                 len(
-                    verify.execute(
-                        _sv(DBWaveform).where(DBWaveform.session_id == good_sid)
+                    (
+                        await verify.execute(
+                            _sv(DBWaveform).where(DBWaveform.session_id == good_sid)
+                        )
                     )
                     .scalars()
                     .all()
@@ -431,7 +436,11 @@ class TestImporterForcedFailureContinuation:
             ), "Good session waveforms must survive"
             assert (
                 len(
-                    verify.execute(_sv(DBEvent).where(DBEvent.session_id == good_sid))
+                    (
+                        await verify.execute(
+                            _sv(DBEvent).where(DBEvent.session_id == good_sid)
+                        )
+                    )
                     .scalars()
                     .all()
                 )
@@ -439,8 +448,10 @@ class TestImporterForcedFailureContinuation:
             ), "Good session events must survive"
             assert (
                 len(
-                    verify.execute(
-                        _sv(DBStatistics).where(DBStatistics.session_id == good_sid)
+                    (
+                        await verify.execute(
+                            _sv(DBStatistics).where(DBStatistics.session_id == good_sid)
+                        )
                     )
                     .scalars()
                     .all()
@@ -450,9 +461,11 @@ class TestImporterForcedFailureContinuation:
 
             # --- Bad session: all seven tables must be clean ---
             bad_sessions = (
-                verify.execute(
-                    _sv(DBSession).where(
-                        DBSession.device_session_id == "SESS_CHILD_BAD"
+                (
+                    await verify.execute(
+                        _sv(DBSession).where(
+                            DBSession.device_session_id == "SESS_CHILD_BAD"
+                        )
                     )
                 )
                 .scalars()
@@ -461,8 +474,10 @@ class TestImporterForcedFailureContinuation:
             assert len(bad_sessions) == 0, "Bad session row must be rolled back"
 
             bad_devices = (
-                verify.execute(
-                    _sv(DBDevice).where(DBDevice.serial_number == "SN_CHILD_BAD")
+                (
+                    await verify.execute(
+                        _sv(DBDevice).where(DBDevice.serial_number == "SN_CHILD_BAD")
+                    )
                 )
                 .scalars()
                 .all()
@@ -471,16 +486,16 @@ class TestImporterForcedFailureContinuation:
 
             # Day rows belonging only to the bad session must be gone.
             all_session_ids = {
-                s.id for s in verify.execute(_sv(DBSession)).scalars().all()
+                s.id for s in (await verify.execute(_sv(DBSession))).scalars().all()
             }
             all_device_ids = {
-                d.id for d in verify.execute(_sv(DBDevice)).scalars().all()
+                d.id for d in (await verify.execute(_sv(DBDevice))).scalars().all()
             }
 
             # No Day row should have a device_id that belongs to no surviving device.
             orphan_days = [
                 d
-                for d in verify.execute(_sv(DBDay)).scalars().all()
+                for d in (await verify.execute(_sv(DBDay))).scalars().all()
                 if d.device_id not in all_device_ids
             ]
             assert len(orphan_days) == 0, (
@@ -489,7 +504,7 @@ class TestImporterForcedFailureContinuation:
 
             orphan_waveforms = [
                 w
-                for w in verify.execute(_sv(DBWaveform)).scalars().all()
+                for w in (await verify.execute(_sv(DBWaveform))).scalars().all()
                 if w.session_id not in all_session_ids
             ]
             assert len(orphan_waveforms) == 0, (
@@ -498,7 +513,7 @@ class TestImporterForcedFailureContinuation:
 
             orphan_events = [
                 e
-                for e in verify.execute(_sv(DBEvent)).scalars().all()
+                for e in (await verify.execute(_sv(DBEvent))).scalars().all()
                 if e.session_id not in all_session_ids
             ]
             assert len(orphan_events) == 0, (
@@ -507,7 +522,7 @@ class TestImporterForcedFailureContinuation:
 
             orphan_stats = [
                 s
-                for s in verify.execute(_sv(DBStatistics)).scalars().all()
+                for s in (await verify.execute(_sv(DBStatistics))).scalars().all()
                 if s.session_id not in all_session_ids
             ]
             assert len(orphan_stats) == 0, (
@@ -516,7 +531,7 @@ class TestImporterForcedFailureContinuation:
 
             orphan_settings = [
                 s
-                for s in verify.execute(_sv(DBSetting)).scalars().all()
+                for s in (await verify.execute(_sv(DBSetting))).scalars().all()
                 if s.session_id not in all_session_ids
             ]
             assert len(orphan_settings) == 0, (

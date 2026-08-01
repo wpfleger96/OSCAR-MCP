@@ -976,18 +976,19 @@ class TestDbInitCommand:
 class TestSessionShowCommand:
     """Tests for session show command."""
 
-    @pytest.mark.skip(reason="volatile: SessionImporter pending PR-1 rewrite")
     @pytest.mark.integration
     def test_session_show_settings_flag(
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test --settings flag displays settings."""
+        import asyncio
+
         from snore.database.importers import import_session
 
         init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
-        import_session(sessions[0])
+        asyncio.run(import_session(sessions[0]))
 
         runner = CliRunner()
         result = runner.invoke(

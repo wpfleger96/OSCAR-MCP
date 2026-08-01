@@ -1,18 +1,15 @@
 """ImportService — orchestrates the CPAP data import pipeline."""
 
-# mypy: ignore-errors
-# Volatile: import_service.py transaction ownership (per-chunk injected scopes,
-# db=None path removal) is being rewritten in Duncan's async-prep branch (PR-1).
-
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from snore.database.importers import SessionImporter
-from snore.database.session import sync_session_scope as session_scope
+from snore.database.session import session_scope
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
 from snore.services.schemas import ImportResult, ImportSource, ImportSourceResult
@@ -110,6 +107,41 @@ class ImportService:
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
         """
+        return asyncio.run(
+            self._import_sources_async(
+                sources,
+                force=force,
+                batch_size=batch_size,
+                backup=backup,
+                backup_root=backup_root,
+                sort_by=sort_by,
+                limit=limit,
+                date_from=date_from,
+                date_to=date_to,
+                parallel=parallel,
+                dry_run=dry_run,
+                progress_callback=progress_callback,
+                cancel_predicate=cancel_predicate,
+            )
+        )
+
+    async def _import_sources_async(
+        self,
+        sources: list[ImportSource],
+        *,
+        force: bool = False,
+        batch_size: int = 50,
+        backup: bool = True,
+        backup_root: Path | None = None,
+        sort_by: str | None = None,
+        limit: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        parallel: bool = True,
+        dry_run: bool = False,
+        progress_callback: Callable[[str], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
+    ) -> ImportResult:
 
         def emit(msg: str) -> None:
             if progress_callback:
@@ -124,8 +156,8 @@ class ImportService:
         total_failed = 0
 
         if not dry_run:
-            with session_scope() as db_session:
-                orphaned = SessionImporter.cleanup_orphaned_records(db_session)
+            async with session_scope() as db_session:
+                orphaned = await SessionImporter.cleanup_orphaned_records(db_session)
                 if orphaned > 0:
                     emit(f"Cleaned up {orphaned} orphaned records from database")
 
@@ -232,8 +264,8 @@ class ImportService:
                 chunk = list(_itertools.islice(session_iter_internal, batch_size))
                 if not chunk:
                     break
-                with session_scope() as chunk_db:
-                    ci, cs, cf = importer.import_sessions_batch(
+                async with session_scope() as chunk_db:
+                    ci, cs, cf = await importer.import_sessions_batch(
                         iter(chunk),
                         force=force,
                         batch_size=batch_size,

@@ -125,7 +125,7 @@ class BatchValidator:
             self.db_session.close()
             from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
-            facade = AnalysisFacade(self.db_session)
+            facade = AnalysisFacade(self.db_session)  # type: ignore[arg-type]
             analysis_result = facade.run_analysis(session_id, modes=[mode])
 
         if mode not in analysis_result.mode_results:

@@ -1,6 +1,7 @@
 """Unit tests for DatabaseService."""
 
 from datetime import datetime, timedelta
+from typing import Any
 
 from snore.database.models import Device, Session, Statistics
 from snore.services.database_service import DatabaseService
@@ -10,10 +11,10 @@ from snore.services.device_service import DeviceService
 class TestDatabaseService:
     """Tests for DatabaseService.get_stats()."""
 
-    def test_empty_database_stats(self, db_session, temp_db):
+    async def test_empty_database_stats(self, async_db_session, temp_db):
         """Empty database returns zeros for all counts."""
-        service = DatabaseService(db_session)
-        stats = service.get_stats(str(temp_db))
+        service = DatabaseService(async_db_session)
+        stats = await service.get_stats(str(temp_db))
 
         assert stats.profile_count == 0
         assert stats.device_count == 0
@@ -32,11 +33,11 @@ class TestDatabaseService:
         assert stats.last_session is None
         assert stats.size_mb > 0
 
-    def test_stats_with_data(self, db_session, test_device, temp_db):
+    async def test_stats_with_data(self, async_db_session, async_test_device, temp_db):
         """Database with data returns correct counts."""
         now = datetime.now()
         session1 = Session(
-            device_id=test_device.id,
+            device_id=async_test_device.id,
             device_session_id="test_1",
             start_time=now,
             end_time=now + timedelta(hours=8),
@@ -45,7 +46,7 @@ class TestDatabaseService:
             has_event_data=True,
         )
         session2 = Session(
-            device_id=test_device.id,
+            device_id=async_test_device.id,
             device_session_id="test_2",
             start_time=now + timedelta(days=1),
             end_time=now + timedelta(days=1, hours=7),
@@ -53,16 +54,16 @@ class TestDatabaseService:
             has_waveform_data=False,
             has_event_data=True,
         )
-        db_session.add(session1)
-        db_session.add(session2)
-        db_session.flush()
+        async_db_session.add(session1)
+        async_db_session.add(session2)
+        await async_db_session.flush()
 
         stats1 = Statistics(session_id=session1.id, ahi=2.5, usage_hours=8.0)
-        db_session.add(stats1)
-        db_session.commit()
+        async_db_session.add(stats1)
+        await async_db_session.commit()
 
-        service = DatabaseService(db_session)
-        stats = service.get_stats(str(temp_db))
+        service = DatabaseService(async_db_session)
+        stats = await service.get_stats(str(temp_db))
 
         assert stats.device_count == 1
         assert stats.session_count == 2
@@ -74,14 +75,16 @@ class TestDatabaseService:
         assert stats.first_session is not None
         assert stats.last_session is not None
 
-    def test_coverage_percentages(self, db_session, test_device, temp_db):
+    async def test_coverage_percentages(
+        self, async_db_session, async_test_device, temp_db
+    ):
         """Coverage percentages computed correctly."""
         now = datetime.now()
         for i in range(10):
             has_wf = i < 3
             has_ev = i < 7
             session = Session(
-                device_id=test_device.id,
+                device_id=async_test_device.id,
                 device_session_id=f"test_{i}",
                 start_time=now + timedelta(days=i),
                 end_time=now + timedelta(days=i, hours=8),
@@ -89,11 +92,11 @@ class TestDatabaseService:
                 has_waveform_data=has_wf,
                 has_event_data=has_ev,
             )
-            db_session.add(session)
-        db_session.commit()
+            async_db_session.add(session)
+        await async_db_session.commit()
 
-        service = DatabaseService(db_session)
-        stats = service.get_stats(str(temp_db))
+        service = DatabaseService(async_db_session)
+        stats = await service.get_stats(str(temp_db))
 
         assert stats.session_count == 10
         assert stats.sessions_with_waveforms == 3
@@ -102,19 +105,21 @@ class TestDatabaseService:
         assert stats.event_coverage_pct == 70.0
         assert stats.analysis_coverage_pct == 0.0
 
-    def test_file_size_calculation(self, db_session, test_device, temp_db):
+    async def test_file_size_calculation(
+        self, async_db_session, async_test_device, temp_db
+    ):
         """Database file size is computed correctly."""
-        service = DatabaseService(db_session)
-        stats = service.get_stats(str(temp_db))
+        service = DatabaseService(async_db_session)
+        stats = await service.get_stats(str(temp_db))
 
         assert stats.size_mb > 0
         assert stats.db_path == str(temp_db)
 
-    def test_nonexistent_file_size_zero(self, db_session):
+    async def test_nonexistent_file_size_zero(self, async_db_session):
         """Nonexistent database path returns 0 size."""
-        service = DatabaseService(db_session)
+        service = DatabaseService(async_db_session)
         fake_path = "/nonexistent/path/database.db"
-        stats = service.get_stats(fake_path)
+        stats = await service.get_stats(fake_path)
 
         assert stats.size_mb == 0
         assert stats.db_path == fake_path
@@ -123,14 +128,14 @@ class TestDatabaseService:
 class TestDeviceServiceListDevices:
     """Tests for DeviceService.list_devices() — device listing moved from DatabaseService."""
 
-    def test_list_devices_empty(self, db_session):
+    async def test_list_devices_empty(self, async_db_session):
         """Empty database returns empty list."""
-        service = DeviceService(db_session)
-        result = service.list_devices()
+        service = DeviceService(async_db_session)
+        result = await service.list_devices()
 
         assert len(result) == 0
 
-    def test_list_devices_with_data(self, db_session):
+    async def test_list_devices_with_data(self, async_db_session):
         """Returns correct device data."""
         device1 = Device(
             manufacturer="ResMed",
@@ -147,11 +152,11 @@ class TestDeviceServiceListDevices:
             model="AirCurve 10",
             serial_number="TEST003",
         )
-        db_session.add_all([device1, device2, device3])
-        db_session.commit()
+        async_db_session.add_all([device1, device2, device3])
+        await async_db_session.commit()
 
-        service = DeviceService(db_session)
-        result = service.list_devices()
+        service = DeviceService(async_db_session)
+        result = await service.list_devices()
 
         assert len(result) == 3
         assert result[0].manufacturer == "Philips"
@@ -161,7 +166,7 @@ class TestDeviceServiceListDevices:
         assert result[2].manufacturer == "ResMed"
         assert result[2].model == "AirSense 10"
 
-    def test_list_devices_ordering(self, db_session):
+    async def test_list_devices_ordering(self, async_db_session):
         """Devices are ordered by manufacturer then model."""
         device1 = Device(
             manufacturer="Philips",
@@ -183,11 +188,11 @@ class TestDeviceServiceListDevices:
             model="AirCurve 10",
             serial_number="TEST004",
         )
-        db_session.add_all([device1, device2, device3, device4])
-        db_session.commit()
+        async_db_session.add_all([device1, device2, device3, device4])
+        await async_db_session.commit()
 
-        service = DeviceService(db_session)
-        result = service.list_devices()
+        service = DeviceService(async_db_session)
+        result = await service.list_devices()
 
         assert len(result) == 4
         assert result[0].manufacturer == "Philips"
@@ -199,7 +204,7 @@ class TestDeviceServiceListDevices:
         assert result[3].manufacturer == "ResMed"
         assert result[3].model == "AirSense 11"
 
-    def test_list_devices_includes_all_fields(self, db_session):
+    async def test_list_devices_includes_all_fields(self, async_db_session):
         """Returns all identity fields including the new firmware/hardware/product_code."""
         device = Device(
             manufacturer="ResMed",
@@ -209,11 +214,11 @@ class TestDeviceServiceListDevices:
             hardware_version="R003",
             product_code="37037",
         )
-        db_session.add(device)
-        db_session.commit()
+        async_db_session.add(device)
+        await async_db_session.commit()
 
-        service = DeviceService(db_session)
-        result = service.list_devices()
+        service = DeviceService(async_db_session)
+        result = await service.list_devices()
 
         assert len(result) == 1
         assert result[0].id == device.id
@@ -227,8 +232,8 @@ class TestDeviceServiceListDevices:
 
 
 class TestVacuum:
-    def test_vacuum_returns_success_status(self, db_session, temp_db):
-        service = DatabaseService(db_session)
+    async def test_vacuum_returns_success_status(self, async_db_session, temp_db):
+        service = DatabaseService(async_db_session)
         result = service.vacuum_sqlite(str(temp_db))
         assert result.status == "success"
 
@@ -236,7 +241,12 @@ class TestVacuum:
 class TestReset:
     """Test the split reset_rows() + vacuum_sqlite() API."""
 
-    def _do_reset(self, service: object, db_session: object, temp_db: object) -> object:
+    async def _do_reset(
+        self,
+        service: DatabaseService,
+        db_session: Any,
+        temp_db: object,
+    ) -> object:
         """Helper: reset_rows() + commit + vacuum_sqlite() — the composed reset."""
         import os  # noqa: PLC0415
 
@@ -246,9 +256,9 @@ class TestReset:
         size_before = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
         )
-        tables_cleared = service.reset_rows()
+        tables_cleared = await service.reset_rows()
         total = sum(tables_cleared.values())
-        db_session.commit()
+        await db_session.commit()
         if DatabaseService.is_sqlite_target(db_path):
             service.vacuum_sqlite(db_path)
         size_after = (
@@ -262,68 +272,70 @@ class TestReset:
             size_after_mb=size_after,
         )
 
-    def test_empty_db_returns_zeros(self, db_session, temp_db):
-        service = DatabaseService(db_session)
-        result = self._do_reset(service, db_session, temp_db)
+    async def test_empty_db_returns_zeros(self, async_db_session, temp_db):
+        service = DatabaseService(async_db_session)
+        result = await self._do_reset(service, async_db_session, temp_db)
         assert result.status == "success"
         assert result.total_rows_deleted == 0
         assert all(v == 0 for v in result.tables_cleared.values())
 
-    def test_includes_all_tables(self, db_session, temp_db):
-        service = DatabaseService(db_session)
-        result = self._do_reset(service, db_session, temp_db)
+    async def test_includes_all_tables(self, async_db_session, temp_db):
+        service = DatabaseService(async_db_session)
+        result = await self._do_reset(service, async_db_session, temp_db)
         from snore.database.models import Base
 
         assert set(result.tables_cleared.keys()) == set(Base.metadata.tables.keys())
 
-    def test_deletes_data(self, db_session, test_device, temp_db):
+    async def test_deletes_data(self, async_db_session, async_test_device, temp_db):
         from datetime import datetime, timedelta
 
         from snore.database.models import Session as DbSession
 
         now = datetime.now()
         session = DbSession(
-            device_id=test_device.id,
+            device_id=async_test_device.id,
             device_session_id="reset_test",
             start_time=now,
             end_time=now + timedelta(hours=8),
             duration_seconds=28800,
         )
-        db_session.add(session)
-        db_session.commit()
+        async_db_session.add(session)
+        await async_db_session.commit()
 
-        service = DatabaseService(db_session)
-        result = self._do_reset(service, db_session, temp_db)
+        service = DatabaseService(async_db_session)
+        result = await self._do_reset(service, async_db_session, temp_db)
 
         assert result.tables_cleared["sessions"] == 1
         assert result.tables_cleared["devices"] >= 1
         assert result.total_rows_deleted >= 2
 
-    def test_tables_empty_after_reset(self, db_session, test_device, temp_db):
+    async def test_tables_empty_after_reset(
+        self, async_db_session, async_test_device, temp_db
+    ):
         from datetime import datetime, timedelta
 
         from snore.database.models import Session as DbSession
 
         now = datetime.now()
         session = DbSession(
-            device_id=test_device.id,
+            device_id=async_test_device.id,
             device_session_id="reset_test_2",
             start_time=now,
             end_time=now + timedelta(hours=8),
             duration_seconds=28800,
         )
-        db_session.add(session)
-        db_session.commit()
+        async_db_session.add(session)
+        await async_db_session.commit()
 
-        service = DatabaseService(db_session)
-        self._do_reset(service, db_session, temp_db)
+        service = DatabaseService(async_db_session)
+        await self._do_reset(service, async_db_session, temp_db)
 
-        stats = service.get_stats(str(temp_db))
+        stats = await service.get_stats(str(temp_db))
         assert stats.session_count == 0
         assert stats.device_count == 0
 
-    def test_size_reported(self, db_session, temp_db):
-        service = DatabaseService(db_session)
-        result = self._do_reset(service, db_session, temp_db)
+    async def test_size_reported(self, async_db_session, temp_db):
+        service = DatabaseService(async_db_session)
+        result = await self._do_reset(service, async_db_session, temp_db)
         assert result.size_before_mb >= 0
         assert result.size_after_mb >= 0

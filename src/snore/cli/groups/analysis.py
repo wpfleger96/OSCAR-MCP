@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from datetime import datetime
@@ -104,29 +105,31 @@ def run(
             "Must provide at least one selection flag (--session-id, --date, --from, or --to)"
         )
 
-    with open_db_session(db) as session:
-        if single_count > 0:
-            _analyze_single_session(
-                session,
-                session_id,
-                date,
-                no_store,
-                mode,
-                all_modes,
-                plain,
-            )
-        else:
-            _analyze_batch(
-                session,
-                date_from,
-                date_to,
-                date_from is None and date_to is None,
-                no_store,
-                mode,
-                all_modes,
-            )
+    async def _run() -> int | None:
+        async with open_db_session(db) as session:
+            if single_count > 0:
+                await _analyze_single_session(
+                    session,
+                    session_id,
+                    date,
+                    no_store,
+                    mode,
+                    all_modes,
+                    plain,
+                )
+            else:
+                await _analyze_batch(
+                    session,
+                    date_from,
+                    date_to,
+                    date_from is None and date_to is None,
+                    no_store,
+                    mode,
+                    all_modes,
+                )
+        return None
 
-    return None
+    return asyncio.run(_run())
 
 
 @analysis.command("list")
@@ -154,8 +157,14 @@ def list_cmd(
     db: str | None,
 ) -> None:
     """List sessions with analysis status."""
-    with open_db_session(db) as session:
-        _list_sessions(session, date_from, date_to, limit, analyzed_only, sort_by)
+
+    async def _run() -> None:
+        async with open_db_session(db) as session:
+            await _list_sessions(
+                session, date_from, date_to, limit, analyzed_only, sort_by
+            )
+
+    asyncio.run(_run())
 
 
 @analysis.command("show")
@@ -187,48 +196,62 @@ def show(
     if session_id is not None and date is not None:
         raise click.ClickException("--session-id and --date are mutually exclusive")
 
-    with open_db_session(db) as session:
-        if date is not None:
-            db_session = (
-                session.execute(
-                    select(models.Session)
-                    .join(models.Day)
-                    .where(models.Day.date == date.date())
+    from snore.database.session import sync_session_scope
+
+    async def _run() -> None:
+        sid = session_id
+        async with open_db_session(db) as session:
+            if date is not None:
+                db_session_row = (
+                    (
+                        await session.execute(
+                            select(models.Session)
+                            .join(models.Day)
+                            .where(models.Day.date == date.date())
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if not db_session_row:
+                    raise click.ClickException(
+                        f"No session found for date {date.date()}"
+                    )
+                sid = db_session_row.id
+
+            assert sid is not None, "session_id should not be None"
+
+            db_session_row = (
+                (
+                    await session.execute(
+                        select(models.Session)
+                        .filter_by(id=sid)
+                        .options(joinedload(models.Session.day))
+                    )
                 )
                 .scalars()
                 .first()
             )
-            if not db_session:
-                raise click.ClickException(f"No session found for date {date.date()}")
-            session_id = db_session.id
+            if not db_session_row:
+                raise click.ClickException(f"Session {sid} not found")
 
-        assert session_id is not None, "session_id should not be None"
-
-        db_session = (
-            session.execute(
-                select(models.Session)
-                .filter_by(id=session_id)
-                .options(joinedload(models.Session.day))
+            day_date = (
+                db_session_row.day.date
+                if db_session_row.day
+                else db_session_row.start_time.date()
             )
-            .scalars()
-            .first()
-        )
-        if not db_session:
-            raise click.ClickException(f"Session {session_id} not found")
+            session_date_str = day_date.isoformat()
 
-        day_date = (
-            db_session.day.date if db_session.day else db_session.start_time.date()
-        )
-        session_date_str = day_date.isoformat()
-
-        analysis_service = AnalysisService(session)
-        result = analysis_service.get_analysis_result(session_id)
+        with sync_session_scope() as sync_db:
+            result = AnalysisService(sync_db).get_analysis_result(sid)
 
         if result is None:
-            raise click.ClickException(f"No analysis found for session {session_id}")
+            raise click.ClickException(f"No analysis found for session {sid}")
 
-        console.print(f"Displaying stored analysis for session {session_id}...\n")
+        console.print(f"Displaying stored analysis for session {sid}...\n")
         display_analysis_result(result, plain, session_date_str)
+
+    asyncio.run(_run())
 
 
 @analysis.command("delete")
@@ -276,116 +299,121 @@ def analysis_delete(
     if session_ids:
         id_list = parse_id_list(session_ids)
 
-    with open_db_session(db) as session:
-        facade = AnalysisFacade(session)
+    async def _run() -> int:
+        async with open_db_session(db) as session:
+            facade = AnalysisFacade(session)
 
-        try:
-            preview = facade.get_delete_preview(
-                session_ids=id_list,
-                from_date=date_from,
-                to_date=date_to,
-                delete_all=delete_all,
-                all_versions=all_versions,
-            )
-        except ValueError as e:
-            raise click.ClickException(str(e)) from e
-
-        if preview.sessions_with_analysis == 0:
-            print_warning(
-                "No sessions with analysis results found matching the specified criteria"
-            )
-            return 0
-
-        print_footer(wide=True)
-        if dry_run:
-            print_dry_run_header("deleted")
-        else:
-            print_warning("Analysis Results to be DELETED")
-        print_footer(wide=True)
-        console.print()
-
-        rows = []
-        for detail in preview.session_details:
-            start = detail.start_time
-            if isinstance(start, str):
-                start = datetime.fromisoformat(start)
-            rows.append(
-                (
-                    str(detail.id),
-                    f"{start:%Y-%m-%d}",
-                    f"{start:%H:%M:%S}",
-                    str(detail.version_count),
-                    f"{detail.manufacturer} {detail.model}",
+            try:
+                preview = await facade.get_delete_preview(
+                    session_ids=id_list,
+                    from_date=date_from,
+                    to_date=date_to,
+                    delete_all=delete_all,
+                    all_versions=all_versions,
                 )
-            )
+            except ValueError as e:
+                raise click.ClickException(str(e)) from e
 
-        print_table(
-            [
-                ("Sess ID", 8),
-                ("Date", 12),
-                ("Time", 8),
-                ("Versions", 10),
-                ("Device", 25),
-            ],
-            rows,
-        )
-
-        print_header("Deletion Summary", ICON_STATS, wide=True)
-        console.print(
-            f"Sessions with analysis:          {preview.sessions_with_analysis}"
-        )
-        console.print(
-            f"Total analysis records:          {preview.total_analysis_records}"
-            + (
-                " (all versions)"
-                if all_versions
-                or preview.total_analysis_records == preview.sessions_with_analysis
-                else ""
-            )
-        )
-        console.print(
-            f"Analysis records to delete:      {preview.records_to_delete}"
-            + (
-                " (latest only)"
-                if not all_versions
-                and preview.total_analysis_records > preview.sessions_with_analysis
-                else ""
-            )
-        )
-        console.print(
-            f"Detected patterns to delete:     {preview.patterns_count} (cascade delete)"
-        )
-        print_footer(wide=True)
-        console.print()
-
-        if dry_run:
-            print_dry_run_complete("delete")
-            return 0
-
-        if not force:
-            print_warning(
-                "WARNING: This will delete analysis results but keep the sessions!"
-            )
-            if not click.confirm(
-                "Are you sure you want to delete these analysis results?"
-            ):
-                console.print("Deletion cancelled")
+            if preview.sessions_with_analysis == 0:
+                print_warning(
+                    "No sessions with analysis results found matching the specified criteria"
+                )
                 return 0
 
-        session_ids_to_delete = [d.id for d in preview.session_details]
-        deleted_count = facade.delete_analysis(session_ids_to_delete, all_versions)
+            print_footer(wide=True)
+            if dry_run:
+                print_dry_run_header("deleted")
+            else:
+                print_warning("Analysis Results to be DELETED")
+            print_footer(wide=True)
+            console.print()
 
-        print_success(
-            f"Successfully deleted {deleted_count} analysis record(s) for {preview.sessions_with_analysis} session(s)"
-        )
+            rows = []
+            for detail in preview.session_details:
+                start = detail.start_time
+                if isinstance(start, str):
+                    start = datetime.fromisoformat(start)
+                rows.append(
+                    (
+                        str(detail.id),
+                        f"{start:%Y-%m-%d}",
+                        f"{start:%H:%M:%S}",
+                        str(detail.version_count),
+                        f"{detail.manufacturer} {detail.model}",
+                    )
+                )
 
-        if deleted_count > 10:
-            print_tip("Run 'snore db vacuum' to reclaim disk space")
+            print_table(
+                [
+                    ("Sess ID", 8),
+                    ("Date", 12),
+                    ("Time", 8),
+                    ("Versions", 10),
+                    ("Device", 25),
+                ],
+                rows,
+            )
 
-        return 0
+            print_header("Deletion Summary", ICON_STATS, wide=True)
+            console.print(
+                f"Sessions with analysis:          {preview.sessions_with_analysis}"
+            )
+            console.print(
+                f"Total analysis records:          {preview.total_analysis_records}"
+                + (
+                    " (all versions)"
+                    if all_versions
+                    or preview.total_analysis_records == preview.sessions_with_analysis
+                    else ""
+                )
+            )
+            console.print(
+                f"Analysis records to delete:      {preview.records_to_delete}"
+                + (
+                    " (latest only)"
+                    if not all_versions
+                    and preview.total_analysis_records > preview.sessions_with_analysis
+                    else ""
+                )
+            )
+            console.print(
+                f"Detected patterns to delete:     {preview.patterns_count} (cascade delete)"
+            )
+            print_footer(wide=True)
+            console.print()
+
+            if dry_run:
+                print_dry_run_complete("delete")
+                return 0
+
+            if not force:
+                print_warning(
+                    "WARNING: This will delete analysis results but keep the sessions!"
+                )
+                if not click.confirm(
+                    "Are you sure you want to delete these analysis results?"
+                ):
+                    console.print("Deletion cancelled")
+                    return 0
+
+            session_ids_to_delete = [d.id for d in preview.session_details]
+            deleted_count = await facade.delete_analysis(
+                session_ids_to_delete, all_versions
+            )
+
+            print_success(
+                f"Successfully deleted {deleted_count} analysis record(s) for {preview.sessions_with_analysis} session(s)"
+            )
+
+            if deleted_count > 10:
+                print_tip("Run 'snore db vacuum' to reclaim disk space")
+
+            return 0
+
+    return asyncio.run(_run())
 
 
-def _analyze_single_session(
+async def _analyze_single_session(
     session: Any,
     session_id: int | None,
     date: datetime | None,
@@ -401,10 +429,12 @@ def _analyze_single_session(
     # I/O: look up session_id / date while the injected session is open.
     if date:
         db_session = (
-            session.execute(
-                select(models.Session)
-                .join(models.Day)
-                .where(models.Day.date == date.date())
+            (
+                await session.execute(
+                    select(models.Session)
+                    .join(models.Day)
+                    .where(models.Day.date == date.date())
+                )
             )
             .scalars()
             .first()
@@ -415,10 +445,12 @@ def _analyze_single_session(
         session_date_str = date.date().isoformat()
     else:
         db_session = (
-            session.execute(
-                select(models.Session)
-                .filter_by(id=session_id)
-                .options(joinedload(models.Session.day))
+            (
+                await session.execute(
+                    select(models.Session)
+                    .filter_by(id=session_id)
+                    .options(joinedload(models.Session.day))
+                )
             )
             .scalars()
             .first()
@@ -431,7 +463,7 @@ def _analyze_single_session(
         session_date_str = day_date.isoformat()
 
     # Close the injected session BEFORE analysis so it is not held across compute.
-    session.close()
+    await session.close()
 
     console.print(f"\nAnalyzing session {session_date_str} (ID: {session_id})...")
 
@@ -462,7 +494,7 @@ def _analyze_single_session(
         raise click.Abort() from e
 
 
-def _analyze_batch(
+async def _analyze_batch(
     session: Any,
     start: datetime | None,
     end: datetime | None,
@@ -502,7 +534,7 @@ def _analyze_batch(
                 task_holder.append(progress.add_task("Analyzing", total=total))
             progress.update(task_holder[0], advance=1)
 
-        result = facade.run_batch_analysis(
+        result = await facade.run_batch_analysis(
             from_date=from_date,
             to_date=to_date,
             modes=modes,
@@ -527,7 +559,7 @@ def _analyze_batch(
             print_warning(f"Session {r.session_id}: {r.error}", indent=1)
 
 
-def _list_sessions(
+async def _list_sessions(
     session: Any,
     start: datetime | None,
     end: datetime | None,
@@ -538,7 +570,7 @@ def _list_sessions(
     from snore.services.analysis_facade import AnalysisFacade
 
     facade = AnalysisFacade(session)
-    results = facade.list_sessions_with_status(
+    results = await facade.list_sessions_with_status(
         start=start, end=end, limit=limit, analyzed_only=analyzed_only, sort_by=sort_by
     )
 

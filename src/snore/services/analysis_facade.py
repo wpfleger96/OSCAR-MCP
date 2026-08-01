@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.types import AnalysisResult
 from snore.database import models
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class AnalysisFacade:
     """Facade for analysis listing and deletion operations."""
 
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: AsyncSession):
         """
         Initialize analysis facade.
 
@@ -72,7 +72,7 @@ class AnalysisFacade:
 
         return stmt
 
-    def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
+    async def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
         """Map each session ID to its latest AnalysisResult ID (by created_at)."""
         if not session_ids:
             return {}
@@ -91,12 +91,16 @@ class AnalysisFacade:
             .where(models.AnalysisResult.session_id.in_(session_ids))
             .subquery()
         )
-        rows = self.db_session.execute(
-            select(ranked.c.session_id, ranked.c.id).where(ranked.c.recency_rank == 1)
+        rows = (
+            await self.db_session.execute(
+                select(ranked.c.session_id, ranked.c.id).where(
+                    ranked.c.recency_rank == 1
+                )
+            )
         ).all()
         return {session_id: analysis_id for session_id, analysis_id in rows}
 
-    def list_sessions_with_status(
+    async def list_sessions_with_status(
         self,
         start: datetime | None = None,
         end: datetime | None = None,
@@ -140,9 +144,9 @@ class AnalysisFacade:
         from sqlalchemy.orm import joinedload as _joinedload
 
         stmt = stmt.options(_joinedload(models.Session.day))
-        sessions = self.db_session.execute(stmt).unique().scalars().all()
+        sessions = (await self.db_session.execute(stmt)).unique().scalars().all()
 
-        latest_analysis = self._latest_analysis_ids([s.id for s in sessions])
+        latest_analysis = await self._latest_analysis_ids([s.id for s in sessions])
 
         results = []
         for session in sessions:
@@ -169,7 +173,7 @@ class AnalysisFacade:
 
         return results
 
-    def count_sessions_with_status(
+    async def count_sessions_with_status(
         self,
         start: datetime | None = None,
         end: datetime | None = None,
@@ -182,9 +186,9 @@ class AnalysisFacade:
         count_stmt = select(func.count()).select_from(
             self._status_select(start, end, analyzed_only).subquery()
         )
-        return self.db_session.execute(count_stmt).scalar() or 0
+        return (await self.db_session.execute(count_stmt)).scalar() or 0
 
-    def get_delete_preview(
+    async def get_delete_preview(
         self,
         session_ids: list[int] | None = None,
         from_date: datetime | None = None,
@@ -240,7 +244,7 @@ class AnalysisFacade:
 
         query = query.order_by(models.Session.start_time.desc())
 
-        sessions_with_analysis = self.db_session.execute(query).fetchall()
+        sessions_with_analysis = (await self.db_session.execute(query)).fetchall()
 
         if not sessions_with_analysis:
             return AnalysisDeletePreview(
@@ -253,10 +257,12 @@ class AnalysisFacade:
 
         session_ids_list = [s.id for s in sessions_with_analysis]
 
-        analysis_counts = self.db_session.execute(
-            select(models.AnalysisResult.session_id, func.count())
-            .where(models.AnalysisResult.session_id.in_(session_ids_list))
-            .group_by(models.AnalysisResult.session_id)
+        analysis_counts = (
+            await self.db_session.execute(
+                select(models.AnalysisResult.session_id, func.count())
+                .where(models.AnalysisResult.session_id.in_(session_ids_list))
+                .group_by(models.AnalysisResult.session_id)
+            )
         ).fetchall()
 
         analysis_count_dict = {row[0]: int(row[1]) for row in analysis_counts}
@@ -266,13 +272,15 @@ class AnalysisFacade:
             total_analysis_records if all_versions else len(sessions_with_analysis)
         )
 
-        patterns_count = self.db_session.execute(
-            select(func.count())
-            .select_from(models.DetectedPattern)
-            .where(
-                models.DetectedPattern.analysis_result_id.in_(
-                    select(models.AnalysisResult.id).where(
-                        models.AnalysisResult.session_id.in_(session_ids_list)
+        patterns_count = (
+            await self.db_session.execute(
+                select(func.count())
+                .select_from(models.DetectedPattern)
+                .where(
+                    models.DetectedPattern.analysis_result_id.in_(
+                        select(models.AnalysisResult.id).where(
+                            models.AnalysisResult.session_id.in_(session_ids_list)
+                        )
                     )
                 )
             )
@@ -297,7 +305,7 @@ class AnalysisFacade:
             session_details=session_details,
         )
 
-    def delete_analysis(
+    async def delete_analysis(
         self,
         session_ids: list[int],
         all_versions: bool = False,
@@ -313,7 +321,7 @@ class AnalysisFacade:
         """
         if all_versions:
             # Delete all analysis results for these sessions.
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 delete(models.AnalysisResult).where(
                     models.AnalysisResult.session_id.in_(session_ids)
                 )
@@ -336,13 +344,17 @@ class AnalysisFacade:
                 .subquery()
             )
             latest_ids = (
-                self.db_session.execute(select(ranked.c.id).where(ranked.c.rn == 1))
+                (
+                    await self.db_session.execute(
+                        select(ranked.c.id).where(ranked.c.rn == 1)
+                    )
+                )
                 .scalars()
                 .all()
             )
             if not latest_ids:
                 return 0
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 delete(models.AnalysisResult).where(
                     models.AnalysisResult.id.in_(latest_ids)
                 )
@@ -363,7 +375,9 @@ class AnalysisFacade:
         import time  # noqa: PLC0415
 
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
-        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.database.session import (
+            sync_session_scope as session_scope,  # noqa: PLC0415
+        )
 
         t_start = time.monotonic()
 
@@ -386,19 +400,34 @@ class AnalysisFacade:
 
         return result
 
-    def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
+    async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
 
         Intentionally returns None (rather than raising NotFoundError like the
         resource lookups elsewhere): "not yet analyzed" is a normal state that
         callers branch on, not a 404 condition.
         """
-        from snore.analysis.service import AnalysisService
+        from sqlalchemy import select
 
-        svc = AnalysisService(self.db_session)
-        return svc.get_analysis_result(session_id)
+        from snore.database import models
 
-    def run_batch_analysis(
+        analysis_row = (
+            (
+                await self.db_session.execute(
+                    select(models.AnalysisResult)
+                    .filter_by(session_id=session_id)
+                    .order_by(models.AnalysisResult.created_at.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+        if analysis_row is None:
+            return None
+        return AnalysisResult.model_validate(analysis_row.programmatic_result_json)
+
+    async def run_batch_analysis(
         self,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
@@ -409,8 +438,8 @@ class AnalysisFacade:
     ) -> BatchAnalysisResult:
         """Run analysis on multiple sessions in parallel.
 
-        Delegates to ``BatchAnalysisCoordinator`` so PR-2 can swap the executor
-        internals (``ThreadPoolExecutor`` → async tasks) without touching callers.
+        Delegates to ``BatchAnalysisCoordinator`` so the executor
+        internals can change without touching callers.
 
         Args:
             from_date: Filter sessions from this datetime (inclusive)
@@ -433,29 +462,20 @@ class AnalysisFacade:
             stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
-        # Stream scalar ID/date rows lazily — the generator is consumed one row
-        # at a time inside the coordinator's sliding window.  No list materialization.
-        from collections.abc import Iterator as _Iterator  # noqa: PLC0415
-
-        def _row_gen() -> _Iterator[tuple[int, date | None]]:
-            for row in self.db_session.execute(stmt).yield_per(200):
-                yield row.session_id, row.day_date
-
-        # Peek at the first pair to detect an empty result without consuming all.
-        row_iter = _row_gen()
-        try:
-            first_pair = next(row_iter)
-        except StopIteration:
+        # Fetch all session ID/date pairs upfront so the ThreadPoolExecutor
+        # workers don't need async context (yield_per requires sync engine).
+        rows = (await self.db_session.execute(stmt)).all()
+        if not rows:
             return BatchAnalysisResult(
                 total=0, successful=0, failed=0, cancelled=0, results=[]
             )
 
-        import itertools as _it  # noqa: PLC0415
+        session_pairs = [(row.session_id, row.day_date) for row in rows]
 
         coordinator = BatchAnalysisCoordinator()
         self._batch_coordinator = coordinator
         return coordinator.submit(
-            session_pairs=_it.chain([first_pair], row_iter),
+            session_pairs=session_pairs,
             modes=modes,
             store_results=store_results,
             max_workers=max_workers,
@@ -535,7 +555,9 @@ class BatchAnalysisCoordinator:
         )
 
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
-        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.database.session import (
+            sync_session_scope as session_scope,  # noqa: PLC0415
+        )
 
         self._total = -1  # Unknown until exhausted; updated at completion.
         self._completed = 0

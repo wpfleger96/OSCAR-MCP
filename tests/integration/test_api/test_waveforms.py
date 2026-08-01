@@ -1,7 +1,5 @@
 from datetime import datetime
 
-import pytest
-
 
 class TestListWaveforms:
     def test_list_waveforms_empty(
@@ -34,10 +32,6 @@ class TestGetWaveform:
 
 
 class TestWaveformCompare:
-    @pytest.mark.skip(
-        reason="volatile: WaveformService.compare_events calls AnalysisService "
-        "with AsyncSession; AnalysisService pending PR-1 AsyncSession conversion"
-    )
     def test_compare_no_analysis_returns_404(
         self, api_client, db_session, test_device, test_session_factory
     ):
