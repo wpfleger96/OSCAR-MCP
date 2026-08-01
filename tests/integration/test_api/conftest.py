@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from snore.api.app import create_app
-from snore.api.deps import get_db, sync_get_db
+from snore.api.deps import get_db
 
 
 @pytest.fixture
@@ -40,22 +40,13 @@ def db_session(temp_db, async_db_session):
 
 @pytest.fixture
 def api_client(async_db_session, db_session):
-    """TestClient with both get_db and sync_get_db overridden for the test session.
-
-    - ``get_db`` yields the async session (for converted services).
-    - ``sync_get_db`` yields the sync session (for volatile services still using
-      sync ORM — e.g. AnalysisFacade, RxTracker, BatchValidator).
-    """
+    """TestClient with get_db overridden to use the test async session."""
     app = create_app()
 
     async def override_get_db():
         yield async_db_session
 
-    def override_sync_get_db():
-        yield db_session
-
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[sync_get_db] = override_sync_get_db
     # Do NOT use 'with TestClient(app)' — that runs lifespan (init_database) which we skip
     # since we're overriding get_db entirely
     client = TestClient(app, raise_server_exceptions=True)
@@ -71,11 +62,7 @@ def localhost_api_client(async_db_session, db_session):
     async def override_get_db():
         yield async_db_session
 
-    def override_sync_get_db():
-        yield db_session
-
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[sync_get_db] = override_sync_get_db
 
     class LocalhostMiddleware:
         def __init__(self, app: ASGIApp) -> None:

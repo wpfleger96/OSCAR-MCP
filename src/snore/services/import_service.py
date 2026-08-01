@@ -107,6 +107,13 @@ class ImportService:
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
         """
+        # asyncio.run() here is intentional: import_sources() is called from
+        # _run_import(), a worker thread spawned by the API's ThreadPoolExecutor.
+        # That thread has no running event loop, so we must start one.  This is
+        # the same "sync entry-point → async service" bridge used in the CLI
+        # (see cli/groups/import.py).  It is NOT a loop-in-loop hack — there is
+        # no outer loop in this thread, which is exactly the condition asyncio.run()
+        # requires.
         return asyncio.run(
             self._import_sources_async(
                 sources,

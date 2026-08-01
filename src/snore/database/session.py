@@ -23,8 +23,8 @@ import logging
 import os
 import threading
 
-from collections.abc import AsyncGenerator, Generator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,6 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import Session
 
 from snore.constants import DEFAULT_DATABASE_PATH
 from snore.database.models import Base
@@ -281,7 +280,7 @@ def get_db_path() -> str:
     return _db_path
 
 
-def get_sync_session_for_alembic() -> Session:
+def get_sync_session_for_alembic() -> Any:
     """Return a synchronous session for Alembic operations only.
 
     This is intentionally sync — Alembic's migration runner is synchronous.
@@ -296,62 +295,6 @@ def get_sync_session_for_alembic() -> Session:
     engine = create_engine(url, connect_args={"check_same_thread": False})
     factory = sessionmaker(bind=engine)
     return factory()
-
-
-def get_sync_session() -> Session:
-    """Return a new sync Session bound to the async engine's underlying sync engine.
-
-    Intended for volatile service surfaces (RxTracker, BatchValidator, AnalysisFacade)
-    that still use the sync ORM API during PR-2 while their full async conversion is
-    deferred to a later milestone.  Uses the already-initialised async engine's
-    underlying sync_engine so PRAGMAs and connection settings are inherited.
-
-    Do NOT use this for new code — prefer AsyncSession via get_session().
-
-    Raises:
-        RuntimeError: If the database has not been initialised.
-    """
-    from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
-
-    if _engine is None:
-        raise RuntimeError("Database not initialized. Call init_database() first.")
-    factory = sessionmaker(bind=_engine.sync_engine)
-    return factory()
-
-
-@contextmanager
-def sync_session_scope() -> Generator[Session]:
-    """Provide a transactional scope for synchronous database operations.
-
-    Temporary bridge for volatile service surfaces (importers, import_service,
-    analysis batch) that use ``with session_scope()`` and are being restructured
-    in Duncan's async-prep branch (PR-1).  Creates a plain pysqlite engine from
-    ``_db_path`` so sync ORM operations work without greenlet context.
-
-    Do NOT use this for new code — prefer ``async with session_scope()`` (AsyncSession).
-
-    Commits on success; rolls back on any exception.
-    """
-    from sqlalchemy import create_engine  # noqa: PLC0415
-    from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
-
-    if _db_path is None:
-        raise RuntimeError("Database not initialized. Call init_database() first.")
-
-    engine = create_engine(
-        f"sqlite:///{_db_path}", connect_args={"check_same_thread": False}
-    )
-    factory = sessionmaker(bind=engine)
-    session = factory()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-        engine.dispose()
 
 
 async def cleanup_database() -> None:

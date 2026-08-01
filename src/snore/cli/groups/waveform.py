@@ -212,9 +212,9 @@ def show_waveform(
                 programmatic_events = []
 
                 if waveform_type_single == "flow":
-                    analysis_service = AnalysisService(db_session)  # type: ignore[arg-type]  # TODO: AnalysisService volatile — awaiting PR-1 AsyncSession conversion
+                    analysis_service = AnalysisService(db_session)
                     try:
-                        result = analysis_service.get_analysis_result(resolved_id)
+                        result = await analysis_service.get_analysis_result(resolved_id)
                     except Exception:
                         result = None
 

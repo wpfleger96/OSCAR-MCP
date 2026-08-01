@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from datetime import date
 from io import StringIO
 from typing import Any
@@ -14,6 +14,7 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from snore.cli.groups.analysis import analysis
+from snore.services.schemas import BatchAnalysisResult, BatchSessionResult
 
 
 def _make_mock_sessions(count: int) -> list[MagicMock]:
@@ -58,6 +59,15 @@ def _make_session_scope(mock_sessions: list[MagicMock]) -> Any:
     return _scope
 
 
+def _make_coordinator_mock(batch_result: BatchAnalysisResult) -> MagicMock:
+    """Return a mock BatchAnalysisCoordinator whose submit() resolves to batch_result."""
+    coord = MagicMock()
+    coord.submit = AsyncMock(return_value=batch_result)
+    coord.cancel = MagicMock()
+    coord.progress = (batch_result.total, batch_result.total)
+    return coord
+
+
 @pytest.mark.unit
 class TestAnalyzeBatch:
     """Tests for batch analysis via `analysis run --from --to`."""
@@ -74,37 +84,28 @@ class TestAnalyzeBatch:
             file=stderr_buf, stderr=True, force_terminal=False, width=120
         )
 
-        from unittest.mock import MagicMock
-
-        mock_inputs = MagicMock()
-        mock_result = MagicMock()
-        mock_raw = MagicMock()  # Represents RawSessionBlobs
+        batch_result = BatchAnalysisResult(
+            total=3,
+            successful=3,
+            failed=0,
+            cancelled=0,
+            results=[
+                BatchSessionResult(
+                    session_id=i, session_date=date(2024, 1, i), success=True
+                )
+                for i in range(1, 4)
+            ],
+        )
+        coord_mock = _make_coordinator_mock(batch_result)
 
         runner = CliRunner()
-        # sync_scope is for BatchAnalysisCoordinator workers (sync with session_scope)
-        mock_worker_session = MagicMock()
-
-        @contextmanager
-        def sync_scope():
-            yield mock_worker_session
-
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
-            patch("snore.database.session.sync_session_scope", sync_scope),
             patch(
-                "snore.analysis.service.AnalysisService.load_session_inputs_raw",
-                return_value=mock_raw,
+                "snore.services.analysis_facade.BatchAnalysisCoordinator",
+                return_value=coord_mock,
             ),
-            patch(
-                "snore.analysis.service.AnalysisService.prepare_inputs",
-                return_value=mock_inputs,
-            ),
-            patch(
-                "snore.analysis.service.AnalysisService.compute_analysis",
-                return_value=mock_result,
-            ),
-            patch("snore.analysis.service.AnalysisService.store_result"),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
@@ -127,16 +128,6 @@ class TestAnalyzeBatch:
 
         scope = _make_session_scope(mock_sessions)
 
-        from unittest.mock import MagicMock
-
-        mock_inputs = MagicMock()
-        mock_result = MagicMock()
-
-        def load_side_effect(self_arg, session_id, **kw):
-            if session_id == failing_id:
-                raise RuntimeError("test error")
-            return mock_inputs
-
         stdout_buf = StringIO()
         stderr_buf = StringIO()
         stdout_console = Console(file=stdout_buf, force_terminal=False, width=120)
@@ -144,30 +135,36 @@ class TestAnalyzeBatch:
             file=stderr_buf, stderr=True, force_terminal=False, width=120
         )
 
-        mock_worker_session_pf = MagicMock()
-
-        @contextmanager
-        def sync_scope_pf():
-            yield mock_worker_session_pf
+        batch_result = BatchAnalysisResult(
+            total=3,
+            successful=2,
+            failed=1,
+            cancelled=0,
+            results=[
+                BatchSessionResult(
+                    session_id=1, session_date=date(2024, 1, 1), success=True
+                ),
+                BatchSessionResult(
+                    session_id=failing_id,
+                    session_date=date(2024, 1, 2),
+                    success=False,
+                    error="test error",
+                ),
+                BatchSessionResult(
+                    session_id=3, session_date=date(2024, 1, 3), success=True
+                ),
+            ],
+        )
+        coord_mock = _make_coordinator_mock(batch_result)
 
         runner = CliRunner()
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
-            patch("snore.database.session.sync_session_scope", sync_scope_pf),
             patch(
-                "snore.analysis.service.AnalysisService.load_session_inputs_raw",
-                load_side_effect,
+                "snore.services.analysis_facade.BatchAnalysisCoordinator",
+                return_value=coord_mock,
             ),
-            patch(
-                "snore.analysis.service.AnalysisService.prepare_inputs",
-                return_value=mock_inputs,
-            ),
-            patch(
-                "snore.analysis.service.AnalysisService.compute_analysis",
-                return_value=mock_result,
-            ),
-            patch("snore.analysis.service.AnalysisService.store_result"),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
@@ -215,36 +212,27 @@ class TestAnalyzeBatch:
         stdout_buf = StringIO()
         stdout_console = Console(file=stdout_buf, force_terminal=False, width=120)
 
-        from unittest.mock import MagicMock
-
-        mock_inputs = MagicMock()
-        mock_result = MagicMock()
-        mock_raw = MagicMock()
+        batch_result = BatchAnalysisResult(
+            total=1,
+            successful=1,
+            failed=0,
+            cancelled=0,
+            results=[
+                BatchSessionResult(
+                    session_id=1, session_date=date(2024, 1, 1), success=True
+                ),
+            ],
+        )
+        coord_mock = _make_coordinator_mock(batch_result)
 
         runner = CliRunner()
-        mock_worker_session2 = MagicMock()
-
-        @contextmanager
-        def sync_scope2():
-            yield mock_worker_session2
-
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
-            patch("snore.database.session.sync_session_scope", sync_scope2),
             patch(
-                "snore.analysis.service.AnalysisService.load_session_inputs_raw",
-                return_value=mock_raw,
+                "snore.services.analysis_facade.BatchAnalysisCoordinator",
+                return_value=coord_mock,
             ),
-            patch(
-                "snore.analysis.service.AnalysisService.prepare_inputs",
-                return_value=mock_inputs,
-            ),
-            patch(
-                "snore.analysis.service.AnalysisService.compute_analysis",
-                return_value=mock_result,
-            ),
-            patch("snore.analysis.service.AnalysisService.store_result"),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
         ):
@@ -267,10 +255,9 @@ class TestBatchCoordinatorHandle:
     """
 
     async def test_batch_coordinator_accessible_after_run(
-        self, async_db_session, async_test_device, monkeypatch
+        self, async_db_session, async_test_device, temp_db, monkeypatch
     ):
         """facade.batch_coordinator is set after run_batch_analysis returns."""
-        from contextlib import contextmanager
         from datetime import date
         from unittest.mock import MagicMock
 
@@ -294,19 +281,12 @@ class TestBatchCoordinatorHandle:
         async_db_session.add(sess)
         await async_db_session.commit()
 
-        @contextmanager
-        def fake_scope():
-            yield async_db_session
+        # Point the coordinator's sync session at the same temp DB used by async_db_session.
+        monkeypatch.setattr("snore.database.session._db_path", str(temp_db))
 
         mock_inputs = MagicMock()
         mock_result = MagicMock()
-        mock_raw = MagicMock()
 
-        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
-            lambda *a, **kw: mock_raw,
-        )
         monkeypatch.setattr(
             "snore.analysis.service.AnalysisService.prepare_inputs",
             lambda *a, **kw: mock_inputs,
@@ -315,10 +295,6 @@ class TestBatchCoordinatorHandle:
             "snore.analysis.service.AnalysisService.compute_analysis",
             lambda *a, **kw: mock_result,
         )
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.store_result",
-            lambda *a, **kw: None,
-        )
 
         facade = AnalysisFacade(async_db_session)
         assert facade.batch_coordinator is None, "No coordinator before run"
@@ -326,6 +302,7 @@ class TestBatchCoordinatorHandle:
         await facade.run_batch_analysis(
             from_date=__import__("datetime").datetime(2025, 6, 1),
             to_date=__import__("datetime").datetime(2025, 6, 30),
+            store_results=False,
         )
 
         # After run, the coordinator is accessible for inspection.
@@ -335,7 +312,7 @@ class TestBatchCoordinatorHandle:
         assert total == 1
         assert completed == 1
 
-    def test_coordinator_cancel_stops_remaining_sessions(self, monkeypatch):
+    async def test_coordinator_cancel_stops_remaining_sessions(self, monkeypatch):
         """Calling coord.cancel() before submit starts causes sessions to be skipped.
 
         ``cancel()`` sets the flag; ``submit()`` does NOT clear a pre-set flag.
@@ -353,7 +330,7 @@ class TestBatchCoordinatorHandle:
         assert coord._cancel_requested is True
 
         # submit() must honour the pre-set flag and not clear it.
-        result = coord.submit(
+        result = await coord.submit(
             session_pairs=[(1, None), (2, None), (3, None)],
             store_results=False,
             max_workers=1,

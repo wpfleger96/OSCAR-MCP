@@ -196,8 +196,6 @@ def show(
     if session_id is not None and date is not None:
         raise click.ClickException("--session-id and --date are mutually exclusive")
 
-    from snore.database.session import sync_session_scope
-
     async def _run() -> None:
         sid = session_id
         async with open_db_session(db) as session:
@@ -242,8 +240,8 @@ def show(
             )
             session_date_str = day_date.isoformat()
 
-        with sync_session_scope() as sync_db:
-            result = AnalysisService(sync_db).get_analysis_result(sid)
+            svc = AnalysisService(session)
+            result = await svc.get_analysis_result(sid)
 
         if result is None:
             raise click.ClickException(f"No analysis found for session {sid}")
@@ -481,7 +479,7 @@ async def _analyze_single_session(
         facade = AnalysisFacade(
             session
         )  # session only needed for listing, not analysis
-        result = facade.run_analysis(
+        result = await facade.run_analysis(
             session_id=session_id,
             modes=modes,
             store_results=not no_store,

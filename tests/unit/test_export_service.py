@@ -6,13 +6,13 @@ import csv
 import json
 import zipfile
 
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
-from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.services.export_service import ExportService
 
@@ -178,8 +178,8 @@ class TestExportRaw:
 
 
 @pytest.fixture()
-def db_session(tmp_path: Path) -> Generator[DBSession]:
-    """Create a fresh SQLite DB with test data per test."""
+async def db_session(tmp_path: Path) -> AsyncGenerator[AsyncSession]:
+    """Create a fresh async SQLite DB with test data per test."""
     import snore.database.session as db_mod
 
     from snore.database import models
@@ -188,17 +188,18 @@ def db_session(tmp_path: Path) -> Generator[DBSession]:
 
     # Reset the singleton so each test gets a fresh DB
     db_mod._engine = None
-    db_mod._session_factory = None
+    db_mod._AsyncSessionFactory = None
+    db_mod._db_path = None
     db_mod.init_database(db_path)
 
-    with db_mod.sync_session_scope() as session:
+    async with db_mod.session_scope() as session:
         device = models.Device(
             manufacturer="ResMed",
             model="AirSense 11",
             serial_number="SN12345",
         )
         session.add(device)
-        session.flush()
+        await session.flush()
 
         s = models.Session(
             device_id=device.id,
@@ -214,7 +215,7 @@ def db_session(tmp_path: Path) -> Generator[DBSession]:
             enabled=True,
         )
         session.add(s)
-        session.flush()
+        await session.flush()
 
         session.add(
             models.Statistics(
@@ -246,19 +247,23 @@ def db_session(tmp_path: Path) -> Generator[DBSession]:
         session.add(models.Setting(session_id=s.id, key="mode", value="APAP"))
         session.add(models.Setting(session_id=s.id, key="pressure_min", value="6.0"))
 
-        session.commit()
         yield session
 
     # Reset for next test
+    if db_mod._engine is not None:
+        await db_mod._engine.dispose()
     db_mod._engine = None
-    db_mod._session_factory = None
+    db_mod._AsyncSessionFactory = None
+    db_mod._db_path = None
 
 
 class TestExportCsv:
-    def test_creates_csv_files(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_creates_csv_files(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "csv_export"
-        result = svc.export_csv(db_session, out)
+        result = await svc.export_csv(db_session, out)
 
         assert result.format == "csv"
         assert (out / "sessions.csv").exists()
@@ -266,10 +271,12 @@ class TestExportCsv:
         assert (out / "settings.csv").exists()
         assert result.files_written == 3
 
-    def test_sessions_csv_content(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_sessions_csv_content(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "csv_export"
-        svc.export_csv(db_session, out)
+        await svc.export_csv(db_session, out)
 
         with open(out / "sessions.csv") as f:
             reader = csv.DictReader(f)
@@ -282,10 +289,12 @@ class TestExportCsv:
         assert row["ahi"] == "3.5"
         assert row["timezone"] == "local"
 
-    def test_events_csv_content(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_events_csv_content(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "csv_export"
-        svc.export_csv(db_session, out)
+        await svc.export_csv(db_session, out)
 
         with open(out / "events.csv") as f:
             reader = csv.DictReader(f)
@@ -295,10 +304,12 @@ class TestExportCsv:
         assert rows[0]["event_type"] == "OA"
         assert rows[0]["timezone"] == "local"
 
-    def test_settings_csv_content(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_settings_csv_content(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "csv_export"
-        svc.export_csv(db_session, out)
+        await svc.export_csv(db_session, out)
 
         with open(out / "settings.csv") as f:
             reader = csv.DictReader(f)
@@ -309,33 +320,41 @@ class TestExportCsv:
         assert "mode" in keys
         assert "pressure_min" in keys
 
-    def test_date_filter_excludes(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_date_filter_excludes(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "csv_export"
-        result = svc.export_csv(db_session, out, date_from=date(2026, 1, 1))
+        result = await svc.export_csv(db_session, out, date_from=date(2026, 1, 1))
         assert result.nights_exported == 0
 
-    def test_no_sessions_warns(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_no_sessions_warns(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "csv_export"
-        result = svc.export_csv(db_session, out, date_from=date(2099, 1, 1))
+        result = await svc.export_csv(db_session, out, date_from=date(2099, 1, 1))
         assert any("No sessions" in w for w in result.warnings)
 
 
 class TestExportJson:
-    def test_creates_json_file(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_creates_json_file(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "export.json"
-        result = svc.export_json(db_session, out)
+        result = await svc.export_json(db_session, out)
 
         assert result.format == "json"
         assert out.exists()
         assert result.files_written == 1
 
-    def test_json_structure(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_json_structure(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "export.json"
-        svc.export_json(db_session, out)
+        await svc.export_json(db_session, out)
 
         with open(out) as f:
             doc = json.load(f)
@@ -353,19 +372,21 @@ class TestExportJson:
         assert s["events"][0]["event_type"] == "OA"
         assert s["settings"]["mode"] == "APAP"
 
-    def test_date_filter(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_date_filter(self, db_session: AsyncSession, tmp_path: Path) -> None:
         svc = ExportService()
         out = tmp_path / "export.json"
-        svc.export_json(db_session, out, date_from=date(2099, 1, 1))
+        await svc.export_json(db_session, out, date_from=date(2099, 1, 1))
 
         with open(out) as f:
             doc = json.load(f)
         assert doc["session_count"] == 0
 
-    def test_device_filter(self, db_session: DBSession, tmp_path: Path) -> None:
+    async def test_device_filter(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
         svc = ExportService()
         out = tmp_path / "export.json"
-        svc.export_json(db_session, out, device_serial="NONEXISTENT")
+        await svc.export_json(db_session, out, device_serial="NONEXISTENT")
 
         with open(out) as f:
             doc = json.load(f)

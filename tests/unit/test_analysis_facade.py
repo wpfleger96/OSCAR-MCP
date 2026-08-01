@@ -1,6 +1,5 @@
 """Unit tests for AnalysisFacade."""
 
-from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -314,38 +313,34 @@ class TestRunBatchAnalysis:
     async def test_successful_analysis(
         self, async_db_session, async_test_device, monkeypatch
     ):
-        """Mock load/compute phases to succeed; verify successful count."""
-        from unittest.mock import MagicMock
+        """Coordinator.submit() success propagates through run_batch_analysis."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from snore.services.schemas import BatchAnalysisResult, BatchSessionResult
 
         day, sess = await _create_session_with_analysis(
             async_db_session, async_test_device, date(2025, 1, 10), num_analyses=0
         )
         await async_db_session.commit()
 
-        @contextmanager
-        def fake_scope():
-            yield async_db_session
+        mock_result = BatchAnalysisResult(
+            total=1,
+            successful=1,
+            failed=0,
+            cancelled=0,
+            results=[
+                BatchSessionResult(
+                    session_id=sess.id, session_date=date(2025, 1, 10), success=True
+                )
+            ],
+        )
+        coord_mock = MagicMock()
+        coord_mock.submit = AsyncMock(return_value=mock_result)
+        coord_mock.progress = (1, 1)
 
-        mock_raw = MagicMock()
-        mock_inputs = MagicMock()
-        mock_result = MagicMock()
-
-        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
-            lambda *a, **kw: mock_raw,
-        )
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.prepare_inputs",
-            lambda *a, **kw: mock_inputs,
-        )
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.compute_analysis",
-            lambda *a, **kw: mock_result,
-        )
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.store_result",
-            lambda *a, **kw: None,
+            "snore.services.analysis_facade.BatchAnalysisCoordinator",
+            lambda: coord_mock,
         )
         facade = AnalysisFacade(async_db_session)
         result = await facade.run_batch_analysis(
@@ -358,23 +353,37 @@ class TestRunBatchAnalysis:
     async def test_failed_analysis(
         self, async_db_session, async_test_device, monkeypatch
     ):
-        """Mock load phase to raise; verify failed count."""
+        """Coordinator.submit() failure propagates through run_batch_analysis."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from snore.services.schemas import BatchAnalysisResult, BatchSessionResult
+
         day, sess = await _create_session_with_analysis(
             async_db_session, async_test_device, date(2025, 1, 10), num_analyses=0
         )
         await async_db_session.commit()
 
-        @contextmanager
-        def fake_scope():
-            yield async_db_session
+        mock_result = BatchAnalysisResult(
+            total=1,
+            successful=0,
+            failed=1,
+            cancelled=0,
+            results=[
+                BatchSessionResult(
+                    session_id=sess.id,
+                    session_date=date(2025, 1, 10),
+                    success=False,
+                    error="test error",
+                )
+            ],
+        )
+        coord_mock = MagicMock()
+        coord_mock.submit = AsyncMock(return_value=mock_result)
+        coord_mock.progress = (1, 1)
 
-        def raise_error(*a, **kw):
-            raise RuntimeError("test error")
-
-        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
-            raise_error,
+            "snore.services.analysis_facade.BatchAnalysisCoordinator",
+            lambda: coord_mock,
         )
         facade = AnalysisFacade(async_db_session)
         result = await facade.run_batch_analysis(
@@ -387,40 +396,42 @@ class TestRunBatchAnalysis:
     async def test_progress_callback_called(
         self, async_db_session, async_test_device, monkeypatch
     ):
-        """Progress callback fires once per session regardless of success/failure."""
+        """Progress callback is forwarded to coordinator.submit()."""
         from unittest.mock import MagicMock
+
+        from snore.services.schemas import BatchAnalysisResult, BatchSessionResult
 
         day, sess = await _create_session_with_analysis(
             async_db_session, async_test_device, date(2025, 1, 10), num_analyses=0
         )
         await async_db_session.commit()
 
-        @contextmanager
-        def fake_scope():
-            yield async_db_session
+        calls: list[tuple[int, int | None]] = []
 
-        mock_raw = MagicMock()
-        mock_inputs = MagicMock()
-        mock_result = MagicMock()
+        async def fake_submit(**kwargs):
+            cb = kwargs.get("progress_callback")
+            if cb:
+                cb(1, None)
+            return BatchAnalysisResult(
+                total=1,
+                successful=1,
+                failed=0,
+                cancelled=0,
+                results=[
+                    BatchSessionResult(
+                        session_id=sess.id, session_date=date(2025, 1, 10), success=True
+                    )
+                ],
+            )
 
-        monkeypatch.setattr("snore.database.session.sync_session_scope", fake_scope)
+        coord_mock = MagicMock()
+        coord_mock.submit = fake_submit
+        coord_mock.progress = (1, 1)
+
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
-            lambda *a, **kw: mock_raw,
+            "snore.services.analysis_facade.BatchAnalysisCoordinator",
+            lambda: coord_mock,
         )
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.prepare_inputs",
-            lambda *a, **kw: mock_inputs,
-        )
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.compute_analysis",
-            lambda *a, **kw: mock_result,
-        )
-        monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.store_result",
-            lambda *a, **kw: None,
-        )
-        calls = []
         facade = AnalysisFacade(async_db_session)
         await facade.run_batch_analysis(
             from_date=datetime(2025, 1, 1),

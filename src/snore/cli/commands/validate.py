@@ -61,25 +61,20 @@ def validate(
             export_report_json,
         )
 
-        async with open_db_session(db) as _db:
+        async with open_db_session(db) as async_db:
             try:
-                from snore.database.session import (  # noqa: PLC0415
-                    sync_session_scope,
+                validator = BatchValidator(async_db, None)
+
+                console.print(
+                    f"Running validation from {date_from.date()} to {date_to.date()}..."
                 )
+                console.print(f"Mode: {mode}\n")
 
-                with sync_session_scope() as sync_sess:
-                    validator = BatchValidator(sync_sess, None)
-
-                    console.print(
-                        f"Running validation from {date_from.date()} to {date_to.date()}..."
-                    )
-                    console.print(f"Mode: {mode}\n")
-
-                    report = validator.validate_date_range(
-                        date_from.strftime("%Y-%m-%d"),
-                        date_to.strftime("%Y-%m-%d"),
-                        mode=mode,
-                    )
+                report = await validator.validate_date_range(
+                    date_from.strftime("%Y-%m-%d"),
+                    date_to.strftime("%Y-%m-%d"),
+                    mode=mode,
+                )
 
                 print_footer()
                 print_header("VALIDATION REPORT")

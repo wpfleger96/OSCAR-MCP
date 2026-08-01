@@ -378,7 +378,7 @@ class TestAnalysisResultOrdering:
 
         engine.dispose()
 
-    def test_latest_result_via_production_path_with_mixed_offsets(self, tmp_path):
+    async def test_latest_result_via_production_path_with_mixed_offsets(self, tmp_path):
         """``AnalysisService.get_analysis_result()`` returns the newest by UTC order.
 
         Supplies one result timestamped with UTC+2 (earlier in absolute UTC)
@@ -390,6 +390,11 @@ class TestAnalysisResultOrdering:
         from datetime import UTC, timedelta, timezone
 
         from sqlalchemy import create_engine
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
         from sqlalchemy.orm import Session as SASession
 
         from snore.analysis.service import AnalysisService
@@ -431,6 +436,8 @@ class TestAnalysisResultOrdering:
                 "timestamp_end": 0.0,
             }
 
+        # Insert rows using sync engine (setup only).
+        session_id: int
         with SASession(engine) as db:
             device = Device(manufacturer="Mfr", model="M", serial_number="SN_MIXED")
             db.add(device)
@@ -467,11 +474,19 @@ class TestAnalysisResultOrdering:
             )
             db.add_all([older, newer])
             db.commit()
+            session_id = session.id
 
-            # Call the PRODUCTION PATH: AnalysisService.get_analysis_result().
-            # This exercises the same ordering clause the real app uses.
-            svc = AnalysisService(db)
-            result = svc.get_analysis_result(session.id)
+        engine.dispose()
+
+        # Call the PRODUCTION PATH via async session.
+        async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
+        factory = async_sessionmaker(
+            bind=async_engine, class_=AsyncSession, expire_on_commit=False
+        )
+        async with factory() as async_db:
+            svc = AnalysisService(async_db)
+            result = await svc.get_analysis_result(session_id)
+        await async_engine.dispose()
 
         assert result is not None, "Production path must return a result"
         # The method must return the row with the later absolute UTC instant.
@@ -481,5 +496,3 @@ class TestAnalysisResultOrdering:
             f"got duration={result.session_duration_hours} — "
             "mixed-offset ordering is wrong in the production path"
         )
-
-        engine.dispose()

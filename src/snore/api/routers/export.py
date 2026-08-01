@@ -1,26 +1,24 @@
 from __future__ import annotations
 
-# ExportService uses a filesystem-oriented constructor (backup_root, not db_session)
-# and doesn't fit the service_dep() DI pattern. DB sessions are passed per-method call.
 import shutil
 import tempfile
 
-from collections.abc import Generator
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from snore.api.deps import sync_get_db
+from snore.api.deps import get_db
 from snore.services.export_service import ExportService
 
 router = APIRouter()
 
 
-def _stream_file(path: Path, chunk_size: int = 64 * 1024) -> Generator[bytes]:
+def _stream_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
     with path.open("rb") as f:
         while chunk := f.read(chunk_size):
             yield chunk
@@ -41,8 +39,8 @@ def _streaming_export(
 
 
 @router.get("/csv")
-def export_csv(
-    db: Session = Depends(sync_get_db),
+async def export_csv(
+    db: AsyncSession = Depends(get_db),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     device: str | None = Query(default=None),
@@ -51,7 +49,7 @@ def export_csv(
     svc = ExportService()
     tmpdir = tempfile.mkdtemp()
     output = Path(tmpdir) / "export.csv"
-    svc.export_csv(
+    await svc.export_csv(
         db,
         output,
         date_from=from_date,
@@ -63,8 +61,8 @@ def export_csv(
 
 
 @router.get("/json")
-def export_json(
-    db: Session = Depends(sync_get_db),
+async def export_json(
+    db: AsyncSession = Depends(get_db),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     device: str | None = Query(default=None),
@@ -72,7 +70,7 @@ def export_json(
     svc = ExportService()
     tmpdir = tempfile.mkdtemp()
     output = Path(tmpdir) / "export.json"
-    svc.export_json(
+    await svc.export_json(
         db,
         output,
         date_from=from_date,

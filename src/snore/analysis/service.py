@@ -25,8 +25,6 @@ detached ``AnalysisInputs`` DTO.  No session is held.
 """
 
 # mypy: ignore-errors
-# Volatile: single/waveform/report read-scope ownership and _make_compute_only()
-# are being replaced with a public seam in Duncan's async-prep branch (PR-1).
 
 import logging
 import time
@@ -38,13 +36,13 @@ from typing import Any
 import numpy as np
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.data.waveform_loader import (
     WaveformLoader,
     deserialize_waveform_blob,
     detect_and_mark_artifacts,
-    fetch_waveform_blob_sync,
+    fetch_waveform_blob,
 )
 from snore.analysis.modes import DEFAULT_MODE, get_mode
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
@@ -131,7 +129,7 @@ class AnalysisService:
 
     def __init__(
         self,
-        db_session: Session | None = None,
+        db_session: AsyncSession | None = None,
         min_breath_duration: float = BSC.MIN_BREATH_DURATION,
         confidence_threshold: float = FLC.CONFIDENCE_THRESHOLD,
     ):
@@ -139,7 +137,7 @@ class AnalysisService:
         Initialize analysis service.
 
         Args:
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy async database session
             min_breath_duration: Minimum breath duration for segmentation (seconds)
             confidence_threshold: Minimum confidence for reliable findings
         """
@@ -158,7 +156,7 @@ class AnalysisService:
             duration_threshold=PCC.DURATION_THRESHOLD,
         )
 
-    def _load_machine_events(self, session_id: int) -> list[AnalysisEvent]:
+    async def _load_machine_events(self, session_id: int) -> list[AnalysisEvent]:
         """
         Load machine-flagged events from database.
 
@@ -170,7 +168,11 @@ class AnalysisService:
         """
         assert self.db_session is not None, "_load_machine_events requires a DB session"
         session = (
-            self.db_session.execute(select(models.Session).filter_by(id=session_id))
+            (
+                await self.db_session.execute(
+                    select(models.Session).filter_by(id=session_id)
+                )
+            )
             .scalars()
             .first()
         )
@@ -180,10 +182,12 @@ class AnalysisService:
         session_start_ts = session.start_time.timestamp()
 
         events = (
-            self.db_session.execute(
-                select(models.Event)
-                .filter_by(session_id=session_id)
-                .order_by(models.Event.start_time)
+            (
+                await self.db_session.execute(
+                    select(models.Event)
+                    .filter_by(session_id=session_id)
+                    .order_by(models.Event.start_time)
+                )
             )
             .scalars()
             .all()
@@ -205,7 +209,7 @@ class AnalysisService:
 
         return respiratory_events
 
-    def load_session_inputs(
+    async def load_session_inputs(
         self,
         session_id: int,
         modes: list[str] | None = None,
@@ -228,10 +232,10 @@ class AnalysisService:
         Raises:
             ValueError: If session not found or has no flow waveform data.
         """
-        raw = self.load_session_inputs_raw(session_id, modes=modes)
+        raw = await self.load_session_inputs_raw(session_id, modes=modes)
         return AnalysisService.prepare_inputs(raw)
 
-    def load_session_inputs_raw(
+    async def load_session_inputs_raw(
         self,
         session_id: int,
         modes: list[str] | None = None,
@@ -258,7 +262,11 @@ class AnalysisService:
         modes_list = list(modes) if modes is not None else [DEFAULT_MODE]
 
         session = (
-            self.db_session.execute(select(models.Session).filter_by(id=session_id))
+            (
+                await self.db_session.execute(
+                    select(models.Session).filter_by(id=session_id)
+                )
+            )
             .scalars()
             .first()
         )
@@ -266,7 +274,7 @@ class AnalysisService:
             raise ValueError(f"Session {session_id} not found")
 
         try:
-            flow_blob, flow_sample_count, flow_metadata = fetch_waveform_blob_sync(
+            flow_blob, flow_sample_count, flow_metadata = await fetch_waveform_blob(
                 self.db_session, session_id, "flow"
             )
         except Exception as e:
@@ -278,13 +286,13 @@ class AnalysisService:
         if flow_sample_count == 0:
             raise ValueError(f"Empty flow waveform data for session {session_id}")
 
-        machine_events = self._load_machine_events(session_id)
+        machine_events = await self._load_machine_events(session_id)
 
         spo2_blob: bytes | None = None
         spo2_sample_count = 0
         spo2_metadata: dict[str, Any] = {}
         try:
-            spo2_blob, spo2_sample_count, spo2_metadata = fetch_waveform_blob_sync(
+            spo2_blob, spo2_sample_count, spo2_metadata = await fetch_waveform_blob(
                 self.db_session, session_id, "spo2"
             )
         except Exception as e:
@@ -294,7 +302,7 @@ class AnalysisService:
         pulse_sample_count = 0
         pulse_metadata: dict[str, Any] = {}
         try:
-            pulse_blob, pulse_sample_count, pulse_metadata = fetch_waveform_blob_sync(
+            pulse_blob, pulse_sample_count, pulse_metadata = await fetch_waveform_blob(
                 self.db_session, session_id, "pulse"
             )
         except Exception as e:
@@ -518,7 +526,7 @@ class AnalysisService:
             timestamp_end=float(timestamps[-1]) if len(timestamps) > 0 else 0.0,
         )
 
-    def analyze_session(
+    async def analyze_session(
         self,
         session_id: int,
         modes: list[str] | None = None,
@@ -552,7 +560,7 @@ class AnalysisService:
         start_time = time.time()
 
         # I/O phase: fetch raw blobs while the session is held.
-        raw = self.load_session_inputs_raw(session_id, modes=modes_list)
+        raw = await self.load_session_inputs_raw(session_id, modes=modes_list)
         # Compute phase: deserialization + NumPy work — no session needed.
         inputs = AnalysisService.prepare_inputs(raw)
         result = self.compute_analysis(inputs)
@@ -561,11 +569,11 @@ class AnalysisService:
         logger.info(f"Analysis complete in {processing_time_ms}ms")
 
         if store_results:
-            self.store_result(result, processing_time_ms)
+            await self.store_result(result, processing_time_ms)
 
         return result
 
-    def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
+    async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """
         Retrieve stored analysis result for a session.
 
@@ -577,10 +585,12 @@ class AnalysisService:
         """
         assert self.db_session is not None, "get_analysis_result requires a DB session"
         analysis = (
-            self.db_session.execute(
-                select(models.AnalysisResult)
-                .filter_by(session_id=session_id)
-                .order_by(models.AnalysisResult.created_at.desc())
+            (
+                await self.db_session.execute(
+                    select(models.AnalysisResult)
+                    .filter_by(session_id=session_id)
+                    .order_by(models.AnalysisResult.created_at.desc())
+                )
             )
             .scalars()
             .first()
@@ -591,7 +601,9 @@ class AnalysisService:
 
         return AnalysisResult.model_validate(analysis.programmatic_result_json)
 
-    def store_result(self, result: AnalysisResult, processing_time_ms: int) -> int:
+    async def store_result(
+        self, result: AnalysisResult, processing_time_ms: int
+    ) -> int:
         """
         Store analysis result to database.
 

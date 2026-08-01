@@ -1,12 +1,11 @@
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Callable
 from datetime import date, datetime, time
 from typing import Annotated
 
 from fastapi import Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
-from snore.database.session import get_session, get_sync_session
+from snore.database.session import get_session
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
@@ -21,24 +20,6 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         await session.close()
 
 
-def sync_get_db() -> Generator[Session]:
-    """FastAPI dependency that provides a committed/rolled-back sync Session.
-
-    Intended for volatile service surfaces (RxTracker, BatchValidator, AnalysisFacade)
-    that still use the sync ORM API during PR-2.  Do NOT use for new code.
-    """
-    session = get_sync_session()
-    try:
-        session.begin()
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-
-
 def service_dep[T](cls: Callable[[AsyncSession], T]) -> Callable[..., T]:
     """Return a FastAPI dependency that constructs ``cls(db)``."""
 
@@ -46,19 +27,6 @@ def service_dep[T](cls: Callable[[AsyncSession], T]) -> Callable[..., T]:
         return cls(db)
 
     return _dep  # type: ignore[return-value]  # FastAPI resolves async deps; Callable[..., T] matches
-
-
-def sync_service_dep[T](cls: Callable[[Session], T]) -> Callable[..., T]:
-    """Return a FastAPI dependency that constructs ``cls(db)`` with a sync Session.
-
-    Intended for volatile service surfaces that still use the sync ORM API during PR-2.
-    Do NOT use for new code.
-    """
-
-    def _dep(db: Annotated[Session, Depends(sync_get_db)]) -> T:
-        return cls(db)
-
-    return _dep
 
 
 class PaginationParams:

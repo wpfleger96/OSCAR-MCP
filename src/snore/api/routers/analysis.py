@@ -64,7 +64,7 @@ async def run_analysis(
     body: AnalysisRunRequest,
     facade: AnalysisFacadeDep,
 ) -> AnalysisResult:
-    return facade.run_analysis(
+    return await facade.run_analysis(
         session_id, modes=body.modes, store_results=body.store_results
     )
 
