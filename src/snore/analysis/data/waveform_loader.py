@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from scipy import signal
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.database.models import Waveform
@@ -166,11 +167,73 @@ def deserialize_waveform_blob(
         raise ValueError(f"Invalid waveform blob data: {e}") from e
 
 
+def fetch_waveform_blob(
+    db_session: Session, session_id: int, waveform_type: str
+) -> tuple[bytes, int, dict[str, Any]]:
+    """Fetch the raw waveform blob and metadata from the database.
+
+    **I/O phase only** — performs the DB query and returns the raw bytes from
+    the ``data_blob`` column plus scalar metadata.  No numpy deserialization
+    occurs here; the session is not needed after this function returns.
+
+    Callers that need numpy arrays should call :func:`load_waveform_from_db`,
+    which calls this function then deserializes in the compute phase.  PR-2
+    async callers can await an async version of this function and then call
+    :func:`deserialize_waveform_blob` without the session.
+
+    Args:
+        db_session: SQLAlchemy database session (used only for the DB query).
+        session_id: Database session ID.
+        waveform_type: Type of waveform (``"flow"``, ``"pressure"``, etc.)
+
+    Returns:
+        Tuple of ``(data_blob, sample_count, metadata_scalars)`` where
+        ``metadata_scalars`` contains all non-blob fields from the Waveform row.
+
+    Raises:
+        ValueError: If the waveform row is not found.
+    """
+    waveform = (
+        db_session.execute(
+            select(Waveform).filter_by(
+                session_id=session_id, waveform_type=waveform_type
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+    if not waveform:
+        raise ValueError(
+            f"Waveform not found: session_id={session_id}, type={waveform_type}"
+        )
+
+    metadata_scalars = {
+        "waveform_id": waveform.id,
+        "session_id": waveform.session_id,
+        "waveform_type": waveform.waveform_type,
+        "sample_rate": waveform.sample_rate,
+        "unit": waveform.unit,
+        "min_value": waveform.min_value,
+        "max_value": waveform.max_value,
+        "mean_value": waveform.mean_value,
+        "sample_count": waveform.sample_count,
+    }
+    return waveform.data_blob, waveform.sample_count or 0, metadata_scalars
+
+
 def load_waveform_from_db(
     db_session: Session, session_id: int, waveform_type: str
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
     Load waveform from database and deserialize.
+
+    Structured as two explicit phases (§7 I/O–compute split):
+
+    1. **I/O phase** (:func:`fetch_waveform_blob`): DB query returns raw bytes +
+       scalar metadata.  The session is not needed after this call.
+    2. **Compute phase** (:func:`deserialize_waveform_blob`): converts raw bytes
+       to numpy arrays.  No session access.
 
     Args:
         db_session: SQLAlchemy database session
@@ -191,31 +254,16 @@ def load_waveform_from_db(
         ...     session, session_id=123, waveform_type="flow"
         ... )
     """
-    waveform = (
-        db_session.query(Waveform)
-        .filter_by(session_id=session_id, waveform_type=waveform_type)
-        .first()
+    # --- I/O phase: DB access only ---
+    data_blob, sample_count, metadata_scalars = fetch_waveform_blob(
+        db_session, session_id, waveform_type
     )
 
-    if not waveform:
-        raise ValueError(
-            f"Waveform not found: session_id={session_id}, type={waveform_type}"
-        )
-
-    timestamps, values = deserialize_waveform_blob(
-        waveform.data_blob, waveform.sample_count or 0
-    )
+    # --- Compute phase: no session needed ---
+    timestamps, values = deserialize_waveform_blob(data_blob, sample_count)
 
     metadata = {
-        "waveform_id": waveform.id,
-        "session_id": waveform.session_id,
-        "waveform_type": waveform.waveform_type,
-        "sample_rate": waveform.sample_rate,
-        "unit": waveform.unit,
-        "min_value": waveform.min_value,
-        "max_value": waveform.max_value,
-        "mean_value": waveform.mean_value,
-        "sample_count": waveform.sample_count,
+        **metadata_scalars,
         "duration": timestamps[-1] - timestamps[0] if len(timestamps) > 0 else 0,
     }
 

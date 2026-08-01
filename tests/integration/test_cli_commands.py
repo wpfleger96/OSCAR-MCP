@@ -8,7 +8,7 @@ These tests verify the command-line interface functionality including:
 - session list command with limits and truncation
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -474,7 +474,7 @@ def db_with_analysis(temp_db):
                     programmatic_result_json=analysis_json,
                     processing_time_ms=100,
                     engine_versions_json={"version": "1.0.0"},
-                    created_at=start_time + timedelta(minutes=j),
+                    created_at=datetime.now(UTC) + timedelta(minutes=j),
                 )
                 session.add(analysis)
                 session.flush()
@@ -969,13 +969,12 @@ class TestSessionShowCommand:
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test --settings flag displays settings."""
-        from snore.database.importers import SessionImporter
+        from snore.database.importers import import_session
 
         init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
-        importer = SessionImporter()
-        importer.import_session(sessions[0])
+        import_session(sessions[0])
 
         runner = CliRunner()
         result = runner.invoke(

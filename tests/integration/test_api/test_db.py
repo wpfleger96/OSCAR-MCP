@@ -2,15 +2,23 @@ from datetime import datetime
 from unittest.mock import patch
 
 
+def _patch_target(temp_db: object) -> object:
+    """Context manager that patches the DB router to use the test database."""
+    from snore.database.target import DatabaseTarget
+
+    target = DatabaseTarget.from_url(str(temp_db))
+    return patch("snore.api.routers.db._get_target", return_value=target)
+
+
 class TestDbStats:
     def test_stats_excludes_db_path(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+        with _patch_target(temp_db):
             response = api_client.get("/api/v1/db/stats")
         data = response.json()
         assert "db_path" not in data
 
     def test_stats_empty_db_counts_zero(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+        with _patch_target(temp_db):
             response = api_client.get("/api/v1/db/stats")
         data = response.json()
         assert data["session_count"] == 0
@@ -21,7 +29,7 @@ class TestDbStats:
     ):
         test_session_factory(test_device.id, start_time=datetime(2025, 1, 1, 22, 0))
         db_session.commit()
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+        with _patch_target(temp_db):
             response = api_client.get("/api/v1/db/stats")
         data = response.json()
         assert data["device_count"] >= 1
@@ -30,14 +38,14 @@ class TestDbStats:
 
 class TestDbVacuum:
     def test_vacuum_status_is_success(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+        with _patch_target(temp_db):
             response = api_client.post("/api/v1/db/vacuum")
         assert response.json()["status"] == "success"
 
 
 class TestDbReset:
     def test_reset_status_is_success(self, api_client, temp_db):
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+        with _patch_target(temp_db):
             response = api_client.post("/api/v1/db/reset")
         assert response.json()["status"] == "success"
 
@@ -48,6 +56,6 @@ class TestDbReset:
 
         test_session_factory(test_device.id, start_time=datetime(2025, 1, 1, 22, 0))
         db_session.commit()
-        with patch("snore.api.routers.db.get_db_path", return_value=str(temp_db)):
+        with _patch_target(temp_db):
             response = api_client.post("/api/v1/db/reset")
         assert response.json()["total_rows_deleted"] >= 1

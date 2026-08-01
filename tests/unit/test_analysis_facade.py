@@ -1,7 +1,7 @@
 """Unit tests for AnalysisFacade."""
 
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -34,7 +34,7 @@ def _create_session_with_analysis(
             timestamp_start=sess.start_time,
             timestamp_end=sess.end_time,
             programmatic_result_json={"version": i + 1},
-            created_at=datetime.now() + timedelta(minutes=i),
+            created_at=datetime.now(UTC) + timedelta(minutes=i),
         )
         db_session.add(ar)
     db_session.flush()
@@ -272,7 +272,9 @@ class TestRunBatchAnalysis:
         assert result.results == []
 
     def test_successful_analysis(self, db_session, test_device, monkeypatch):
-        """Mock analyze_session to succeed, verify successful count."""
+        """Mock load/compute phases to succeed; verify successful count."""
+        from unittest.mock import MagicMock
+
         day, sess = _create_session_with_analysis(
             db_session, test_device, date(2025, 1, 10), num_analyses=0
         )
@@ -282,9 +284,25 @@ class TestRunBatchAnalysis:
         def fake_scope():
             yield db_session
 
+        mock_raw = MagicMock()
+        mock_inputs = MagicMock()
+        mock_result = MagicMock()
+
         monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.analyze_session",
+            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
+            lambda *a, **kw: mock_raw,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.prepare_inputs",
+            lambda *a, **kw: mock_inputs,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.compute_analysis",
+            lambda *a, **kw: mock_result,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.store_result",
             lambda *a, **kw: None,
         )
         facade = AnalysisFacade(db_session)
@@ -296,7 +314,7 @@ class TestRunBatchAnalysis:
         assert result.failed == 0
 
     def test_failed_analysis(self, db_session, test_device, monkeypatch):
-        """Mock analyze_session to raise, verify failed count."""
+        """Mock load phase to raise; verify failed count."""
         day, sess = _create_session_with_analysis(
             db_session, test_device, date(2025, 1, 10), num_analyses=0
         )
@@ -311,7 +329,7 @@ class TestRunBatchAnalysis:
 
         monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.analyze_session",
+            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
             raise_error,
         )
         facade = AnalysisFacade(db_session)
@@ -323,6 +341,9 @@ class TestRunBatchAnalysis:
         assert result.results[0].success is False
 
     def test_progress_callback_called(self, db_session, test_device, monkeypatch):
+        """Progress callback fires once per session regardless of success/failure."""
+        from unittest.mock import MagicMock
+
         day, sess = _create_session_with_analysis(
             db_session, test_device, date(2025, 1, 10), num_analyses=0
         )
@@ -332,9 +353,25 @@ class TestRunBatchAnalysis:
         def fake_scope():
             yield db_session
 
+        mock_raw = MagicMock()
+        mock_inputs = MagicMock()
+        mock_result = MagicMock()
+
         monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.analyze_session",
+            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
+            lambda *a, **kw: mock_raw,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.prepare_inputs",
+            lambda *a, **kw: mock_inputs,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.compute_analysis",
+            lambda *a, **kw: mock_result,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.store_result",
             lambda *a, **kw: None,
         )
         calls = []
@@ -345,4 +382,4 @@ class TestRunBatchAnalysis:
             progress_callback=lambda completed, total: calls.append((completed, total)),
         )
         assert len(calls) == 1
-        assert calls[0] == (1, 1)
+        assert calls[0] == (1, None)  # total is None until exhausted (unknown)

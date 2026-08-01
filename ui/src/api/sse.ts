@@ -6,6 +6,24 @@ export interface ImportProgressCallbacks {
     onError: (data: { message: string }) => void
 }
 
+/**
+ * Cancel an in-progress import job.
+ *
+ * Sends DELETE /api/v1/import/{jobId}.  Returns true if the server accepted
+ * the cancellation (204), false on any error.  Idempotent — safe to call
+ * on a job that has already finished.
+ */
+export async function cancelImport(jobId: string): Promise<boolean> {
+    try {
+        const response = await fetch(`/api/v1/import/${jobId}`, {
+            method: 'DELETE',
+        })
+        return response.status === 204
+    } catch {
+        return false
+    }
+}
+
 export function connectImportProgress(
     jobId: string,
     callbacks: ImportProgressCallbacks,

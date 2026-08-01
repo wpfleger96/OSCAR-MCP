@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import logging
 import os
 
 from collections.abc import AsyncIterator
@@ -15,6 +16,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from snore.api.errors import NotFoundError, not_found_handler, server_error_handler
+from snore.api.import_jobs import shutdown as _shutdown_import_jobs
+from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, RateLimitMiddleware
 from snore.api.routers import (
     analysis,
@@ -31,9 +34,11 @@ from snore.api.routers import (
     validation,
     waveforms,
 )
-from snore.database.session import init_database
+from snore.database.session import init_database, init_database_from_url
 
 API_V1_PREFIX = "/api/v1"
+
+logger = logging.getLogger(__name__)
 
 try:
     __version__ = get_version("snore")
@@ -43,9 +48,34 @@ except PackageNotFoundError:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    db_path = os.environ.get("SNORE_DB_PATH")
-    init_database(db_path)
-    yield
+    # Honour the canonical URL exported by `snore serve` first; fall back to
+    # SNORE_DB_PATH for direct uvicorn invocations and the e2e test harness.
+    database_url = os.environ.get("SNORE_DATABASE_URL")
+    if database_url:
+        init_database_from_url(database_url)
+    else:
+        db_path = os.environ.get("SNORE_DB_PATH")
+        init_database(db_path)
+    # Start a single lifespan-owned TTL reaper.  The stop event and thread
+    # handle are kept so the reaper is joined cleanly on exit — each lifespan
+    # entry gets exactly one reaper; it is stopped on exit rather than left as
+    # an immortal daemon.
+    reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
+    try:
+        yield
+    finally:
+        # Stop the reaper first so it doesn't race with shutdown cleanup.
+        reaper_stop.set()
+        reaper_thread.join(timeout=5.0)
+        # Cancel all in-flight import jobs and await their threads.
+        # Raise a RuntimeError if any worker is still alive after the timeout
+        # so the lifespan does NOT complete clean teardown with active work.
+        still_alive = _shutdown_import_jobs()
+        if still_alive:
+            raise RuntimeError(
+                f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
+                f"after timeout: {still_alive}. Active import writes may be interrupted."
+            )
 
 
 def create_app() -> FastAPI:

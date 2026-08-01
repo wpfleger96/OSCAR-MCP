@@ -9,6 +9,9 @@ from typing import Any
 
 import click
 
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
+
 from snore.cli.decorators import (
     date_range_options,
     db_option,
@@ -187,9 +190,12 @@ def show(
     with open_db_session(db) as session:
         if date is not None:
             db_session = (
-                session.query(models.Session)
-                .join(models.Day)
-                .filter(models.Day.date == date.date())
+                session.execute(
+                    select(models.Session)
+                    .join(models.Day)
+                    .where(models.Day.date == date.date())
+                )
+                .scalars()
                 .first()
             )
             if not db_session:
@@ -198,7 +204,15 @@ def show(
 
         assert session_id is not None, "session_id should not be None"
 
-        db_session = session.query(models.Session).filter_by(id=session_id).first()
+        db_session = (
+            session.execute(
+                select(models.Session)
+                .filter_by(id=session_id)
+                .options(joinedload(models.Session.day))
+            )
+            .scalars()
+            .first()
+        )
         if not db_session:
             raise click.ClickException(f"Session {session_id} not found")
 
@@ -381,14 +395,18 @@ def _analyze_single_session(
     plain: bool,
 ) -> None:
     from snore.analysis.modes import AVAILABLE_CONFIGS
-    from snore.analysis.service import AnalysisService
     from snore.database import models
+    from snore.services.analysis_facade import AnalysisFacade
 
+    # I/O: look up session_id / date while the injected session is open.
     if date:
         db_session = (
-            session.query(models.Session)
-            .join(models.Day)
-            .filter(models.Day.date == date.date())
+            session.execute(
+                select(models.Session)
+                .join(models.Day)
+                .where(models.Day.date == date.date())
+            )
+            .scalars()
             .first()
         )
         if not db_session:
@@ -396,7 +414,15 @@ def _analyze_single_session(
         session_id = db_session.id
         session_date_str = date.date().isoformat()
     else:
-        db_session = session.query(models.Session).filter_by(id=session_id).first()
+        db_session = (
+            session.execute(
+                select(models.Session)
+                .filter_by(id=session_id)
+                .options(joinedload(models.Session.day))
+            )
+            .scalars()
+            .first()
+        )
         if not db_session:
             raise click.ClickException(f"Session {session_id} not found")
         day_date = (
@@ -404,9 +430,10 @@ def _analyze_single_session(
         )
         session_date_str = day_date.isoformat()
 
-    console.print(f"\nAnalyzing session {session_date_str} (ID: {session_id})...")
+    # Close the injected session BEFORE analysis so it is not held across compute.
+    session.close()
 
-    analysis_service = AnalysisService(session)
+    console.print(f"\nAnalyzing session {session_date_str} (ID: {session_id})...")
 
     assert session_id is not None, "session_id should not be None"
 
@@ -417,7 +444,12 @@ def _analyze_single_session(
         modes = list(mode)
 
     try:
-        result = analysis_service.analyze_session(
+        # AnalysisFacade.run_analysis owns its own short read/write scopes;
+        # the injected session (already closed) is not used here.
+        facade = AnalysisFacade(
+            session
+        )  # session only needed for listing, not analysis
+        result = facade.run_analysis(
             session_id=session_id,
             modes=modes,
             store_results=not no_store,
@@ -463,8 +495,10 @@ def _analyze_batch(
         console=console,
     ) as progress:
 
-        def on_progress(completed: int, total: int) -> None:
+        def on_progress(completed: int, total: int | None) -> None:
             if not task_holder:
+                # total=None means we don't yet know how many sessions there are;
+                # use an indeterminate bar (total=None in Rich) until count is known.
                 task_holder.append(progress.add_task("Analyzing", total=total))
             progress.update(task_holder[0], advance=1)
 

@@ -50,11 +50,13 @@ def test_missing_session_returns_structured_404(running_api):
 def test_openapi_matches_committed_generated_types(running_api, request):
     """Guard against schema drift between the live API and the UI codegen.
 
-    The UI generates `ui/src/types/generated.ts` from the OpenAPI schema. Every
-    `/api/v1/...` path the generated file declares must still be served by the
-    live API — catching a backend change that silently breaks the typed
-    frontend contract. Skips cleanly when the generated file isn't present
-    (e.g. before the UI-codegen PR lands).
+    Three directions are checked:
+    1. Paths: generated types must match live API paths bidirectionally.
+    2. Components: every Pydantic schema component must appear in generated.ts
+       — catches new fields (e.g. ``cancelled`` on ``BatchAnalysisResult``)
+       that were added to Python but never regenerated.
+
+    Skips cleanly when the generated file is not present.
     """
     import re
 
@@ -66,12 +68,49 @@ def test_openapi_matches_committed_generated_types(running_api, request):
     schema = running_api.get("/openapi.json").json()
     live_paths = set(schema["paths"].keys())
 
-    # openapi-typescript emits the path templates as quoted object keys.
-    referenced = set(re.findall(r'["\'](/api/v1/[^"\']*)["\']', generated.read_text()))
+    generated_text = generated.read_text()
+    referenced = set(re.findall(r"['\"](?P<p>/api/v1/[^\'\"]+)[\'\"]", generated_text))
     if not referenced:
         pytest.skip("generated types declare no /api/v1 path keys to compare")
 
-    drifted = referenced - live_paths
-    assert not drifted, (
-        f"ui generated types reference paths the live API no longer serves: {sorted(drifted)}"
+    # Direction 1a: generated references paths that no longer exist.
+    stale = referenced - live_paths
+    assert not stale, (
+        f"ui generated types reference paths the live API no longer serves: {sorted(stale)}"
     )
+
+    # Direction 1b: live API paths not yet in generated types.
+    ungenerated = live_paths - referenced
+    assert not ungenerated, (
+        "live API paths missing from ui generated types "
+        "(regenerate with pnpm generate:types): "
+        f"{sorted(ungenerated)}"
+    )
+
+    # Direction 2: live schema components and their properties must be reflected in
+    # the committed openapi.json artifact.  This catches new/changed fields (like
+    # `cancelled` on BatchAnalysisResult) that were never regenerated.
+    committed_openapi = repo_root / "ui" / "openapi.json"
+    if committed_openapi.exists():
+        import json as _json  # noqa: PLC0415
+
+        committed_schema = _json.loads(committed_openapi.read_text())
+        live_comps = schema.get("components", {}).get("schemas", {})
+        committed_comps = committed_schema.get("components", {}).get("schemas", {})
+
+        # Check every live component's required fields are in the committed artifact.
+        # A missing or changed required field means regeneration is needed.
+        for comp_name, live_comp in live_comps.items():
+            committed_comp = committed_comps.get(comp_name)
+            assert committed_comp is not None, (
+                f"Schema component {comp_name!r} not in committed openapi.json "
+                "(regenerate ui/openapi.json with pnpm generate:types)"
+            )
+            live_props = set(live_comp.get("properties", {}).keys())
+            committed_props = set(committed_comp.get("properties", {}).keys())
+            missing_props = live_props - committed_props
+            assert not missing_props, (
+                f"Component {comp_name!r} has properties in live API not in committed "
+                f"openapi.json: {sorted(missing_props)}. "
+                "Regenerate ui/openapi.json and ui/src/types/generated.ts."
+            )

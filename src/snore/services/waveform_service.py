@@ -5,9 +5,14 @@ from typing import Any
 
 import numpy as np
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from snore.analysis.data.waveform_loader import WaveformLoader
+from snore.analysis.data.waveform_loader import (
+    WaveformLoader,
+    deserialize_waveform_blob,
+    fetch_waveform_blob,
+)
 from snore.database import models
 from snore.exceptions import NotFoundError
 from snore.services.lttb import lttb_downsample
@@ -46,9 +51,12 @@ class WaveformService:
             List of WaveformInfo objects with metadata
         """
         waveforms = (
-            self.db_session.query(models.Waveform)
-            .filter(models.Waveform.session_id == session_id)
-            .order_by(models.Waveform.waveform_type)
+            self.db_session.execute(
+                select(models.Waveform)
+                .where(models.Waveform.session_id == session_id)
+                .order_by(models.Waveform.waveform_type)
+            )
+            .scalars()
             .all()
         )
 
@@ -80,6 +88,13 @@ class WaveformService:
         """
         Load waveform data with optional windowing and LTTB downsampling.
 
+        Structured as two explicit phases (§7 I/O–compute split):
+
+        1. **I/O phase** (``fetch_waveform_blob``): DB query returns raw bytes and
+           scalar metadata.  The injected session is used only here.
+        2. **Compute phase** (``deserialize_waveform_blob``): converts raw bytes to
+           numpy arrays.  No DB session access occurs here.
+
         Args:
             session_id: Database session ID
             waveform_type: Type of waveform to load
@@ -93,14 +108,19 @@ class WaveformService:
         Raises:
             ValueError: If waveform not found
         """
+        # --- I/O phase: DB access only ---
         try:
-            timestamps, values, metadata = self._loader.load_waveform(
-                session_id=session_id,
-                waveform_type=waveform_type,
-                apply_filter=False,
+            data_blob, sample_count, metadata = fetch_waveform_blob(
+                self.db_session, session_id, waveform_type
             )
         except ValueError as e:
             raise NotFoundError(str(e)) from e
+
+        # Close the session now — deserialization and LTTB are pure compute.
+        self.db_session.close()
+
+        # --- Compute phase: no DB session needed after this point ---
+        timestamps, values = deserialize_waveform_blob(data_blob, sample_count)
 
         if start_seconds is not None or end_seconds is not None:
             mask = np.ones(len(timestamps), dtype=bool)

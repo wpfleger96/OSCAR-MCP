@@ -94,16 +94,25 @@ class ImportService:
         parallel: bool = True,
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> ImportResult:
         """Run the import pipeline for the selected sources.
 
         Backup (optional) → parse → import (or dry-run count). Returns aggregate
         counts and per-source breakdown.
+
+        Args:
+            cancel_predicate: Optional callable that returns True when the caller
+                has requested cancellation.  Checked between sources and at each
+                batch boundary inside ``SessionImporter``.
         """
 
         def emit(msg: str) -> None:
             if progress_callback:
                 progress_callback(msg)
+
+        def is_cancelled() -> bool:
+            return cancel_predicate is not None and cancel_predicate()
 
         source_results: list[ImportSourceResult] = []
         total_imported = 0
@@ -119,6 +128,9 @@ class ImportService:
         parser_map = {p.parser_id: p for p in parser_registry.list_parsers()}
 
         for source in sources:
+            if is_cancelled():
+                break
+
             parser = parser_map.get(source.parser_name)
             if parser is None:
                 logger.warning(
@@ -166,44 +178,68 @@ class ImportService:
                     warnings.append("No device serial — backup skipped")
                     emit("No device serial found — skipping backup")
 
-            # Parse sessions
-            sessions = list(
-                parser.parse_sessions(
-                    parse_root,
-                    date_from=date_from,
-                    date_to=date_to,
-                    limit=limit,
-                    sort_by=sort_by,
-                    parallel=parallel,
-                    progress_callback=emit,
-                )
+            if is_cancelled():
+                break
+
+            # Parse sessions lazily — no full-batch prefetch.
+            # parse_sessions() returns a generator; import_sessions_batch consumes
+            # it in bounded batch_size chunks so memory is bounded per-batch.
+            session_iter = parser.parse_sessions(
+                parse_root,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+                sort_by=sort_by,
+                parallel=parallel,
+                progress_callback=emit,
             )
-            emit(f"Found {len(sessions)} sessions")
+            emit("Detected sessions — starting import")
 
             if dry_run:
-                # Count what would be imported without writing to DB
+                # Count what would be imported without writing to DB.
+                # Consume the iterator to get the count (dry_run materializes anyway).
+                sessions_list = list(session_iter)
                 source_results.append(
                     ImportSourceResult(
                         source=source,
-                        imported=len(sessions),
+                        imported=len(sessions_list),
                         skipped=0,
                         failed=0,
                         warnings=warnings,
                     )
                 )
-                total_imported += len(sessions)
+                total_imported += len(sessions_list)
                 continue
 
-            # Import
+            # Import — ImportService opens ONE scope per bounded batch chunk.
+            # Each chunk is committed separately; a failed chunk does not poison
+            # subsequent chunks.
             importer = SessionImporter()
-            total_batches = (len(sessions) + batch_size - 1) // batch_size
-            emit(f"Importing {len(sessions)} sessions in {total_batches} batch(es)...")
-            imported, skipped, failed = importer.import_sessions_batch(
-                sessions,
-                force=force,
-                batch_size=batch_size,
-                progress_callback=progress_callback,
-            )
+            emit("Importing sessions...")
+            imported = 0
+            skipped = 0
+            failed = 0
+            session_iter_internal = iter(session_iter)
+            import itertools as _itertools  # noqa: PLC0415
+
+            for _chunk_num in _itertools.count(1):
+                if cancel_predicate is not None and cancel_predicate():
+                    break
+                chunk = list(_itertools.islice(session_iter_internal, batch_size))
+                if not chunk:
+                    break
+                with session_scope() as chunk_db:
+                    ci, cs, cf = importer.import_sessions_batch(
+                        iter(chunk),
+                        force=force,
+                        batch_size=batch_size,
+                        progress_callback=progress_callback,
+                        cancel_predicate=cancel_predicate,
+                        db=chunk_db,
+                    )
+                imported += ci
+                skipped += cs
+                failed += cf
 
             total_imported += imported
             total_skipped += skipped

@@ -14,12 +14,15 @@ import logging
 import shutil
 import zipfile
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+from sqlalchemy import select
 
 from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.parsers.base import RawFileManifest
@@ -206,56 +209,93 @@ class ExportService:
         device_serial: str | None = None,
         include_waveforms: bool = False,
     ) -> ExportResult:
-        """Export parsed data as CSV files."""
-        from snore.database import models
+        """Export parsed data as CSV files.
+
+        All three output files (sessions, events, settings) are written in a
+        single generator pass — no full materialisation of the result set.
+        """
+        from snore.database import models  # noqa: PLC0415
 
         output.mkdir(parents=True, exist_ok=True)
         warnings: list[str] = []
         files_written = 0
+        nights: set[date] = set()
 
-        sessions, events_by_session, settings_by_session, nights = (
-            self._build_export_sessions(db_session, date_from, date_to, device_serial)
+        if include_waveforms:
+            warnings.append(
+                "Waveform export enabled. Files may be very large "
+                "(~720K rows per 8-hour session at 25Hz)."
+            )
+
+        rows_gen = self._build_export_rows(
+            db_session, date_from, date_to, device_serial
         )
 
-        if not sessions:
-            warnings.append("No sessions found for the specified filters.")
-            return ExportResult(format="csv", output_path=output, warnings=warnings)
-
-        # sessions.csv
+        # Open all three CSV files simultaneously so we can write in one pass.
         sessions_path = output / "sessions.csv"
-        with open(sessions_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "device_session_id",
-                    "date",
-                    "start_time",
-                    "end_time",
-                    "duration_hours",
-                    "device_serial",
-                    "device_model",
-                    "therapy_mode",
-                    "timezone",
-                    "ahi",
-                    "oai",
-                    "cai",
-                    "hi",
-                    "obstructive_apneas",
-                    "central_apneas",
-                    "hypopneas",
-                    "reras",
-                    "pressure_mean",
-                    "pressure_95th",
-                    "epap_mean",
-                    "leak_mean",
-                    "leak_95th",
-                    "spo2_mean",
-                    "usage_hours",
-                ]
-            )
-            for s in sessions:
+        events_path = output / "events.csv"
+        settings_path = output / "settings.csv"
+
+        session_header = [
+            "device_session_id",
+            "date",
+            "start_time",
+            "end_time",
+            "duration_hours",
+            "device_serial",
+            "device_model",
+            "therapy_mode",
+            "timezone",
+            "ahi",
+            "oai",
+            "cai",
+            "hi",
+            "obstructive_apneas",
+            "central_apneas",
+            "hypopneas",
+            "reras",
+            "pressure_mean",
+            "pressure_95th",
+            "epap_mean",
+            "leak_mean",
+            "leak_95th",
+            "spo2_mean",
+            "usage_hours",
+        ]
+        event_header = [
+            "device_session_id",
+            "session_date",
+            "event_type",
+            "start_time",
+            "duration_seconds",
+            "timezone",
+        ]
+        setting_header = ["device_session_id", "session_date", "key", "value"]
+
+        found_any = False
+        with (
+            open(sessions_path, "w", newline="") as sf,
+            open(events_path, "w", newline="") as ef,
+            open(settings_path, "w", newline="") as stf,
+        ):
+            sw = csv.writer(sf)
+            ew = csv.writer(ef)
+            stw = csv.writer(stf)
+            sw.writerow(session_header)
+            ew.writerow(event_header)
+            stw.writerow(setting_header)
+
+            for s, evs, stts in rows_gen:
+                found_any = True
                 stats = s.get("statistics") or {}
-                writer.writerow(
+                night = (
+                    s["start_time"].date()
+                    if s["start_time"].hour >= 12
+                    else (s["start_time"] - timedelta(days=1)).date()
+                )
+                nights.add(night)
+
+                sw.writerow(
                     [
                         s["device_session_id"],
                         s["start_time"].strftime("%Y-%m-%d"),
@@ -285,25 +325,9 @@ class ExportService:
                         stats.get("usage_hours", ""),
                     ]
                 )
-        files_written += 1
 
-        # events.csv
-        events_path = output / "events.csv"
-        with open(events_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "device_session_id",
-                    "session_date",
-                    "event_type",
-                    "start_time",
-                    "duration_seconds",
-                    "timezone",
-                ]
-            )
-            for s in sessions:
-                for e in events_by_session.get(s["id"], []):
-                    writer.writerow(
+                for e in evs:
+                    ew.writerow(
                         [
                             s["device_session_id"],
                             s["start_time"].strftime("%Y-%m-%d"),
@@ -313,23 +337,9 @@ class ExportService:
                             "local",
                         ]
                     )
-        files_written += 1
 
-        # settings.csv
-        settings_path = output / "settings.csv"
-        with open(settings_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "device_session_id",
-                    "session_date",
-                    "key",
-                    "value",
-                ]
-            )
-            for s in sessions:
-                for st in settings_by_session.get(s["id"], []):
-                    writer.writerow(
+                for st in stts:
+                    stw.writerow(
                         [
                             s["device_session_id"],
                             s["start_time"].strftime("%Y-%m-%d"),
@@ -337,40 +347,45 @@ class ExportService:
                             st.value,
                         ]
                     )
-        files_written += 1
 
-        # waveforms (optional)
-        if include_waveforms:
-            waveforms_dir = output / "waveforms"
-            waveforms_dir.mkdir(exist_ok=True)
-            warnings.append(
-                "Waveform export enabled. Files may be very large "
-                "(~720K rows per 8-hour session at 25Hz)."
-            )
-            for s in sessions:
-                waveforms = (
-                    db_session.query(models.Waveform)
-                    .filter_by(session_id=s["id"])
-                    .all()
-                )
-                for w in waveforms:
-                    if not w.data_blob:
-                        continue
-                    fname = (
-                        f"{s['serial_number']}_{s['start_time']:%Y%m%d}_"
-                        f"{s['start_time']:%H%M%S}_{w.waveform_type}.csv"
+                # Waveform export — per session, uses serial+date+time filenames
+                # matching the pre-branch format: serial_YYYYMMDD_HHMMSS_type.csv
+                if include_waveforms:
+                    sid = s["id"]
+                    waveforms_dir = output / "waveforms"
+                    waveforms_dir.mkdir(exist_ok=True)
+                    waveforms = (
+                        db_session.execute(
+                            select(models.Waveform).filter_by(session_id=sid)
+                        )
+                        .scalars()
+                        .all()
                     )
-                    wpath = waveforms_dir / fname
-                    flat = np.frombuffer(w.data_blob, dtype=np.float32)
-                    if len(flat) % 2 != 0:
-                        continue
-                    rows = flat.reshape(-1, 2)
-                    with open(wpath, "w", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["offset_seconds", "value"])
-                        for row in rows:
-                            writer.writerow([f"{row[0]:.3f}", f"{row[1]:.3f}"])
-                    files_written += 1
+                    for w in waveforms:
+                        if not w.data_blob:
+                            continue
+                        # Restore the original filename format: serial_date_time_type.csv
+                        fname = (
+                            f"{s['serial_number']}_{s['start_time']:%Y%m%d}_"
+                            f"{s['start_time']:%H%M%S}_{w.waveform_type}.csv"
+                        )
+                        wpath = waveforms_dir / fname
+                        flat = np.frombuffer(w.data_blob, dtype=np.float32)
+                        if len(flat) % 2 != 0:
+                            continue
+                        wf_rows = flat.reshape(-1, 2)
+                        with open(wpath, "w", newline="") as wf:
+                            writer = csv.writer(wf)
+                            writer.writerow(["offset_seconds", "value"])
+                            for wrow in wf_rows:
+                                writer.writerow([f"{wrow[0]:.3f}", f"{wrow[1]:.3f}"])
+                        files_written += 1
+
+        if not found_any:
+            warnings.append("No sessions found for the specified filters.")
+            return ExportResult(format="csv", output_path=output, warnings=warnings)
+
+        files_written += 3
 
         return ExportResult(
             format="csv",
@@ -392,66 +407,91 @@ class ExportService:
         date_to: date | None = None,
         device_serial: str | None = None,
     ) -> ExportResult:
-        """Export parsed data as a single JSON document."""
+        """Export parsed data as a single JSON document.
+
+        Writes the JSON array incrementally — one object per session — so the
+        full session list is never held in memory simultaneously.
+        """
         output.parent.mkdir(parents=True, exist_ok=True)
         warnings: list[str] = []
+        nights: set[date] = set()
+        session_count = 0
 
-        sessions, events_by_session, settings_by_session, nights = (
-            self._build_export_sessions(db_session, date_from, date_to, device_serial)
-        )
-
-        if not sessions:
-            warnings.append("No sessions found for the specified filters.")
-
-        session_list: list[dict[str, Any]] = []
-
-        for s in sessions:
-            events = events_by_session.get(s["id"], [])
-            settings = settings_by_session.get(s["id"], [])
-
-            session_list.append(
-                {
-                    "device_session_id": s["device_session_id"],
-                    "date": s["start_time"].strftime("%Y-%m-%d"),
-                    "start_time": s["start_time"].isoformat(),
-                    "end_time": s["end_time"].isoformat(),
-                    "duration_hours": round(s["duration_seconds"] / 3600, 2)
-                    if s["duration_seconds"]
-                    else None,
-                    "timezone": "local",
-                    "device": {
-                        "serial": s["serial_number"],
-                        "model": s["model"],
-                        "manufacturer": s["manufacturer"],
-                    },
-                    "statistics": s.get("statistics") or {},
-                    "settings": {st.key: st.value for st in settings},
-                    "events": [
-                        {
-                            "event_type": e.event_type,
-                            "start_time": e.start_time.isoformat()
-                            if e.start_time
-                            else None,
-                            "duration_seconds": e.duration_seconds,
-                        }
-                        for e in events
-                    ],
-                }
-            )
-
-        doc = {
-            "exported_at": datetime.now().isoformat(),
-            "snore_export_format": "1.0",
-            "date_range": {
-                "from": date_from.isoformat() if date_from else None,
-                "to": date_to.isoformat() if date_to else None,
-            },
-            "session_count": len(session_list),
-            "sessions": session_list,
-        }
+        def _session_obj(
+            s: dict[str, Any], events: list[Any], settings: list[Any]
+        ) -> str:
+            """Serialise one session to a compact JSON object string."""
+            obj = {
+                "device_session_id": s["device_session_id"],
+                "date": s["start_time"].strftime("%Y-%m-%d"),
+                "start_time": s["start_time"].isoformat(),
+                "end_time": s["end_time"].isoformat(),
+                "duration_hours": round(s["duration_seconds"] / 3600, 2)
+                if s["duration_seconds"]
+                else None,
+                "timezone": "local",
+                "device": {
+                    "serial": s["serial_number"],
+                    "model": s["model"],
+                    "manufacturer": s["manufacturer"],
+                },
+                "statistics": s.get("statistics") or {},
+                "settings": {st.key: st.value for st in settings},
+                "events": [
+                    {
+                        "event_type": e.event_type,
+                        "start_time": e.start_time.isoformat()
+                        if e.start_time
+                        else None,
+                        "duration_seconds": e.duration_seconds,
+                    }
+                    for e in events
+                ],
+            }
+            return json.dumps(obj, indent=2, default=str)
 
         with open(output, "w") as f:
-            json.dump(doc, f, indent=2, default=str)
+            # Write document header and open sessions array.
+            header = {
+                "exported_at": datetime.now().isoformat(),
+                "snore_export_format": "1.0",
+                "date_range": {
+                    "from": date_from.isoformat() if date_from else None,
+                    "to": date_to.isoformat() if date_to else None,
+                },
+            }
+            # Write header fields then open the sessions array incrementally.
+            f.write("{\n")
+            for k, v in header.items():
+                f.write(f"  {json.dumps(k)}: {json.dumps(v, default=str)},\n")
+            f.write('  "sessions": [\n')
+
+            first_session = True
+            for s, events, settings in self._build_export_rows(
+                db_session, date_from, date_to, device_serial
+            ):
+                night = (
+                    s["start_time"].date()
+                    if s["start_time"].hour >= 12
+                    else (s["start_time"] - timedelta(days=1)).date()
+                )
+                nights.add(night)
+                session_count += 1
+
+                if not first_session:
+                    f.write(",\n")
+                first_session = False
+                # Indent the session object to nest inside the array.
+                obj_str = _session_obj(s, events, settings)
+                indented = "\n".join("    " + line for line in obj_str.splitlines())
+                f.write(indented)
+
+            f.write("\n  ],\n")
+            f.write(f'  "session_count": {session_count}\n')
+            f.write("}\n")
+
+        if session_count == 0:
+            warnings.append("No sessions found for the specified filters.")
 
         return ExportResult(
             format="json",
@@ -465,38 +505,42 @@ class ExportService:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _build_export_sessions(
+    _EXPORT_CHUNK_SIZE: int = 500  # Sessions per DB fetch window
+
+    def _build_export_rows(
         self,
         db_session: DBSession,
         date_from: date | None,
         date_to: date | None,
         device_serial: str | None,
-    ) -> tuple[
-        list[dict[str, Any]],
-        dict[int, list[Any]],
-        dict[int, list[Any]],
-        set[date],
-    ]:
-        """Fetch sessions plus bulk-loaded events/settings and night aggregation.
+    ) -> Iterator[tuple[dict[str, Any], list[Any], list[Any]]]:
+        """Yield ``(session_dict, events, settings)`` tuples in bounded chunks.
 
-        Shared by the CSV and JSON exporters so both consume identical data.
+        Fetches sessions in windows of ``_EXPORT_CHUNK_SIZE`` rows and bulk-loads
+        events/settings for each window.  No full materialisation of the entire
+        result set occurs; memory is bounded to one chunk at a time.
 
-        Returns:
-            Tuple of (sessions, events_by_session, settings_by_session, nights).
+        Shared by ``export_csv`` and ``export_json`` so both consumers work from
+        the same I/O–bounded data path.
         """
-        sessions = self._query_sessions(db_session, date_from, date_to, device_serial)
-        session_ids = [s["id"] for s in sessions]
-        events_by_session = self._bulk_load_events(db_session, session_ids)
-        settings_by_session = self._bulk_load_settings(db_session, session_ids)
+        import itertools  # noqa: PLC0415
 
-        nights = {
-            s["start_time"].date()
-            if s["start_time"].hour >= 12
-            else (s["start_time"] - timedelta(days=1)).date()
-            for s in sessions
-        }
-
-        return sessions, events_by_session, settings_by_session, nights
+        session_gen = self._query_sessions_chunked(
+            db_session, date_from, date_to, device_serial
+        )
+        while True:
+            chunk = list(itertools.islice(session_gen, self._EXPORT_CHUNK_SIZE))
+            if not chunk:
+                break
+            session_ids = [s["id"] for s in chunk]
+            events_by_session = self._bulk_load_events(db_session, session_ids)
+            settings_by_session = self._bulk_load_settings(db_session, session_ids)
+            for s in chunk:
+                yield (
+                    s,
+                    events_by_session.get(s["id"], []),
+                    settings_by_session.get(s["id"], []),
+                )
 
     def _resolve_device_serial(self, device_serial: str | None) -> str:
         """Resolve device serial, failing fast on ambiguity."""
@@ -533,83 +577,97 @@ class ExportService:
         device_serial: str | None,
     ) -> list[dict[str, Any]]:
         """Query sessions with optional filters, returning dicts with joined data."""
-        from sqlalchemy import text
+        return list(
+            self._query_sessions_chunked(db_session, date_from, date_to, device_serial)
+        )
 
-        where_clauses = ["sessions.enabled = 1"]
-        params: dict[str, Any] = {}
+    def _query_sessions_chunked(
+        self,
+        db_session: DBSession,
+        date_from: date | None,
+        date_to: date | None,
+        device_serial: str | None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield session dicts one-by-one using a server-side cursor (``yield_per``).
+
+        Memory is bounded to one database page at a time regardless of result set
+        size.  Callers that need all rows at once should use ``_query_sessions``.
+        """
+        from snore.database import models  # noqa: PLC0415
+
+        # Build the base join: sessions → devices (required) + statistics (optional).
+        stats_alias = models.Statistics
+        stmt = (
+            select(
+                models.Session.id,
+                models.Session.device_session_id,
+                models.Session.start_time,
+                models.Session.end_time,
+                models.Session.duration_seconds,
+                models.Session.therapy_mode,
+                models.Device.serial_number,
+                models.Device.model,
+                models.Device.manufacturer,
+                # Statistics columns — None when no stats row exists.
+                stats_alias.ahi,
+                stats_alias.oai,
+                stats_alias.cai,
+                stats_alias.hi,
+                stats_alias.obstructive_apneas,
+                stats_alias.central_apneas,
+                stats_alias.hypopneas,
+                stats_alias.reras,
+                stats_alias.pressure_mean,
+                stats_alias.pressure_95th,
+                stats_alias.epap_mean,
+                stats_alias.leak_mean,
+                stats_alias.leak_95th,
+                stats_alias.spo2_mean,
+                stats_alias.usage_hours,
+            )
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .outerjoin(stats_alias, models.Session.id == stats_alias.session_id)
+            .where(models.Session.enabled.is_(True))
+            .order_by(models.Session.start_time)
+        )
 
         if device_serial:
-            where_clauses.append("devices.serial_number = :device")
-            params["device"] = device_serial
+            stmt = stmt.where(models.Device.serial_number == device_serial)
         if date_from:
-            where_clauses.append("sessions.start_time >= :from_date")
-            params["from_date"] = datetime(
-                date_from.year, date_from.month, date_from.day
-            ).isoformat()
+            stmt = stmt.where(
+                models.Session.start_time
+                >= datetime(date_from.year, date_from.month, date_from.day)
+            )
         if date_to:
-            where_clauses.append("sessions.start_time <= :to_date")
-            params["to_date"] = datetime(
-                date_to.year, date_to.month, date_to.day, 23, 59, 59
-            ).isoformat()
+            stmt = stmt.where(
+                models.Session.start_time
+                <= datetime(date_to.year, date_to.month, date_to.day, 23, 59, 59)
+            )
 
-        where_sql = " AND ".join(where_clauses)
-
-        query = text(f"""
-            SELECT
-                sessions.id,
-                sessions.device_session_id,
-                sessions.start_time,
-                sessions.end_time,
-                sessions.duration_seconds,
-                sessions.therapy_mode,
-                devices.serial_number,
-                devices.model,
-                devices.manufacturer,
-                statistics.ahi, statistics.oai, statistics.cai, statistics.hi,
-                statistics.obstructive_apneas, statistics.central_apneas,
-                statistics.hypopneas, statistics.reras,
-                statistics.pressure_mean, statistics.pressure_95th,
-                statistics.epap_mean,
-                statistics.leak_mean, statistics.leak_95th,
-                statistics.spo2_mean, statistics.usage_hours
-            FROM sessions
-            JOIN devices ON sessions.device_id = devices.id
-            LEFT JOIN statistics ON sessions.id = statistics.session_id
-            WHERE {where_sql}
-            ORDER BY sessions.start_time ASC
-        """)
-
-        rows = db_session.execute(query, params).fetchall()
-        results = []
-        for row in rows:
+        stat_keys = [
+            "ahi",
+            "oai",
+            "cai",
+            "hi",
+            "obstructive_apneas",
+            "central_apneas",
+            "hypopneas",
+            "reras",
+            "pressure_mean",
+            "pressure_95th",
+            "epap_mean",
+            "leak_mean",
+            "leak_95th",
+            "spo2_mean",
+            "usage_hours",
+        ]
+        for row in db_session.execute(stmt).yield_per(self._EXPORT_CHUNK_SIZE):
             r = dict(row._mapping)
-            for dt_field in ("start_time", "end_time"):
-                if isinstance(r[dt_field], str):
-                    r[dt_field] = datetime.fromisoformat(r[dt_field])
-            stat_keys = [
-                "ahi",
-                "oai",
-                "cai",
-                "hi",
-                "obstructive_apneas",
-                "central_apneas",
-                "hypopneas",
-                "reras",
-                "pressure_mean",
-                "pressure_95th",
-                "epap_mean",
-                "leak_mean",
-                "leak_95th",
-                "spo2_mean",
-                "usage_hours",
-            ]
             r["statistics"] = {k: r.pop(k) for k in stat_keys if r.get(k) is not None}
-            # Clean up None stat keys
+            # Remove any stat keys that were None (not present in statistics dict).
             for k in stat_keys:
                 r.pop(k, None)
-            results.append(r)
-
-        return results
+            yield r
 
     @staticmethod
     def _bulk_load_events(
@@ -624,9 +682,12 @@ class ExportService:
             return {}
 
         events = (
-            db_session.query(models.Event)
-            .filter(models.Event.session_id.in_(session_ids))
-            .order_by(models.Event.session_id, models.Event.start_time)
+            db_session.execute(
+                select(models.Event)
+                .filter(models.Event.session_id.in_(session_ids))
+                .order_by(models.Event.session_id, models.Event.start_time)
+            )
+            .scalars()
             .all()
         )
         grouped: dict[int, list[Any]] = defaultdict(list)
@@ -647,9 +708,12 @@ class ExportService:
             return {}
 
         settings = (
-            db_session.query(models.Setting)
-            .filter(models.Setting.session_id.in_(session_ids))
-            .order_by(models.Setting.session_id, models.Setting.key)
+            db_session.execute(
+                select(models.Setting)
+                .filter(models.Setting.session_id.in_(session_ids))
+                .order_by(models.Setting.session_id, models.Setting.key)
+            )
+            .scalars()
             .all()
         )
         grouped: dict[int, list[Any]] = defaultdict(list)

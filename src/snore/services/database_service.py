@@ -4,12 +4,12 @@ import os
 
 from datetime import datetime
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from snore.database import models
 from snore.database.models import Base
-from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
+from snore.services.schemas import DatabaseStats, VacuumResult
 
 __all__ = ["DatabaseService"]
 
@@ -36,45 +36,89 @@ class DatabaseService:
         Returns:
             DatabaseStats with all counts, percentages, and date range
         """
-        profile_count = self.db_session.query(models.Profile).count()
-        device_count = self.db_session.query(models.Device).count()
-        session_count = self.db_session.query(models.Session).count()
-        day_count = self.db_session.query(models.Day).count()
-        event_count = (
-            self.db_session.execute(text("SELECT COUNT(*) FROM events")).scalar() or 0
+        profile_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Profile)
+            ).scalar()
+            or 0
         )
-        waveform_count = self.db_session.query(models.Waveform).count()
-        analysis_count = self.db_session.query(models.AnalysisResult).count()
-        pattern_count = self.db_session.query(models.DetectedPattern).count()
+        device_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Device)
+            ).scalar()
+            or 0
+        )
+        session_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Session)
+            ).scalar()
+            or 0
+        )
+        day_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Day)
+            ).scalar()
+            or 0
+        )
+        event_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Event)
+            ).scalar()
+            or 0
+        )
+        waveform_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.Waveform)
+            ).scalar()
+            or 0
+        )
+        analysis_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.AnalysisResult)
+            ).scalar()
+            or 0
+        )
+        pattern_count = (
+            self.db_session.execute(
+                select(func.count()).select_from(models.DetectedPattern)
+            ).scalar()
+            or 0
+        )
 
         sessions_with_waveforms = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.has_waveform_data == True)
-            .count()
+            self.db_session.execute(
+                select(func.count())
+                .select_from(models.Session)
+                .where(models.Session.has_waveform_data.is_(True))
+            ).scalar()
+            or 0
         )
         sessions_with_events = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.has_event_data == True)
-            .count()
+            self.db_session.execute(
+                select(func.count())
+                .select_from(models.Session)
+                .where(models.Session.has_event_data.is_(True))
+            ).scalar()
+            or 0
         )
 
         first_session_raw = self.db_session.execute(
-            text("SELECT MIN(start_time) as first FROM sessions")
+            select(func.min(models.Session.start_time))
         ).scalar()
 
         last_session_raw = self.db_session.execute(
-            text("SELECT MAX(start_time) as last FROM sessions")
+            select(func.max(models.Session.start_time))
         ).scalar()
 
         first_session = None
         last_session = None
-        if first_session_raw:
+        if first_session_raw is not None:
             first_session = (
                 datetime.fromisoformat(first_session_raw)
                 if isinstance(first_session_raw, str)
                 else first_session_raw
             )
-        if last_session_raw:
+        if last_session_raw is not None:
             last_session = (
                 datetime.fromisoformat(last_session_raw)
                 if isinstance(last_session_raw, str)
@@ -114,54 +158,80 @@ class DatabaseService:
             last_session=last_session,
         )
 
-    def vacuum(self, db_path: str) -> VacuumResult:
-        """Vacuum the database to reclaim space after deletions."""
-        size_before = (
-            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
-        )
+    def reset_rows(self) -> dict[str, int]:
+        """Delete all rows from all data tables.  Caller-transaction-owned.
 
-        self.db_session.execute(text("VACUUM"))
-        self.db_session.commit()
+        Performs generic typed ``table.delete()`` statements in FK-safe order.
+        Does NOT commit — the caller owns the transaction.
+        Does NOT VACUUM — call ``vacuum_sqlite()`` separately if needed.
 
-        size_after = (
-            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
-        )
-
-        return VacuumResult(
-            status="success",
-            size_before_mb=size_before,
-            size_after_mb=size_after,
-        )
-
-    def reset(self, db_path: str) -> ResetResult:
-        """Delete all rows from all data tables and vacuum to reclaim space.
-
-        Tables are cleared in FK-safe order (leaf tables first). Schema is preserved.
+        Returns:
+            Mapping of table name → rows deleted.
         """
-        size_before = (
-            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
-        )
-
         tables_cleared: dict[str, int] = {}
-        total = 0
         for table in reversed(Base.metadata.sorted_tables):
             cursor = self.db_session.execute(table.delete())
             count = cursor.rowcount or 0  # type: ignore[attr-defined]
             tables_cleared[table.name] = count
-            total += count
+        return tables_cleared
 
-        self.db_session.commit()  # commit deletes before VACUUM — SQLite forbids VACUUM in a transaction
-        self.db_session.execute(text("VACUUM"))
-        self.db_session.commit()
+    def vacuum_sqlite(self, db_path: str) -> VacuumResult:
+        """Run VACUUM on a SQLite file-backed database.
 
-        size_after = (
+        Dispatched separately from row-reset so callers can vacuum without
+        deleting, or skip vacuum on non-SQLite targets.
+
+        Args:
+            db_path: Path to the SQLite file.
+
+        Raises:
+            RuntimeError: If db_path is not a valid SQLite file target.
+        """
+        if not self.is_sqlite_target(db_path):
+            raise RuntimeError(
+                f"vacuum_sqlite() requires a SQLite file target; got {db_path!r}"
+            )
+        vacuum_engine = create_engine(
+            f"sqlite:///{db_path}",
+            isolation_level="AUTOCOMMIT",
+        )
+        try:
+            with vacuum_engine.connect() as conn:
+                conn.execute(text("VACUUM"))
+        finally:
+            vacuum_engine.dispose()
+
+        size = (
             os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
         )
+        return VacuumResult(status="success", size_before_mb=size, size_after_mb=size)
 
-        return ResetResult(
-            status="success",
-            tables_cleared=tables_cleared,
-            total_rows_deleted=total,
-            size_before_mb=size_before,
-            size_after_mb=size_after,
-        )
+    @staticmethod
+    def is_sqlite_target(db_path: str) -> bool:
+        """Return True if *db_path* identifies a SQLite file target.
+
+        Routes through ``DatabaseTarget`` to determine the dialect rather than
+        relying on path-string heuristics.  A bare file path (no ``://``) is
+        treated as a SQLite path by ``DatabaseTarget.from_url()``.  An explicit
+        URL is parsed to extract the dialect; only ``"sqlite"`` with a non-memory
+        location returns True.
+
+        Examples:
+            >>> DatabaseService.is_sqlite_target("/home/user/snore.db")
+            True
+            >>> DatabaseService.is_sqlite_target(":memory:")
+            False
+            >>> DatabaseService.is_sqlite_target("postgresql://user@host/db")
+            False
+            >>> DatabaseService.is_sqlite_target("sqlite:////abs/path.db")
+            True
+        """
+        if not db_path or db_path == ":memory:":
+            return False
+        from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+        try:
+            target = DatabaseTarget.from_url(db_path)
+        except (ValueError, Exception):
+            return False  # Unrecognised — treat as non-SQLite to be safe
+        return target.dialect == "sqlite" and target.location not in ("", ":memory:")

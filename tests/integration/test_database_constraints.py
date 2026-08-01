@@ -8,11 +8,13 @@ These tests verify:
 - Data integrity is maintained
 """
 
+import sqlite3
+
 from datetime import datetime, timedelta
 
 import pytest
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from snore.database import models
 from snore.database.importers import SessionImporter
@@ -244,15 +246,19 @@ class TestOrphanedRecordCleanup:
         """Test cleanup of orphaned event records."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            session.execute(text("PRAGMA foreign_keys = OFF"))
-            session.execute(
-                text(
-                    "INSERT INTO events (session_id, event_type, start_time, duration_seconds) VALUES (999, 'Apnea', '2025-10-01 22:00:00', 15.0)"
-                )
+        # Insert orphaned data using a raw sqlite3 connection with FK off.
+        # SQLite requires PRAGMA foreign_keys changes to happen outside a
+        # transaction; use a direct connection with autocommit semantics.
+        raw = sqlite3.connect(str(temp_db), isolation_level=None)
+        try:
+            raw.execute("PRAGMA foreign_keys = OFF")
+            raw.execute(
+                "INSERT INTO events (session_id, event_type, start_time, duration_seconds)"
+                " VALUES (999, 'Apnea', '2025-10-01 22:00:00', 15.0)"
             )
-            session.commit()
-            session.execute(text("PRAGMA foreign_keys = ON"))
+            raw.execute("PRAGMA foreign_keys = ON")
+        finally:
+            raw.close()
 
         with session_scope() as session:
             orphaned_before = session.execute(
@@ -272,12 +278,17 @@ class TestOrphanedRecordCleanup:
         """Test cleanup of orphaned statistics records."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            session.execute(text("PRAGMA foreign_keys = OFF"))
-            orphaned_stat = models.Statistics(session_id=999, ahi=5.2)
-            session.add(orphaned_stat)
-            session.commit()
-            session.execute(text("PRAGMA foreign_keys = ON"))
+        raw = sqlite3.connect(str(temp_db), isolation_level=None)
+        try:
+            raw.execute("PRAGMA foreign_keys = OFF")
+            raw.execute(
+                "INSERT INTO statistics (session_id, obstructive_apneas, central_apneas,"
+                " mixed_apneas, hypopneas, reras, flow_limitations, ahi)"
+                " VALUES (999, 0, 0, 0, 0, 0, 0, 5.2)"
+            )
+            raw.execute("PRAGMA foreign_keys = ON")
+        finally:
+            raw.close()
 
         with session_scope() as session:
             orphaned_before = session.execute(
@@ -297,15 +308,15 @@ class TestOrphanedRecordCleanup:
         """Test cleanup of orphaned settings records."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            session.execute(text("PRAGMA foreign_keys = OFF"))
-            session.execute(
-                text(
-                    "INSERT INTO settings (session_id, key, value) VALUES (999, 'mode', 'CPAP')"
-                )
+        raw = sqlite3.connect(str(temp_db), isolation_level=None)
+        try:
+            raw.execute("PRAGMA foreign_keys = OFF")
+            raw.execute(
+                "INSERT INTO settings (session_id, key, value) VALUES (999, 'mode', 'CPAP')"
             )
-            session.commit()
-            session.execute(text("PRAGMA foreign_keys = ON"))
+            raw.execute("PRAGMA foreign_keys = ON")
+        finally:
+            raw.close()
 
         with session_scope() as session:
             orphaned_before = session.execute(
@@ -325,15 +336,16 @@ class TestOrphanedRecordCleanup:
         """Test cleanup of orphaned waveform records."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            session.execute(text("PRAGMA foreign_keys = OFF"))
-            session.execute(
-                text(
-                    "INSERT INTO waveforms (session_id, waveform_type, sample_rate, data_blob) VALUES (999, 'FlowRate', 25.0, x'00010203')"
-                )
+        raw = sqlite3.connect(str(temp_db), isolation_level=None)
+        try:
+            raw.execute("PRAGMA foreign_keys = OFF")
+            raw.execute(
+                "INSERT INTO waveforms (session_id, waveform_type, sample_rate, data_blob)"
+                " VALUES (999, 'FlowRate', 25.0, X'00010203')"
             )
-            session.commit()
-            session.execute(text("PRAGMA foreign_keys = ON"))
+            raw.execute("PRAGMA foreign_keys = ON")
+        finally:
+            raw.close()
 
         with session_scope() as session:
             orphaned_before = session.execute(
@@ -353,21 +365,24 @@ class TestOrphanedRecordCleanup:
         """Test cleanup of multiple orphaned records across tables."""
         init_database(str(temp_db))
 
-        with session_scope() as session:
-            session.execute(text("PRAGMA foreign_keys = OFF"))
-            from datetime import datetime
-
-            orphaned_event = models.Event(
-                session_id=999,
-                event_type="Apnea",
-                start_time=datetime(2025, 10, 1, 22, 0, 0),
-                duration_seconds=15.0,
+        raw = sqlite3.connect(str(temp_db), isolation_level=None)
+        try:
+            raw.execute("PRAGMA foreign_keys = OFF")
+            raw.execute(
+                "INSERT INTO events (session_id, event_type, start_time, duration_seconds)"
+                " VALUES (999, 'Apnea', '2025-10-01 22:00:00', 15.0)"
             )
-            orphaned_stat = models.Statistics(session_id=999, ahi=5.2)
-            orphaned_setting = models.Setting(session_id=999, key="mode", value="CPAP")
-            session.add_all([orphaned_event, orphaned_stat, orphaned_setting])
-            session.commit()
-            session.execute(text("PRAGMA foreign_keys = ON"))
+            raw.execute(
+                "INSERT INTO statistics (session_id, obstructive_apneas, central_apneas,"
+                " mixed_apneas, hypopneas, reras, flow_limitations, ahi)"
+                " VALUES (999, 0, 0, 0, 0, 0, 0, 5.2)"
+            )
+            raw.execute(
+                "INSERT INTO settings (session_id, key, value) VALUES (999, 'mode', 'CPAP')"
+            )
+            raw.execute("PRAGMA foreign_keys = ON")
+        finally:
+            raw.close()
 
         with session_scope() as session:
             cleaned = SessionImporter.cleanup_orphaned_records(session)
@@ -422,7 +437,7 @@ class TestDataIntegrity:
             session.commit()
 
         with session_scope() as session:
-            device = session.query(models.Device).first()
+            device = session.execute(select(models.Device)).scalars().first()
             session2 = models.Session(
                 device_id=device.id,
                 device_session_id="duplicate_id",
@@ -469,7 +484,7 @@ class TestDataIntegrity:
             session.commit()
 
         with session_scope() as session:
-            test_session = session.query(models.Session).first()
+            test_session = session.execute(select(models.Session)).scalars().first()
             setting2 = models.Setting(
                 session_id=test_session.id, key="mode", value="APAP"
             )

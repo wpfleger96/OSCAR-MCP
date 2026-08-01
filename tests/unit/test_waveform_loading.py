@@ -76,7 +76,9 @@ class TestWaveformLoading:
     def test_load_missing_waveform(self):
         """Loading non-existent waveform should raise ValueError."""
         mock_session = Mock()
-        mock_session.query().filter_by().first.return_value = None
+        execute_result = Mock()
+        execute_result.scalars.return_value.first.return_value = None
+        mock_session.execute.return_value = execute_result
 
         with pytest.raises(ValueError, match="Waveform not found"):
             load_waveform_from_db(mock_session, session_id=999, waveform_type="flow")
@@ -100,7 +102,9 @@ class TestWaveformLoading:
         mock_waveform.mean_value = 15.0
 
         mock_session = Mock()
-        mock_session.query().filter_by().first.return_value = mock_waveform
+        execute_result = Mock()
+        execute_result.scalars.return_value.first.return_value = mock_waveform
+        mock_session.execute.return_value = execute_result
 
         t, v, metadata = load_waveform_from_db(mock_session, 123, "flow")
 

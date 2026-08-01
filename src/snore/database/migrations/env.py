@@ -29,13 +29,30 @@ target_metadata.naming_convention = {
 
 
 def _resolve_url() -> str:
-    """Return the configured URL, falling back to DEFAULT_DATABASE_PATH when unset."""
-    url = config.get_main_option("sqlalchemy.url") or ""
-    if url in ("", "sqlite:///"):
-        from snore.constants import DEFAULT_DATABASE_PATH  # noqa: PLC0415
+    """Return the configured URL via ``DatabaseTarget``, falling back to DEFAULT_DATABASE_PATH.
 
-        return f"sqlite:///{DEFAULT_DATABASE_PATH}"
-    return url
+    Routes through the same ``DatabaseTarget`` resolver used by the app and CLI
+    so Alembic and the runtime always see identical URL derivation logic.
+
+    Uses ``resolve_migration_url()`` (not ``resolve_sync_url()``) so that the
+    driver mapping is correct for Alembic's needs — today both are identical for
+    SQLite, but they will diverge at the hosted milestone (postgresql → psycopg
+    for migrations vs. asyncpg for runtime).
+    """
+    url = config.get_main_option("sqlalchemy.url") or ""
+    if url not in ("", "sqlite:///"):
+        # An explicit URL was provided in alembic.ini or via env override.
+        # Let DatabaseTarget parse and normalise it.
+        from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+        target = DatabaseTarget.from_url(url)
+        return target.resolve_migration_url()
+
+    # No explicit URL — use the environment/default resolution chain.
+    from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+    target = DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
+    return target.resolve_migration_url()
 
 
 def run_migrations_offline() -> None:
@@ -80,7 +97,10 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,  # Required for SQLite ALTER TABLE support
+            # render_as_batch is required for SQLite ALTER TABLE support; it is
+            # harmless (but unnecessary) on PostgreSQL.  We gate it on the dialect
+            # so generated migration SQL stays portable and readable on Postgres.
+            render_as_batch=connection.dialect.name == "sqlite",
         )
 
         with context.begin_transaction():

@@ -6,11 +6,12 @@ from datetime import date
 from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.analysis.svg_charts import render_trend_line
 from snore.database import models
-from snore.services.schemas import TherapySummary
+from snore.services.schemas import DeviceInfo, TherapySummary
 from snore.services.stats_service import StatsService
 
 __all__ = ["ReportService"]
@@ -116,25 +117,44 @@ def _build_deltas(
 
 
 class ReportService:
-    """Generate self-contained HTML therapy reports."""
+    """Generate self-contained HTML therapy reports.
+
+    I/O–compute split (§7)
+    -----------------------
+    Each ``generate_*_report`` method is structured as an explicit two-phase call:
+
+    1. **Fetch phase** (``_fetch_summary_data`` / ``_fetch_comparison_data``): all
+       database queries run via ``StatsService`` and return plain Python objects
+       (Pydantic schemas).  The session is not needed after this phase completes.
+    2. **Render phase** (``_render_summary`` / ``_render_comparison``): pure
+       Jinja2 template rendering that takes only plain Python objects.  No session
+       access occurs here, making it safe to call after the session is closed.
+
+    PR-2 can adapt the fetch phase to an async session and keep the render phase
+    unchanged.
+    """
 
     def __init__(self, db_session: Session) -> None:
         self._db = db_session
         self._stats = StatsService(db_session)
 
-    def _first_device(self) -> models.Device | None:
-        return self._db.query(models.Device).order_by(models.Device.first_seen).first()
+    def _first_device(self) -> DeviceInfo | None:
+        """Return the first device as a plain detached schema, or None."""
+        device = (
+            self._db.execute(select(models.Device).order_by(models.Device.first_seen))
+            .scalars()
+            .first()
+        )
+        if device is None:
+            return None
+        return DeviceInfo.model_validate(device)
 
-    def generate_summary_report(self, from_date: date, to_date: date) -> str:
-        """
-        Render a complete HTML summary therapy report for the given date range.
+    # --- Fetch helpers (I/O phase) ---
 
-        Args:
-            from_date: Start of the reporting period (inclusive).
-            to_date: End of the reporting period (inclusive).
+    def _fetch_summary_data(self, from_date: date, to_date: date) -> dict[str, Any]:
+        """Fetch all data needed to render a summary report.
 
-        Returns:
-            Complete HTML document string starting with ``<!DOCTYPE html>``.
+        Returns plain Python objects; no ORM session access after this call.
         """
         summary = self._stats.get_summary(from_date=from_date, to_date=to_date)
         monthly = self._stats.get_period_statistics(
@@ -142,7 +162,43 @@ class ReportService:
         )
         trends = self._stats.get_trends("week", from_date=from_date, to_date=to_date)
         device = self._first_device()
+        return {
+            "summary": summary,
+            "monthly": monthly,
+            "trends": trends,
+            "device": device,
+        }
 
+    def _fetch_comparison_data(
+        self,
+        range_a: tuple[date, date],
+        range_b: tuple[date, date],
+    ) -> dict[str, Any]:
+        """Fetch all data needed to render a comparison report.
+
+        Returns plain Python objects; no ORM session access after this call.
+        """
+        summary_a = self._stats.get_summary(from_date=range_a[0], to_date=range_a[1])
+        summary_b = self._stats.get_summary(from_date=range_b[0], to_date=range_b[1])
+        device = self._first_device()
+        deltas = _build_deltas(summary_a, summary_b)
+        return {
+            "summary_a": summary_a,
+            "summary_b": summary_b,
+            "device": device,
+            "deltas": deltas,
+        }
+
+    # --- Render helpers (compute phase — no session needed) ---
+
+    @staticmethod
+    def _render_summary(
+        from_date: date,
+        to_date: date,
+        data: dict[str, Any],
+    ) -> str:
+        """Render summary HTML from pre-fetched data.  No DB access."""
+        trends = data["trends"]
         ahi_chart = render_trend_line(
             trends.get("ahi", []),
             color="#dc2626",
@@ -153,18 +209,50 @@ class ReportService:
             color="#2563eb",
             y_label="Hours",
         )
-
         tmpl = _ENV.get_template("summary.html")
         return tmpl.render(
             from_date=from_date,
             to_date=to_date,
             generated_on=date.today(),
-            summary=summary,
-            monthly=monthly,
+            summary=data["summary"],
+            monthly=data["monthly"],
             ahi_chart=ahi_chart,
             usage_chart=usage_chart,
-            device=device,
+            device=data["device"],
         )
+
+    @staticmethod
+    def _render_comparison(
+        range_a: tuple[date, date],
+        range_b: tuple[date, date],
+        data: dict[str, Any],
+    ) -> str:
+        """Render comparison HTML from pre-fetched data.  No DB access."""
+        tmpl = _ENV.get_template("comparison.html")
+        return tmpl.render(
+            range_a=range_a,
+            range_b=range_b,
+            generated_on=date.today(),
+            summary_a=data["summary_a"],
+            summary_b=data["summary_b"],
+            device=data["device"],
+            deltas=data["deltas"],
+        )
+
+    # --- Public API (fetch then render) ---
+
+    def generate_summary_report(self, from_date: date, to_date: date) -> str:
+        """
+        Render a complete HTML summary therapy report for the given date range.
+
+        Structured as fetch (DB I/O, session required) then render (pure
+        Jinja2, no session needed).  The injected session is explicitly closed
+        after the fetch phase so the render runs without any held transaction.
+        """
+        data = self._fetch_summary_data(from_date, to_date)
+        # Close the injected session — Jinja2 render needs no DB access.
+        self._db.close()
+        return self._render_summary(from_date, to_date, data)
 
     def generate_comparison_report(
         self,
@@ -174,25 +262,11 @@ class ReportService:
         """
         Render a complete HTML comparison report for two date ranges.
 
-        Args:
-            range_a: (from_date, to_date) for the first period.
-            range_b: (from_date, to_date) for the second period.
-
-        Returns:
-            Complete HTML document string starting with ``<!DOCTYPE html>``.
+        Structured as fetch (DB I/O, session required) then render (pure
+        Jinja2, no session needed).  The injected session is explicitly closed
+        after the fetch phase.
         """
-        summary_a = self._stats.get_summary(from_date=range_a[0], to_date=range_a[1])
-        summary_b = self._stats.get_summary(from_date=range_b[0], to_date=range_b[1])
-        device = self._first_device()
-        deltas = _build_deltas(summary_a, summary_b)
-
-        tmpl = _ENV.get_template("comparison.html")
-        return tmpl.render(
-            range_a=range_a,
-            range_b=range_b,
-            generated_on=date.today(),
-            summary_a=summary_a,
-            summary_b=summary_b,
-            device=device,
-            deltas=deltas,
-        )
+        data = self._fetch_comparison_data(range_a, range_b)
+        # Close the injected session — render needs no DB access.
+        self._db.close()
+        return self._render_comparison(range_a, range_b, data)

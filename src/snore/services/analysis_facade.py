@@ -2,12 +2,12 @@
 
 import logging
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import bindparam, func, select, text
-from sqlalchemy.orm import Query, Session
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
 
 from snore.analysis.types import AnalysisResult
 from snore.database import models
@@ -19,7 +19,7 @@ from snore.services.schemas import (
     BatchSessionResult,
 )
 
-__all__ = ["AnalysisFacade"]
+__all__ = ["AnalysisFacade", "BatchAnalysisCoordinator"]
 
 logger = logging.getLogger(__name__)
 
@@ -35,29 +35,42 @@ class AnalysisFacade:
             db_session: SQLAlchemy database session
         """
         self.db_session = db_session
+        self._batch_coordinator: BatchAnalysisCoordinator | None = None
 
-    def _status_query(
+    @property
+    def batch_coordinator(self) -> "BatchAnalysisCoordinator | None":
+        """The active ``BatchAnalysisCoordinator``, or ``None`` when no batch is running.
+
+        Set immediately before ``submit()`` is called; remains set after completion so
+        callers can inspect ``progress`` after the batch finishes.  PR-2 replaces the
+        sync coordinator with an async one; callers use the same ``cancel()`` handle.
+        """
+        return self._batch_coordinator
+
+    def _status_select(
         self,
         start: datetime | None,
         end: datetime | None,
         analyzed_only: bool,
-    ) -> Query[models.Session]:
-        """Build the shared session query for list/count of analysis status."""
-        query = self.db_session.query(models.Session).join(models.Day)
+    ) -> Any:
+        """Build the shared 2.0-style select for list/count of analysis status."""
+        stmt = select(models.Session).join(
+            models.Day, models.Session.day_id == models.Day.id
+        )
 
         if start:
-            query = query.filter(models.Day.date >= start.date())
+            stmt = stmt.where(models.Day.date >= start.date())
         if end:
-            query = query.filter(models.Day.date <= end.date())
+            stmt = stmt.where(models.Day.date <= end.date())
 
         if analyzed_only:
-            query = query.filter(
-                self.db_session.query(models.AnalysisResult)
-                .filter(models.AnalysisResult.session_id == models.Session.id)
+            stmt = stmt.where(
+                select(models.AnalysisResult.id)
+                .where(models.AnalysisResult.session_id == models.Session.id)
                 .exists()
             )
 
-        return query
+        return stmt
 
     def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
         """Map each session ID to its latest AnalysisResult ID (by created_at)."""
@@ -104,7 +117,7 @@ class AnalysisFacade:
         Returns:
             List of AnalysisListItem with has_analysis and analysis_id fields
         """
-        query = self._status_query(start, end, analyzed_only)
+        stmt = self._status_select(start, end, analyzed_only)
 
         sort_clauses: dict[str, Any] = {
             "date-asc": models.Day.date.asc(),
@@ -113,17 +126,21 @@ class AnalysisFacade:
         }
 
         sort_clause = sort_clauses.get(sort_by, models.Day.date.desc())
-        query = query.order_by(sort_clause)
+        stmt = stmt.order_by(sort_clause)
 
         if offset > 0:
-            query = query.offset(offset)
+            stmt = stmt.offset(offset)
 
         if limit > 0:
-            query = query.limit(limit)
+            stmt = stmt.limit(limit)
         else:
-            query = query.limit(10000)
+            stmt = stmt.limit(10000)
 
-        sessions = query.all()
+        # Load Day inline to avoid lazy-load access below.
+        from sqlalchemy.orm import joinedload as _joinedload
+
+        stmt = stmt.options(_joinedload(models.Session.day))
+        sessions = self.db_session.execute(stmt).unique().scalars().all()
 
         latest_analysis = self._latest_analysis_ids([s.id for s in sessions])
 
@@ -131,6 +148,7 @@ class AnalysisFacade:
         for session in sessions:
             analysis_id = latest_analysis.get(session.id)
 
+            # day is loaded via joinedload; use start_time.date() as fallback.
             session_date = (
                 session.day.date if session.day else session.start_time.date()
             )
@@ -161,7 +179,10 @@ class AnalysisFacade:
 
         Used by the API to populate the `total` field in paginated responses.
         """
-        return self._status_query(start, end, analyzed_only).count()
+        count_stmt = select(func.count()).select_from(
+            self._status_select(start, end, analyzed_only).subquery()
+        )
+        return self.db_session.execute(count_stmt).scalar() or 0
 
     def get_delete_preview(
         self,
@@ -291,29 +312,40 @@ class AnalysisFacade:
             Number of analysis records deleted
         """
         if all_versions:
+            # Delete all analysis results for these sessions.
             result = self.db_session.execute(
-                text(
-                    "DELETE FROM analysis_results WHERE session_id IN :session_ids"
-                ).bindparams(bindparam("session_ids", expanding=True)),
-                {"session_ids": session_ids},
+                delete(models.AnalysisResult).where(
+                    models.AnalysisResult.session_id.in_(session_ids)
+                )
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
-            result = self.db_session.execute(
-                text("""
-                    DELETE FROM analysis_results
-                    WHERE id IN (
-                        SELECT id FROM (
-                            SELECT id, ROW_NUMBER() OVER (
-                                PARTITION BY session_id ORDER BY created_at DESC
-                            ) AS rn
-                            FROM analysis_results
-                            WHERE session_id IN :session_ids
-                        )
-                        WHERE rn = 1
+            # Delete only the latest (highest created_at) result per session.
+            # Identify the latest result IDs first, then delete by PK.
+            ranked = (
+                select(
+                    models.AnalysisResult.id,
+                    func.row_number()
+                    .over(
+                        partition_by=models.AnalysisResult.session_id,
+                        order_by=models.AnalysisResult.created_at.desc(),
                     )
-                """).bindparams(bindparam("session_ids", expanding=True)),
-                {"session_ids": session_ids},
+                    .label("rn"),
+                )
+                .where(models.AnalysisResult.session_id.in_(session_ids))
+                .subquery()
+            )
+            latest_ids = (
+                self.db_session.execute(select(ranked.c.id).where(ranked.c.rn == 1))
+                .scalars()
+                .all()
+            )
+            if not latest_ids:
+                return 0
+            result = self.db_session.execute(
+                delete(models.AnalysisResult).where(
+                    models.AnalysisResult.id.in_(latest_ids)
+                )
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
 
@@ -323,11 +355,36 @@ class AnalysisFacade:
         modes: list[str] | None = None,
         store_results: bool = True,
     ) -> AnalysisResult:
-        """Run analysis on a session. Returns AnalysisResult (Pydantic model)."""
-        from snore.analysis.service import AnalysisService
+        """Run analysis on a session.  Returns AnalysisResult (Pydantic model).
 
-        svc = AnalysisService(self.db_session)
-        return svc.analyze_session(session_id, modes=modes, store_results=store_results)
+        Owns a short read scope for the I/O phase and closes it before compute,
+        so the injected request session is never held across NumPy/scipy work.
+        """
+        import time  # noqa: PLC0415
+
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
+
+        t_start = time.monotonic()
+
+        # I/O phase: open a dedicated short scope — close it before compute.
+        with session_scope() as read_db:
+            read_svc = AnalysisService(read_db)
+            raw = read_svc.load_session_inputs_raw(session_id, modes=modes)
+        # Session closed; NumPy/scipy work runs without any held lock.
+        inputs = AnalysisService.prepare_inputs(raw)
+        compute_svc = AnalysisService()  # no db_session — compute only
+        result = compute_svc.compute_analysis(inputs)
+
+        processing_time_ms = int((time.monotonic() - t_start) * 1000)
+
+        if store_results:
+            # Write phase: short INSERT-only scope.
+            with session_scope() as write_db:
+                write_svc = AnalysisService(write_db)
+                write_svc.store_result(result, processing_time_ms)
+
+        return result
 
     def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
@@ -348,9 +405,12 @@ class AnalysisFacade:
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
-        progress_callback: Callable[[int, int], None] | None = None,
+        progress_callback: Callable[[int, int | None], None] | None = None,
     ) -> BatchAnalysisResult:
         """Run analysis on multiple sessions in parallel.
+
+        Delegates to ``BatchAnalysisCoordinator`` so PR-2 can swap the executor
+        internals (``ThreadPoolExecutor`` → async tasks) without touching callers.
 
         Args:
             from_date: Filter sessions from this datetime (inclusive)
@@ -363,67 +423,224 @@ class AnalysisFacade:
         Returns:
             BatchAnalysisResult with per-session outcomes and aggregate counts
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        from snore.analysis.service import AnalysisService
-        from snore.database.session import session_scope
-
-        query = self.db_session.query(models.Session).join(models.Day)
+        stmt = select(
+            models.Session.id.label("session_id"),
+            models.Day.date.label("day_date"),
+        ).join(models.Day, models.Session.day_id == models.Day.id)
         if from_date:
-            query = query.filter(models.Day.date >= from_date.date())
+            stmt = stmt.where(models.Day.date >= from_date.date())
         if to_date:
-            query = query.filter(models.Day.date <= to_date.date())
+            stmt = stmt.where(models.Day.date <= to_date.date())
+        stmt = stmt.order_by(models.Day.date)
 
-        sessions = query.order_by(models.Day.date).all()
-        # Build date map before spawning threads to avoid DB access in workers
-        session_dates: dict[int, date | None] = {
-            s.id: s.day.date if s.day else s.start_time.date() for s in sessions
-        }
-        session_ids = [s.id for s in sessions]
-        total = len(session_ids)
+        # Stream scalar ID/date rows lazily — the generator is consumed one row
+        # at a time inside the coordinator's sliding window.  No list materialization.
+        from collections.abc import Iterator as _Iterator  # noqa: PLC0415
 
-        if not session_ids:
-            return BatchAnalysisResult(total=0, successful=0, failed=0, results=[])
+        def _row_gen() -> _Iterator[tuple[int, date | None]]:
+            for row in self.db_session.execute(stmt).yield_per(200):
+                yield row.session_id, row.day_date
+
+        # Peek at the first pair to detect an empty result without consuming all.
+        row_iter = _row_gen()
+        try:
+            first_pair = next(row_iter)
+        except StopIteration:
+            return BatchAnalysisResult(
+                total=0, successful=0, failed=0, cancelled=0, results=[]
+            )
+
+        import itertools as _it  # noqa: PLC0415
+
+        coordinator = BatchAnalysisCoordinator()
+        self._batch_coordinator = coordinator
+        return coordinator.submit(
+            session_pairs=_it.chain([first_pair], row_iter),
+            modes=modes,
+            store_results=store_results,
+            max_workers=max_workers,
+            progress_callback=progress_callback,
+        )
+
+
+# ---------------------------------------------------------------------------
+# BatchAnalysisCoordinator (§7)
+# ---------------------------------------------------------------------------
+
+
+class BatchAnalysisCoordinator:
+    """Thin coordinator that backs batch analysis scheduling.
+
+    PR-1 implementation: ``ThreadPoolExecutor`` with detached I/O→compute→write
+    pipelines.  PR-2 swaps the executor internals to ``asyncio`` tasks without
+    touching callers — the ``submit`` interface is the stable boundary.
+
+    The narrow interface (``submit / progress / cancel``) is intentional:
+    - ``submit`` starts work synchronously and returns the aggregated result.
+    - ``progress`` is reserved for PR-2's async streaming path.
+    - ``cancel`` requests cooperative cancellation via a flag checked between
+      sessions; PR-2 replaces it with task cancellation.
+    """
+
+    def __init__(self) -> None:
+        self._cancel_requested = False
+        self._completed = 0
+        self._total = 0
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation.  Checked between sessions."""
+        self._cancel_requested = True
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        """Return (completed, total) session counts."""
+        return self._completed, self._total
+
+    def submit(
+        self,
+        *,
+        session_pairs: Iterable[tuple[int, date | None]],
+        modes: Sequence[str] | None = None,
+        store_results: bool = True,
+        max_workers: int = 4,
+        progress_callback: Callable[[int, int | None], None] | None = None,
+    ) -> BatchAnalysisResult:
+        """Execute batch analysis and return aggregated results.
+
+        Each session is processed in a detached I/O → compute → write pipeline:
+
+        1. **Read phase**: open a short ``session_scope()``, fetch raw blobs only
+           (no NumPy). Session closed before compute.
+        2. **Compute phase**: pure Python / numpy, no ORM session held.
+        3. **Write phase**: open a fresh ``session_scope()``, INSERT the result.
+
+        Args:
+            session_pairs: List of ``(session_id, day_date)`` scalar pairs.
+                Scalars only — no ORM objects passed to workers.
+            modes: Detection modes to run (``None`` = default).
+            store_results: If True, write each result to the DB.
+            max_workers: Thread-pool concurrency cap.
+            progress_callback: Called with (completed, total) after each session.
+
+        Returns:
+            Aggregated ``BatchAnalysisResult``.
+        """
+        import time  # noqa: PLC0415
+
+        from concurrent.futures import (  # noqa: PLC0415
+            FIRST_COMPLETED,
+            Future,
+            ThreadPoolExecutor,
+            wait,
+        )
+
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
+
+        self._total = -1  # Unknown until exhausted; updated at completion.
+        self._completed = 0
+        # Do NOT reset _cancel_requested if cancel() was called before submit().
+        # This allows callers to pre-cancel a coordinator before submitting work.
+
+        # Build date lookup lazily — only entries for the active window are held.
+        session_dates: dict[int, date | None] = {}
 
         batch_results: list[BatchSessionResult] = []
-        completed = 0
         modes_list: list[str] | None = list(modes) if modes is not None else None
+        # Lazy pair iterator — never materialized into a full list.
+        pair_iter = iter(session_pairs)
 
-        def analyze_one(sid: int) -> None:
-            with session_scope() as thread_session:
-                svc = AnalysisService(thread_session)
-                svc.analyze_session(
-                    session_id=sid, modes=modes_list, store_results=store_results
-                )
+        def analyze_one(sid: int) -> str:
+            """Return 'cancelled', 'success', or 'error' for this session."""
+            if self._cancel_requested:
+                return "cancelled"
 
-        with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
-            futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}
-            for future in as_completed(futures):
-                sid = futures[future]
+            # --- Read phase (session open only during DB I/O) ---
+            # load_session_inputs_raw fetches raw blobs and returns immediately.
+            # ALL NumPy work (deserialization, artifact detection) happens AFTER
+            # the session is closed via prepare_inputs().
+            t_start = time.monotonic()
+            with session_scope() as read_session:
+                svc = AnalysisService(read_session)
+                raw = svc.load_session_inputs_raw(session_id=sid, modes=modes_list)
+            # Session is now closed; all NumPy/scipy work below is sessionless.
+
+            # --- Compute phase (no ORM session held) ---
+            inputs = AnalysisService.prepare_inputs(raw)
+            compute_svc = AnalysisService()  # db_session=None — compute only
+            result = compute_svc.compute_analysis(inputs)
+            processing_time_ms = int((time.monotonic() - t_start) * 1000)
+
+            # --- Write phase (short session for INSERT only) ---
+            if store_results and result is not None:
+                with session_scope() as write_session:
+                    write_svc = AnalysisService(write_session)
+                    write_svc.store_result(result, processing_time_ms)
+
+            return "success"
+
+        # Bounded sliding window — at most max_workers futures in flight at a time.
+        # The pair iterator is consumed lazily; no full-batch list is ever built.
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            pending: dict[Future[str], int] = {}
+
+            def _submit_next() -> None:
+                """Pull the next (sid, day_date) from the lazy iterator and submit."""
                 try:
-                    future.result()
-                    success, error = True, None
-                except Exception as e:
-                    logger.warning(
-                        "Failed to analyze session %d: %s", sid, e, exc_info=True
-                    )
-                    success, error = False, f"Analysis failed for session {sid}"
-                batch_results.append(
-                    BatchSessionResult(
-                        session_id=sid,
-                        session_date=session_dates.get(sid),
-                        success=success,
-                        error=error,
-                    )
-                )
-                completed += 1
-                if progress_callback:
-                    progress_callback(completed, total)
+                    sid, day_date = next(pair_iter)
+                    session_dates[sid] = day_date  # register only when submitted
+                    fut = executor.submit(analyze_one, sid)
+                    pending[fut] = sid
+                except StopIteration:
+                    pass
 
+            # Prime the window — at most max_workers futures queued at once.
+            for _ in range(max_workers):
+                _submit_next()
+
+            while pending:
+                done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
+                for future in done:
+                    sid = pending.pop(future)
+                    try:
+                        outcome = future.result()
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to analyze session %d: %s", sid, e, exc_info=True
+                        )
+                        outcome = "error"
+                    cancelled = outcome == "cancelled"
+                    success = outcome == "success"
+                    error = (
+                        None
+                        if outcome != "error"
+                        else f"Analysis failed for session {sid}"
+                    )
+                    batch_results.append(
+                        BatchSessionResult(
+                            session_id=sid,
+                            session_date=session_dates.get(sid),
+                            success=success,
+                            cancelled=cancelled,
+                            error=error,
+                        )
+                    )
+                    self._completed += 1
+                    if progress_callback:
+                        progress_callback(
+                            self._completed, None
+                        )  # total unknown until exhausted
+                    # Slide the window forward.
+                    _submit_next()
+
+        total = len(batch_results)
+        self._total = total
         successful = sum(1 for r in batch_results if r.success)
+        cancelled_count = sum(1 for r in batch_results if r.cancelled)
         return BatchAnalysisResult(
             total=total,
             successful=successful,
-            failed=total - successful,
+            failed=total - successful - cancelled_count,
+            cancelled=cancelled_count,
             results=batch_results,
         )

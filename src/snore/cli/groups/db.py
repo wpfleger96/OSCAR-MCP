@@ -111,7 +111,7 @@ def vacuum(db: str | None) -> None:
 
     with db_session(db) as session:
         service = DatabaseService(session)
-        result = service.vacuum(str(db_path))
+        result = service.vacuum_sqlite(str(db_path))
 
     print_success(
         f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)"

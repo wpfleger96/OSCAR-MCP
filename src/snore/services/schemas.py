@@ -565,6 +565,10 @@ class BatchSessionResult(BaseModel):
     session_id: int = Field(description="Session database ID")
     session_date: date | None = Field(default=None, description="Session date")
     success: bool = Field(description="Whether analysis succeeded")
+    cancelled: bool = Field(
+        default=False,
+        description="Whether this session was skipped due to cancellation",
+    )
     error: str | None = Field(default=None, description="Error message if failed")
 
 
@@ -574,6 +578,9 @@ class BatchAnalysisResult(BaseModel):
     total: int = Field(description="Total sessions processed")
     successful: int = Field(default=0, description="Sessions analyzed successfully")
     failed: int = Field(default=0, description="Sessions that failed analysis")
+    cancelled: int = Field(
+        default=0, description="Sessions skipped due to cancellation"
+    )
     results: list[BatchSessionResult] = Field(
         default_factory=list, description="Per-session results"
     )

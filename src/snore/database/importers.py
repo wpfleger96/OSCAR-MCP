@@ -2,16 +2,33 @@
 Session import functionality for converting UnifiedSession to database records.
 
 Handles the complete import process including waveforms, events, and statistics.
+
+Transaction ownership (§6)
+---------------------------
+- ``import_session``: delegates to ``import_sessions_batch`` with a single-element
+  list and an explicit ``session_scope()`` — same UoW pattern as the batch path.
+- ``import_sessions_batch``: requires a caller-provided ``db`` session; uses only
+  ``begin_nested()`` savepoints so one failed session cannot poison the batch.
+  The caller (``ImportService``) opens one ``session_scope()`` per bounded chunk
+  and injects it here so the UoW boundary is owned at the service layer.
+
+Bulk strategy (frozen in §7/PR-2)
+-----------------------------------
+Waveforms, events, and settings use ``bulk_save_objects`` (no post-insert PK
+reads; matches previous behaviour).  Statistics uses ``db.add()`` because it
+has a single row per session and is used via the identity map.
 """
 
+import itertools
 import json
 import logging
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 
 import numpy as np
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snore.database import models
@@ -63,31 +80,40 @@ class SessionImporter:
 
         This can happen if CASCADE delete is not enabled or if a database was corrupted.
 
+        Uses typed ``delete()`` statements keyed on ``session_id`` FK — no f-string
+        SQL, no internal commit (the caller's transaction owns commit/rollback).
+
         Args:
-            db: SQLAlchemy session
+            db: SQLAlchemy session (caller owns the transaction)
 
         Returns:
             Number of orphaned records removed
         """
-        from sqlalchemy import text
+        from sqlalchemy import delete  # noqa: PLC0415
 
-        tables = ["settings", "events", "waveforms", "statistics"]
+        orphan_tables = [
+            models.Setting,
+            models.Event,
+            models.Waveform,
+            models.Statistics,
+        ]
         total_cleaned = 0
 
-        for table in tables:
-            result = db.execute(
-                text(
-                    f"DELETE FROM {table} WHERE session_id NOT IN (SELECT id FROM sessions)"
+        for model_cls in orphan_tables:
+            stmt = delete(model_cls).where(
+                model_cls.session_id.notin_(  # type: ignore[attr-defined]
+                    select(models.Session.id)
                 )
             )
+            result = db.execute(stmt)
             count = result.rowcount if hasattr(result, "rowcount") else 0
             if count > 0:
-                logger.debug(f"Cleaned {count} orphaned records from {table}")
+                logger.debug(
+                    f"Cleaned {count} orphaned records from {model_cls.__tablename__}"
+                )
                 total_cleaned += count
 
-        if total_cleaned > 0:
-            db.commit()
-
+        # No db.commit() — caller owns the transaction boundary.
         return total_cleaned
 
     def _import_single_session(
@@ -97,6 +123,8 @@ class SessionImporter:
         Import a single session. Returns (imported, day_id).
 
         This method NEVER aggregates - aggregation is handled by the caller.
+        It does NOT open its own savepoint; callers that want per-session
+        isolation must wrap each call in ``db.begin_nested()``.
 
         Args:
             db: SQLAlchemy database session
@@ -106,11 +134,10 @@ class SessionImporter:
         Returns:
             Tuple of (was_imported, day_id)
         """
-        device = (
-            db.query(models.Device)
-            .filter_by(serial_number=session_data.device_info.serial_number)
-            .first()
+        stmt = select(models.Device).filter_by(
+            serial_number=session_data.device_info.serial_number
         )
+        device = db.execute(stmt).scalars().first()
 
         if device:
             device.manufacturer = session_data.device_info.manufacturer
@@ -118,7 +145,7 @@ class SessionImporter:
             device.firmware_version = session_data.device_info.firmware_version
             device.hardware_version = session_data.device_info.hardware_version
             device.product_code = session_data.device_info.product_code
-            device.last_import = datetime.now(UTC).replace(tzinfo=None)
+            device.last_import = datetime.now(UTC)
         else:
             device = models.Device(
                 manufacturer=session_data.device_info.manufacturer,
@@ -131,14 +158,11 @@ class SessionImporter:
             db.add(device)
             db.flush()
 
-        existing = (
-            db.query(models.Session)
-            .filter_by(
-                device_id=device.id,
-                device_session_id=session_data.device_session_id,
-            )
-            .first()
+        existing_stmt = select(models.Session).filter_by(
+            device_id=device.id,
+            device_session_id=session_data.device_session_id,
         )
+        existing = db.execute(existing_stmt).scalars().first()
 
         if existing and not force:
             logger.debug(
@@ -198,45 +222,73 @@ class SessionImporter:
         )
         return True, day_id
 
-    def import_session(self, session_data: UnifiedSession, force: bool = False) -> bool:
-        """
-        Import a complete session to database.
+    def import_session(
+        self, session_data: UnifiedSession, force: bool = False, *, db: Session
+    ) -> bool:
+        """Import a complete session using a caller-provided session.
+
+        The caller owns the UoW — this method uses only ``begin_nested()``
+        savepoints via ``import_sessions_batch``.  No ``session_scope()`` is
+        opened here; use the module-level ``import_session`` function for
+        standalone imports with automatic scope ownership.
 
         Args:
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
+            db: Required caller-provided session.
 
         Returns:
             True if imported, False if skipped (already exists)
         """
-        with session_scope() as db:
-            imported, day_id = self._import_single_session(db, session_data, force)
-
-            if imported and day_id:
-                day_record = db.get(models.Day, day_id)
-                if day_record:
-                    DayManager._aggregate_day_statistics(day_record, db)
-
-        return imported
+        imported, _skipped, _failed = self.import_sessions_batch(
+            [session_data],
+            force=force,
+            batch_size=1,
+            db=db,
+        )
+        return imported > 0
 
     def import_sessions_batch(
         self,
-        sessions: list[UnifiedSession],
+        sessions: Iterable[UnifiedSession],
         force: bool = False,
         batch_size: int = 50,
         progress_callback: Callable[[str], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
+        *,
+        db: Session,
     ) -> tuple[int, int, int]:
         """
-        Import multiple sessions in batched transactions.
+        Import multiple sessions in batched transactions with per-session savepoints.
 
-        Processes sessions in configurable batch sizes with single transaction per batch.
-        Aggregates day statistics at end of EACH batch for crash safety.
+        Each session import is wrapped in ``begin_nested()`` so a single failed session
+        releases its savepoint and increments ``failed`` without poisoning the rest of
+        the batch.  Day statistics are aggregated at the end of each batch.
+
+        Checks ``cancel_predicate()`` between batches.  If cancellation is requested
+        the loop exits early; partial results accumulated so far are returned.
+
+        ``sessions`` may be any iterable (list or lazy iterator); the method consumes
+        it in bounded chunks of ``batch_size`` so no full-batch prefetch is required.
+
+        Transaction ownership: the CALLER owns the transaction.  This method uses
+        ``begin_nested()`` savepoints only.  The production caller is ``ImportService``,
+        which opens one ``session_scope()`` per bounded chunk and injects the session
+        here so the UoW boundary is explicit and owned at the service layer.
+
+        For standalone one-session imports, use ``import_session()`` which opens its
+        own explicit service-owned scope.
 
         Args:
-            sessions: List of UnifiedSession objects to import
+            sessions: Iterable of UnifiedSession objects to import.  Need not be
+                a list; a lazy generator is consumed in bounded ``batch_size`` chunks.
             force: If True, re-import existing sessions
             batch_size: Number of sessions per transaction (default: 50)
             progress_callback: Optional callback for progress messages
+            cancel_predicate: Optional callable; returns True when cancellation
+                is requested.  Checked between batches (not mid-batch).
+            db: Required injected SQLAlchemy session.  The caller owns
+                commit/rollback of the outer transaction.
 
         Returns:
             Tuple of (imported_count, skipped_count, failed_count)
@@ -245,43 +297,80 @@ class SessionImporter:
         skipped = 0
         failed = 0
 
-        for batch_num, i in enumerate(range(0, len(sessions), batch_size), 1):
-            batch = sessions[i : i + batch_size]
-            batch_day_ids = set()
+        session_iter = iter(sessions)
+
+        for batch_num in itertools.count(1):
+            # Check cancellation between batches.
+            if cancel_predicate is not None and cancel_predicate():
+                break
+
+            batch = list(itertools.islice(session_iter, batch_size))
+            if not batch:
+                break
+
+            batch_day_ids: set[int] = set()
 
             logger.debug(f"Importing batch {batch_num} ({len(batch)} sessions)")
 
-            with session_scope() as db:
-                for session_data in batch:
-                    try:
-                        was_imported, day_id = self._import_single_session(
-                            db, session_data, force
-                        )
-                        if was_imported:
-                            imported += 1
-                            if day_id:
-                                batch_day_ids.add(day_id)
-                        else:
-                            skipped += 1
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to import session {session_data.device_session_id}: {e}"
-                        )
-                        failed += 1
-
-                    if progress_callback:
-                        sessions_done = imported + skipped + failed
-                        progress_callback(
-                            f"Importing session {sessions_done}/{len(sessions)}..."
-                        )
-
-                if batch_day_ids:
-                    for day_id in batch_day_ids:
-                        day_record = db.get(models.Day, day_id)
-                        if day_record:
-                            DayManager._aggregate_day_statistics(day_record, db)
+            # Caller-owned transaction: use savepoints only.
+            imported, skipped, failed, batch_day_ids = self._import_batch_with_session(
+                db,
+                batch,
+                force,
+                imported,
+                skipped,
+                failed,
+                batch_day_ids,
+                progress_callback,
+            )
+            if batch_day_ids:
+                for day_id in batch_day_ids:
+                    day_record = db.get(models.Day, day_id)
+                    if day_record:
+                        DayManager._aggregate_day_statistics(day_record, db)
 
         return imported, skipped, failed
+
+    def _import_batch_with_session(
+        self,
+        db: Session,
+        batch: list[UnifiedSession],
+        force: bool,
+        imported: int,
+        skipped: int,
+        failed: int,
+        batch_day_ids: set[int],
+        progress_callback: Callable[[str], None] | None,
+    ) -> tuple[int, int, int, set[int]]:
+        """Import one batch of sessions within a caller-provided session.
+
+        Returns updated (imported, skipped, failed, batch_day_ids).
+        """
+        for session_data in batch:
+            sp = db.begin_nested()
+            try:
+                was_imported, day_id = self._import_single_session(
+                    db, session_data, force
+                )
+                sp.commit()
+                if was_imported:
+                    imported += 1
+                    if day_id:
+                        batch_day_ids.add(day_id)
+                else:
+                    skipped += 1
+            except Exception as e:
+                sp.rollback()
+                logger.error(
+                    f"Failed to import session {session_data.device_session_id}: {e}"
+                )
+                failed += 1
+
+            if progress_callback:
+                sessions_done = imported + skipped + failed
+                progress_callback(f"Importing session {sessions_done}...")
+
+        return imported, skipped, failed, batch_day_ids
 
     def _import_waveforms(
         self, db: Session, session_id: int, session_data: UnifiedSession
@@ -389,6 +478,10 @@ def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
     """
     Convenience function to import a session.
 
+    Opens an explicit ``session_scope()`` (service-layer UoW ownership) and
+    delegates to ``SessionImporter.import_session``.  The importer itself
+    does not open any scopes.
+
     Args:
         session_data: UnifiedSession to import
         force: Force re-import if exists
@@ -397,4 +490,5 @@ def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
         True if imported, False if skipped
     """
     importer = SessionImporter()
-    return importer.import_session(session_data, force=force)
+    with session_scope() as db:
+        return importer.import_session(session_data, force=force, db=db)

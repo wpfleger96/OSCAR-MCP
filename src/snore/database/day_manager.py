@@ -4,9 +4,11 @@ Day aggregation and management logic (OSCAR-compatible).
 Handles day splitting logic and aggregation of session statistics into daily records.
 """
 
+from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, joinedload
 
 from snore.database.models import Day, Statistics
 from snore.database.models import Session as SessionModel
@@ -57,7 +59,11 @@ class DayManager:
             Day object (without aggregated statistics)
         """
         day = (
-            db_session.query(Day).filter_by(device_id=device_id, date=day_date).first()
+            db_session.execute(
+                select(Day).filter_by(device_id=device_id, date=day_date)
+            )
+            .scalars()
+            .first()
         )
 
         if not day:
@@ -91,7 +97,10 @@ class DayManager:
 
     @classmethod
     def _weighted_average(
-        cls, stats_records: list[Statistics], sessions: list[SessionModel], attr: str
+        cls,
+        stats_records: list[Statistics],
+        sessions: Sequence[SessionModel],
+        attr: str,
     ) -> float | None:
         """Calculate time-weighted average for a statistic across sessions."""
         values = [
@@ -115,7 +124,13 @@ class DayManager:
             db_session: SQLAlchemy database session
         """
         sessions = (
-            db_session.query(SessionModel).filter_by(day_id=day.id, enabled=True).all()
+            db_session.execute(
+                select(SessionModel)
+                .filter_by(day_id=day.id, enabled=True)
+                .options(joinedload(SessionModel.statistics))
+            )
+            .scalars()
+            .all()
         )
 
         if not sessions:

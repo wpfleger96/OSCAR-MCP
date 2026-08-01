@@ -3,7 +3,8 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, UnaryExpression, func, select
+from sqlalchemy import ColumnElement, UnaryExpression, delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
@@ -153,44 +154,61 @@ class SessionService:
             ValueError: If session not found
         """
         session = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.id == session_id)
+            self.db_session.execute(
+                select(models.Session).where(models.Session.id == session_id)
+            )
+            .scalars()
             .first()
         )
         if not session:
             raise NotFoundError(f"Session {session_id} not found")
 
         device = (
-            self.db_session.query(models.Device)
-            .filter(models.Device.id == session.device_id)
+            self.db_session.execute(
+                select(models.Device).where(models.Device.id == session.device_id)
+            )
+            .scalars()
             .first()
         )
 
         stats_record = (
-            self.db_session.query(models.Statistics)
-            .filter(models.Statistics.session_id == session.id)
+            self.db_session.execute(
+                select(models.Statistics).where(
+                    models.Statistics.session_id == session.id
+                )
+            )
+            .scalars()
             .first()
         )
 
         event_count = (
-            self.db_session.query(models.Event)
-            .filter(models.Event.session_id == session.id)
-            .count()
+            self.db_session.execute(
+                select(func.count())
+                .select_from(models.Event)
+                .where(models.Event.session_id == session.id)
+            ).scalar()
+            or 0
         )
 
         waveform_count = (
-            self.db_session.query(models.Waveform)
-            .filter(models.Waveform.session_id == session.id)
-            .count()
+            self.db_session.execute(
+                select(func.count())
+                .select_from(models.Waveform)
+                .where(models.Waveform.session_id == session.id)
+            ).scalar()
+            or 0
         )
 
         waveform_types = (
-            self.db_session.query(models.Waveform.waveform_type)
-            .filter(models.Waveform.session_id == session.id)
-            .distinct()
+            self.db_session.execute(
+                select(models.Waveform.waveform_type)
+                .where(models.Waveform.session_id == session.id)
+                .distinct()
+            )
+            .scalars()
             .all()
         )
-        waveform_type_list = [wt[0] for wt in waveform_types]
+        waveform_type_list = list(waveform_types)
 
         statistics = None
         if stats_record:
@@ -199,9 +217,12 @@ class SessionService:
         settings_list = None
         if include_settings:
             settings_records = (
-                self.db_session.query(models.Setting)
-                .filter(models.Setting.session_id == session.id)
-                .order_by(models.Setting.key)
+                self.db_session.execute(
+                    select(models.Setting)
+                    .where(models.Setting.session_id == session.id)
+                    .order_by(models.Setting.key)
+                )
+                .scalars()
                 .all()
             )
             settings_list = [
@@ -351,12 +372,10 @@ class SessionService:
             return 0
 
         # Use ORM delete for proper rowcount tracking
-        count = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.id.in_(session_ids))
-            .delete(synchronize_session=False)
+        cursor: CursorResult[Any] = self.db_session.execute(  # type: ignore[assignment]
+            delete(models.Session).where(models.Session.id.in_(session_ids))
         )
-        return count
+        return cursor.rowcount or 0
 
     def set_session_enabled(self, session_id: int, enabled: bool) -> None:
         """
@@ -372,8 +391,10 @@ class SessionService:
             ValueError: If session not found
         """
         session = (
-            self.db_session.query(models.Session)
-            .filter(models.Session.id == session_id)
+            self.db_session.execute(
+                select(models.Session).where(models.Session.id == session_id)
+            )
+            .scalars()
             .first()
         )
         if not session:
@@ -387,8 +408,10 @@ class SessionService:
 
         if session.day_id:
             day = (
-                self.db_session.query(models.Day)
-                .filter(models.Day.id == session.day_id)
+                self.db_session.execute(
+                    select(models.Day).where(models.Day.id == session.day_id)
+                )
+                .scalars()
                 .first()
             )
             if day:
@@ -415,9 +438,12 @@ class SessionService:
             raise ValueError("Either session_id or date must be provided")
 
         session = (
-            self.db_session.query(models.Session)
-            .join(models.Day)
-            .filter(models.Day.date == date.date())
+            self.db_session.execute(
+                select(models.Session)
+                .join(models.Day)
+                .where(models.Day.date == date.date())
+            )
+            .scalars()
             .first()
         )
 

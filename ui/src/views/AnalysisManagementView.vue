@@ -93,6 +93,7 @@
             <div class="batch-stats">
                 <StatCard label="Total" :value="batchResult.total" :decimals="0" />
                 <StatCard label="Successful" :value="batchResult.successful" :decimals="0" />
+                <StatCard label="Cancelled" :value="batchResult.cancelled ?? 0" :decimals="0" />
                 <StatCard label="Failed" :value="batchResult.failed" :decimals="0" />
             </div>
         </div>

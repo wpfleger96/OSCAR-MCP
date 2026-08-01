@@ -204,6 +204,37 @@ Complete project overview showing implemented features and future development pl
 
 ## In Progress 🚧
 
+### Phase 2.3: Async Migration
+
+Two-PR sequence to migrate from synchronous SQLAlchemy to `AsyncSession`/`aiosqlite`.
+See `docs/async-migration-plan.md` for the full spec.
+
+**PR-1 — Sync prep** (current):
+- [x] SQLAlchemy 2.0 `select()` modernisation; `lazy="raise"` gate on all relationships
+- [x] `DatabaseTarget` URL resolver with precedence chain + `snore serve --db` canonical export
+- [x] `UTCDateTime` custom type + column classification (absolute instants vs wall-clock)
+- [x] SQLite connection recipe: integrated `autocommit=False` + PRAGMA toggle (probe-verified)
+- [x] `DatabaseService` SQL portability; `schema.sql` deleted
+- [x] Transaction-ownership table; import savepoints with forced-failure test
+- [x] I/O–compute DTO split; read/write session split in batch analysis
+- [x] Import-job state machine (pending → running → succeeded/failed/cancelled + pending → cancelled)
+- [x] Docs: async migration plan, MCP server plan, roadmap entry
+
+**PR-2 — Atomic async flip** (planned):
+- [ ] `create_async_engine`, `AsyncSession`, `aiosqlite`
+- [ ] All services, routers, CLI converted; `asyncio.run` CLI bridge
+- [ ] Bulk inserts via typed `insert()` executemany inside per-session savepoints
+- [ ] Alembic stays sync via `run_sync`
+
+### Phase 2.3+: MCP Server
+
+**Sequenced behind PR-2.** See `docs/mcp-server-plan.md` for the full spec.
+
+- [ ] Phase 1: MCP skeleton + `get_settings_timeline`, `get_nightly_summary`, `get_events`
+- [ ] Phase 2: `breaths` table + per-breath feature persistence at import time (parallel with Phase 1)
+- [ ] Phase 3: `get_breath_table`, `find_windows`, `compare_epochs`
+- [ ] Phase 4: `render_window`, `get_waveform`, `get_ca_analysis`
+
 ### Phase 2: Web UI
 
 **Sub-phase 2.2: Vue Frontend** ✅ COMPLETE

@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from snore.database.models import Day, Device
@@ -210,12 +211,16 @@ class RxTracker:
         matching Device row (device is None) are skipped with a warning.
         """
         days = (
-            db_session.query(Day)
-            .order_by(Day.device_id, Day.date)
-            .options(
-                joinedload(Day.sessions).joinedload(SessionModel.settings),
-                joinedload(Day.device),
+            db_session.execute(
+                select(Day)
+                .order_by(Day.device_id, Day.date)
+                .options(
+                    joinedload(Day.sessions).joinedload(SessionModel.settings),
+                    joinedload(Day.device),
+                )
             )
+            .unique()
+            .scalars()
             .all()
         )
 
@@ -400,12 +405,11 @@ class RxTracker:
         Uses an inner join so Day rows with no matching Device are naturally
         excluded — same outcome as the missing-device guard in _days_by_device.
         """
-        rows = (
-            db_session.query(Day.device_id, Device.manufacturer, Device.model)
+        rows = db_session.execute(
+            select(Day.device_id, Device.manufacturer, Device.model)
             .join(Device, Day.device_id == Device.id)
             .distinct()
-            .all()
-        )
+        ).all()
         return [
             (
                 device_id,
@@ -427,18 +431,17 @@ class RxTracker:
         If `before` is given, only days strictly older than that date are
         included (keyset pagination cursor).
         """
-        q = (
-            db_session.query(Day)
-            .filter(Day.device_id == device_id)
-            .order_by(Day.date.desc())
-        )
+        q = select(Day).where(Day.device_id == device_id).order_by(Day.date.desc())
         if before is not None:
-            q = q.filter(Day.date < before)
-        return (
-            q.options(
-                selectinload(Day.sessions).selectinload(SessionModel.settings),
+            q = q.where(Day.date < before)
+        return list(
+            db_session.execute(
+                q.options(
+                    selectinload(Day.sessions).selectinload(SessionModel.settings),
+                ).limit(limit)
             )
-            .limit(limit)
+            .unique()
+            .scalars()
             .all()
         )
 

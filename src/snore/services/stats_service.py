@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from datetime import date, timedelta
 
-from sqlalchemy import func, text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from snore.analysis.calculations import (
@@ -50,15 +50,15 @@ class StatsService:
         Returns:
             List of Day records
         """
-        query = self.db_session.query(models.Day)
+        query = select(models.Day)
         if days_limit:
             cutoff_date = date.today() - timedelta(days=days_limit)
-            query = query.filter(models.Day.date >= cutoff_date)
+            query = query.where(models.Day.date >= cutoff_date)
         if from_date is not None:
-            query = query.filter(models.Day.date >= from_date)
+            query = query.where(models.Day.date >= from_date)
         if to_date is not None:
-            query = query.filter(models.Day.date <= to_date)
-        return query.all()
+            query = query.where(models.Day.date <= to_date)
+        return list(self.db_session.execute(query).scalars().all())
 
     def get_summary(
         self,
@@ -90,12 +90,11 @@ class StatsService:
         day_ids = [d.id for d in day_records]
         days_with_data = len(day_records)
 
-        total_duration = (
-            self.db_session.query(func.sum(models.Session.duration_seconds))
+        total_duration = self.db_session.execute(
+            select(func.sum(models.Session.duration_seconds))
             .join(models.Day)
-            .filter(models.Day.id.in_(day_ids))
-            .scalar()
-        )
+            .where(models.Day.id.in_(day_ids))
+        ).scalar()
         total_hours = (total_duration or 0) / 3600
         avg_hours = total_hours / days_with_data if days_with_data > 0 else 0
 
@@ -126,17 +125,17 @@ class StatsService:
         spo2_mins = [d.spo2_min for d in day_records if d.spo2_min is not None]
         min_spo2 = min(spo2_mins) if spo2_mins else None
 
-        event_counts = (
-            self.db_session.query(
-                models.Event.event_type, func.count(models.Event.id).label("count")
+        event_counts = self.db_session.execute(
+            select(
+                models.Event.event_type,
+                func.count(models.Event.id).label("count"),
             )
             .join(models.Session)
             .join(models.Day)
-            .filter(models.Day.id.in_(day_ids))
+            .where(models.Day.id.in_(day_ids))
             .group_by(models.Event.event_type)
-            .order_by(text("count DESC"))
-            .all()
-        )
+            .order_by(func.count(models.Event.id).desc())
+        ).all()
 
         total_events = sum(count for _, count in event_counts)
         event_type_counts = [
@@ -149,10 +148,13 @@ class StatsService:
         ]
 
         stats_records = (
-            self.db_session.query(models.Statistics)
-            .join(models.Session)
-            .join(models.Day)
-            .filter(models.Day.id.in_(day_ids))
+            self.db_session.execute(
+                select(models.Statistics)
+                .join(models.Session)
+                .join(models.Day)
+                .where(models.Day.id.in_(day_ids))
+            )
+            .scalars()
             .all()
         )
 
@@ -280,13 +282,12 @@ class StatsService:
         }
 
         day_ids = [d.id for d in day_records]
-        rows = (
-            self.db_session.query(models.Statistics, models.Day.date)
+        rows = self.db_session.execute(
+            select(models.Statistics, models.Day.date)
             .join(models.Session, models.Statistics.session_id == models.Session.id)
             .join(models.Day, models.Session.day_id == models.Day.id)
-            .filter(models.Day.id.in_(day_ids))
-            .all()
-        )
+            .where(models.Day.id.in_(day_ids))
+        ).all()
 
         _KEYS = ["epap", "rr", "pulse", "mv"]
         _FIELD_MAP = {
