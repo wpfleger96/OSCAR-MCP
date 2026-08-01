@@ -346,6 +346,7 @@ class TestImporterForcedFailureContinuation:
         from unittest.mock import patch
 
         from snore.database.importers import SessionImporter
+        from snore.database.models import Day as DBDay
         from snore.database.models import Device as DBDevice
         from snore.database.models import Event as DBEvent
         from snore.database.models import Session as DBSession
@@ -468,6 +469,19 @@ class TestImporterForcedFailureContinuation:
             all_session_ids = {
                 s.id for s in verify.execute(_sv(DBSession)).scalars().all()
             }
+            all_device_ids = {
+                d.id for d in verify.execute(_sv(DBDevice)).scalars().all()
+            }
+
+            # No Day row should have a device_id that belongs to no surviving device.
+            orphan_days = [
+                d
+                for d in verify.execute(_sv(DBDay)).scalars().all()
+                if d.device_id not in all_device_ids
+            ]
+            assert len(orphan_days) == 0, (
+                f"Orphan Day rows found: {[d.id for d in orphan_days]}"
+            )
 
             orphan_waveforms = [
                 w

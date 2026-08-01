@@ -382,4 +382,4 @@ class TestRunBatchAnalysis:
             progress_callback=lambda completed, total: calls.append((completed, total)),
         )
         assert len(calls) == 1
-        assert calls[0] == (1, 1)
+        assert calls[0] == (1, None)  # total is None until exhausted (unknown)

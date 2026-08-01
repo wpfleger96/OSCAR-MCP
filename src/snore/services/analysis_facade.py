@@ -405,7 +405,7 @@ class AnalysisFacade:
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
-        progress_callback: Callable[[int, int], None] | None = None,
+        progress_callback: Callable[[int, int | None], None] | None = None,
     ) -> BatchAnalysisResult:
         """Run analysis on multiple sessions in parallel.
 
@@ -503,7 +503,7 @@ class BatchAnalysisCoordinator:
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
-        progress_callback: Callable[[int, int], None] | None = None,
+        progress_callback: Callable[[int, int | None], None] | None = None,
     ) -> BatchAnalysisResult:
         """Execute batch analysis and return aggregated results.
 
@@ -627,7 +627,9 @@ class BatchAnalysisCoordinator:
                     )
                     self._completed += 1
                     if progress_callback:
-                        progress_callback(self._completed, self._completed)
+                        progress_callback(
+                            self._completed, None
+                        )  # total unknown until exhausted
                     # Slide the window forward.
                     _submit_next()
 

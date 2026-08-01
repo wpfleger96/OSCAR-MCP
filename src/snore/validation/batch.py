@@ -119,9 +119,10 @@ class BatchValidator:
         analysis_result = self.analysis_service.get_analysis_result(session_id)
         if not analysis_result:
             logger.info(f"Running analysis for session {session_id}...")
-            # Use AnalysisFacade.run_analysis so analysis runs in its own short
-            # read/write scopes — not inside self.db_session which must stay open
-            # for the validation queries that follow.
+            # Close the validator's injected session before analysis so it holds
+            # no open transaction during compute — facade.run_analysis() uses its
+            # own short read/write scopes.
+            self.db_session.close()
             from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
             facade = AnalysisFacade(self.db_session)

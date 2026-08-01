@@ -495,8 +495,10 @@ def _analyze_batch(
         console=console,
     ) as progress:
 
-        def on_progress(completed: int, total: int) -> None:
+        def on_progress(completed: int, total: int | None) -> None:
             if not task_holder:
+                # total=None means we don't yet know how many sessions there are;
+                # use an indeterminate bar (total=None in Rich) until count is known.
                 task_holder.append(progress.add_task("Analyzing", total=total))
             progress.update(task_holder[0], advance=1)
 
