@@ -385,7 +385,6 @@ class ExportService:
             warnings.append("No sessions found for the specified filters.")
             return ExportResult(format="csv", output_path=output, warnings=warnings)
 
-        # Three CSV files were written (sessions, events, settings).
         files_written += 3
 
         return ExportResult(
