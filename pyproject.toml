@@ -24,6 +24,7 @@ dependencies = [
     "uvicorn[standard]>=0.46.0",
     "python-multipart>=0.0.32",
     "jinja2>=3.1",
+    "aiosqlite>=0.22.1",
 ]
 
 [project.optional-dependencies]
@@ -82,10 +83,12 @@ disable_error_code = ["var-annotated", "type-arg", "union-attr", "assignment", "
 
 [dependency-groups]
 dev = [
+    "anyio>=4.14.2",
     "httpx>=0.28.1",
     "mne>=1.6.0",
     "mypy>=2.0.0",
     "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.2",
