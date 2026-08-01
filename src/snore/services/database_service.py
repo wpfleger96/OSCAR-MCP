@@ -199,24 +199,26 @@ class DatabaseService:
         )
 
     def reset(self, db_path: str) -> ResetResult:
-        """Delete all rows from all data tables and vacuum to reclaim space.
+        """Delete all rows from all data tables.
 
         Split into two capabilities:
 
         1. **Generic row reset** (any dialect): clears all user data rows in FK-safe
            order via typed ``table.delete()`` statements.  The caller's session
            commits the deletes.
-        2. **SQLite file VACUUM** (SQLite only): runs on a separate AUTOCOMMIT
-           connection after the delete commit.  VACUUM cannot execute inside a
-           transaction.
-
-        Raises ``RuntimeError`` for non-SQLite targets if called with a SQLite-only
-        vacuum expectation, but the generic row-deletion phase runs on any dialect.
+        2. **SQLite file VACUUM** (SQLite targets only): runs on a separate AUTOCOMMIT
+           connection after the delete commit.  Dispatched only when the target
+           explicitly reports ``is_sqlite_target()`` — not via an empty-string
+           implicit switch.  VACUUM cannot execute inside a transaction.
 
         Args:
-            db_path: Path to the SQLite database file (required for VACUUM and
-                     size measurement).  Pass empty string to skip VACUUM and
-                     size reporting (e.g., on non-SQLite databases).
+            db_path: Path to the SQLite database file.  Required for VACUUM and
+                     size measurement.  Ignored for non-SQLite targets (pass ``""``
+                     to skip file operations).
+
+        Note:
+            To check whether VACUUM will run, callers should test
+            ``DatabaseService.is_sqlite_target(db_path)`` before calling.
         """
         size_before = (
             os.path.getsize(db_path) / (1024 * 1024)
@@ -238,8 +240,8 @@ class DatabaseService:
         # and the route dependency creates a fresh session per request.
         self.db_session.commit()
 
-        # SQLite file maintenance phase: VACUUM on dedicated AUTOCOMMIT connection.
-        if db_path:
+        # SQLite file maintenance phase: dispatched only for SQLite file targets.
+        if self.is_sqlite_target(db_path):
             vacuum_engine = create_engine(
                 f"sqlite:///{db_path}",
                 isolation_level="AUTOCOMMIT",
@@ -263,3 +265,14 @@ class DatabaseService:
             size_before_mb=size_before,
             size_after_mb=size_after,
         )
+
+    @staticmethod
+    def is_sqlite_target(db_path: str) -> bool:
+        """Return True if *db_path* identifies a SQLite file target.
+
+        Non-empty, non-memory paths are SQLite file targets.  Empty strings
+        and ``:memory:`` are treated as non-file targets.  This is the explicit
+        capability gate that controls whether VACUUM and file-size measurements
+        run — replaces the previous implicit ``if db_path:`` switch.
+        """
+        return bool(db_path) and db_path != ":memory:"

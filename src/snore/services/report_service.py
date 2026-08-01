@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from snore.analysis.svg_charts import render_trend_line
 from snore.database import models
-from snore.services.schemas import TherapySummary
+from snore.services.schemas import DeviceInfo, TherapySummary
 from snore.services.stats_service import StatsService
 
 __all__ = ["ReportService"]
@@ -125,8 +125,7 @@ class ReportService:
 
     1. **Fetch phase** (``_fetch_summary_data`` / ``_fetch_comparison_data``): all
        database queries run via ``StatsService`` and return plain Python objects
-       (Pydantic schemas + a detached ``Device`` row).  The session is not needed
-       after this phase completes.
+       (Pydantic schemas).  The session is not needed after this phase completes.
     2. **Render phase** (``_render_summary`` / ``_render_comparison``): pure
        Jinja2 template rendering that takes only plain Python objects.  No session
        access occurs here, making it safe to call after the session is closed.
@@ -139,12 +138,16 @@ class ReportService:
         self._db = db_session
         self._stats = StatsService(db_session)
 
-    def _first_device(self) -> models.Device | None:
-        return (
+    def _first_device(self) -> DeviceInfo | None:
+        """Return the first device as a plain detached schema, or None."""
+        device = (
             self._db.execute(select(models.Device).order_by(models.Device.first_seen))
             .scalars()
             .first()
         )
+        if device is None:
+            return None
+        return DeviceInfo.model_validate(device)
 
     # --- Fetch helpers (I/O phase) ---
 

@@ -103,6 +103,16 @@ transaction.
   `DatabaseTarget`, not hardcoded
 - `src/snore/database/schema.sql` deleted — zero callers; obsolete SQLite-only subset
   that diverged from the Alembic migration history
+- Typed SQL throughout (no `text()` for DML/ORDER BY); offline PostgreSQL compilation
+  suite in `tests/unit/test_dialect_compilation.py` validates syntax against the
+  PostgreSQL dialect without a running server
+
+> **Dialect compilation disclaimer:** The offline PostgreSQL compilation suite compiles
+> audited statements against the SQLAlchemy PostgreSQL dialect.  This catches type
+> mismatches and unsupported constructs at test time but is **NOT a substitute for
+> end-to-end testing against a real PostgreSQL instance**.  The PostgreSQL code paths
+> are capability-gated and will be validated against a real server at the hosted
+> milestone before any production PostgreSQL traffic is served.
 
 ### 6. Transaction ownership
 
@@ -112,7 +122,7 @@ entry point.
 | Entry point | Opens session | Commits | Rollback on error | Notes |
 |---|---|---|---|---|
 | `session_scope()` context manager | Yes | `session.commit()` on exit | `session.rollback()` on exception | All normal service calls |
-| `import_sessions_batch` (per batch) | Yes (via `session_scope()`) | On batch exit | On batch exception | Each session wrapped in `begin_nested()` savepoint |
+| `import_sessions_batch` (per batch) | No (caller provides via `db=` parameter) | No (caller owns the outer transaction) | No (caller owns) | Called by `ImportService` which injects the `ImportService`-owned batch session; each individual session wrapped in `begin_nested()` savepoint |
 | `_import_single_session` savepoint | `db.begin_nested()` | `sp.commit()` | `sp.rollback()` | Never commits or rolls back the outer session |
 | `cleanup_orphaned_records` | No (caller provides) | **Never** | **Never** | Caller owns the transaction; no internal commit |
 | `DatabaseService.reset` | No (caller provides via dep) | Yes (intentional, before VACUUM) | No | VACUUM requires committed state; route dep creates a fresh session per request |
@@ -126,11 +136,9 @@ entry point.
 | `POST /analysis/batch` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Coordinator internally opens additional `session_scope` instances per thread |
 | `PUT /sessions/{id}` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Session update via `SessionService` |
 | `DELETE /sessions/` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Bulk session delete via `SessionService.delete_sessions` |
-| `POST /import/` worker thread | Via `session_scope` inside `ImportService` | Per batch, by `import_sessions_batch` | Per batch exception | Worker thread; each batch is an independent `session_scope` |
+| `POST /import/` worker thread | Via `session_scope` inside `ImportService.import_sources` | Per batch, by `ImportService` (outer) and `import_sessions_batch` (savepoints) | Per batch exception | `ImportService` opens and injects the batch session; `import_sessions_batch` uses `begin_nested()` savepoints only |
 
-Import UoW: batch-scoped, `ImportService`-owned `session_scope()` per batch; per-session
-`begin_nested()` savepoints so one failed import cannot poison the batch. One
-forced-failure test asserts zero rows survive when a session import raises mid-batch.
+Import UoW: `ImportService.import_sources` opens a `session_scope()` per source batch and injects the live session into `SessionImporter.import_sessions_batch` via the `db=` parameter.  `import_sessions_batch` never opens its own `session_scope()` when called from `ImportService`; it uses `begin_nested()` savepoints only.  The forced-failure test asserts zero child rows (device, day, session, waveform, event, statistics) survive when an import raises mid-batch.
 
 ### 7. I/O–compute DTO split
 
@@ -138,8 +146,9 @@ No ORM session crosses a thread boundary. Batch analysis uses detached DTOs betw
 I/O and compute phases.
 
 Batch analysis: `BatchAnalysisCoordinator.analyze_one` splits into:
-1. A read+compute `session_scope()` that closes before returning the `AnalysisResult` DTO.
-2. A separate write-only `session_scope()` (INSERT only), held only for the write duration.
+1. A **read-only** `session_scope()` that calls `load_session_inputs_raw()` — raw blob fetch, no NumPy.  The session is closed before compute begins.
+2. A **compute phase** (no session held): `AnalysisService.prepare_inputs()` (deserialisation + artifact detection) then `compute_analysis()`.
+3. A **write-only** `session_scope()` (INSERT only), held only for the write duration.
 
 This eliminates SQLite write-lock contention under `ThreadPoolExecutor` with
 `autocommit=False`. Real `processing_time_ms` is measured over the read+compute phase
@@ -149,19 +158,24 @@ and written with each result.
 so PR-2 can swap the executor internals (``ThreadPoolExecutor`` → ``asyncio`` tasks)
 without touching callers.
 
-**§7 I/O–compute splits in PR-1:** All five named surfaces have explicit I/O–compute
+**§7 I/O–compute splits in PR-1:** All six named surfaces have explicit I/O–compute
 separation in PR-1:
 
-1. **Batch analysis** (`BatchAnalysisCoordinator`): read phase (session closed before compute),
-   compute phase (no session held), write phase (fresh session for INSERT only).
-2. **Single-session analysis** (`AnalysisService.analyze_session`): calls `load_session_inputs`
-   then `compute_analysis` in sequence; the session is already bounded by the request context.
+1. **Batch analysis** (`BatchAnalysisCoordinator`): read-only phase (`load_session_inputs_raw`,
+   session closed before NumPy), compute phase (`prepare_inputs` + `compute_analysis`, no session),
+   write phase (fresh session for INSERT only).
+2. **Single-session analysis** (`AnalysisService.analyze_session`): calls `load_session_inputs_raw`
+   then `prepare_inputs` then `compute_analysis`; the session is bounded by the request context
+   and no NumPy work runs while holding a query lock.
 3. **Waveform load** (`load_waveform_from_db`): `fetch_waveform_blob` (I/O, returns raw bytes)
    then `deserialize_waveform_blob` (compute, no session needed).
 4. **Report generation** (`ReportService`): `_fetch_summary_data` / `_fetch_comparison_data`
    (I/O, returns plain Python objects) then `_render_summary` / `_render_comparison`
    (pure Jinja2, static methods, no session).
-5. **Import** (`import_sessions_batch`): `parse_sessions()` returns a lazy iterator consumed
+5. **Export** (`ExportService`): `_build_export_rows` generator yields `(session_dict, events, settings)`
+   in bounded chunks of `_EXPORT_CHUNK_SIZE` rows using `yield_per()` — no full materialisation
+   of all sessions, events, or settings before rendering.
+6. **Import** (`import_sessions_batch`): `parse_sessions()` returns a lazy iterator consumed
    in bounded `batch_size` chunks — no full-batch prefetch.
 
 ### 8. Import-job state machine

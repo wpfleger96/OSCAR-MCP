@@ -284,12 +284,17 @@ class TestRunBatchAnalysis:
         def fake_scope():
             yield db_session
 
+        mock_raw = MagicMock()
         mock_inputs = MagicMock()
         mock_result = MagicMock()
 
         monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs",
+            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
+            lambda *a, **kw: mock_raw,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.prepare_inputs",
             lambda *a, **kw: mock_inputs,
         )
         monkeypatch.setattr(
@@ -297,7 +302,7 @@ class TestRunBatchAnalysis:
             lambda *a, **kw: mock_result,
         )
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService._store_result",
+            "snore.analysis.service.AnalysisService.store_result",
             lambda *a, **kw: None,
         )
         facade = AnalysisFacade(db_session)
@@ -324,7 +329,7 @@ class TestRunBatchAnalysis:
 
         monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs",
+            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
             raise_error,
         )
         facade = AnalysisFacade(db_session)
@@ -348,12 +353,17 @@ class TestRunBatchAnalysis:
         def fake_scope():
             yield db_session
 
+        mock_raw = MagicMock()
         mock_inputs = MagicMock()
         mock_result = MagicMock()
 
         monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs",
+            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
+            lambda *a, **kw: mock_raw,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.prepare_inputs",
             lambda *a, **kw: mock_inputs,
         )
         monkeypatch.setattr(
@@ -361,7 +371,7 @@ class TestRunBatchAnalysis:
             lambda *a, **kw: mock_result,
         )
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService._store_result",
+            "snore.analysis.service.AnalysisService.store_result",
             lambda *a, **kw: None,
         )
         calls = []

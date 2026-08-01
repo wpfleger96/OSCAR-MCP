@@ -14,6 +14,7 @@ import logging
 import shutil
 import zipfile
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -215,13 +216,38 @@ class ExportService:
         warnings: list[str] = []
         files_written = 0
 
-        sessions, events_by_session, settings_by_session, nights = (
-            self._build_export_sessions(db_session, date_from, date_to, device_serial)
+        # Collect the first row to check for empty results, then chain it back.
+        # Using _build_export_rows yields (session_dict, events, settings) lazily
+        # in bounded chunks — no full materialisation of all sessions+events+settings.
+        rows_gen = self._build_export_rows(
+            db_session, date_from, date_to, device_serial
         )
-
-        if not sessions:
+        try:
+            first = next(rows_gen)
+        except StopIteration:
             warnings.append("No sessions found for the specified filters.")
             return ExportResult(format="csv", output_path=output, warnings=warnings)
+
+        import itertools  # noqa: PLC0415
+
+        all_rows = itertools.chain([first], rows_gen)
+
+        # Collect sessions list and night-set in a single pass for CSV needs;
+        # events/settings are already bound per-row so memory is bounded per chunk.
+        sessions: list[dict[str, Any]] = []
+        events_by_session: dict[int, list[Any]] = {}
+        settings_by_session: dict[int, list[Any]] = {}
+        nights: set[date] = set()
+        for s, evs, stts in all_rows:
+            sessions.append(s)
+            events_by_session[s["id"]] = evs
+            settings_by_session[s["id"]] = stts
+            night = (
+                s["start_time"].date()
+                if s["start_time"].hour >= 12
+                else (s["start_time"] - timedelta(days=1)).date()
+            )
+            nights.add(night)
 
         # sessions.csv
         sessions_path = output / "sessions.csv"
@@ -400,18 +426,23 @@ class ExportService:
         output.parent.mkdir(parents=True, exist_ok=True)
         warnings: list[str] = []
 
-        sessions, events_by_session, settings_by_session, nights = (
-            self._build_export_sessions(db_session, date_from, date_to, device_serial)
-        )
-
-        if not sessions:
-            warnings.append("No sessions found for the specified filters.")
-
         session_list: list[dict[str, Any]] = []
+        nights: set[date] = set()
 
-        for s in sessions:
-            events = events_by_session.get(s["id"], [])
-            settings = settings_by_session.get(s["id"], [])
+        # Consume the bounded row generator — each iteration yields one
+        # session's data (dict + event + setting lists) without materialising
+        # the entire result set first.
+        found_any = False
+        for s, events, settings in self._build_export_rows(
+            db_session, date_from, date_to, device_serial
+        ):
+            found_any = True
+            night = (
+                s["start_time"].date()
+                if s["start_time"].hour >= 12
+                else (s["start_time"] - timedelta(days=1)).date()
+            )
+            nights.add(night)
 
             session_list.append(
                 {
@@ -443,6 +474,9 @@ class ExportService:
                 }
             )
 
+        if not found_any:
+            warnings.append("No sessions found for the specified filters.")
+
         doc = {
             "exported_at": datetime.now().isoformat(),
             "snore_export_format": "1.0",
@@ -469,6 +503,43 @@ class ExportService:
     # Helpers
     # ------------------------------------------------------------------
 
+    _EXPORT_CHUNK_SIZE: int = 500  # Sessions per DB fetch window
+
+    def _build_export_rows(
+        self,
+        db_session: DBSession,
+        date_from: date | None,
+        date_to: date | None,
+        device_serial: str | None,
+    ) -> Iterator[tuple[dict[str, Any], list[Any], list[Any]]]:
+        """Yield ``(session_dict, events, settings)`` tuples in bounded chunks.
+
+        Fetches sessions in windows of ``_EXPORT_CHUNK_SIZE`` rows and bulk-loads
+        events/settings for each window.  No full materialisation of the entire
+        result set occurs; memory is bounded to one chunk at a time.
+
+        Shared by ``export_csv`` and ``export_json`` so both consumers work from
+        the same I/O–bounded data path.
+        """
+        import itertools  # noqa: PLC0415
+
+        session_gen = self._query_sessions_chunked(
+            db_session, date_from, date_to, device_serial
+        )
+        while True:
+            chunk = list(itertools.islice(session_gen, self._EXPORT_CHUNK_SIZE))
+            if not chunk:
+                break
+            session_ids = [s["id"] for s in chunk]
+            events_by_session = self._bulk_load_events(db_session, session_ids)
+            settings_by_session = self._bulk_load_settings(db_session, session_ids)
+            for s in chunk:
+                yield (
+                    s,
+                    events_by_session.get(s["id"], []),
+                    settings_by_session.get(s["id"], []),
+                )
+
     def _build_export_sessions(
         self,
         db_session: DBSession,
@@ -483,23 +554,28 @@ class ExportService:
     ]:
         """Fetch sessions plus bulk-loaded events/settings and night aggregation.
 
-        Shared by the CSV and JSON exporters so both consume identical data.
+        Kept for backward compatibility with callers that expect the full tuple.
+        New code should prefer ``_build_export_rows`` for bounded memory usage.
 
         Returns:
             Tuple of (sessions, events_by_session, settings_by_session, nights).
         """
-        sessions = self._query_sessions(db_session, date_from, date_to, device_serial)
-        session_ids = [s["id"] for s in sessions]
-        events_by_session = self._bulk_load_events(db_session, session_ids)
-        settings_by_session = self._bulk_load_settings(db_session, session_ids)
-
-        nights = {
-            s["start_time"].date()
-            if s["start_time"].hour >= 12
-            else (s["start_time"] - timedelta(days=1)).date()
-            for s in sessions
-        }
-
+        sessions: list[dict[str, Any]] = []
+        events_by_session: dict[int, list[Any]] = {}
+        settings_by_session: dict[int, list[Any]] = {}
+        nights: set[date] = set()
+        for s, evs, stts in self._build_export_rows(
+            db_session, date_from, date_to, device_serial
+        ):
+            sessions.append(s)
+            events_by_session[s["id"]] = evs
+            settings_by_session[s["id"]] = stts
+            night = (
+                s["start_time"].date()
+                if s["start_time"].hour >= 12
+                else (s["start_time"] - timedelta(days=1)).date()
+            )
+            nights.add(night)
         return sessions, events_by_session, settings_by_session, nights
 
     def _resolve_device_serial(self, device_serial: str | None) -> str:
@@ -537,6 +613,22 @@ class ExportService:
         device_serial: str | None,
     ) -> list[dict[str, Any]]:
         """Query sessions with optional filters, returning dicts with joined data."""
+        return list(
+            self._query_sessions_chunked(db_session, date_from, date_to, device_serial)
+        )
+
+    def _query_sessions_chunked(
+        self,
+        db_session: DBSession,
+        date_from: date | None,
+        date_to: date | None,
+        device_serial: str | None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield session dicts one-by-one using a server-side cursor (``yield_per``).
+
+        Memory is bounded to one database page at a time regardless of result set
+        size.  Callers that need all rows at once should use ``_query_sessions``.
+        """
         from snore.database import models  # noqa: PLC0415
 
         # Build the base join: sessions → devices (required) + statistics (optional).
@@ -588,7 +680,6 @@ class ExportService:
                 <= datetime(date_to.year, date_to.month, date_to.day, 23, 59, 59)
             )
 
-        rows = db_session.execute(stmt).fetchall()
         stat_keys = [
             "ahi",
             "oai",
@@ -606,16 +697,13 @@ class ExportService:
             "spo2_mean",
             "usage_hours",
         ]
-        results = []
-        for row in rows:
+        for row in db_session.execute(stmt).yield_per(self._EXPORT_CHUNK_SIZE):
             r = dict(row._mapping)
             r["statistics"] = {k: r.pop(k) for k in stat_keys if r.get(k) is not None}
             # Remove any stat keys that were None (not present in statistics dict).
             for k in stat_keys:
                 r.pop(k, None)
-            results.append(r)
-
-        return results
+            yield r
 
     @staticmethod
     def _bulk_load_events(

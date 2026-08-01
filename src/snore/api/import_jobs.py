@@ -4,8 +4,8 @@ State machine
 -------------
 ::
 
-    POST /            → pending
-    GET /{id}/progress → starts worker (pending → running) once; subsequent GETs attach an observer
+    POST /            → pending (worker starts immediately)
+    GET /{id}/progress → attaches an SSE observer; never starts or restarts the worker
     DELETE /{id}      → cancelled (idempotent after any terminal state)
     worker finishes   → succeeded | failed
     reaper            → removes terminal jobs after TTL
@@ -341,6 +341,7 @@ def create_job(job_type: JobType, **kwargs: Any) -> ImportJob:
 
 
 def get_job(job_id: str) -> ImportJob | None:
+    _reap_terminal()
     with _lock:
         return _jobs.get(job_id)
 
@@ -361,6 +362,10 @@ def cancel_job(job_id: str) -> bool:
 def shutdown(timeout: float = 10.0) -> None:
     """Cancel all non-terminal jobs and wait for worker threads to exit.
 
+    Iterates over the worker list and joins each one until it stops or the
+    per-worker timeout is exhausted.  Any worker still alive after the timeout
+    is logged as a warning rather than silently ignored.
+
     Called during application shutdown to ensure clean teardown.
     """
     with _lock:
@@ -369,6 +374,33 @@ def shutdown(timeout: float = 10.0) -> None:
         job.try_cancel()
     for job in active:
         job.wait_for_worker(timeout=timeout)
+        t = job._worker_thread
+        if t is not None and t.is_alive():
+            logger.warning(
+                "Worker thread for job %s still alive after %.1fs shutdown timeout",
+                job.job_id,
+                timeout,
+            )
+
+
+def start_reaper(interval: float = 60.0) -> threading.Thread:
+    """Start a background daemon thread that reaps terminal jobs every *interval* seconds.
+
+    Returns the started thread so the caller can join it on shutdown if desired.
+    The thread is a daemon so it does not prevent clean process exit.
+    """
+
+    def _reap_loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                _reap_terminal()
+            except Exception:
+                logger.exception("Reaper iteration failed")
+
+    t = threading.Thread(target=_reap_loop, daemon=True, name="import-job-reaper")
+    t.start()
+    return t
 
 
 def _reap_terminal() -> None:

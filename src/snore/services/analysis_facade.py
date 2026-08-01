@@ -498,7 +498,11 @@ class BatchAnalysisCoordinator:
         """
         import time  # noqa: PLC0415
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
+        from concurrent.futures import (  # noqa: PLC0415
+            FIRST_COMPLETED,
+            ThreadPoolExecutor,
+            wait,
+        )
 
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
@@ -512,23 +516,23 @@ class BatchAnalysisCoordinator:
         batch_results: list[BatchSessionResult] = []
         modes_list: list[str] | None = list(modes) if modes is not None else None
 
-        def analyze_one(sid: int) -> None:
+        def analyze_one(sid: int) -> str:
+            """Return 'cancelled', 'success', or 'error' for this session."""
             if self._cancel_requested:
-                return
+                return "cancelled"
 
             # --- Read phase (session open only during DB I/O) ---
-            # load_session_inputs fetches waveforms + events then returns a
-            # plain DTO with copied numpy arrays.  The session is closed before
-            # any scipy/NumPy work begins.
+            # load_session_inputs_raw fetches raw blobs and returns immediately.
+            # ALL NumPy work (deserialization, artifact detection) happens AFTER
+            # the session is closed via prepare_inputs().
             t_start = time.monotonic()
             with session_scope() as read_session:
                 svc = AnalysisService(read_session)
-                inputs = svc.load_session_inputs(session_id=sid, modes=modes_list)
-            # Session is now closed; compute runs without a held lock.
+                raw = svc.load_session_inputs_raw(session_id=sid, modes=modes_list)
+            # Session is now closed; all NumPy/scipy work below is sessionless.
 
             # --- Compute phase (no ORM session held) ---
-            # Use a dedicated compute-only service instance built via the
-            # class factory so algorithm helpers are initialized correctly.
+            inputs = AnalysisService.prepare_inputs(raw)
             compute_svc = AnalysisService._make_compute_only()
             result = compute_svc.compute_analysis(inputs)
             processing_time_ms = int((time.monotonic() - t_start) * 1000)
@@ -537,36 +541,71 @@ class BatchAnalysisCoordinator:
             if store_results and result is not None:
                 with session_scope() as write_session:
                     write_svc = AnalysisService(write_session)
-                    write_svc._store_result(result, processing_time_ms)
+                    write_svc.store_result(result, processing_time_ms)
 
-        with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
-            futures = {executor.submit(analyze_one, sid): sid for sid in session_ids}
-            for future in as_completed(futures):
-                sid = futures[future]
+            return "success"
+
+        # Bounded in-flight: submit at most max_workers futures at a time so the
+        # executor never holds all session rows in memory simultaneously.
+        effective_workers = min(max_workers, total)
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            # Sliding window: keep at most max_workers futures pending.
+            from concurrent.futures import Future  # noqa: PLC0415
+
+            pending: dict[Future[str], int] = {}
+            sid_iter = iter(session_ids)
+
+            def _submit_next() -> None:
                 try:
-                    future.result()
-                    success, error = True, None
-                except Exception as e:
-                    logger.warning(
-                        "Failed to analyze session %d: %s", sid, e, exc_info=True
+                    sid = next(sid_iter)
+                    fut = executor.submit(analyze_one, sid)
+                    pending[fut] = sid
+                except StopIteration:
+                    pass
+
+            # Prime the window.
+            for _ in range(effective_workers):
+                _submit_next()
+
+            while pending:
+                done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
+                for future in done:
+                    sid = pending.pop(future)
+                    try:
+                        outcome = future.result()
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to analyze session %d: %s", sid, e, exc_info=True
+                        )
+                        outcome = "error"
+                    cancelled = outcome == "cancelled"
+                    success = outcome == "success"
+                    error = (
+                        None
+                        if outcome != "error"
+                        else f"Analysis failed for session {sid}"
                     )
-                    success, error = False, f"Analysis failed for session {sid}"
-                batch_results.append(
-                    BatchSessionResult(
-                        session_id=sid,
-                        session_date=session_dates.get(sid),
-                        success=success,
-                        error=error,
+                    batch_results.append(
+                        BatchSessionResult(
+                            session_id=sid,
+                            session_date=session_dates.get(sid),
+                            success=success,
+                            cancelled=cancelled,
+                            error=error,
+                        )
                     )
-                )
-                self._completed += 1
-                if progress_callback:
-                    progress_callback(self._completed, total)
+                    self._completed += 1
+                    if progress_callback:
+                        progress_callback(self._completed, total)
+                    # Slide the window forward.
+                    _submit_next()
 
         successful = sum(1 for r in batch_results if r.success)
+        cancelled_count = sum(1 for r in batch_results if r.cancelled)
         return BatchAnalysisResult(
             total=total,
             successful=successful,
-            failed=total - successful,
+            failed=total - successful - cancelled_count,
+            cancelled=cancelled_count,
             results=batch_results,
         )

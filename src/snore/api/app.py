@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from snore.api.errors import NotFoundError, not_found_handler, server_error_handler
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
+from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, RateLimitMiddleware
 from snore.api.routers import (
     analysis,
@@ -52,6 +53,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         db_path = os.environ.get("SNORE_DB_PATH")
         init_database(db_path)
+    # Start the background TTL reaper so expired terminal jobs are removed
+    # every 60 seconds without requiring a new job to be created.
+    _start_import_reaper(interval=60.0)
     try:
         yield
     finally:

@@ -76,20 +76,25 @@ class TestAnalyzeBatch:
 
         mock_inputs = MagicMock()
         mock_result = MagicMock()
+        mock_raw = MagicMock()  # Represents RawSessionBlobs
 
         runner = CliRunner()
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
             patch(
-                "snore.analysis.service.AnalysisService.load_session_inputs",
+                "snore.analysis.service.AnalysisService.load_session_inputs_raw",
+                return_value=mock_raw,
+            ),
+            patch(
+                "snore.analysis.service.AnalysisService.prepare_inputs",
                 return_value=mock_inputs,
             ),
             patch(
                 "snore.analysis.service.AnalysisService.compute_analysis",
                 return_value=mock_result,
             ),
-            patch("snore.analysis.service.AnalysisService._store_result"),
+            patch("snore.analysis.service.AnalysisService.store_result"),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
@@ -134,14 +139,18 @@ class TestAnalyzeBatch:
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
             patch(
-                "snore.analysis.service.AnalysisService.load_session_inputs",
+                "snore.analysis.service.AnalysisService.load_session_inputs_raw",
                 load_side_effect,
+            ),
+            patch(
+                "snore.analysis.service.AnalysisService.prepare_inputs",
+                return_value=mock_inputs,
             ),
             patch(
                 "snore.analysis.service.AnalysisService.compute_analysis",
                 return_value=mock_result,
             ),
-            patch("snore.analysis.service.AnalysisService._store_result"),
+            patch("snore.analysis.service.AnalysisService.store_result"),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
@@ -193,20 +202,25 @@ class TestAnalyzeBatch:
 
         mock_inputs = MagicMock()
         mock_result = MagicMock()
+        mock_raw = MagicMock()
 
         runner = CliRunner()
         with (
             patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.session_scope", scope),
             patch(
-                "snore.analysis.service.AnalysisService.load_session_inputs",
+                "snore.analysis.service.AnalysisService.load_session_inputs_raw",
+                return_value=mock_raw,
+            ),
+            patch(
+                "snore.analysis.service.AnalysisService.prepare_inputs",
                 return_value=mock_inputs,
             ),
             patch(
                 "snore.analysis.service.AnalysisService.compute_analysis",
                 return_value=mock_result,
             ),
-            patch("snore.analysis.service.AnalysisService._store_result"),
+            patch("snore.analysis.service.AnalysisService.store_result"),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
         ):
@@ -260,10 +274,15 @@ class TestBatchCoordinatorHandle:
 
         mock_inputs = MagicMock()
         mock_result = MagicMock()
+        mock_raw = MagicMock()
 
         monkeypatch.setattr("snore.database.session.session_scope", fake_scope)
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService.load_session_inputs",
+            "snore.analysis.service.AnalysisService.load_session_inputs_raw",
+            lambda *a, **kw: mock_raw,
+        )
+        monkeypatch.setattr(
+            "snore.analysis.service.AnalysisService.prepare_inputs",
             lambda *a, **kw: mock_inputs,
         )
         monkeypatch.setattr(
@@ -271,7 +290,7 @@ class TestBatchCoordinatorHandle:
             lambda *a, **kw: mock_result,
         )
         monkeypatch.setattr(
-            "snore.analysis.service.AnalysisService._store_result",
+            "snore.analysis.service.AnalysisService.store_result",
             lambda *a, **kw: None,
         )
 
@@ -297,8 +316,8 @@ class TestBatchCoordinatorHandle:
 
         ``cancel()`` sets the flag; ``submit()`` does NOT clear a pre-set flag.
         ``analyze_one`` returns early for each session, so no DB access occurs.
-        All sessions are recorded as successful (no exception raised) — the
-        important property is that ``load_session_inputs`` is never called.
+        All sessions are recorded as cancelled (not successful) — the
+        important property is that ``load_session_inputs_raw`` is never called.
         """
         from snore.services.analysis_facade import BatchAnalysisCoordinator
 
@@ -318,7 +337,16 @@ class TestBatchCoordinatorHandle:
         )
         # All sessions skipped by the cancellation guard in analyze_one.
         assert result.total == 3
+        # All sessions must be cancelled, none successful.
+        assert result.cancelled == 3, (
+            f"All pre-cancelled sessions must be counted as cancelled; got {result.cancelled}"
+        )
+        assert result.successful == 0, (
+            f"No session must be counted successful after pre-cancel; got {result.successful}"
+        )
         # No load calls: the cancellation guard fires before any I/O.
-        assert load_calls == [], "load_session_inputs must not be called after cancel()"
+        assert load_calls == [], (
+            "load_session_inputs_raw must not be called after cancel()"
+        )
         # Flag must still be set.
         assert coord._cancel_requested is True

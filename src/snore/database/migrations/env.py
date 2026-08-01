@@ -33,6 +33,11 @@ def _resolve_url() -> str:
 
     Routes through the same ``DatabaseTarget`` resolver used by the app and CLI
     so Alembic and the runtime always see identical URL derivation logic.
+
+    Uses ``resolve_migration_url()`` (not ``resolve_sync_url()``) so that the
+    driver mapping is correct for Alembic's needs — today both are identical for
+    SQLite, but they will diverge at the hosted milestone (postgresql → psycopg
+    for migrations vs. asyncpg for runtime).
     """
     url = config.get_main_option("sqlalchemy.url") or ""
     if url not in ("", "sqlite:///"):
@@ -41,13 +46,13 @@ def _resolve_url() -> str:
         from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
         target = DatabaseTarget.from_url(url)
-        return target.resolve_sync_url()
+        return target.resolve_migration_url()
 
     # No explicit URL — use the environment/default resolution chain.
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
     target = DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
-    return target.resolve_sync_url()
+    return target.resolve_migration_url()
 
 
 def run_migrations_offline() -> None:

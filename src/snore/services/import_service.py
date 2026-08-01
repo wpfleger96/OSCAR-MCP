@@ -211,16 +211,18 @@ class ImportService:
                 total_imported += len(sessions_list)
                 continue
 
-            # Import
+            # Import — ImportService opens the batch session and injects it.
             importer = SessionImporter()
             emit("Importing sessions...")
-            imported, skipped, failed = importer.import_sessions_batch(
-                session_iter,
-                force=force,
-                batch_size=batch_size,
-                progress_callback=progress_callback,
-                cancel_predicate=cancel_predicate,
-            )
+            with session_scope() as batch_db:
+                imported, skipped, failed = importer.import_sessions_batch(
+                    session_iter,
+                    force=force,
+                    batch_size=batch_size,
+                    progress_callback=progress_callback,
+                    cancel_predicate=cancel_predicate,
+                    db=batch_db,
+                )
 
             total_imported += imported
             total_skipped += skipped

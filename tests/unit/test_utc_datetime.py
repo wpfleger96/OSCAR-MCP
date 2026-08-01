@@ -392,6 +392,7 @@ class TestAnalysisResultOrdering:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import Session as SASession
 
+        from snore.analysis.service import AnalysisService
         from snore.database.models import AnalysisResult, Base, Day, Device
         from snore.database.models import Session as DBSession
 
@@ -418,6 +419,18 @@ class TestAnalysisResultOrdering:
         start = __import__("datetime").datetime(2024, 1, 1, 21, 0, 0)
         end = __import__("datetime").datetime(2024, 1, 2, 5, 0, 0)
 
+        # Minimal AnalysisResult JSON with distinguishing duration_hours values.
+        def _make_result_json(session_id: int, duration_hours: float) -> dict:
+            return {
+                "session_id": session_id,
+                "session_duration_hours": duration_hours,
+                "total_breaths": 0,
+                "machine_events": [],
+                "mode_results": {},
+                "timestamp_start": 0.0,
+                "timestamp_end": 0.0,
+            }
+
         with SASession(engine) as db:
             device = Device(manufacturer="Mfr", model="M", serial_number="SN_MIXED")
             db.add(device)
@@ -436,11 +449,13 @@ class TestAnalysisResultOrdering:
             db.flush()
 
             # Insert the "earlier" result first (larger wall-clock hour).
+            # We distinguish the two rows by session_duration_hours in the JSON.
             older = AnalysisResult(
                 session_id=session.id,
                 created_at=earlier_utc_plus2,
                 timestamp_start=start,
                 timestamp_end=end,
+                programmatic_result_json=_make_result_json(session.id, 6.0),
             )
             # Insert the "later" result second (smaller wall-clock hour).
             newer = AnalysisResult(
@@ -448,30 +463,23 @@ class TestAnalysisResultOrdering:
                 created_at=later_utc_minus8,
                 timestamp_start=start,
                 timestamp_end=end,
+                programmatic_result_json=_make_result_json(session.id, 8.0),
             )
             db.add_all([older, newer])
             db.commit()
 
-            # Use the production query path: the service orders by created_at DESC.
-            # Query directly using the same ordering AnalysisService.get_analysis_result uses.
-            result_row = (
-                db.execute(
-                    __import__("sqlalchemy")
-                    .select(AnalysisResult)
-                    .where(AnalysisResult.session_id == session.id)
-                    .order_by(AnalysisResult.created_at.desc())
-                    .limit(1)
-                )
-                .scalars()
-                .first()
-            )
-            assert result_row is not None
-            # created_at must be the later one (14:00 UTC, originally -08:00).
-            loaded_utc = result_row.created_at.astimezone(UTC)
-            expected_utc = later_utc_minus8.astimezone(UTC)
-            assert loaded_utc == expected_utc, (
-                f"Expected the later UTC instant ({expected_utc}), "
-                f"got {loaded_utc} — mixed-offset ordering is wrong"
-            )
+            # Call the PRODUCTION PATH: AnalysisService.get_analysis_result().
+            # This exercises the same ordering clause the real app uses.
+            svc = AnalysisService(db)
+            result = svc.get_analysis_result(session.id)
+
+        assert result is not None, "Production path must return a result"
+        # The method must return the row with the later absolute UTC instant.
+        # That row has duration_hours=8.0 (the "later" one, stored as UTC-8).
+        assert result.session_duration_hours == 8.0, (
+            f"Expected the later UTC result (duration=8.0), "
+            f"got duration={result.session_duration_hours} — "
+            "mixed-offset ordering is wrong in the production path"
+        )
 
         engine.dispose()

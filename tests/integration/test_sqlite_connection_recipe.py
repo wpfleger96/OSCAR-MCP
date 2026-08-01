@@ -171,6 +171,86 @@ class TestImporterForcedFailureContinuation:
             end_time=end,
         )
 
+    def _make_session_data_with_children(
+        self, serial: str, session_id_str: str
+    ) -> UnifiedSession:
+        """Build a UnifiedSession with waveforms, events, statistics, and settings.
+
+        Used to verify that child rows (Waveform, Event, Statistics, Setting) are
+        fully rolled back by the savepoint when the session import fails.
+        """
+        from datetime import datetime  # noqa: PLC0415
+
+        import numpy as np  # noqa: PLC0415
+
+        from snore.parsers.unified import (  # noqa: PLC0415
+            DeviceInfo,
+            RespiratoryEvent,
+            RespiratoryEventType,
+            SessionStatistics,
+            TherapyMode,
+            TherapySettings,
+            UnifiedSession,
+            WaveformData,
+            WaveformType,
+        )
+
+        # Minimal float32 blob: 2 samples × 2 columns (timestamp, value)
+        arr = np.array([[0.0, 1.0], [0.04, 1.1]], dtype=np.float32)
+        blob = arr.tobytes()
+
+        device_info = DeviceInfo(
+            manufacturer="TestMfr",
+            model="TestMdl",
+            serial_number=serial,
+        )
+        start = datetime(2024, 1, 1, 21, 0, 0)
+        end = datetime(2024, 1, 2, 5, 0, 0)
+
+        wf = WaveformData(
+            waveform_type=WaveformType.FLOW_RATE,
+            sample_rate=25.0,
+            unit="L/min",
+            min_value=-10.0,
+            max_value=10.0,
+            mean_value=0.0,
+            sample_count=2,
+            data_blob=blob,
+            timestamps=[0.0, 0.04],
+            values=[1.0, 1.1],
+        )
+
+        evt = RespiratoryEvent(
+            event_type=RespiratoryEventType.OBSTRUCTIVE_APNEA,
+            start_time=start,
+            duration_seconds=10.0,
+        )
+
+        settings = TherapySettings(
+            mode=TherapyMode.CPAP,
+            pressure_fixed=8.0,
+        )
+
+        stats = SessionStatistics(
+            usage_hours=8.0,
+            ahi=2.5,
+        )
+
+        sess = UnifiedSession(
+            device_info=device_info,
+            device_session_id=session_id_str,
+            start_time=start,
+            end_time=end,
+            settings=settings,
+            statistics=stats,
+            has_waveform_data=True,
+            has_event_data=True,
+            has_statistics=True,
+        )
+        sess.waveforms = {WaveformType.FLOW_RATE: wf}
+        sess.events = [evt]
+        return sess
+
     def test_failed_session_after_partial_flush_leaves_no_rows_next_session_succeeds(
         self, temp_db
     ):
@@ -248,3 +328,141 @@ class TestImporterForcedFailureContinuation:
             "SN_BAD_PF device was flushed then rolled back via savepoint — "
             "device row must not survive"
         )
+
+    def test_failed_session_after_child_writes_leaves_no_child_rows(self, temp_db):
+        """Child rows (Waveform, Event, Statistics, Setting) are rolled back when a session fails.
+
+        Failure is injected AFTER waveforms and events have been flushed into the
+        savepoint.  The savepoint rollback must remove ALL child rows for the
+        failed session, while the next session's child rows survive.
+
+        This test exercises the §6 requirement: forced-failure test must inject
+        after real child writes and assert no child rows survive.
+        """
+        init_database(str(temp_db))
+        from unittest.mock import patch
+
+        from snore.database.importers import SessionImporter
+        from snore.database.models import Device as DBDevice
+        from snore.database.models import Event as DBEvent
+        from snore.database.models import Session as DBSession
+        from snore.database.models import Statistics as DBStatistics
+        from snore.database.models import Waveform as DBWaveform
+        from snore.database.session import session_scope
+
+        # Build sessions WITH child data so there are waveform/event/stat rows to roll back.
+        good = self._make_session_data_with_children("SN_CHILD_GOOD", "SESS_CHILD_GOOD")
+        bad = self._make_session_data_with_children("SN_CHILD_BAD", "SESS_CHILD_BAD")
+
+        original_import_statistics = SessionImporter._import_statistics
+
+        def _raise_for_bad(self, db, session_id, session_data):
+            """Raise after waveforms+events are flushed, but before statistics commit."""
+            # Check if this is the bad session by querying the flushed Session row.
+            from sqlalchemy import select as _sel  # noqa: PLC0415
+
+            sess_rows = (
+                db.execute(
+                    _sel(DBSession).where(
+                        DBSession.id == session_id,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if sess_rows and sess_rows[0].device_session_id == "SESS_CHILD_BAD":
+                raise RuntimeError(
+                    "Forced failure after child writes (waveforms+events flushed)"
+                )
+            return original_import_statistics(self, db, session_id, session_data)
+
+        importer = SessionImporter()
+        with patch.object(SessionImporter, "_import_statistics", _raise_for_bad):
+            imported, skipped, failed = importer.import_sessions_batch(
+                [good, bad],
+                batch_size=2,
+            )
+
+        assert failed == 1, f"Expected 1 failure, got {failed}"
+        assert imported == 1, f"Expected 1 imported, got {imported}"
+
+        # Verify at the DB level: good session's child rows present,
+        # bad session's child rows absent — savepoint rolled back everything.
+        with session_scope() as verify:
+            from sqlalchemy import select as _sv  # noqa: PLC0415
+
+            good_sessions = (
+                verify.execute(
+                    _sv(DBSession).where(
+                        DBSession.device_session_id == "SESS_CHILD_GOOD"
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            bad_sessions = (
+                verify.execute(
+                    _sv(DBSession).where(
+                        DBSession.device_session_id == "SESS_CHILD_BAD"
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(good_sessions) == 1, "Good session must survive"
+            assert len(bad_sessions) == 0, "Bad session must be rolled back"
+
+            good_session_id = good_sessions[0].id
+
+            good_waveforms = (
+                verify.execute(
+                    _sv(DBWaveform).where(DBWaveform.session_id == good_session_id)
+                )
+                .scalars()
+                .all()
+            )
+            assert len(good_waveforms) >= 1, "Good session's waveforms must survive"
+
+            good_events = (
+                verify.execute(
+                    _sv(DBEvent).where(DBEvent.session_id == good_session_id)
+                )
+                .scalars()
+                .all()
+            )
+            assert len(good_events) >= 1, "Good session's events must survive"
+
+            good_stats = (
+                verify.execute(
+                    _sv(DBStatistics).where(DBStatistics.session_id == good_session_id)
+                )
+                .scalars()
+                .all()
+            )
+            assert len(good_stats) >= 1, "Good session's statistics must survive"
+
+            # Bad session was rolled back; its device must also be gone.
+            bad_devices = (
+                verify.execute(
+                    _sv(DBDevice).where(DBDevice.serial_number == "SN_CHILD_BAD")
+                )
+                .scalars()
+                .all()
+            )
+            assert len(bad_devices) == 0, (
+                "Bad session's device was flushed then rolled back — "
+                "no device row for SN_CHILD_BAD must survive"
+            )
+
+            # No orphan Waveform/Event rows for any non-existent session.
+            all_session_ids = {
+                s.id for s in verify.execute(_sv(DBSession)).scalars().all()
+            }
+            orphan_waveforms = [
+                w
+                for w in verify.execute(_sv(DBWaveform)).scalars().all()
+                if w.session_id not in all_session_ids
+            ]
+            assert len(orphan_waveforms) == 0, (
+                f"Orphan waveform rows found: {[w.id for w in orphan_waveforms]}"
+            )

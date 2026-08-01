@@ -249,6 +249,7 @@ class SessionImporter:
         batch_size: int = 50,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
+        db: Session | None = None,
     ) -> tuple[int, int, int]:
         """
         Import multiple sessions in batched transactions with per-session savepoints.
@@ -263,6 +264,16 @@ class SessionImporter:
         ``sessions`` may be any iterable (list or lazy iterator); the method consumes
         it in bounded chunks of ``batch_size`` so no full-batch prefetch is required.
 
+        Transaction ownership:
+
+        - If ``db`` is supplied, the CALLER owns the transaction; this method uses
+          ``begin_nested()`` savepoints only.  This is the preferred path from
+          ``ImportService``, which opens each batch-scoped ``session_scope()`` and
+          injects the session here so the UoW boundary is explicit and owned by the
+          service layer.
+        - If ``db`` is ``None`` (legacy / standalone use), this method opens its own
+          ``session_scope()`` per batch — retained for backward compatibility.
+
         Args:
             sessions: Iterable of UnifiedSession objects to import.  Need not be
                 a list; a lazy generator is consumed in bounded ``batch_size`` chunks.
@@ -271,6 +282,8 @@ class SessionImporter:
             progress_callback: Optional callback for progress messages
             cancel_predicate: Optional callable; returns True when cancellation
                 is requested.  Checked between batches (not mid-batch).
+            db: Optional injected SQLAlchemy session.  When provided, the caller
+                owns commit/rollback of the outer transaction.
 
         Returns:
             Tuple of (imported_count, skipped_count, failed_count)
@@ -290,43 +303,92 @@ class SessionImporter:
             if not batch:
                 break
 
-            batch_day_ids = set()
+            batch_day_ids: set[int] = set()
 
             logger.debug(f"Importing batch {batch_num} ({len(batch)} sessions)")
 
-            with session_scope() as db:
-                for session_data in batch:
-                    # Per-session savepoint: one failed session cannot poison the batch.
-                    sp = db.begin_nested()
-                    try:
-                        was_imported, day_id = self._import_single_session(
-                            db, session_data, force
-                        )
-                        sp.commit()
-                        if was_imported:
-                            imported += 1
-                            if day_id:
-                                batch_day_ids.add(day_id)
-                        else:
-                            skipped += 1
-                    except Exception as e:
-                        sp.rollback()
-                        logger.error(
-                            f"Failed to import session {session_data.device_session_id}: {e}"
-                        )
-                        failed += 1
-
-                    if progress_callback:
-                        sessions_done = imported + skipped + failed
-                        progress_callback(f"Importing session {sessions_done}...")
-
+            if db is not None:
+                # Caller-owned transaction: use savepoints only.
+                imported, skipped, failed, batch_day_ids = (
+                    self._import_batch_with_session(
+                        db,
+                        batch,
+                        force,
+                        imported,
+                        skipped,
+                        failed,
+                        batch_day_ids,
+                        progress_callback,
+                    )
+                )
                 if batch_day_ids:
                     for day_id in batch_day_ids:
                         day_record = db.get(models.Day, day_id)
                         if day_record:
                             DayManager._aggregate_day_statistics(day_record, db)
+            else:
+                # Legacy path: open own session_scope per batch.
+                with session_scope() as own_db:
+                    imported, skipped, failed, batch_day_ids = (
+                        self._import_batch_with_session(
+                            own_db,
+                            batch,
+                            force,
+                            imported,
+                            skipped,
+                            failed,
+                            batch_day_ids,
+                            progress_callback,
+                        )
+                    )
+                    if batch_day_ids:
+                        for day_id in batch_day_ids:
+                            day_record = own_db.get(models.Day, day_id)
+                            if day_record:
+                                DayManager._aggregate_day_statistics(day_record, own_db)
 
         return imported, skipped, failed
+
+    def _import_batch_with_session(
+        self,
+        db: Session,
+        batch: list[UnifiedSession],
+        force: bool,
+        imported: int,
+        skipped: int,
+        failed: int,
+        batch_day_ids: set[int],
+        progress_callback: Callable[[str], None] | None,
+    ) -> tuple[int, int, int, set[int]]:
+        """Import one batch of sessions within a caller-provided session.
+
+        Returns updated (imported, skipped, failed, batch_day_ids).
+        """
+        for session_data in batch:
+            sp = db.begin_nested()
+            try:
+                was_imported, day_id = self._import_single_session(
+                    db, session_data, force
+                )
+                sp.commit()
+                if was_imported:
+                    imported += 1
+                    if day_id:
+                        batch_day_ids.add(day_id)
+                else:
+                    skipped += 1
+            except Exception as e:
+                sp.rollback()
+                logger.error(
+                    f"Failed to import session {session_data.device_session_id}: {e}"
+                )
+                failed += 1
+
+            if progress_callback:
+                sessions_done = imported + skipped + failed
+                progress_callback(f"Importing session {sessions_done}...")
+
+        return imported, skipped, failed, batch_day_ids
 
     def _import_waveforms(
         self, db: Session, session_id: int, session_data: UnifiedSession

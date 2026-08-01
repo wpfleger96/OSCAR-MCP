@@ -25,13 +25,19 @@ import time
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 import numpy as np
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from snore.analysis.data.waveform_loader import WaveformLoader
+from snore.analysis.data.waveform_loader import (
+    WaveformLoader,
+    deserialize_waveform_blob,
+    detect_and_mark_artifacts,
+    fetch_waveform_blob,
+)
 from snore.analysis.modes import DEFAULT_MODE, get_mode
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
 from snore.analysis.shared.feature_extractors import WaveformFeatureExtractor
@@ -47,7 +53,31 @@ from snore.database import models
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AnalysisInputs", "AnalysisService", "AnalysisResult"]
+__all__ = ["AnalysisInputs", "RawSessionBlobs", "AnalysisService", "AnalysisResult"]
+
+
+@dataclass
+class RawSessionBlobs:
+    """Raw DB-fetched bytes for one session — no NumPy, no ORM references.
+
+    Created by ``AnalysisService.load_session_inputs_raw()`` (I/O phase only).
+    Passed to ``AnalysisService.prepare_inputs()`` outside the ORM session so
+    that all NumPy work (deserialization, artifact detection) runs without a
+    held session lock.
+    """
+
+    session_id: int
+    flow_blob: bytes
+    flow_sample_count: int
+    flow_metadata: dict[str, Any]
+    machine_events: list[AnalysisEvent]
+    spo2_blob: bytes | None = None
+    spo2_sample_count: int = 0
+    spo2_metadata: dict[str, Any] = field(default_factory=dict)
+    pulse_blob: bytes | None = None
+    pulse_sample_count: int = 0
+    pulse_metadata: dict[str, Any] = field(default_factory=dict)
+    modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
 
 
 @dataclass
@@ -199,12 +229,42 @@ class AnalysisService:
         session immediately after this call so that compute runs without a
         held session.
 
+        Internally calls ``load_session_inputs_raw()`` (pure I/O) and then
+        ``prepare_inputs()`` (pure compute) so that single-session callers get a
+        ready-to-use ``AnalysisInputs`` DTO in one call.  Batch callers that want
+        the session closed between I/O and compute should call those two methods
+        separately — see ``BatchAnalysisCoordinator.analyze_one``.
+
         Args:
             session_id: Database session ID
             modes: Detection modes to include in the DTO (None = default mode)
 
         Returns:
             ``AnalysisInputs`` DTO with copied numpy arrays.
+
+        Raises:
+            ValueError: If session not found or has no flow waveform data.
+        """
+        raw = self.load_session_inputs_raw(session_id, modes=modes)
+        return AnalysisService.prepare_inputs(raw)
+
+    def load_session_inputs_raw(
+        self,
+        session_id: int,
+        modes: list[str] | None = None,
+    ) -> RawSessionBlobs:
+        """Fetch all DB inputs for a session as raw bytes — **I/O phase only**.
+
+        No NumPy, no deserialization, no artifact detection.  The ORM session is
+        NOT needed after this call returns.  Call ``AnalysisService.prepare_inputs()``
+        outside the session scope to convert blobs to numpy arrays.
+
+        Args:
+            session_id: Database session ID.
+            modes: Detection modes (``None`` = default mode).
+
+        Returns:
+            ``RawSessionBlobs`` DTO with raw bytes and scalar metadata.
 
         Raises:
             ValueError: If session not found or has no flow waveform data.
@@ -220,8 +280,8 @@ class AnalysisService:
             raise ValueError(f"Session {session_id} not found")
 
         try:
-            timestamps, flow_values, metadata = self.waveform_loader.load_waveform(
-                session_id=session_id, waveform_type="flow", apply_filter=False
+            flow_blob, flow_sample_count, flow_metadata = fetch_waveform_blob(
+                self.db_session, session_id, "flow"
             )
         except Exception as e:
             logger.error(f"Failed to load flow waveform for session {session_id}: {e}")
@@ -229,48 +289,107 @@ class AnalysisService:
                 f"No flow waveform data available for session {session_id}"
             ) from e
 
-        if len(timestamps) == 0:
+        if flow_sample_count == 0:
             raise ValueError(f"Empty flow waveform data for session {session_id}")
-
-        sample_rate = float(metadata.get("sample_rate", 25.0))
 
         machine_events = self._load_machine_events(session_id)
 
-        spo2_values: np.ndarray | None = None
+        spo2_blob: bytes | None = None
+        spo2_sample_count = 0
+        spo2_metadata: dict[str, Any] = {}
         try:
-            _, spo2_raw, _ = self.waveform_loader.load_waveform(
-                session_id=session_id, waveform_type="spo2", apply_filter=False
+            spo2_blob, spo2_sample_count, spo2_metadata = fetch_waveform_blob(
+                self.db_session, session_id, "spo2"
             )
-            if len(spo2_raw) > 0 and len(spo2_raw) == len(timestamps):
-                spo2_values = spo2_raw.copy()
-            elif len(spo2_raw) > 0:
-                logger.warning(
-                    f"SpO2 length mismatch ({len(spo2_raw)} vs {len(timestamps)}), skipping"
-                )
         except Exception as e:
             logger.info(f"No SpO2 data available: {e}")
 
-        pulse_timestamps: np.ndarray | None = None
-        pulse_values: np.ndarray | None = None
+        pulse_blob: bytes | None = None
+        pulse_sample_count = 0
+        pulse_metadata: dict[str, Any] = {}
         try:
-            pt, pv, _ = self.waveform_loader.load_waveform(
-                session_id=session_id, waveform_type="pulse", apply_filter=False
+            pulse_blob, pulse_sample_count, pulse_metadata = fetch_waveform_blob(
+                self.db_session, session_id, "pulse"
             )
-            pulse_timestamps = pt.copy()
-            pulse_values = pv.copy()
         except Exception as e:
             logger.debug(f"Pulse waveform not available: {e}")
 
-        return AnalysisInputs(
+        return RawSessionBlobs(
             session_id=session_id,
-            flow_timestamps=timestamps.copy(),
+            flow_blob=flow_blob,
+            flow_sample_count=flow_sample_count,
+            flow_metadata=flow_metadata,
+            machine_events=machine_events,
+            spo2_blob=spo2_blob,
+            spo2_sample_count=spo2_sample_count,
+            spo2_metadata=spo2_metadata,
+            pulse_blob=pulse_blob,
+            pulse_sample_count=pulse_sample_count,
+            pulse_metadata=pulse_metadata,
+            modes=modes_list,
+        )
+
+    @staticmethod
+    def prepare_inputs(raw: RawSessionBlobs) -> AnalysisInputs:
+        """Convert a ``RawSessionBlobs`` DTO into a compute-ready ``AnalysisInputs`` DTO.
+
+        **Compute phase only — no DB access.**  Performs deserialization
+        (``np.frombuffer``) and artifact detection (NumPy).  Safe to call after
+        the ORM session has been closed.
+
+        Args:
+            raw: Raw blobs from ``load_session_inputs_raw()``.
+
+        Returns:
+            ``AnalysisInputs`` with copied numpy arrays.
+        """
+        # Deserialise flow waveform (compute — no session).
+        flow_timestamps, flow_values = deserialize_waveform_blob(
+            raw.flow_blob, raw.flow_sample_count
+        )
+        # Artifact detection (NumPy — no session).
+        artifact_mask = detect_and_mark_artifacts(flow_values, "flow")
+        _ = artifact_mask  # mask available to callers via metadata if needed
+
+        sample_rate = float(raw.flow_metadata.get("sample_rate", 25.0))
+
+        spo2_values: np.ndarray | None = None
+        if raw.spo2_blob is not None and raw.spo2_sample_count > 0:
+            try:
+                _, spo2_raw = deserialize_waveform_blob(
+                    raw.spo2_blob, raw.spo2_sample_count
+                )
+                if len(spo2_raw) > 0 and len(spo2_raw) == len(flow_timestamps):
+                    spo2_values = spo2_raw.copy()
+                elif len(spo2_raw) > 0:
+                    logger.warning(
+                        f"SpO2 length mismatch ({len(spo2_raw)} vs {len(flow_timestamps)}), skipping"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to deserialise SpO2 blob: {e}")
+
+        pulse_timestamps: np.ndarray | None = None
+        pulse_values: np.ndarray | None = None
+        if raw.pulse_blob is not None and raw.pulse_sample_count > 0:
+            try:
+                pt, pv = deserialize_waveform_blob(
+                    raw.pulse_blob, raw.pulse_sample_count
+                )
+                pulse_timestamps = pt.copy()
+                pulse_values = pv.copy()
+            except Exception as e:
+                logger.debug(f"Failed to deserialise pulse blob: {e}")
+
+        return AnalysisInputs(
+            session_id=raw.session_id,
+            flow_timestamps=flow_timestamps.copy(),
             flow_values=flow_values.copy(),
             sample_rate=sample_rate,
-            machine_events=machine_events,
+            machine_events=raw.machine_events,
             spo2_values=spo2_values,
             pulse_timestamps=pulse_timestamps,
             pulse_values=pulse_values,
-            modes=modes_list,
+            modes=raw.modes,
         )
 
     def compute_analysis(self, inputs: AnalysisInputs) -> AnalysisResult:
@@ -421,11 +540,13 @@ class AnalysisService:
     ) -> AnalysisResult:
         """Analyze session with specified detection mode(s).
 
-        Convenience wrapper that calls ``load_session_inputs`` then
-        ``compute_analysis`` in sequence.  Used by single-session paths where
-        the session lifetime is already bounded by the request context.  Batch
-        analysis uses the two phases separately so the session is released
-        before compute.
+        Uses the same three-phase pipeline as batch analysis:
+
+        1. **I/O phase** (``load_session_inputs_raw``): DB reads only — raw blobs
+           and scalar metadata.  ORM session not needed after this returns.
+        2. **Compute phase** (``prepare_inputs`` + ``compute_analysis``): NumPy /
+           scipy work on detached data.  No session held.
+        3. **Write phase** (``store_result``): short INSERT via the injected session.
 
         Args:
             session_id: Database session ID
@@ -444,14 +565,17 @@ class AnalysisService:
         )
         start_time = time.time()
 
-        inputs = self.load_session_inputs(session_id, modes=modes_list)
+        # I/O phase: fetch raw blobs while the session is held.
+        raw = self.load_session_inputs_raw(session_id, modes=modes_list)
+        # Compute phase: deserialization + NumPy work — no session needed.
+        inputs = AnalysisService.prepare_inputs(raw)
         result = self.compute_analysis(inputs)
 
         processing_time_ms = int((time.time() - start_time) * 1000)
         logger.info(f"Analysis complete in {processing_time_ms}ms")
 
         if store_results:
-            self._store_result(result, processing_time_ms)
+            self.store_result(result, processing_time_ms)
 
         return result
 
@@ -481,8 +605,23 @@ class AnalysisService:
         return AnalysisResult.model_validate(analysis.programmatic_result_json)
 
     def _store_result(self, result: AnalysisResult, processing_time_ms: int) -> int:
+        """Store analysis result to database.
+
+        Args:
+            result: Analysis result to store
+            processing_time_ms: Processing time in milliseconds
+
+        Returns:
+            Database analysis result ID
+        """
+        return self.store_result(result, processing_time_ms)
+
+    def store_result(self, result: AnalysisResult, processing_time_ms: int) -> int:
         """
         Store analysis result to database.
+
+        Public write seam — callers (including ``BatchAnalysisCoordinator``) use
+        this method so the write phase is not tied to a private implementation detail.
 
         Args:
             result: Analysis result to store

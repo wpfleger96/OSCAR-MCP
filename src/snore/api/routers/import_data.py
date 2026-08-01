@@ -113,29 +113,30 @@ def _run_import(job: ImportJob) -> None:
             terminal_msg={"event": "error", "data": {"message": str(e)}},
         )
     finally:
-        # Cleanup upload temp dir only after worker has fully exited.
+        # Remove the upload temp directory at the end of worker execution.
         job.cleanup_files()
 
 
 def _start_worker(job: ImportJob) -> None:
     """Attempt to start the worker thread for *job* (start-once guarantee).
 
-    If the thread cannot be started, the job is cancelled, removed from the
-    store, and its upload directory cleaned up — no orphaned RUNNING job.
+    Wraps Thread construction, assignment, and start in one rollback-safe block.
+    Any failure — construction OR start — cancels the job, removes it from the
+    store, and cleans up the upload directory.  No orphaned RUNNING job is possible.
     """
     from snore.api.import_jobs import remove_job  # noqa: PLC0415
 
     if not job.try_start():
         return  # Already running or terminal.
-    t = threading.Thread(
-        target=_run_import, args=(job,), daemon=True, name=f"import-{job.job_id}"
-    )
-    with job._lock:
-        job._worker_thread = t
     try:
+        t = threading.Thread(
+            target=_run_import, args=(job,), daemon=True, name=f"import-{job.job_id}"
+        )
+        with job._lock:
+            job._worker_thread = t
         t.start()
     except Exception:
-        # Thread failed to start — leave no orphaned RUNNING job.
+        # Thread construction or start failed — leave no orphaned RUNNING job.
         job._finish_cancelled()
         remove_job(job.job_id)
         job.cleanup_files()

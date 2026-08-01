@@ -356,3 +356,76 @@ class TestServeCommandEnvExport:
         assert exported_url.startswith("sqlite+pysqlite://"), (
             f"Exported URL must be a valid SQLAlchemy SQLite URL; got {exported_url!r}"
         )
+
+    def test_lifespan_opens_flagged_database(self, monkeypatch, tmp_path):
+        """The app lifespan opens the database specified by SNORE_DATABASE_URL.
+
+        Invokes the real ``snore serve`` Click command to capture the exported
+        URL, then actually runs the FastAPI lifespan with that URL to confirm
+        ``init_database_from_url`` is called with the flag-specified database.
+
+        This proves the child/lifespan opens the flagged DB, not just that the
+        env variable is set correctly.
+        """
+        import asyncio  # noqa: PLC0415
+        import os  # noqa: PLC0415
+
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from click.testing import CliRunner  # noqa: PLC0415
+
+        from snore.cli.commands.serve import serve  # noqa: PLC0415
+
+        explicit_db = str(tmp_path / "lifespan_test.db")
+        captured_env: dict[str, str] = {}
+
+        def spy_uvicorn(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+            captured_env.update(os.environ)
+
+        runner = CliRunner()
+        with patch("snore.cli.commands.serve.uvicorn.run", spy_uvicorn):
+            result = runner.invoke(
+                serve,
+                ["--db", explicit_db, "--port", "19999"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, (
+            f"serve exited {result.exit_code}: {result.output}"
+        )
+        exported_url = captured_env.get("SNORE_DATABASE_URL", "")
+        assert "lifespan_test.db" in exported_url, (
+            f"Exported URL must reference the flag DB; got {exported_url!r}"
+        )
+
+        # Now exercise the lifespan directly with the exported URL.
+        # Patch init_database_from_url to capture the URL it receives.
+        init_calls: list[str] = []
+
+        def _capture_init(url: str) -> None:
+            init_calls.append(url)
+
+        from snore.api.app import create_app  # noqa: PLC0415
+
+        app = create_app()
+        monkeypatch.setenv("SNORE_DATABASE_URL", exported_url)
+        monkeypatch.delenv("SNORE_DB_PATH", raising=False)
+
+        async def run_lifespan() -> None:
+            with (
+                patch("snore.api.app.init_database_from_url", _capture_init),
+                patch("snore.api.app._start_import_reaper"),
+                patch("snore.api.app._shutdown_import_jobs"),
+            ):
+                async with app.router.lifespan_context(app):
+                    pass  # Startup + immediate shutdown
+
+        asyncio.run(run_lifespan())
+
+        assert len(init_calls) == 1, (
+            f"init_database_from_url must be called exactly once; called {len(init_calls)} times"
+        )
+        assert "lifespan_test.db" in init_calls[0], (
+            f"init_database_from_url must be called with the flagged DB URL; "
+            f"got {init_calls[0]!r}"
+        )
