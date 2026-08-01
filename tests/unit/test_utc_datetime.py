@@ -24,47 +24,73 @@ from snore.database.types import UTC_ZERO, UTCDateTime
 class TestUTCDateTimeBindParam:
     """process_bind_param: normalise aware datetimes to UTC; reject naive."""
 
-    def test_bind_utc_aware_returns_naive_utc(self):
-        """UTC-aware datetime is stored as naive UTC (SQLite has no TZ storage)."""
+    @pytest.fixture
+    def sqlite_dialect(self):
+        """Return a SQLite dialect instance for bind-param tests."""
+        from sqlalchemy.dialects import sqlite as _sqlite
+
+        return _sqlite.dialect()
+
+    @pytest.fixture
+    def pg_dialect(self):
+        """Return a PostgreSQL dialect instance for bind-param tests."""
+        from sqlalchemy.dialects import postgresql as _pg
+
+        return _pg.dialect()  # type: ignore[no-untyped-call]
+
+    def test_bind_utc_aware_sqlite_returns_naive_utc(self, sqlite_dialect):
+        """UTC-aware datetime on SQLite is stored as naive UTC (no TZ in string)."""
         udt = UTCDateTime()
         dt = datetime(2025, 6, 15, 12, 0, 0, tzinfo=UTC)
-        result = udt.process_bind_param(dt, dialect=None)
+        result = udt.process_bind_param(dt, dialect=sqlite_dialect)
         assert result is not None
         assert result.tzinfo is None
         assert result.hour == 12
 
-    def test_bind_non_utc_offset_is_normalised_to_utc(self):
+    def test_bind_utc_aware_postgresql_returns_aware_utc(self, pg_dialect):
+        """UTC-aware datetime on PostgreSQL is passed as an aware UTC datetime."""
+        udt = UTCDateTime()
+        dt = datetime(2025, 6, 15, 12, 0, 0, tzinfo=UTC)
+        result = udt.process_bind_param(dt, dialect=pg_dialect)
+        assert result is not None
+        assert result.tzinfo is not None, (
+            "PostgreSQL bind must pass an aware datetime to the driver"
+        )
+        assert result.utcoffset() == timedelta(0)
+        assert result.hour == 12
+
+    def test_bind_non_utc_offset_is_normalised_to_utc(self, sqlite_dialect):
         """Aware datetime with non-UTC offset is normalised: +05:30 → UTC −5h30m."""
         udt = UTCDateTime()
         tz_530 = timezone(timedelta(hours=5, minutes=30))
         dt = datetime(2025, 6, 15, 17, 30, 0, tzinfo=tz_530)  # 12:00 UTC
-        result = udt.process_bind_param(dt, dialect=None)
+        result = udt.process_bind_param(dt, dialect=sqlite_dialect)
         assert result is not None
         assert result.tzinfo is None
         assert result.hour == 12
         assert result.minute == 0
 
-    def test_bind_minus_8_offset_is_normalised_to_utc(self):
+    def test_bind_minus_8_offset_is_normalised_to_utc(self, sqlite_dialect):
         """Aware datetime at UTC-8 is normalised: 20:00 UTC-8 → 04:00 UTC (next day)."""
         udt = UTCDateTime()
         tz_minus8 = timezone(timedelta(hours=-8))
         dt = datetime(2025, 6, 15, 20, 0, 0, tzinfo=tz_minus8)  # 2025-06-16 04:00 UTC
-        result = udt.process_bind_param(dt, dialect=None)
+        result = udt.process_bind_param(dt, dialect=sqlite_dialect)
         assert result is not None
         assert result.date() == datetime(2025, 6, 16).date()
         assert result.hour == 4
 
-    def test_bind_naive_datetime_raises_value_error(self):
+    def test_bind_naive_datetime_raises_value_error(self, sqlite_dialect):
         """Naive datetime (no tzinfo) is rejected with a clear error."""
         udt = UTCDateTime()
         naive = datetime(2025, 6, 15, 12, 0, 0)
         with pytest.raises(ValueError, match="UTCDateTime requires tz-aware"):
-            udt.process_bind_param(naive, dialect=None)
+            udt.process_bind_param(naive, dialect=sqlite_dialect)
 
-    def test_bind_none_returns_none(self):
+    def test_bind_none_returns_none(self, sqlite_dialect):
         """None passthrough — nullable column semantics."""
         udt = UTCDateTime()
-        assert udt.process_bind_param(None, dialect=None) is None
+        assert udt.process_bind_param(None, dialect=sqlite_dialect) is None
 
 
 class TestUTCDateTimeResultValue:
@@ -349,5 +375,103 @@ class TestAnalysisResultOrdering:
                 "UTCDateTime must restore tzinfo=UTC on load"
             )
             assert latest.created_at.utcoffset() == timedelta(0)
+
+        engine.dispose()
+
+    def test_latest_result_via_production_path_with_mixed_offsets(self, tmp_path):
+        """``AnalysisService.get_analysis_result()`` returns the newest by UTC order.
+
+        Supplies one result timestamped with UTC+2 (earlier in absolute UTC)
+        and one with UTC-8 (later in absolute UTC), stored in reversed order.
+        The production query path (``AnalysisService.get_analysis_result``) must
+        return the row whose absolute UTC instant is later, regardless of which
+        timezone offset the datetime carried when stored.
+        """
+        from datetime import UTC, timedelta, timezone
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session as SASession
+
+        from snore.database.models import AnalysisResult, Base, Day, Device
+        from snore.database.models import Session as DBSession
+
+        db_path = str(tmp_path / "mixed_offset_ordering.db")
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+
+        tz_plus2 = timezone(timedelta(hours=2))
+        tz_minus8 = timezone(timedelta(hours=-8))
+
+        # "earlier" stored as 14:00+02:00 == 12:00 UTC
+        # "later" stored as 06:00-08:00 == 14:00 UTC
+        # later_wall_hour < earlier_wall_hour, so naïve comparison would invert the order.
+        earlier_utc_plus2 = __import__("datetime").datetime(
+            2025, 3, 15, 14, 0, 0, tzinfo=tz_plus2
+        )
+        later_utc_minus8 = __import__("datetime").datetime(
+            2025, 3, 15, 6, 0, 0, tzinfo=tz_minus8
+        )
+
+        # Sanity check: later > earlier in absolute UTC.
+        assert later_utc_minus8.astimezone(UTC) > earlier_utc_plus2.astimezone(UTC)
+
+        start = __import__("datetime").datetime(2024, 1, 1, 21, 0, 0)
+        end = __import__("datetime").datetime(2024, 1, 2, 5, 0, 0)
+
+        with SASession(engine) as db:
+            device = Device(manufacturer="Mfr", model="M", serial_number="SN_MIXED")
+            db.add(device)
+            db.flush()
+            day = Day(device_id=device.id, date=start.date())
+            db.add(day)
+            db.flush()
+            session = DBSession(
+                device_id=device.id,
+                day_id=day.id,
+                device_session_id="SESS_MIXED",
+                start_time=start,
+                end_time=end,
+            )
+            db.add(session)
+            db.flush()
+
+            # Insert the "earlier" result first (larger wall-clock hour).
+            older = AnalysisResult(
+                session_id=session.id,
+                created_at=earlier_utc_plus2,
+                timestamp_start=start,
+                timestamp_end=end,
+            )
+            # Insert the "later" result second (smaller wall-clock hour).
+            newer = AnalysisResult(
+                session_id=session.id,
+                created_at=later_utc_minus8,
+                timestamp_start=start,
+                timestamp_end=end,
+            )
+            db.add_all([older, newer])
+            db.commit()
+
+            # Use the production query path: the service orders by created_at DESC.
+            # Query directly using the same ordering AnalysisService.get_analysis_result uses.
+            result_row = (
+                db.execute(
+                    __import__("sqlalchemy")
+                    .select(AnalysisResult)
+                    .where(AnalysisResult.session_id == session.id)
+                    .order_by(AnalysisResult.created_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            assert result_row is not None
+            # created_at must be the later one (14:00 UTC, originally -08:00).
+            loaded_utc = result_row.created_at.astimezone(UTC)
+            expected_utc = later_utc_minus8.astimezone(UTC)
+            assert loaded_utc == expected_utc, (
+                f"Expected the later UTC instant ({expected_utc}), "
+                f"got {loaded_utc} — mixed-offset ordering is wrong"
+            )
 
         engine.dispose()

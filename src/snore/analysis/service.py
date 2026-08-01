@@ -3,11 +3,27 @@ Analysis service for orchestrating programmatic analysis.
 
 This module provides the main interface for running comprehensive CPAP session
 analysis, loading data from the database, and storing results.
+
+I/O–compute separation (§7)
+-----------------------------
+``AnalysisService.load_session_inputs()`` performs **only** database reads,
+returning a plain ``AnalysisInputs`` dataclass.  The ORM session is closed before
+any numpy/scipy work begins.
+
+``AnalysisService.compute_analysis()`` is pure Python/numpy — it takes an
+``AnalysisInputs`` DTO and returns an ``AnalysisResult``.  No session is held.
+
+``AnalysisService.analyze_session()`` is the convenience wrapper that calls
+``load_session_inputs`` then ``compute_analysis`` in one call (used by
+single-session paths where session lifetime is already bounded by the request
+context).  Batch analysis (``BatchAnalysisCoordinator``) calls the two phases
+separately so the session is released before compute.
 """
 
 import logging
 import time
 
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
@@ -31,7 +47,27 @@ from snore.database import models
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AnalysisService", "AnalysisResult"]
+__all__ = ["AnalysisInputs", "AnalysisService", "AnalysisResult"]
+
+
+@dataclass
+class AnalysisInputs:
+    """Detached DTO carrying all DB-loaded inputs needed for analysis compute.
+
+    Created by ``AnalysisService.load_session_inputs()``.  Contains only plain
+    Python types and numpy arrays — no ORM objects, no live session references.
+    Safe to pass across thread boundaries or between executor tasks.
+    """
+
+    session_id: int
+    flow_timestamps: np.ndarray
+    flow_values: np.ndarray
+    sample_rate: float
+    machine_events: list[AnalysisEvent]
+    spo2_values: np.ndarray | None = None
+    pulse_timestamps: np.ndarray | None = None
+    pulse_values: np.ndarray | None = None
+    modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
 
 
 class AnalysisService:
@@ -76,6 +112,34 @@ class AnalysisService:
             bpm_threshold=PCC.BPM_THRESHOLD,
             duration_threshold=PCC.DURATION_THRESHOLD,
         )
+
+    @classmethod
+    def _make_compute_only(
+        cls,
+        min_breath_duration: float = BSC.MIN_BREATH_DURATION,
+        confidence_threshold: float = FLC.CONFIDENCE_THRESHOLD,
+    ) -> "AnalysisService":
+        """Create an ``AnalysisService`` instance that has no DB session.
+
+        Only ``compute_analysis()`` may be called on the returned instance.
+        Attempting ``load_session_inputs()`` or ``analyze_session()`` will fail
+        because ``db_session`` is ``None``.  Used by ``BatchAnalysisCoordinator``
+        to run pure compute after the read session has been closed.
+        """
+        obj = object.__new__(cls)
+        obj.db_session = None  # type: ignore[assignment]
+        obj.waveform_loader = None  # type: ignore[assignment]
+        obj.breath_segmenter = BreathSegmenter(min_breath_duration=min_breath_duration)
+        obj.feature_extractor = WaveformFeatureExtractor()
+        obj.flow_classifier = FlowLimitationClassifier(
+            confidence_threshold=confidence_threshold
+        )
+        obj.pattern_detector = ComplexPatternDetector()
+        obj.pulse_detector = PulseChangeDetector(
+            bpm_threshold=PCC.BPM_THRESHOLD,
+            duration_threshold=PCC.DURATION_THRESHOLD,
+        )
+        return obj
 
     def _load_machine_events(self, session_id: int) -> list[AnalysisEvent]:
         """
@@ -123,31 +187,29 @@ class AnalysisService:
 
         return respiratory_events
 
-    def analyze_session(
+    def load_session_inputs(
         self,
         session_id: int,
         modes: list[str] | None = None,
-        store_results: bool = True,
-    ) -> AnalysisResult:
-        """
-        Analyze session with specified detection mode(s).
+    ) -> AnalysisInputs:
+        """Load all DB inputs for a session and return them as a detached DTO.
+
+        **I/O only** — all work done here is database reads.  No numpy/scipy
+        computation is performed.  The caller is expected to close the ORM
+        session immediately after this call so that compute runs without a
+        held session.
 
         Args:
             session_id: Database session ID
-            modes: Detection modes to run (None = default mode)
-            store_results: Whether to persist results
+            modes: Detection modes to include in the DTO (None = default mode)
 
         Returns:
-            AnalysisResult with results from all modes
+            ``AnalysisInputs`` DTO with copied numpy arrays.
 
         Raises:
-            ValueError: If session not found or has no waveform data
+            ValueError: If session not found or has no flow waveform data.
         """
-        if modes is None:
-            modes = [DEFAULT_MODE]
-
-        logger.info(f"Starting analysis for session {session_id} with modes: {modes}")
-        start_time = time.time()
+        modes_list = list(modes) if modes is not None else [DEFAULT_MODE]
 
         session = (
             self.db_session.execute(select(models.Session).filter_by(id=session_id))
@@ -170,30 +232,73 @@ class AnalysisService:
         if len(timestamps) == 0:
             raise ValueError(f"Empty flow waveform data for session {session_id}")
 
-        sample_rate = metadata.get("sample_rate", 25.0)
-        session_duration_hours = len(timestamps) / sample_rate / 3600
-        logger.info(
-            f"Loaded {len(timestamps)} flow samples at {sample_rate}Hz ({session_duration_hours:.1f} hours)"
-        )
+        sample_rate = float(metadata.get("sample_rate", 25.0))
 
         machine_events = self._load_machine_events(session_id)
-        logger.info(f"Loaded {len(machine_events)} machine-flagged events")
 
-        spo2_values = None
+        spo2_values: np.ndarray | None = None
         try:
-            _, spo2_values, _ = self.waveform_loader.load_waveform(
+            _, spo2_raw, _ = self.waveform_loader.load_waveform(
                 session_id=session_id, waveform_type="spo2", apply_filter=False
             )
-            if len(spo2_values) > 0 and len(spo2_values) != len(timestamps):
+            if len(spo2_raw) > 0 and len(spo2_raw) == len(timestamps):
+                spo2_values = spo2_raw.copy()
+            elif len(spo2_raw) > 0:
                 logger.warning(
-                    f"SpO2 length mismatch ({len(spo2_values)} vs {len(timestamps)}), "
-                    "will resample or skip"
+                    f"SpO2 length mismatch ({len(spo2_raw)} vs {len(timestamps)}), skipping"
                 )
-                spo2_values = None
-            if spo2_values is not None:
-                logger.info(f"Loaded SpO2 data: {len(spo2_values)} samples")
         except Exception as e:
             logger.info(f"No SpO2 data available: {e}")
+
+        pulse_timestamps: np.ndarray | None = None
+        pulse_values: np.ndarray | None = None
+        try:
+            pt, pv, _ = self.waveform_loader.load_waveform(
+                session_id=session_id, waveform_type="pulse", apply_filter=False
+            )
+            pulse_timestamps = pt.copy()
+            pulse_values = pv.copy()
+        except Exception as e:
+            logger.debug(f"Pulse waveform not available: {e}")
+
+        return AnalysisInputs(
+            session_id=session_id,
+            flow_timestamps=timestamps.copy(),
+            flow_values=flow_values.copy(),
+            sample_rate=sample_rate,
+            machine_events=machine_events,
+            spo2_values=spo2_values,
+            pulse_timestamps=pulse_timestamps,
+            pulse_values=pulse_values,
+            modes=modes_list,
+        )
+
+    def compute_analysis(self, inputs: AnalysisInputs) -> AnalysisResult:
+        """Run pure analysis compute on a detached ``AnalysisInputs`` DTO.
+
+        **No database access** — all inputs come from the DTO.  Safe to call
+        after the ORM session has been closed.
+
+        Args:
+            inputs: Detached DTO from ``load_session_inputs()``.
+
+        Returns:
+            ``AnalysisResult`` (Pydantic model).
+
+        Raises:
+            ValueError: If no breaths can be segmented.
+        """
+        timestamps = inputs.flow_timestamps
+        flow_values = inputs.flow_values
+        sample_rate = inputs.sample_rate
+        session_id = inputs.session_id
+
+        session_duration_hours = len(timestamps) / sample_rate / 3600
+        logger.info(
+            f"Loaded {len(timestamps)} flow samples at {sample_rate}Hz "
+            f"({session_duration_hours:.1f} hours)"
+        )
+        logger.info(f"Loaded {len(inputs.machine_events)} machine-flagged events")
 
         breaths = self.breath_segmenter.segment_breaths(
             timestamps, flow_values, sample_rate
@@ -252,28 +357,26 @@ class AnalysisService:
 
         pulse_change_count = None
         pulse_change_index = None
-        try:
-            pulse_timestamps, pulse_values, pulse_metadata = (
-                self.waveform_loader.load_waveform(
-                    session_id=session_id, waveform_type="pulse", apply_filter=False
+        if inputs.pulse_timestamps is not None and inputs.pulse_values is not None:
+            try:
+                pulse_events = self.pulse_detector.detect(
+                    inputs.pulse_timestamps, inputs.pulse_values
                 )
-            )
-            pulse_events = self.pulse_detector.detect(pulse_timestamps, pulse_values)
-            pulse_change_count = len(pulse_events)
-            pulse_change_index = (
-                pulse_change_count / session_duration_hours
-                if session_duration_hours > 0
-                else 0.0
-            )
-            logger.info(
-                f"Pulse changes: {pulse_change_count} total, "
-                f"{pulse_change_index:.1f} per hour"
-            )
-        except Exception as e:
-            logger.debug(f"Pulse waveform not available or detection failed: {e}")
+                pulse_change_count = len(pulse_events)
+                pulse_change_index = (
+                    pulse_change_count / session_duration_hours
+                    if session_duration_hours > 0
+                    else 0.0
+                )
+                logger.info(
+                    f"Pulse changes: {pulse_change_count} total, "
+                    f"{pulse_change_index:.1f} per hour"
+                )
+            except Exception as e:
+                logger.debug(f"Pulse detection failed: {e}")
 
         mode_results = {}
-        for mode_name in modes:
+        for mode_name in inputs.modes:
             try:
                 mode = get_mode(mode_name)
                 mode_result = mode.detect_events(
@@ -291,14 +394,11 @@ class AnalysisService:
                 logger.error(f"Failed to run mode '{mode_name}': {e}")
                 continue
 
-        processing_time_ms = int((time.time() - start_time) * 1000)
-        logger.info(f"Analysis complete in {processing_time_ms}ms")
-
-        result = AnalysisResult(
+        return AnalysisResult(
             session_id=session_id,
             session_duration_hours=session_duration_hours,
             total_breaths=len(breaths),
-            machine_events=machine_events,
+            machine_events=inputs.machine_events,
             mode_results=mode_results,
             flow_analysis=flow_analysis.model_dump(),
             csr_detection=csr_detection.model_dump() if csr_detection else None,
@@ -312,6 +412,43 @@ class AnalysisService:
             timestamp_start=float(timestamps[0]) if len(timestamps) > 0 else 0.0,
             timestamp_end=float(timestamps[-1]) if len(timestamps) > 0 else 0.0,
         )
+
+    def analyze_session(
+        self,
+        session_id: int,
+        modes: list[str] | None = None,
+        store_results: bool = True,
+    ) -> AnalysisResult:
+        """Analyze session with specified detection mode(s).
+
+        Convenience wrapper that calls ``load_session_inputs`` then
+        ``compute_analysis`` in sequence.  Used by single-session paths where
+        the session lifetime is already bounded by the request context.  Batch
+        analysis uses the two phases separately so the session is released
+        before compute.
+
+        Args:
+            session_id: Database session ID
+            modes: Detection modes to run (None = default mode)
+            store_results: Whether to persist results
+
+        Returns:
+            AnalysisResult with results from all modes
+
+        Raises:
+            ValueError: If session not found or has no waveform data
+        """
+        modes_list = list(modes) if modes is not None else [DEFAULT_MODE]
+        logger.info(
+            f"Starting analysis for session {session_id} with modes: {modes_list}"
+        )
+        start_time = time.time()
+
+        inputs = self.load_session_inputs(session_id, modes=modes_list)
+        result = self.compute_analysis(inputs)
+
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"Analysis complete in {processing_time_ms}ms")
 
         if store_results:
             self._store_result(result, processing_time_ms)

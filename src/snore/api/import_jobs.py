@@ -263,12 +263,21 @@ class ImportJob:
 
         Returns True if this call won the transition; False if cancellation already
         claimed the terminal slot (cancel() won the race).
+
+        If ``_cancel_flag`` was set before this call wins the lock, the terminal
+        state is ``CANCELLED`` (not ``SUCCEEDED`` / ``FAILED``) — the cancel
+        predicate won the race, so the worker honours the caller's intent.
         """
         with self._lock:
             if self._state in TERMINAL_STATES:
                 # cancel() already won the race; honour it.
                 return False
-            self._state = JobState.SUCCEEDED if succeeded else JobState.FAILED
+            # Honour a pending cancellation even if completion won the lock.
+            if self._cancel_flag:
+                self._state = JobState.CANCELLED
+                terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
+            else:
+                self._state = JobState.SUCCEEDED if succeeded else JobState.FAILED
             self._terminal_msg = terminal_msg
             self._terminal_at = time.monotonic()
             observers = list(self._observers)

@@ -18,10 +18,11 @@ reads; matches previous behaviour).  Statistics uses ``db.add()`` because it
 has a single row per session and is used via the identity map.
 """
 
+import itertools
 import json
 import logging
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 
 import numpy as np
@@ -243,7 +244,7 @@ class SessionImporter:
 
     def import_sessions_batch(
         self,
-        sessions: list[UnifiedSession],
+        sessions: Iterable[UnifiedSession],
         force: bool = False,
         batch_size: int = 50,
         progress_callback: Callable[[str], None] | None = None,
@@ -259,8 +260,12 @@ class SessionImporter:
         Checks ``cancel_predicate()`` between batches.  If cancellation is requested
         the loop exits early; partial results accumulated so far are returned.
 
+        ``sessions`` may be any iterable (list or lazy iterator); the method consumes
+        it in bounded chunks of ``batch_size`` so no full-batch prefetch is required.
+
         Args:
-            sessions: List of UnifiedSession objects to import
+            sessions: Iterable of UnifiedSession objects to import.  Need not be
+                a list; a lazy generator is consumed in bounded ``batch_size`` chunks.
             force: If True, re-import existing sessions
             batch_size: Number of sessions per transaction (default: 50)
             progress_callback: Optional callback for progress messages
@@ -274,12 +279,17 @@ class SessionImporter:
         skipped = 0
         failed = 0
 
-        for batch_num, i in enumerate(range(0, len(sessions), batch_size), 1):
+        session_iter = iter(sessions)
+
+        for batch_num in itertools.count(1):
             # Check cancellation between batches.
             if cancel_predicate is not None and cancel_predicate():
                 break
 
-            batch = sessions[i : i + batch_size]
+            batch = list(itertools.islice(session_iter, batch_size))
+            if not batch:
+                break
+
             batch_day_ids = set()
 
             logger.debug(f"Importing batch {batch_num} ({len(batch)} sessions)")
@@ -308,9 +318,7 @@ class SessionImporter:
 
                     if progress_callback:
                         sessions_done = imported + skipped + failed
-                        progress_callback(
-                            f"Importing session {sessions_done}/{len(sessions)}..."
-                        )
+                        progress_callback(f"Importing session {sessions_done}...")
 
                 if batch_day_ids:
                     for day_id in batch_day_ids:

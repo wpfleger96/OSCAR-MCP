@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import bindparam, func, select, text
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from snore.analysis.types import AnalysisResult
@@ -35,6 +35,17 @@ class AnalysisFacade:
             db_session: SQLAlchemy database session
         """
         self.db_session = db_session
+        self._batch_coordinator: BatchAnalysisCoordinator | None = None
+
+    @property
+    def batch_coordinator(self) -> "BatchAnalysisCoordinator | None":
+        """The active ``BatchAnalysisCoordinator``, or ``None`` when no batch is running.
+
+        Set immediately before ``submit()`` is called; remains set after completion so
+        callers can inspect ``progress`` after the batch finishes.  PR-2 replaces the
+        sync coordinator with an async one; callers use the same ``cancel()`` handle.
+        """
+        return self._batch_coordinator
 
     def _status_select(
         self,
@@ -301,29 +312,40 @@ class AnalysisFacade:
             Number of analysis records deleted
         """
         if all_versions:
+            # Delete all analysis results for these sessions.
             result = self.db_session.execute(
-                text(
-                    "DELETE FROM analysis_results WHERE session_id IN :session_ids"
-                ).bindparams(bindparam("session_ids", expanding=True)),
-                {"session_ids": session_ids},
+                delete(models.AnalysisResult).where(
+                    models.AnalysisResult.session_id.in_(session_ids)
+                )
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
-            result = self.db_session.execute(
-                text("""
-                    DELETE FROM analysis_results
-                    WHERE id IN (
-                        SELECT id FROM (
-                            SELECT id, ROW_NUMBER() OVER (
-                                PARTITION BY session_id ORDER BY created_at DESC
-                            ) AS rn
-                            FROM analysis_results
-                            WHERE session_id IN :session_ids
-                        )
-                        WHERE rn = 1
+            # Delete only the latest (highest created_at) result per session.
+            # Identify the latest result IDs first, then delete by PK.
+            ranked = (
+                select(
+                    models.AnalysisResult.id,
+                    func.row_number()
+                    .over(
+                        partition_by=models.AnalysisResult.session_id,
+                        order_by=models.AnalysisResult.created_at.desc(),
                     )
-                """).bindparams(bindparam("session_ids", expanding=True)),
-                {"session_ids": session_ids},
+                    .label("rn"),
+                )
+                .where(models.AnalysisResult.session_id.in_(session_ids))
+                .subquery()
+            )
+            latest_ids = (
+                self.db_session.execute(select(ranked.c.id).where(ranked.c.rn == 1))
+                .scalars()
+                .all()
+            )
+            if not latest_ids:
+                return 0
+            result = self.db_session.execute(
+                delete(models.AnalysisResult).where(
+                    models.AnalysisResult.id.in_(latest_ids)
+                )
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
 
@@ -395,6 +417,7 @@ class AnalysisFacade:
             return BatchAnalysisResult(total=0, successful=0, failed=0, results=[])
 
         coordinator = BatchAnalysisCoordinator()
+        self._batch_coordinator = coordinator
         return coordinator.submit(
             session_ids=session_ids,
             session_dates=session_dates,
@@ -483,7 +506,8 @@ class BatchAnalysisCoordinator:
         total = len(session_ids)
         self._total = total
         self._completed = 0
-        self._cancel_requested = False
+        # Do NOT reset _cancel_requested if cancel() was called before submit().
+        # This allows callers to pre-cancel a coordinator before submitting work.
 
         batch_results: list[BatchSessionResult] = []
         modes_list: list[str] | None = list(modes) if modes is not None else None
@@ -492,19 +516,24 @@ class BatchAnalysisCoordinator:
             if self._cancel_requested:
                 return
 
-            # --- Read + compute phase ---
-            # Time the full analysis so processing_time_ms is accurate.
+            # --- Read phase (session open only during DB I/O) ---
+            # load_session_inputs fetches waveforms + events then returns a
+            # plain DTO with copied numpy arrays.  The session is closed before
+            # any scipy/NumPy work begins.
             t_start = time.monotonic()
-            result = None
             with session_scope() as read_session:
                 svc = AnalysisService(read_session)
-                result = svc.analyze_session(
-                    session_id=sid, modes=modes_list, store_results=False
-                )
+                inputs = svc.load_session_inputs(session_id=sid, modes=modes_list)
+            # Session is now closed; compute runs without a held lock.
+
+            # --- Compute phase (no ORM session held) ---
+            # Use a dedicated compute-only service instance built via the
+            # class factory so algorithm helpers are initialized correctly.
+            compute_svc = AnalysisService._make_compute_only()
+            result = compute_svc.compute_analysis(inputs)
             processing_time_ms = int((time.monotonic() - t_start) * 1000)
 
-            # --- Write phase ---
-            # Guard: skip the write if analyze_session returned None.
+            # --- Write phase (short session for INSERT only) ---
             if store_results and result is not None:
                 with session_scope() as write_session:
                     write_svc = AnalysisService(write_session)

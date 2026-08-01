@@ -1,7 +1,7 @@
 """Pytest configuration and fixtures for SNORE tests."""
 
 import sqlite3
-import tempfile
+import tempfile  # noqa: F401 — kept for backwards compat with any external imports
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -89,19 +89,25 @@ def parser_registry():
 
 
 @pytest.fixture
-def temp_db():
-    """Create a temporary database for testing."""
-    temp_dir = Path(tempfile.gettempdir())
-    db_path = temp_dir / f"test_oscar_{datetime.now().timestamp()}.db"
+def temp_db(tmp_path):
+    """Create a temporary database for testing with a collision-proof name.
+
+    Uses ``tmp_path`` (pytest's per-test isolated directory) plus a UUID so
+    parallel xdist workers never share or collide on the same file — even when
+    their clocks have the same millisecond timestamp.
+    """
+    import uuid
+
+    db_path = tmp_path / f"test_snore_{uuid.uuid4().hex}.db"
 
     yield db_path
 
     if db_path.exists():
-        db_path.unlink()
+        db_path.unlink(missing_ok=True)
     for ext in ["-wal", "-shm"]:
         wal_file = Path(str(db_path) + ext)
         if wal_file.exists():
-            wal_file.unlink()
+            wal_file.unlink(missing_ok=True)
 
 
 @pytest.fixture

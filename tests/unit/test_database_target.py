@@ -282,3 +282,77 @@ class TestServeDbCollisionScenario:
             db_flag=explicit_path, warn_ignored=False
         )
         assert target.sqlite_path == explicit_path
+
+
+# ---------------------------------------------------------------------------
+# Serve command: real invocation verifies env export (§2 serve --db test)
+# ---------------------------------------------------------------------------
+
+
+class TestServeCommandEnvExport:
+    """The ``serve --db`` command must export SNORE_DATABASE_URL before handing
+    off to uvicorn, overriding any previously-set SNORE_DATABASE_URL or
+    SNORE_DB_PATH that the process inherited.
+
+    This class invokes the real ``snore serve`` Click command (with uvicorn.run
+    mocked so no server actually starts) and asserts the env state seen by the
+    would-be child process.
+    """
+
+    def test_serve_db_exports_canonical_url_overrides_inherited_env(
+        self, monkeypatch, tmp_path
+    ):
+        """``snore serve --db <path>`` exports canonical URL; SNORE_DB_PATH removed.
+
+        Invokes the real serve Click command via Click's test runner.
+        ``uvicorn.run`` is replaced by a spy so no server starts; the test
+        inspects the environment state captured at the moment uvicorn would run.
+        """
+        import os
+
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from snore.cli.commands.serve import serve
+
+        explicit_db = str(tmp_path / "serve_test.db")
+        inherited_url = "sqlite:///should_not_appear.db"
+        inherited_path = "/should/also/not/appear.db"
+
+        captured_env: dict[str, str] = {}
+
+        def spy_uvicorn(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+            captured_env.update(os.environ)
+
+        runner = CliRunner()
+        with patch("snore.cli.commands.serve.uvicorn.run", spy_uvicorn):
+            result = runner.invoke(
+                serve,
+                ["--db", explicit_db, "--port", "19999"],
+                env={
+                    "SNORE_DATABASE_URL": inherited_url,
+                    "SNORE_DB_PATH": inherited_path,
+                },
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, (
+            f"serve exited {result.exit_code}: {result.output}"
+        )
+        assert "SNORE_DATABASE_URL" in captured_env, (
+            "serve must export SNORE_DATABASE_URL before handing off to uvicorn"
+        )
+        exported_url = captured_env["SNORE_DATABASE_URL"]
+        assert "serve_test.db" in exported_url, (
+            f"Exported URL {exported_url!r} must reference the --db flag path"
+        )
+        assert "should_not_appear" not in exported_url, (
+            f"Exported URL {exported_url!r} must not reference the inherited SNORE_DATABASE_URL"
+        )
+        assert "SNORE_DB_PATH" not in captured_env, (
+            "serve must remove SNORE_DB_PATH before handing off to uvicorn"
+        )
+        assert exported_url.startswith("sqlite+pysqlite://"), (
+            f"Exported URL must be a valid SQLAlchemy SQLite URL; got {exported_url!r}"
+        )

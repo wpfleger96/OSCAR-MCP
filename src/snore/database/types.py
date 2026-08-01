@@ -147,12 +147,16 @@ class UTCDateTime(TypeDecorator[datetime]):
     def process_bind_param(self, value: Any, dialect: Any) -> datetime | None:
         """Normalise a tz-aware datetime to UTC before storage.
 
+        - **SQLite**: strips tzinfo so the driver stores a plain ISO string.
+        - **Other dialects** (PostgreSQL etc.): passes a UTC-aware datetime so
+          the driver / server can use the timezone information (TIMESTAMPTZ).
+
         Args:
             value: datetime to store; must be tz-aware.
-            dialect: SQLAlchemy dialect (unused).
+            dialect: SQLAlchemy dialect.
 
         Returns:
-            Naive UTC datetime for storage (SQLite has no native TZ storage).
+            Naive UTC datetime for SQLite; tz-aware UTC datetime for other dialects.
 
         Raises:
             ValueError: If value is a naive datetime.
@@ -166,10 +170,14 @@ class UTCDateTime(TypeDecorator[datetime]):
                 "UTCDateTime requires tz-aware datetimes; "
                 "use datetime.now(UTC) or datetime(..., tzinfo=UTC)"
             )
-        # Normalise non-UTC offsets to UTC, then strip tzinfo for storage
-        # (SQLite stores the bare string; PostgreSQL stores with offset = +00).
+        # Normalise non-UTC offsets to UTC.
         utc_value = value.astimezone(UTC)
-        return utc_value.replace(tzinfo=None)
+        # SQLite stores bare ISO strings; strip tzinfo so the driver doesn't
+        # prepend "+00:00".  PostgreSQL (TIMESTAMPTZ) needs the tzinfo present
+        # so the driver passes an aware value to the server.
+        if dialect.name == "sqlite":
+            return utc_value.replace(tzinfo=None)
+        return utc_value
 
     def process_result_value(self, value: Any, dialect: Any) -> datetime | None:
         """Restore UTC tzinfo on every retrieved datetime.

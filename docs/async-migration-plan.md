@@ -65,18 +65,16 @@ normalises any aware result to UTC on read.
   convert):** `Session.start_time`/`end_time`, `Event.start_time`,
   `AnalysisResult.timestamp_start`/`timestamp_end`, `DetectedPattern.start_time`
 
-`cache_ok = True` set on the type. Existing naive UTC values backfill correctly
-(SQLite stores them without offset; `UTCDateTime` reads them back as UTC-aware).
+`cache_ok = True` set on the type. Existing naive UTC values are read back as
+UTC-aware automatically (SQLite stores them without offset; `UTCDateTime` restores
+the `tzinfo` on load).  No migration is needed — this project uses drop-and-reimport
+for schema changes; a fresh `create_all` + stamp produces the correct schema.
 
 **Dialect behaviour:**
 
 - SQLite: uses `DateTime` (no native TZ); UTC is re-attached on load.
 - PostgreSQL: uses `DateTime(timezone=True)` (TIMESTAMP WITH TIME ZONE); the driver
   receives and returns offset-aware datetimes; normalised to UTC on load.
-
-A migration (`c3f2a1b4d5e6`) documents the column classification, validates that all
-non-nullable absolute-instant columns are populated, and anchors the ALTER COLUMN …
-TYPE TIMESTAMPTZ statements for the hosted PostgreSQL milestone.
 
 ### 4. SQLite connection recipe (one integrated protocol)
 
@@ -120,6 +118,15 @@ entry point.
 | `DatabaseService.reset` | No (caller provides via dep) | Yes (intentional, before VACUUM) | No | VACUUM requires committed state; route dep creates a fresh session per request |
 | `BatchAnalysisCoordinator.analyze_one` (read) | Yes (via `session_scope()`) | On scope exit | On scope exception | Closed before compute phase begins |
 | `BatchAnalysisCoordinator.analyze_one` (write) | Yes (via `session_scope()`) | On scope exit | On scope exception | Short-lived INSERT only; held ≤ write duration |
+| `AnalysisFacade.run_analysis` | No (injects caller's session) | No (caller owns) | No (caller owns) | FastAPI dep injects a request-scoped session; `session_scope` closes it on response |
+| `AnalysisFacade.delete_analysis` | No (injects caller's session) | No (caller owns) | No (caller owns) | Same as above; bulk DELETE via typed `delete()` |
+| `AnalysisFacade.run_batch_analysis` | No (injects caller's session for query) | No | No | Session used only to fetch session IDs; coordinator opens its own scoped sessions per worker |
+| `POST /sessions/{id}/analysis` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | `service_dep` creates a `session_scope` per request |
+| `DELETE /analysis` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Same |
+| `POST /analysis/batch` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Coordinator internally opens additional `session_scope` instances per thread |
+| `PUT /sessions/{id}` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Session update via `SessionService` |
+| `DELETE /sessions/` route | Via FastAPI dep (`session_scope`) | On response exit | On exception | Bulk session delete via `SessionService.delete_sessions` |
+| `POST /import/` worker thread | Via `session_scope` inside `ImportService` | Per batch, by `import_sessions_batch` | Per batch exception | Worker thread; each batch is an independent `session_scope` |
 
 Import UoW: batch-scoped, `ImportService`-owned `session_scope()` per batch; per-session
 `begin_nested()` savepoints so one failed import cannot poison the batch. One
@@ -142,10 +149,20 @@ and written with each result.
 so PR-2 can swap the executor internals (``ThreadPoolExecutor`` → ``asyncio`` tasks)
 without touching callers.
 
-**Note:** Report, export, and single-analysis surfaces still use session-scoped ORM
-access. These surfaces do not cross thread boundaries in PR-1 (all synchronous), so
-the session lifetime constraint is not violated. The full I/O→compute→write split for
-those surfaces is deferred to PR-2 where async session semantics require it.
+**§7 I/O–compute splits in PR-1:** All five named surfaces have explicit I/O–compute
+separation in PR-1:
+
+1. **Batch analysis** (`BatchAnalysisCoordinator`): read phase (session closed before compute),
+   compute phase (no session held), write phase (fresh session for INSERT only).
+2. **Single-session analysis** (`AnalysisService.analyze_session`): calls `load_session_inputs`
+   then `compute_analysis` in sequence; the session is already bounded by the request context.
+3. **Waveform load** (`load_waveform_from_db`): `fetch_waveform_blob` (I/O, returns raw bytes)
+   then `deserialize_waveform_blob` (compute, no session needed).
+4. **Report generation** (`ReportService`): `_fetch_summary_data` / `_fetch_comparison_data`
+   (I/O, returns plain Python objects) then `_render_summary` / `_render_comparison`
+   (pure Jinja2, static methods, no session).
+5. **Import** (`import_sessions_batch`): `parse_sessions()` returns a lazy iterator consumed
+   in bounded `batch_size` chunks — no full-batch prefetch.
 
 ### 8. Import-job state machine
 

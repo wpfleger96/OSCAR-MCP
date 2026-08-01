@@ -29,13 +29,25 @@ target_metadata.naming_convention = {
 
 
 def _resolve_url() -> str:
-    """Return the configured URL, falling back to DEFAULT_DATABASE_PATH when unset."""
-    url = config.get_main_option("sqlalchemy.url") or ""
-    if url in ("", "sqlite:///"):
-        from snore.constants import DEFAULT_DATABASE_PATH  # noqa: PLC0415
+    """Return the configured URL via ``DatabaseTarget``, falling back to DEFAULT_DATABASE_PATH.
 
-        return f"sqlite:///{DEFAULT_DATABASE_PATH}"
-    return url
+    Routes through the same ``DatabaseTarget`` resolver used by the app and CLI
+    so Alembic and the runtime always see identical URL derivation logic.
+    """
+    url = config.get_main_option("sqlalchemy.url") or ""
+    if url not in ("", "sqlite:///"):
+        # An explicit URL was provided in alembic.ini or via env override.
+        # Let DatabaseTarget parse and normalise it.
+        from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+        target = DatabaseTarget.from_url(url)
+        return target.resolve_sync_url()
+
+    # No explicit URL — use the environment/default resolution chain.
+    from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+    target = DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
+    return target.resolve_sync_url()
 
 
 def run_migrations_offline() -> None:

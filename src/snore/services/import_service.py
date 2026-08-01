@@ -181,40 +181,41 @@ class ImportService:
             if is_cancelled():
                 break
 
-            # Parse sessions
-            sessions = list(
-                parser.parse_sessions(
-                    parse_root,
-                    date_from=date_from,
-                    date_to=date_to,
-                    limit=limit,
-                    sort_by=sort_by,
-                    parallel=parallel,
-                    progress_callback=emit,
-                )
+            # Parse sessions lazily — no full-batch prefetch.
+            # parse_sessions() returns a generator; import_sessions_batch consumes
+            # it in bounded batch_size chunks so memory is bounded per-batch.
+            session_iter = parser.parse_sessions(
+                parse_root,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+                sort_by=sort_by,
+                parallel=parallel,
+                progress_callback=emit,
             )
-            emit(f"Found {len(sessions)} sessions")
+            emit("Detected sessions — starting import")
 
             if dry_run:
-                # Count what would be imported without writing to DB
+                # Count what would be imported without writing to DB.
+                # Consume the iterator to get the count (dry_run materializes anyway).
+                sessions_list = list(session_iter)
                 source_results.append(
                     ImportSourceResult(
                         source=source,
-                        imported=len(sessions),
+                        imported=len(sessions_list),
                         skipped=0,
                         failed=0,
                         warnings=warnings,
                     )
                 )
-                total_imported += len(sessions)
+                total_imported += len(sessions_list)
                 continue
 
             # Import
             importer = SessionImporter()
-            total_batches = (len(sessions) + batch_size - 1) // batch_size
-            emit(f"Importing {len(sessions)} sessions in {total_batches} batch(es)...")
+            emit("Importing sessions...")
             imported, skipped, failed = importer.import_sessions_batch(
-                sessions,
+                session_iter,
                 force=force,
                 batch_size=batch_size,
                 progress_callback=progress_callback,

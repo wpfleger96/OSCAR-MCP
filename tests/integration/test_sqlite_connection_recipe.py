@@ -140,9 +140,15 @@ class TestSavepointRollback:
 class TestImporterForcedFailureContinuation:
     """Force a session import to fail mid-batch; subsequent sessions must succeed.
 
-    This is the spec §6 importer-level test: when _import_single_session raises,
-    the failing session leaves no partial rows (the savepoint is rolled back) and
-    the next session in the batch imports successfully.
+    This is the spec §6 importer-level test: when ``_import_single_session`` raises
+    **after partial rows have been flushed**, the failing session's rows (device +
+    session) are rolled back by the savepoint, and the next session in the batch
+    imports successfully.
+
+    Failure injection point: ``DayManager.get_or_create_day`` is patched to raise
+    for the bad session.  By the time this is called, ``db.flush()`` has already
+    been called for both the Device and Session rows — so the savepoint rollback
+    is meaningful (proves partial rows do not survive).
     """
 
     def _make_session_data(self, serial: str, session_id_str: str) -> UnifiedSession:
@@ -165,30 +171,53 @@ class TestImporterForcedFailureContinuation:
             end_time=end,
         )
 
-    def test_failed_session_leaves_no_rows_next_session_succeeds(self, temp_db):
-        """One failing session in a batch leaves zero rows; subsequent sessions commit."""
+    def test_failed_session_after_partial_flush_leaves_no_rows_next_session_succeeds(
+        self, temp_db
+    ):
+        """Session failing AFTER partial rows are flushed leaves zero rows; next session commits.
+
+        Failure is injected at ``DayManager.get_or_create_day`` — after both Device
+        and Session rows have been flushed into the savepoint.  The savepoint is
+        rolled back, leaving no device/day/session rows for the bad session.
+        The subsequent good session must then import successfully.
+        """
         init_database(str(temp_db))
         from unittest.mock import patch
 
+        from snore.database.day_manager import DayManager
         from snore.database.importers import SessionImporter
+        from snore.database.models import Device as DBDevice
         from snore.database.models import Session as DBSession
         from snore.database.session import session_scope
 
-        good1 = self._make_session_data("SN_GOOD1", "SESS_GOOD1")
-        bad_session = self._make_session_data("SN_BAD", "SESS_BAD")
-        good2 = self._make_session_data("SN_GOOD2", "SESS_GOOD2")
+        good1 = self._make_session_data("SN_GOOD1_PF", "SESS_GOOD1_PF")
+        bad_session = self._make_session_data("SN_BAD_PF", "SESS_BAD_PF")
+        good2 = self._make_session_data("SN_GOOD2_PF", "SESS_GOOD2_PF")
 
-        call_count = [0]
-        original_import = SessionImporter._import_single_session
+        original_get_or_create = DayManager.get_or_create_day
 
-        def patched_import(self_inner, db, session_data, force=False):
-            call_count[0] += 1
-            if session_data.device_session_id == "SESS_BAD":
-                raise RuntimeError("Forced failure for bad session")
-            return original_import(self_inner, db, session_data, force)
+        def patched_day(device_id, day_date, db_session):
+            # Identify the bad session by querying the already-flushed Session row.
+            # The flush has fired for Device + Session at this point, so these
+            # rows exist inside the savepoint and can be seen by this query.
+            from sqlalchemy import select as _select  # noqa: PLC0415
+
+            pending_sessions = (
+                db_session.execute(
+                    _select(DBSession).where(
+                        DBSession.device_session_id == "SESS_BAD_PF",
+                        DBSession.id.isnot(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if pending_sessions:
+                raise RuntimeError("Forced mid-import failure after partial flush")
+            return original_get_or_create(device_id, day_date, db_session)
 
         importer = SessionImporter()
-        with patch.object(SessionImporter, "_import_single_session", patched_import):
+        with patch.object(DayManager, "get_or_create_day", patched_day):
             imported, skipped, failed = importer.import_sessions_batch(
                 [good1, bad_session, good2],
                 batch_size=3,
@@ -198,15 +227,24 @@ class TestImporterForcedFailureContinuation:
         assert imported == 2, f"Expected 2 imported, got {imported}"
         assert skipped == 0, f"Expected 0 skipped, got {skipped}"
 
-        # Verify at the DB level: only the good sessions are present.
+        # Verify at the DB level: good sessions present, bad session and its
+        # device absent — the savepoint rolled back ALL rows flushed for bad.
         with session_scope() as verify:
-            from sqlalchemy import select
+            from sqlalchemy import select as _sv_select  # noqa: PLC0415
 
-            sessions = verify.execute(select(DBSession)).scalars().all()
+            sessions = verify.execute(_sv_select(DBSession)).scalars().all()
             session_ids = {s.device_session_id for s in sessions}
+            device_serials = {
+                d.serial_number
+                for d in verify.execute(_sv_select(DBDevice)).scalars().all()
+            }
 
-        assert "SESS_GOOD1" in session_ids, "SESS_GOOD1 should be in DB"
-        assert "SESS_GOOD2" in session_ids, "SESS_GOOD2 should be in DB"
-        assert "SESS_BAD" not in session_ids, (
-            "SESS_BAD failed mid-import — no rows should have survived the savepoint rollback"
+        assert "SESS_GOOD1_PF" in session_ids, "SESS_GOOD1_PF should be in DB"
+        assert "SESS_GOOD2_PF" in session_ids, "SESS_GOOD2_PF should be in DB"
+        assert "SESS_BAD_PF" not in session_ids, (
+            "SESS_BAD_PF was rolled back via savepoint — session row must not survive"
+        )
+        assert "SN_BAD_PF" not in device_serials, (
+            "SN_BAD_PF device was flushed then rolled back via savepoint — "
+            "device row must not survive"
         )

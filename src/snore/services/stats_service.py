@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from datetime import date, timedelta
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from snore.analysis.calculations import (
@@ -134,7 +134,7 @@ class StatsService:
             .join(models.Day)
             .where(models.Day.id.in_(day_ids))
             .group_by(models.Event.event_type)
-            .order_by(text("count DESC"))
+            .order_by(func.count(models.Event.id).desc())
         ).all()
 
         total_events = sum(count for _, count in event_counts)

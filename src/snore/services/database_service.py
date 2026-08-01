@@ -201,26 +201,30 @@ class DatabaseService:
     def reset(self, db_path: str) -> ResetResult:
         """Delete all rows from all data tables and vacuum to reclaim space.
 
-        SQLite-only operation.  Raises ``RuntimeError`` for non-SQLite targets.
-        Tables are cleared in FK-safe order (leaf tables first). Schema is preserved.
-        VACUUM runs on a separate AUTOCOMMIT connection after the deletes are
-        committed (SQLite forbids VACUUM inside a transaction).
+        Split into two capabilities:
 
-        The caller's session owns the commit for the DELETE phase; ``reset``
-        calls ``self.db_session.commit()`` explicitly because VACUUM must follow
-        the commit (SQLite forbids VACUUM in a transaction), and the route
-        dependency creates a fresh session per request.
+        1. **Generic row reset** (any dialect): clears all user data rows in FK-safe
+           order via typed ``table.delete()`` statements.  The caller's session
+           commits the deletes.
+        2. **SQLite file VACUUM** (SQLite only): runs on a separate AUTOCOMMIT
+           connection after the delete commit.  VACUUM cannot execute inside a
+           transaction.
+
+        Raises ``RuntimeError`` for non-SQLite targets if called with a SQLite-only
+        vacuum expectation, but the generic row-deletion phase runs on any dialect.
+
+        Args:
+            db_path: Path to the SQLite database file (required for VACUUM and
+                     size measurement).  Pass empty string to skip VACUUM and
+                     size reporting (e.g., on non-SQLite databases).
         """
-        if not db_path:
-            raise RuntimeError(
-                "Reset is a SQLite-only operation and requires a file-backed database. "
-                "This operation is not available for in-memory or non-SQLite databases."
-            )
-
         size_before = (
-            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+            os.path.getsize(db_path) / (1024 * 1024)
+            if db_path and os.path.exists(db_path)
+            else 0.0
         )
 
+        # Generic phase: typed row deletion (any dialect).
         tables_cleared: dict[str, int] = {}
         total = 0
         for table in reversed(Base.metadata.sorted_tables):
@@ -234,19 +238,22 @@ class DatabaseService:
         # and the route dependency creates a fresh session per request.
         self.db_session.commit()
 
-        # VACUUM on its own AUTOCOMMIT connection.
-        vacuum_engine = create_engine(
-            f"sqlite:///{db_path}",
-            isolation_level="AUTOCOMMIT",
-        )
-        try:
-            with vacuum_engine.connect() as conn:
-                conn.execute(text("VACUUM"))
-        finally:
-            vacuum_engine.dispose()
+        # SQLite file maintenance phase: VACUUM on dedicated AUTOCOMMIT connection.
+        if db_path:
+            vacuum_engine = create_engine(
+                f"sqlite:///{db_path}",
+                isolation_level="AUTOCOMMIT",
+            )
+            try:
+                with vacuum_engine.connect() as conn:
+                    conn.execute(text("VACUUM"))
+            finally:
+                vacuum_engine.dispose()
 
         size_after = (
-            os.path.getsize(db_path) / (1024 * 1024) if os.path.exists(db_path) else 0.0
+            os.path.getsize(db_path) / (1024 * 1024)
+            if db_path and os.path.exists(db_path)
+            else 0.0
         )
 
         return ResetResult(

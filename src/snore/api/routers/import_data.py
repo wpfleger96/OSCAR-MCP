@@ -118,7 +118,13 @@ def _run_import(job: ImportJob) -> None:
 
 
 def _start_worker(job: ImportJob) -> None:
-    """Attempt to start the worker thread for *job* (start-once guarantee)."""
+    """Attempt to start the worker thread for *job* (start-once guarantee).
+
+    If the thread cannot be started, the job is cancelled, removed from the
+    store, and its upload directory cleaned up — no orphaned RUNNING job.
+    """
+    from snore.api.import_jobs import remove_job  # noqa: PLC0415
+
     if not job.try_start():
         return  # Already running or terminal.
     t = threading.Thread(
@@ -126,7 +132,14 @@ def _start_worker(job: ImportJob) -> None:
     )
     with job._lock:
         job._worker_thread = t
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        # Thread failed to start — leave no orphaned RUNNING job.
+        job._finish_cancelled()
+        remove_job(job.job_id)
+        job.cleanup_files()
+        raise
 
 
 @router.post(
