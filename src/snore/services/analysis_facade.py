@@ -506,6 +506,7 @@ class BatchAnalysisCoordinator:
         self._cancel_requested = False
         self._completed = 0
         self._total = 0
+        self.session_dates: dict[int, Any] = {}  # sid → day_date; window-bounded
 
     def cancel(self) -> None:
         """Request cooperative cancellation.  Checked between sessions."""
@@ -709,7 +710,8 @@ class BatchAnalysisCoordinator:
 
         batch_results: list[BatchSessionResult] = []
         pending: dict[asyncio.Task[str], int] = {}  # task → sid
-        session_dates: dict[int, date | None] = {}
+        session_dates = self.session_dates  # instance attribute for observability
+        session_dates.clear()
         sem = asyncio.Semaphore(max_workers)
 
         async def _run_one(sid: int) -> str:

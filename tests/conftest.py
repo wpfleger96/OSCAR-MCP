@@ -277,33 +277,6 @@ def async_test_session_factory(async_db_session):
 
 
 @pytest.fixture
-def recorded_session(db_session):
-    """Factory for loading recorded session fixtures by YYYYMMDD ID.
-
-    Usage:
-        def test_something(self, recorded_session):
-            db = recorded_session("20250808")
-            session = db.query(Session).first()
-
-    Available sessions:
-        - 20250110: Early therapy session (January 2025)
-        - 20250808: Baseline session (August 2025)
-        - 20250910: Multi-segment session (September 2025, 4 therapy segments)
-        - 20251025: Event detection test session (October 2025)
-    """
-    from tests.helpers.fixtures_loader import import_to_test_db
-
-    def _load(session_id: str) -> Any:
-        try:
-            import_to_test_db(session_id, db_session)
-            return db_session
-        except (ValueError, FileNotFoundError) as e:
-            pytest.skip(f"Fixture {session_id} not available: {e}")
-
-    return _load
-
-
-@pytest.fixture
 def async_recorded_session(async_db_session):
     """Async factory for loading recorded session fixtures by YYYYMMDD ID.
 

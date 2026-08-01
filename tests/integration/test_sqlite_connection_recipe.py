@@ -787,10 +787,13 @@ class TestTypedBulkInsert:
         # The identity map should not grow proportionally with n_sessions.
         # After N bulk inserts, its size should reflect only parent objects
         # (Device, Day, Session) — not the child Waveform/Event/Setting rows.
-        # We allow a generous cap: at most 10 * max_parent_rows per import.
-        max_allowed = (
-            n_sessions * 10
-        )  # Device + Day + Session per import = 3; 10x slack
+        # Typed INSERT executemany bypasses the ORM unit-of-work entirely,
+        # so the identity map should hold only the handful of parent rows
+        # explicitly add()ed, not the bulk children.  A cap of 5 is generous
+        # for the parent rows (Device + Session per import = 2 objects) while
+        # still being tight enough to fail under add_all(), which accumulates
+        # all child instances (identity map reaches ~50+ for 20 sessions).
+        max_allowed = 5  # typed inserts yield 0 child entries; add_all() fails here
         final_size = identity_map_sizes[-1]
         assert final_size <= max_allowed, (
             f"Identity map grew to {final_size} after {n_sessions} imports "

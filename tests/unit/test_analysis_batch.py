@@ -493,7 +493,8 @@ class TestBatchCoordinatorHandle:
         Probe: 10,000 sessions, max_workers=4.  At no point should more than
         max_workers asyncio tasks be simultaneously in flight.  Also verifies
         that session_dates (retained metadata) never exceeds max_workers at
-        any checkpoint.
+        any checkpoint — entries are pruned as tasks complete so the
+        coordinator's retained metadata stays window-bounded (O(max_workers)).
         """
         import asyncio  # noqa: PLC0415
         import unittest.mock  # noqa: PLC0415
@@ -515,6 +516,8 @@ class TestBatchCoordinatorHandle:
             async with in_flight_lock:
                 in_flight += 1
                 peak_in_flight.append(in_flight)
+                # Snapshot session_dates size at each enqueue — must be window-bounded.
+                peak_in_flight.append(len(coord.session_dates))
             await asyncio.sleep(0)  # yield to let other tasks start
             async with in_flight_lock:
                 in_flight -= 1
@@ -534,8 +537,21 @@ class TestBatchCoordinatorHandle:
         assert result.cancelled == 0
         assert result.failed == 0
 
-        observed_peak = max(peak_in_flight) if peak_in_flight else 0
+        observed_peak = max(peak_in_flight[0::2]) if peak_in_flight else 0
         assert observed_peak <= max_workers, (
             f"Peak in-flight tasks was {observed_peak}, expected <= {max_workers}. "
             "Sliding window is not bounding task concurrency correctly."
+        )
+        # session_dates is keyed by the same sid set as `pending` — entries are
+        # added at enqueue and popped at task completion.  Snapshots taken at
+        # each enqueue must also stay window-bounded.
+        observed_sd_peak = max(peak_in_flight[1::2]) if peak_in_flight else 0
+        assert observed_sd_peak <= max_workers, (
+            f"session_dates peak was {observed_sd_peak}, expected <= {max_workers}. "
+            "Retained metadata is not staying window-bounded."
+        )
+        # After submit() completes, session_dates must be fully drained.
+        assert len(coord.session_dates) == 0, (
+            f"session_dates has {len(coord.session_dates)} entries after submit(); "
+            "expected 0 — all entries should be popped on task completion."
         )
