@@ -2,6 +2,15 @@
 Fixture loading utilities for test data.
 
 Provides functions to load real session fixtures and import them to test databases.
+
+Sync seed-only helper
+---------------------
+``import_to_test_db`` uses the sync ORM Session intentionally — it is a
+test-data seed helper, not an application code path.  It runs through a
+separate sync AUTOCOMMIT session so every flush is immediately visible to
+subsequent async sessions pointing at the same SQLite file.  This is NOT
+a volatile application seam; it is isolated here and must never be used
+for production logic.
 """
 
 from __future__ import annotations

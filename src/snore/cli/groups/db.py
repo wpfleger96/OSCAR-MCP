@@ -38,7 +38,7 @@ def init(db: str | None) -> None:
     db_path = Path(db).expanduser() if db else Path(DEFAULT_DATABASE_PATH)
     db_existed = db_path.exists()
 
-    init_database(str(db_path))
+    asyncio.run(init_database(str(db_path)))
 
     table_names = sorted(Base.metadata.tables.keys())
 
@@ -137,7 +137,7 @@ def drop(db: str | None, force: bool) -> None:
         return
 
     try:
-        init_database(str(db_path))
+        asyncio.run(init_database(str(db_path)))
 
         async def _show_stats() -> None:
             async with session_scope() as session:

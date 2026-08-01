@@ -24,6 +24,7 @@ class TestWaveformMultiTypeAllFail:
 
         with (
             patch("snore.cli.decorators.init_db"),
+            patch("snore.database.session.init_database", new_callable=AsyncMock),
             # session_scope is imported inside show_waveform; patch at source
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
@@ -72,6 +73,7 @@ class TestWaveformMultiTypePartialFailure:
 
         with (
             patch("snore.cli.decorators.init_db"),
+            patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
             ),
@@ -128,6 +130,7 @@ class TestWaveformMultiTypeOrdering:
 
         with (
             patch("snore.cli.decorators.init_db"),
+            patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
             ),

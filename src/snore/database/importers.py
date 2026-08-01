@@ -12,11 +12,13 @@ Transaction ownership (§6)
   The caller (``ImportService``) opens one ``session_scope()`` per bounded chunk
   and injects it here so the UoW boundary is owned at the service layer.
 
-Bulk strategy (frozen in §7/PR-2)
------------------------------------
-Waveforms, events, and settings use ``add_all`` (replaces ``bulk_save_objects``
-which is not available on AsyncSession).  Statistics uses ``add()`` because it
-has a single row per session and is used via the identity map.
+Bulk strategy (frozen in §90/PR-2)
+------------------------------------
+Waveforms, events, and settings use ``await db.execute(insert(Model), mappings)``
+inside the per-session ``begin_nested()`` savepoint.  Core INSERT rows (Device,
+Session, Day, Statistics) use ``add()`` / ``add_all()`` because they are small in
+number, require identity-map access after flush, and benefit from ORM-level
+change tracking.
 """
 
 import itertools
@@ -28,7 +30,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
@@ -204,16 +206,16 @@ class SessionImporter:
         day_id = day.id
 
         if session_data.has_waveform_data:
-            self._import_waveforms(db, new_session.id, session_data)
+            await self._import_waveforms(db, new_session.id, session_data)
 
         if session_data.has_event_data:
-            self._import_events(db, new_session.id, session_data)
+            await self._import_events(db, new_session.id, session_data)
 
         if session_data.has_statistics:
             self._import_statistics(db, new_session.id, session_data)
 
         if session_data.settings:
-            self._import_settings(db, new_session.id, session_data)
+            await self._import_settings(db, new_session.id, session_data)
 
         logger.debug(
             f"Imported session {session_data.device_session_id} from {session_data.start_time}"
@@ -373,14 +375,14 @@ class SessionImporter:
 
         return imported, skipped, failed, batch_day_ids
 
-    def _import_waveforms(
+    async def _import_waveforms(
         self, db: AsyncSession, session_id: int, session_data: UnifiedSession
     ) -> None:
-        """Import all waveforms for session."""
+        """Import all waveforms for session using typed bulk INSERT."""
         if not session_data.waveforms:
             return
 
-        waveform_records = []
+        mappings = []
         for waveform_type, waveform in session_data.waveforms.items():
             data_blob = serialize_waveform(waveform)
             sample_count = (
@@ -388,45 +390,46 @@ class SessionImporter:
                 if isinstance(waveform.values, list)
                 else len(waveform.values)
             )
-
-            waveform_records.append(
-                models.Waveform(
-                    session_id=session_id,
-                    waveform_type=waveform_type.value,
-                    sample_rate=waveform.sample_rate,
-                    unit=waveform.unit,
-                    min_value=waveform.min_value,
-                    max_value=waveform.max_value,
-                    mean_value=waveform.mean_value,
-                    data_blob=data_blob,
-                    sample_count=sample_count,
-                )
+            mappings.append(
+                {
+                    "session_id": session_id,
+                    "waveform_type": waveform_type.value,
+                    "sample_rate": waveform.sample_rate,
+                    "unit": waveform.unit,
+                    "min_value": waveform.min_value,
+                    "max_value": waveform.max_value,
+                    "mean_value": waveform.mean_value,
+                    "data_blob": data_blob,
+                    "sample_count": sample_count,
+                }
             )
 
-        db.add_all(waveform_records)
-        logger.debug(f"Bulk imported {len(waveform_records)} waveforms")
+        if mappings:
+            await db.execute(insert(models.Waveform), mappings)
+        logger.debug(f"Bulk imported {len(mappings)} waveforms")
 
-    def _import_events(
+    async def _import_events(
         self, db: AsyncSession, session_id: int, session_data: UnifiedSession
     ) -> None:
-        """Import all respiratory events for session."""
+        """Import all respiratory events for session using typed bulk INSERT."""
         if not session_data.events:
             return
 
-        event_records = [
-            models.Event(
-                session_id=session_id,
-                event_type=event.event_type.value,
-                start_time=event.start_time,
-                duration_seconds=event.duration_seconds,
-                spo2_drop=event.spo2_drop,
-                peak_flow_limitation=event.peak_flow_limitation,
-            )
+        mappings = [
+            {
+                "session_id": session_id,
+                "event_type": event.event_type.value,
+                "start_time": event.start_time,
+                "duration_seconds": event.duration_seconds,
+                "spo2_drop": event.spo2_drop,
+                "peak_flow_limitation": event.peak_flow_limitation,
+            }
             for event in session_data.events
         ]
-        db.add_all(event_records)
+        if mappings:
+            await db.execute(insert(models.Event), mappings)
 
-        logger.debug(f"Bulk imported {len(event_records)} events")
+        logger.debug(f"Bulk imported {len(mappings)} events")
 
     def _import_statistics(
         self, db: AsyncSession, session_id: int, session_data: UnifiedSession
@@ -439,10 +442,10 @@ class SessionImporter:
 
         logger.debug("Imported session statistics")
 
-    def _import_settings(
+    async def _import_settings(
         self, db: AsyncSession, session_id: int, session_data: UnifiedSession
     ) -> None:
-        """Import session settings."""
+        """Import session settings using typed bulk INSERT."""
         settings = session_data.settings
 
         if not settings:
@@ -459,20 +462,22 @@ class SessionImporter:
         # merged in afterward, so guard against None here to avoid persisting
         # the literal string "None". Floats are rounded to strip EDF
         # gain-arithmetic noise (28.900000000000002 → 28.9).
-        setting_records = [
-            models.Setting(
-                session_id=session_id,
-                key=key,
-                value=str(round(value, 2)) if isinstance(value, float) else str(value),
-            )
+        mappings = [
+            {
+                "session_id": session_id,
+                "key": key,
+                "value": str(round(value, 2))
+                if isinstance(value, float)
+                else str(value),
+            }
             for key, value in settings_dict.items()
             if value is not None
         ]
 
-        if setting_records:
-            db.add_all(setting_records)
+        if mappings:
+            await db.execute(insert(models.Setting), mappings)
 
-        logger.debug(f"Imported {len(setting_records)} settings")
+        logger.debug(f"Imported {len(mappings)} settings")
 
 
 async def import_session(session_data: UnifiedSession, force: bool = False) -> bool:

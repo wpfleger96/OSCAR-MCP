@@ -8,6 +8,8 @@ These tests verify the command-line interface functionality including:
 - session list command with limits and truncation
 """
 
+import asyncio
+
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -32,7 +34,7 @@ def cli_runner():
 @pytest.fixture
 async def populated_test_db(temp_db):
     """Create a database populated with realistic test data."""
-    init_database(str(temp_db))
+    await init_database(str(temp_db))
 
     async with session_scope() as session:
         device = models.Device(
@@ -85,7 +87,7 @@ async def populated_test_db_full(temp_db):
     """Create a database populated with full Statistics and Waveform records."""
     import numpy as np
 
-    init_database(str(temp_db))
+    await init_database(str(temp_db))
 
     async with session_scope() as session:
         device = models.Device(
@@ -309,7 +311,7 @@ class TestDbStatsCommand:
 
     def test_db_stats_empty_database(self, cli_runner, temp_db):
         """Test db stats with empty database."""
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         result = cli_runner.invoke(cli, ["db", "stats", "--db", str(temp_db)])
 
@@ -371,7 +373,7 @@ class TestSessionListCommand:
         """Test session list doesn't show truncation when all results fit."""
         import asyncio
 
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         async def _setup() -> None:
             async with session_scope() as session:
@@ -404,7 +406,7 @@ class TestSessionListCommand:
 @pytest.fixture
 async def db_with_analysis(temp_db):
     """Create a database populated with sessions and analysis results."""
-    init_database(str(temp_db))
+    await init_database(str(temp_db))
 
     async with session_scope() as session:
         device = models.Device(
@@ -680,7 +682,7 @@ class TestAnalysisDeleteCommand:
         """Test graceful handling when no sessions have analysis."""
         import asyncio
 
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         async def _setup() -> None:
             async with session_scope() as session:
@@ -774,7 +776,7 @@ class TestAnalysisCommand:
 
     def test_analyze_missing_selection_flag(self, cli_runner, temp_db):
         """Test that analysis run requires at least one selection flag."""
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         result = cli_runner.invoke(
             cli,
@@ -786,7 +788,7 @@ class TestAnalysisCommand:
 
     def test_analyze_mutually_exclusive_single_flags(self, cli_runner, temp_db):
         """Test that --session-id and --date are mutually exclusive."""
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         result = cli_runner.invoke(
             cli,
@@ -807,7 +809,7 @@ class TestAnalysisCommand:
 
     def test_analyze_mutually_exclusive_single_and_batch(self, cli_runner, temp_db):
         """Test that single session flags cannot be used with batch flags."""
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         result = cli_runner.invoke(
             cli,
@@ -882,7 +884,7 @@ class TestAnalysisCommand:
         """Test show subcommand gracefully handles missing analysis."""
         import asyncio
 
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         async def _setup() -> None:
             async with session_scope() as session:
@@ -985,7 +987,7 @@ class TestSessionShowCommand:
 
         from snore.database.importers import import_session
 
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
         asyncio.run(import_session(sessions[0]))
@@ -1124,7 +1126,7 @@ async def db_with_rx_settings_changes(temp_db):
     Day 2 (2025-06-02): mode=APAP, pressure_min=6.0    (change date A)
     Day 3 (2025-06-03): mode=APAP, pressure_min=8.0    (change date B, most recent)
     """
-    init_database(str(temp_db))
+    await init_database(str(temp_db))
 
     async with session_scope() as session:
         device = models.Device(
@@ -1228,7 +1230,7 @@ class TestRxChangesCommand:
 
     def test_changes_empty_db_shows_no_changes_message(self, cli_runner, temp_db):
         """Empty database produces a friendly no-changes message, not an error."""
-        init_database(str(temp_db))
+        asyncio.run(init_database(str(temp_db)))
 
         result = cli_runner.invoke(cli, ["rx", "changes", "--db", str(temp_db)])
 
@@ -1282,7 +1284,7 @@ async def _make_rx_session(
 @pytest.fixture
 async def db_with_apap_rx(temp_db):
     """DB with a single APAP period: pressure range and EPR settings present."""
-    init_database(str(temp_db))
+    await init_database(str(temp_db))
 
     async with session_scope() as session:
         device = models.Device(
@@ -1319,7 +1321,7 @@ async def db_with_bipap_rx(temp_db):
     Period 1 (day 1): CPAP, pressure_fixed=10.0
     Period 2 (days 2-4): BiPAP Auto, epap=6.0, ipap=18.0, ps=4.0, no epr keys
     """
-    init_database(str(temp_db))
+    await init_database(str(temp_db))
 
     async with session_scope() as session:
         device = models.Device(

@@ -1,6 +1,6 @@
 import json
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -170,6 +170,7 @@ class TestImportProgress:
             ),
             patch(
                 "snore.api.routers.import_data.ImportService.import_sources",
+                new_callable=AsyncMock,
                 return_value=fake_result,
             ),
         ):
@@ -223,6 +224,7 @@ class TestUploadBackupEnabled:
             ),
             patch(
                 "snore.api.routers.import_data.ImportService.import_sources",
+                new_callable=AsyncMock,
                 return_value=fake_result,
             ) as mock_import,
         ):

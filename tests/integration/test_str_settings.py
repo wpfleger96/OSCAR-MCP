@@ -129,7 +129,7 @@ class TestSTRSettingsParsing:
         from snore.database.importers import import_session
         from snore.database.session import init_database, session_scope
 
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
         assert len(sessions) > 0, "Should parse at least one session"

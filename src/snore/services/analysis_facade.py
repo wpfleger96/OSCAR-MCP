@@ -695,12 +695,13 @@ class BatchAnalysisCoordinator:
 
             return "success"
 
-        # Build the session pairs list and track sid→task.
-        pairs_list = list(session_pairs)
-        session_dates: dict[int, date | None] = {
-            sid: day_date for sid, day_date in pairs_list
-        }
+        # Build a lazy iterator over the pairs; maintain at most max_workers tasks
+        # in flight (sliding window).  Never create all tasks upfront — task count,
+        # frames, and results must scale with max_workers, not batch length.
+        pairs_iter = iter(session_pairs)
         batch_results: list[BatchSessionResult] = []
+        pending: dict[asyncio.Task[str], int] = {}  # task → sid
+        session_dates: dict[int, date | None] = {}
         sem = asyncio.Semaphore(max_workers)
 
         async def _run_one(sid: int) -> str:
@@ -713,27 +714,44 @@ class BatchAnalysisCoordinator:
                     )
                     return "error"
 
-        sid_tasks: list[tuple[int, asyncio.Task[str]]] = [
-            (sid, asyncio.create_task(_run_one(sid))) for sid, _ in pairs_list
-        ]
+        def _fill_window() -> None:
+            """Enqueue pairs until max_workers tasks are in flight or exhausted."""
+            while len(pending) < max_workers:
+                if self._cancel_requested:
+                    break
+                try:
+                    sid, day_date = next(pairs_iter)
+                except StopIteration:
+                    break
+                session_dates[sid] = day_date
+                task: asyncio.Task[str] = asyncio.create_task(_run_one(sid))
+                pending[task] = sid
 
-        for sid, task in sid_tasks:
-            outcome = await task
-            cancelled = outcome == "cancelled"
-            success = outcome == "success"
-            error = None if outcome != "error" else f"Analysis failed for session {sid}"
-            batch_results.append(
-                BatchSessionResult(
-                    session_id=sid,
-                    session_date=session_dates.get(sid),
-                    success=success,
-                    cancelled=cancelled,
-                    error=error,
+        _fill_window()
+        while pending:
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                sid = pending.pop(task)
+                outcome = task.result()
+                cancelled = outcome == "cancelled"
+                success = outcome == "success"
+                error = (
+                    None if outcome != "error" else f"Analysis failed for session {sid}"
                 )
-            )
-            self._completed += 1
-            if progress_callback:
-                progress_callback(self._completed, None)
+                batch_results.append(
+                    BatchSessionResult(
+                        session_id=sid,
+                        session_date=session_dates.get(sid),
+                        success=success,
+                        cancelled=cancelled,
+                        error=error,
+                    )
+                )
+                self._completed += 1
+                if progress_callback:
+                    progress_callback(self._completed, None)
+            # Refill the window after each completion.
+            _fill_window()
 
         total = len(batch_results)
         self._total = total

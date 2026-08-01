@@ -552,7 +552,7 @@ class TestShutdown:
         import asyncio  # noqa: PLC0415
         import threading as _threading  # noqa: PLC0415
 
-        from unittest.mock import patch  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
         from snore.api.app import create_app  # noqa: PLC0415
 
@@ -567,7 +567,7 @@ class TestShutdown:
 
         async def run_lifespan() -> None:
             with (
-                patch("snore.api.app.init_database"),
+                patch("snore.api.app.init_database", new_callable=AsyncMock),
                 patch(
                     "snore.api.app._start_import_reaper",
                     return_value=(_dummy_thread, _dummy_stop),
@@ -790,7 +790,7 @@ class TestRouteWorkerBehavior:
 
         Uses a real background thread started by _start_worker.
         """
-        from unittest.mock import patch  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
         from snore.api.routers.import_data import (  # noqa: PLC0415
             _start_worker,
@@ -814,6 +814,7 @@ class TestRouteWorkerBehavior:
             ),
             patch(
                 "snore.api.routers.import_data.ImportService.import_sources",
+                new_callable=AsyncMock,
                 return_value=fake_result,
             ),
         ):
@@ -993,7 +994,7 @@ class TestRouteHTTPBoundary:
 
     def test_post_upload_creates_job_and_returns_202(self, tmp_path):
         """POST /import creates a job in the store and returns 202 with job_id."""
-        from unittest.mock import patch  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
         from fastapi.testclient import TestClient  # noqa: PLC0415
 
@@ -1015,6 +1016,7 @@ class TestRouteHTTPBoundary:
                 ),
                 patch(
                     "snore.api.routers.import_data.ImportService.import_sources",
+                    new_callable=AsyncMock,
                     return_value=fake_result,
                 ),
             ):

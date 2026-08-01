@@ -15,10 +15,16 @@ if TYPE_CHECKING:
 
 
 def init_db(db: str | None) -> None:
-    """Initialize the database, resolving the path if provided."""
-    from snore.database.session import init_database
+    """Initialize the database, resolving the path if provided.
 
-    init_database(str(Path(db).expanduser()) if db else None)
+    Bridges the sync Click command boundary to the async ``init_database``
+    coroutine by running it in a new event loop.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from snore.database.session import init_database  # noqa: PLC0415
+
+    asyncio.run(init_database(str(Path(db).expanduser()) if db else None))
 
 
 @asynccontextmanager
@@ -29,9 +35,9 @@ async def db_session(db: str | None) -> AsyncIterator[AsyncSession]:
     manager to obtain a session.  The session is committed on clean exit and
     rolled back on exception.
     """
-    from snore.database.session import session_scope
+    from snore.database.session import init_database, session_scope  # noqa: PLC0415
 
-    init_db(db)
+    await init_database(str(Path(db).expanduser()) if db else None)
     async with session_scope() as session:
         yield session
 

@@ -22,7 +22,7 @@ from snore.database.session import init_database, session_scope
 @pytest.fixture
 async def test_device_fixture(temp_db):
     """Create a device for testing."""
-    init_database(str(temp_db))
+    await init_database(str(temp_db))
 
     async with session_scope() as session:
         device = models.Device(
@@ -228,8 +228,6 @@ class TestDayManagerFunctions:
 
     def test_get_day_for_session_after_split(self, temp_db):
         """Test get_day_for_session with time after split."""
-        init_database(str(temp_db))
-
         session_time = datetime(2025, 10, 15, 22, 0, 0)
         day_date = DayManager.get_day_for_session(session_time)
 
@@ -237,8 +235,6 @@ class TestDayManagerFunctions:
 
     def test_get_day_for_session_before_split(self, temp_db):
         """Test get_day_for_session with time before split."""
-        init_database(str(temp_db))
-
         session_time = datetime(2025, 10, 16, 9, 0, 0)
         day_date = DayManager.get_day_for_session(session_time)
 

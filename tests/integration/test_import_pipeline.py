@@ -20,7 +20,7 @@ class TestImportPipeline:
         """Test that database is auto-created on first use."""
         assert not temp_db.exists()
 
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         assert temp_db.exists()
 
@@ -44,7 +44,7 @@ class TestImportPipeline:
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test importing a complete ResMed session."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         assert len(sessions) > 0
@@ -69,7 +69,7 @@ class TestImportPipeline:
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test that duplicate sessions are not re-imported."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
@@ -88,7 +88,7 @@ class TestImportPipeline:
 
     async def test_force_reimport(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test force re-import of existing session."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
@@ -106,7 +106,7 @@ class TestImportPipeline:
 
     async def test_waveform_storage(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test that waveforms are stored correctly."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
@@ -125,7 +125,7 @@ class TestImportPipeline:
 
     async def test_event_storage(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test that events are stored correctly."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
@@ -145,7 +145,7 @@ class TestImportPipeline:
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test that statistics are stored correctly."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
@@ -161,7 +161,7 @@ class TestImportPipeline:
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """None values in other_settings must not be persisted as the string 'None'."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
@@ -181,7 +181,7 @@ class TestImportPipeline:
 
     async def test_database_stats(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test database statistics reporting."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
 
@@ -209,7 +209,7 @@ class TestImportPipeline:
 
     async def test_multiple_devices(self, temp_db):
         """Test handling multiple devices."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             result = await session.execute(

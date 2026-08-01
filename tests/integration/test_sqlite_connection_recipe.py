@@ -23,7 +23,7 @@ class TestSQLitePragmas:
 
     async def test_foreign_keys_enabled_on_pooled_connection(self, temp_db):
         """PRAGMA foreign_keys == 1 after init_database()."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             from sqlalchemy import text
@@ -33,7 +33,7 @@ class TestSQLitePragmas:
 
     async def test_journal_mode_wal_on_file_backed_connection(self, temp_db):
         """PRAGMA journal_mode == 'wal' after init_database()."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             from sqlalchemy import text
@@ -45,7 +45,7 @@ class TestSQLitePragmas:
         self, temp_db
     ):
         """Integrated recipe: autocommit toggle ensures both FK and WAL are applied atomically."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             from sqlalchemy import text
@@ -61,7 +61,7 @@ class TestSavepointRollback:
 
     async def test_released_savepoint_rows_do_not_survive_outer_rollback(self, temp_db):
         """Inside a batch, one failed nested savepoint; outer abort removes all batch rows."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         # First, create a device to satisfy the FK constraint on sessions.
         async with session_scope() as setup_session:
@@ -256,7 +256,7 @@ class TestImporterForcedFailureContinuation:
         rolled back, leaving no device/day/session rows for the bad session.
         The subsequent good session must then import successfully.
         """
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
         from unittest.mock import patch
 
         from snore.database.day_manager import DayManager
@@ -341,7 +341,7 @@ class TestImporterForcedFailureContinuation:
         This is the §6 spec requirement: failure after every child is flushed;
         all seven bad-table projections asserted empty.
         """
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
         from unittest.mock import patch
 
         from snore.database.importers import SessionImporter
@@ -537,3 +537,177 @@ class TestImporterForcedFailureContinuation:
             assert len(orphan_settings) == 0, (
                 f"Orphan Setting rows found: {[s.id for s in orphan_settings]}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Typed bulk INSERT tests (W4: § 90/PR-2)
+# ---------------------------------------------------------------------------
+
+
+class TestTypedBulkInsert:
+    """``execute(insert(Model), mappings)`` must populate rows correctly.
+
+    Verifies the bulk INSERT strategy used by ``_import_waveforms``,
+    ``_import_events``, and ``_import_settings``: rows are readable after
+    commit, autoincrement IDs are populated, and a savepoint rollback removes
+    ALL bulk rows for a failed session while the good session's rows survive.
+    """
+
+    def _make_session_with_waveforms(
+        self, serial: str, session_id_str: str
+    ) -> UnifiedSession:
+        """Build a UnifiedSession with one FLOW_RATE waveform and one event."""
+        from datetime import datetime
+
+        import numpy as np
+
+        from snore.parsers.unified import (
+            DeviceInfo,
+            RespiratoryEvent,
+            RespiratoryEventType,
+            SessionStatistics,
+            TherapyMode,
+            TherapySettings,
+            UnifiedSession,
+            WaveformData,
+            WaveformType,
+        )
+
+        arr = np.array([[0.0, 1.0], [0.04, 1.1]], dtype=np.float32)
+        blob = arr.tobytes()
+
+        device_info = DeviceInfo(
+            manufacturer="BulkMfr",
+            model="BulkMdl",
+            serial_number=serial,
+        )
+        start = datetime(2024, 2, 1, 21, 0, 0)
+        end = datetime(2024, 2, 2, 5, 0, 0)
+
+        wf = WaveformData(
+            waveform_type=WaveformType.FLOW_RATE,
+            sample_rate=25.0,
+            unit="L/min",
+            min_value=-10.0,
+            max_value=10.0,
+            mean_value=0.0,
+            sample_count=2,
+            data_blob=blob,
+            timestamps=[0.0, 0.04],
+            values=[1.0, 1.1],
+        )
+
+        evt = RespiratoryEvent(
+            event_type=RespiratoryEventType.OBSTRUCTIVE_APNEA,
+            start_time=start,
+            duration_seconds=15.0,
+        )
+
+        settings = TherapySettings(mode=TherapyMode.CPAP, pressure_fixed=10.0)
+        stats = SessionStatistics(usage_hours=8.0, ahi=1.5)
+
+        sess = UnifiedSession(
+            device_info=device_info,
+            device_session_id=session_id_str,
+            start_time=start,
+            end_time=end,
+            settings=settings,
+            statistics=stats,
+            has_waveform_data=True,
+            has_event_data=True,
+            has_statistics=True,
+        )
+        sess.waveforms = {WaveformType.FLOW_RATE: wf}
+        sess.events = [evt]
+        return sess
+
+    async def test_bulk_insert_rows_readable_and_ids_populated(self, temp_db):
+        """After import, waveform/event/setting rows are readable with non-null IDs.
+
+        Confirms that ``execute(insert(Model), mappings)`` correctly:
+        - Creates rows visible to a follow-up SELECT.
+        - Populates the autoincrement ``id`` column.
+        - Stores the correct field values.
+        """
+        from sqlalchemy import select
+
+        from snore.database.importers import SessionImporter
+        from snore.database.models import Event, Setting, Waveform
+        from snore.database.session import session_scope
+
+        await init_database(str(temp_db))
+
+        session_data = self._make_session_with_waveforms(
+            "SN_BULK_READ", "SESS_BULK_READ"
+        )
+
+        importer = SessionImporter()
+        async with session_scope() as db:
+            async with db.begin_nested():
+                imported, day_id = await importer._import_single_session(
+                    db, session_data
+                )
+
+        assert imported is True
+
+        # Verify waveforms: id populated, sample_rate correct.
+        async with session_scope() as verify:
+            from sqlalchemy import select
+
+            from snore.database.models import Session as DBSession
+
+            sess_row = (
+                (
+                    await verify.execute(
+                        select(DBSession).where(
+                            DBSession.device_session_id == "SESS_BULK_READ"
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert sess_row is not None, "Session row missing after import"
+
+            waveforms = (
+                (
+                    await verify.execute(
+                        select(Waveform).where(Waveform.session_id == sess_row.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            events = (
+                (
+                    await verify.execute(
+                        select(Event).where(Event.session_id == sess_row.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            settings = (
+                (
+                    await verify.execute(
+                        select(Setting).where(Setting.session_id == sess_row.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert len(waveforms) == 1, f"Expected 1 waveform, got {len(waveforms)}"
+        assert waveforms[0].id is not None, (
+            "Waveform id must be populated (autoincrement)"
+        )
+        assert waveforms[0].sample_rate == 25.0
+
+        assert len(events) == 1, f"Expected 1 event, got {len(events)}"
+        assert events[0].id is not None, "Event id must be populated (autoincrement)"
+        assert events[0].duration_seconds == 15.0
+
+        assert len(settings) >= 1, f"Expected at least 1 setting, got {len(settings)}"
+        mode_settings = [s for s in settings if s.key == "mode"]
+        assert len(mode_settings) == 1
+        assert mode_settings[0].value.upper() == "CPAP"

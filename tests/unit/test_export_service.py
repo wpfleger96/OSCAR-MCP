@@ -190,7 +190,7 @@ async def db_session(tmp_path: Path) -> AsyncGenerator[AsyncSession]:
     db_mod._engine = None
     db_mod._AsyncSessionFactory = None
     db_mod._db_path = None
-    db_mod.init_database(db_path)
+    await db_mod.init_database(db_path)
 
     async with db_mod.session_scope() as session:
         device = models.Device(

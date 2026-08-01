@@ -26,7 +26,7 @@ class TestForeignKeyConstraints:
 
     async def test_foreign_keys_enabled(self, temp_db):
         """Test that foreign keys are enabled on connection."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             result = (await session.execute(text("PRAGMA foreign_keys"))).scalar()
@@ -34,7 +34,7 @@ class TestForeignKeyConstraints:
 
     async def test_cascade_delete_session_to_events(self, temp_db):
         """Test that deleting a session cascades to events."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             device = models.Device(
@@ -91,7 +91,7 @@ class TestForeignKeyConstraints:
 
     async def test_cascade_delete_session_to_statistics(self, temp_db):
         """Test that deleting a session cascades to statistics."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             device = models.Device(
@@ -144,7 +144,7 @@ class TestForeignKeyConstraints:
 
     async def test_cascade_delete_session_to_settings(self, temp_db):
         """Test that deleting a session cascades to settings."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             device = models.Device(
@@ -198,7 +198,7 @@ class TestForeignKeyConstraints:
 
     async def test_cascade_delete_session_to_waveforms(self, temp_db):
         """Test that deleting a session cascades to waveforms."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             device = models.Device(
@@ -261,7 +261,7 @@ class TestOrphanedRecordCleanup:
 
     async def test_cleanup_orphaned_events(self, temp_db):
         """Test cleanup of orphaned event records."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         # Insert orphaned data using a raw sqlite3 connection with FK off.
         # SQLite requires PRAGMA foreign_keys changes to happen outside a
@@ -298,7 +298,7 @@ class TestOrphanedRecordCleanup:
 
     async def test_cleanup_orphaned_statistics(self, temp_db):
         """Test cleanup of orphaned statistics records."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         raw = sqlite3.connect(str(temp_db), isolation_level=None)
         try:
@@ -333,7 +333,7 @@ class TestOrphanedRecordCleanup:
 
     async def test_cleanup_orphaned_settings(self, temp_db):
         """Test cleanup of orphaned settings records."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         raw = sqlite3.connect(str(temp_db), isolation_level=None)
         try:
@@ -366,7 +366,7 @@ class TestOrphanedRecordCleanup:
 
     async def test_cleanup_orphaned_waveforms(self, temp_db):
         """Test cleanup of orphaned waveform records."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         raw = sqlite3.connect(str(temp_db), isolation_level=None)
         try:
@@ -400,7 +400,7 @@ class TestOrphanedRecordCleanup:
 
     async def test_cleanup_multiple_orphaned_records(self, temp_db):
         """Test cleanup of multiple orphaned records across tables."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         raw = sqlite3.connect(str(temp_db), isolation_level=None)
         try:
@@ -446,7 +446,7 @@ class TestOrphanedRecordCleanup:
 
     async def test_cleanup_no_orphaned_records(self, temp_db):
         """Test cleanup returns 0 when no orphaned records exist."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             cleaned = await SessionImporter.cleanup_orphaned_records(session)
@@ -458,7 +458,7 @@ class TestDataIntegrity:
 
     async def test_unique_constraint_device_session(self, temp_db):
         """Test unique constraint on (device_id, device_session_id)."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             device = models.Device(
@@ -499,7 +499,7 @@ class TestDataIntegrity:
 
     async def test_unique_constraint_setting_key(self, temp_db):
         """Test unique constraint on (session_id, key) for settings."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         async with session_scope() as session:
             device = models.Device(

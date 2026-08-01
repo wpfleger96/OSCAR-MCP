@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from collections.abc import Callable
@@ -80,7 +79,7 @@ class ImportService:
 
         return sources
 
-    def import_sources(
+    async def import_sources(
         self,
         sources: list[ImportSource],
         *,
@@ -107,28 +106,20 @@ class ImportService:
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
         """
-        # asyncio.run() here is intentional: import_sources() is called from
-        # _run_import(), a worker thread (plain threading.Thread, no running
-        # event loop in this thread).  This is the same "sync entry-point →
-        # async service" bridge used in the CLI (see cli/groups/import.py).
-        # It is NOT a loop-in-loop hack — there is no outer loop in this
-        # thread, which is exactly the condition asyncio.run() requires.
-        return asyncio.run(
-            self._import_sources_async(
-                sources,
-                force=force,
-                batch_size=batch_size,
-                backup=backup,
-                backup_root=backup_root,
-                sort_by=sort_by,
-                limit=limit,
-                date_from=date_from,
-                date_to=date_to,
-                parallel=parallel,
-                dry_run=dry_run,
-                progress_callback=progress_callback,
-                cancel_predicate=cancel_predicate,
-            )
+        return await self._import_sources_async(
+            sources,
+            force=force,
+            batch_size=batch_size,
+            backup=backup,
+            backup_root=backup_root,
+            sort_by=sort_by,
+            limit=limit,
+            date_from=date_from,
+            date_to=date_to,
+            parallel=parallel,
+            dry_run=dry_run,
+            progress_callback=progress_callback,
+            cancel_predicate=cancel_predicate,
         )
 
     async def _import_sources_async(

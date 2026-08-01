@@ -112,7 +112,14 @@ def temp_db(tmp_path):
 
 @pytest.fixture
 def db_session(temp_db):
-    """Create fresh database session for each test with proper isolation."""
+    """Sync seed-only session for tests that need a synchronous ORM handle.
+
+    Intentionally uses the sync ORM (``Session``) — this is an isolated
+    test-data seed helper, NOT an application code path.  Application tests
+    that exercise transaction semantics must use ``async_db_session`` or the
+    full FastAPI lifespan.  Do NOT use this fixture for new application-facing
+    tests.
+    """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 

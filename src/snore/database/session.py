@@ -1,18 +1,38 @@
 """Database session management for SNORE.
 
-Async SQLite connection recipe (§4, PR-2)
-------------------------------------------
-The async engine uses ``aiosqlite`` as the DBAPI.  aiosqlite wraps the raw
-``sqlite3.Connection`` in an ``AsyncAdapt_aiosqlite_connection`` adapter.
-The PRAGMA recipe on the ``"connect"`` event accesses the raw connection via
-``dbapi_conn.driver_connection._conn`` and sets ``isolation_level = None``
-(autocommit) before applying PRAGMAs, then restores the prior isolation level.
+Async SQLite transaction recipe (§4, PR-2)
+-------------------------------------------
+The async engine uses ``aiosqlite`` as the DBAPI.
+
+**PRAGMA setup (``"connect"`` event):**
+The ``"connect"`` event fires on every new DBAPI connection.  aiosqlite wraps
+the raw ``sqlite3.Connection``; we access it via
+``dbapi_conn.driver_connection._conn``.  We set ``isolation_level = None``
+(autocommit) *permanently* on the raw connection so PRAGMAs like
+``journal_mode=WAL`` can run outside a transaction.  The connection stays in
+autocommit mode — SQLAlchemy's logical transaction control takes over via the
+``"begin"`` event (see below).
+
+**Transaction control (``"begin"`` event):**
+With aiosqlite in autocommit mode, SQLAlchemy's logical ``BEGIN`` never emits
+an actual ``BEGIN`` statement to SQLite.  That means a released savepoint
+(``RELEASE SAVEPOINT sp``) escapes the outer rollback — the row is committed to
+the file before the outer ``ROLLBACK`` fires.
+
+To fix this, we attach a ``"begin"`` event listener to
+``async_engine.sync_engine`` that executes an explicit ``BEGIN`` statement
+whenever SQLAlchemy starts a new logical transaction.  This restores the
+expected two-layer semantics: SQLite's outer ``BEGIN`` contains all
+``SAVEPOINT`` / ``RELEASE`` / ``ROLLBACK TO`` operations so that an outer
+``ROLLBACK`` always undoes any released savepoints.
 
 VACUUM uses a separate sync AUTOCOMMIT connection and is unaffected.
 
-Alembic stays fully synchronous.  Migrations run via
-``asyncio.get_event_loop().run_in_executor`` / ``asyncio.to_thread`` patterns
-in test helpers, or directly in CLI commands that bridge with ``asyncio.run``.
+**Migrations:**
+Alembic stays fully synchronous and uses the pysqlite URL.  The async
+``init_database`` / ``init_database_from_url`` entry points run
+``_apply_migrations_sync`` via ``asyncio.to_thread`` so they never block the
+event loop.
 
 expire_on_commit=False is set on all sessions so that ORM attributes remain
 accessible after a commit without triggering implicit I/O — required for
@@ -83,20 +103,27 @@ def _apply_migrations_sync(sync_url: str) -> None:
 def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
     """Attach the integrated SQLite connection recipe to *async_engine*.
 
-    The recipe attaches to ``async_engine.sync_engine`` (the underlying pysqlite
-    engine) so the autocommit toggle works on the real DBAPI connection.
+    Two event listeners are registered on ``async_engine.sync_engine``:
 
-    For ``aiosqlite``, ``dbapi_conn`` is an ``AsyncAdapt_aiosqlite_connection``
-    wrapper.  The underlying ``sqlite3.Connection`` is at
-    ``dbapi_conn.driver_connection._conn``.  We set ``isolation_level = None``
-    (autocommit) on the raw connection before applying PRAGMAs, then restore it.
+    **"connect" — PRAGMA setup:**
+    Fires on every new DBAPI connection.  For aiosqlite connections,
+    ``dbapi_conn.driver_connection._conn`` is the raw ``sqlite3.Connection``.
+    We set ``isolation_level = None`` (autocommit) *permanently* so that
+    PRAGMAs like ``journal_mode=WAL`` run outside a transaction and so that
+    SQLAlchemy's logical transaction control is the sole source of truth.
+    The connection is left in autocommit mode after the event returns.
 
-    Steps:
-    1. Access the raw ``sqlite3.Connection`` via ``driver_connection._conn``.
-    2. Set ``isolation_level = None`` (autocommit) so PRAGMAs like
-       ``journal_mode=WAL`` can run outside a transaction.
-    3. Apply PRAGMAs.
-    4. Restore the original ``isolation_level``.
+    **"begin" — explicit BEGIN:**
+    With the DBAPI in autocommit mode, SQLAlchemy's logical transaction does
+    not emit a real ``BEGIN`` to SQLite.  Without an explicit ``BEGIN``, a
+    released savepoint (``RELEASE SAVEPOINT sp``) writes directly to the
+    database file and cannot be undone by a later outer rollback.
+
+    The ``"begin"`` listener executes ``BEGIN`` via a raw cursor whenever
+    SQLAlchemy opens a new logical transaction.  This re-establishes the
+    two-layer semantics: SQLite's outer ``BEGIN`` contains all
+    ``SAVEPOINT`` / ``RELEASE`` / ``ROLLBACK TO`` operations, so an outer
+    rollback undoes every released savepoint within it.
     """
     from sqlalchemy import event  # noqa: PLC0415
 
@@ -107,27 +134,35 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
             getattr(dbapi_conn, "driver_connection", None), "_conn", None
         )
         if raw_conn is None:
-            # Fallback: try direct autocommit attribute (sync pysqlite path).
+            # Fallback: try direct raw connection (sync pysqlite path).
             raw_conn = dbapi_conn
 
-        prior_isolation = getattr(raw_conn, "isolation_level", "")
+        # Set autocommit permanently — the "begin" listener emits explicit BEGIN.
+        raw_conn.isolation_level = None
+
+        cursor = dbapi_conn.cursor()
         try:
-            raw_conn.isolation_level = None  # autocommit
-            cursor = dbapi_conn.cursor()
-            try:
-                cursor.execute("PRAGMA foreign_keys=ON")
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.execute("PRAGMA busy_timeout=5000")
-                cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
-                cursor.execute("PRAGMA temp_store=MEMORY")
-            finally:
-                cursor.close()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
+            cursor.execute("PRAGMA temp_store=MEMORY")
         finally:
-            raw_conn.isolation_level = prior_isolation
+            cursor.close()
+
+    @event.listens_for(async_engine.sync_engine, "begin")
+    def emit_begin(conn: Any) -> None:
+        # With DBAPI in autocommit mode, emit an explicit BEGIN so that SQLite's
+        # outer transaction wraps all SAVEPOINTs and outer ROLLBACK works correctly.
+        conn.exec_driver_sql("BEGIN")
 
 
 def _init_engine(database_url: str, async_url: str, db_path: str | None) -> None:
-    """Build the async engine and session factory (called under _init_lock)."""
+    """Build the async engine and session factory (called under _init_lock).
+
+    Does NOT run migrations — callers must invoke ``_apply_migrations_sync``
+    via ``asyncio.to_thread`` after calling this function.
+    """
     global _engine, _AsyncSessionFactory, _db_path
 
     if db_path and db_path != ":memory:":
@@ -151,7 +186,7 @@ def _init_engine(database_url: str, async_url: str, db_path: str | None) -> None
         pool_pre_ping=True,
     )
 
-    # Attach the SQLite PRAGMA recipe via sync_engine listener.
+    # Attach the SQLite PRAGMA + BEGIN recipe via sync_engine listeners.
     from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
 
     dialect = _make_url(async_url).get_backend_name()
@@ -165,12 +200,13 @@ def _init_engine(database_url: str, async_url: str, db_path: str | None) -> None
         class_=AsyncSession,
     )
 
-    # Alembic migrations always use the sync pysqlite URL.
-    _apply_migrations_sync(database_url)
 
-
-def init_database(database_path: str | None = None) -> None:
+async def init_database(database_path: str | None = None) -> None:
     """Initialize the database connection in a thread-safe manner.
+
+    Migrations run via ``asyncio.to_thread`` so this coroutine never blocks
+    the event loop.  Safe to ``await`` directly inside a FastAPI lifespan or
+    any async CLI bridge.
 
     Args:
         database_path: Path to the SQLite database file.
@@ -180,6 +216,8 @@ def init_database(database_path: str | None = None) -> None:
         PermissionError: If directory cannot be created
         ValueError: If database path is invalid
     """
+    import asyncio  # noqa: PLC0415
+
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
     global _engine, _AsyncSessionFactory
@@ -201,9 +239,16 @@ def init_database(database_path: str | None = None) -> None:
 
         _init_engine(sync_url, async_url, db_path)
 
+    # Run migrations off the event loop; _init_lock is NOT held here so the
+    # thread can acquire it if needed (it won't — engine is already set).
+    await asyncio.to_thread(_apply_migrations_sync, sync_url)
 
-def init_database_from_url(database_url: str) -> None:
+
+async def init_database_from_url(database_url: str) -> None:
     """Initialise the database from a fully-formed SQLAlchemy URL.
+
+    Migrations run via ``asyncio.to_thread`` so this coroutine never blocks
+    the event loop.
 
     Used by ``serve`` after the parent has resolved the canonical URL from the
     ``DatabaseTarget`` precedence chain and exported it as ``SNORE_DATABASE_URL``.
@@ -211,6 +256,8 @@ def init_database_from_url(database_url: str) -> None:
     Args:
         database_url: A fully-formed SQLAlchemy URL string.
     """
+    import asyncio  # noqa: PLC0415
+
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
     global _engine, _AsyncSessionFactory
@@ -228,6 +275,8 @@ def init_database_from_url(database_url: str) -> None:
         db_path = target.sqlite_path if target.is_sqlite else None
 
         _init_engine(sync_url, async_url, db_path)
+
+    await asyncio.to_thread(_apply_migrations_sync, sync_url)
 
 
 def get_session() -> AsyncSession:
