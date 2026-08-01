@@ -39,9 +39,9 @@ accessible after a commit without triggering implicit I/O — required for
 async contexts where lazy loads raise MissingGreenlet.
 """
 
+import asyncio
 import logging
 import os
-import threading
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -66,7 +66,24 @@ logger = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _AsyncSessionFactory: async_sessionmaker[AsyncSession] | None = None
 _db_path: str | None = None
-_init_lock = threading.Lock()
+
+# Once-future coordination: concurrent callers await the same in-flight
+# initialization task.  Published engine/factory only after migration success;
+# disposed and cleared atomically on failure so a retry re-runs migrations.
+# Protected by an asyncio.Lock so concurrent async callers serialize correctly.
+_init_lock: asyncio.Lock | None = None  # Created lazily inside an event loop.
+_init_future: asyncio.Future[None] | None = None  # The in-flight once-future.
+
+
+def _get_init_lock() -> asyncio.Lock:
+    """Return the module-level asyncio.Lock, creating it on first call.
+
+    Must be called from within a running event loop.
+    """
+    global _init_lock
+    if _init_lock is None:
+        _init_lock = asyncio.Lock()
+    return _init_lock
 
 
 def _build_alembic_config(database_url: str) -> AlembicConfig:
@@ -157,52 +174,112 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
         conn.exec_driver_sql("BEGIN")
 
 
-def _init_engine(database_url: str, async_url: str, db_path: str | None) -> None:
-    """Build the async engine and session factory (called under _init_lock).
+async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
+    """Build the engine, run migrations, then publish globals atomically.
 
-    Does NOT run migrations — callers must invoke ``_apply_migrations_sync``
-    via ``asyncio.to_thread`` after calling this function.
+    Called exactly once per initialization lifecycle.  On failure, disposes
+    any partially-built engine and clears all globals so a retry starts fresh.
     """
     global _engine, _AsyncSessionFactory, _db_path
 
-    if db_path and db_path != ":memory:":
-        db_dir = os.path.dirname(db_path)
-        if db_dir:
-            try:
-                os.makedirs(db_dir, exist_ok=True)
-            except PermissionError as e:
-                raise PermissionError(
-                    f"Cannot create database directory {db_dir}: {e}"
-                ) from e
+    engine: AsyncEngine | None = None
+    try:
+        if db_path and db_path != ":memory:":
+            db_dir = os.path.dirname(db_path)
+            if db_dir:
+                try:
+                    os.makedirs(db_dir, exist_ok=True)
+                except PermissionError as e:
+                    raise PermissionError(
+                        f"Cannot create database directory {db_dir}: {e}"
+                    ) from e
 
-    _db_path = db_path
+        engine = create_async_engine(
+            async_url,
+            echo=False,
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+        )
 
-    engine = create_async_engine(
-        async_url,
-        echo=False,
-        connect_args={
-            "check_same_thread": False,
-        },
-        pool_pre_ping=True,
-    )
+        from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
 
-    # Attach the SQLite PRAGMA + BEGIN recipe via sync_engine listeners.
-    from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
+        dialect = _make_url(async_url).get_backend_name()
+        if dialect == "sqlite":
+            _register_sqlite_pragmas_on_async_engine(engine)
 
-    dialect = _make_url(async_url).get_backend_name()
-    if dialect == "sqlite":
-        _register_sqlite_pragmas_on_async_engine(engine)
+        # Run migrations off the event loop — never blocks uvicorn.
+        await asyncio.to_thread(_apply_migrations_sync, sync_url)
 
-    _engine = engine
-    _AsyncSessionFactory = async_sessionmaker(
-        bind=engine,
-        expire_on_commit=False,
-        class_=AsyncSession,
-    )
+        # Publish only after successful migration.
+        _db_path = db_path
+        _engine = engine
+        _AsyncSessionFactory = async_sessionmaker(
+            bind=engine,
+            expire_on_commit=False,
+            class_=AsyncSession,
+        )
+    except Exception:
+        # Atomic teardown: dispose partial engine, clear all globals.
+        if engine is not None:
+            await engine.dispose()
+        _engine = None
+        _AsyncSessionFactory = None
+        _db_path = None
+        raise
+
+
+async def _init_with_once_future(
+    sync_url: str, async_url: str, db_path: str | None
+) -> None:
+    """Coordinate initialization via a once-future.
+
+    Concurrent callers await the SAME in-flight future.  On success, the future
+    resolves and all waiters return immediately with the published globals.
+    On failure, the future is cleared atomically so the next caller retries.
+    """
+    global _init_future
+
+    lock = _get_init_lock()
+    async with lock:
+        if _engine is not None and _AsyncSessionFactory is not None:
+            # Already initialized — fast path.
+            return
+
+        if _init_future is not None:
+            # Another caller is in flight — grab a reference before releasing the lock.
+            fut = _init_future
+            is_driver = False
+        else:
+            # First caller: create the once-future and start initialization.
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            _init_future = fut
+            is_driver = True
+
+    if not is_driver:
+        # We are a waiter — block until the driver resolves the future.
+        await fut
+        return
+
+    # We are the driver — run initialization and resolve the future for waiters.
+    try:
+        await _do_init(sync_url, async_url, db_path)
+        fut.set_result(None)
+    except Exception as exc:
+        # Clear the once-future so the next caller retries from a clean state.
+        async with lock:
+            if _init_future is fut:
+                _init_future = None
+        fut.set_exception(exc)
+        raise
 
 
 async def init_database(database_path: str | None = None) -> None:
-    """Initialize the database connection in a thread-safe manner.
+    """Initialize the database connection using a once-future state machine.
+
+    Concurrent callers await the SAME in-flight initialization — no caller
+    returns before migrations complete.  On failure, globals are cleared
+    atomically so a retry re-runs migrations from a clean state.
 
     Migrations run via ``asyncio.to_thread`` so this coroutine never blocks
     the event loop.  Safe to ``await`` directly inside a FastAPI lifespan or
@@ -216,39 +293,31 @@ async def init_database(database_path: str | None = None) -> None:
         PermissionError: If directory cannot be created
         ValueError: If database path is invalid
     """
-    import asyncio  # noqa: PLC0415
-
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
-    global _engine, _AsyncSessionFactory
+    if _engine is not None and _AsyncSessionFactory is not None:
+        return  # Already initialized — ultra-fast path before taking the lock.
 
-    with _init_lock:
-        if _engine is not None and _AsyncSessionFactory is not None:
-            return
+    if database_path is None:
+        database_path = DEFAULT_DATABASE_PATH
 
-        if database_path is None:
-            database_path = DEFAULT_DATABASE_PATH
+    if not database_path or not isinstance(database_path, str):
+        raise ValueError(f"Invalid database path: {database_path}")
 
-        if not database_path or not isinstance(database_path, str):
-            raise ValueError(f"Invalid database path: {database_path}")
+    target = DatabaseTarget.from_url(database_path)
+    sync_url = target.resolve_sync_url()
+    async_url = target.resolve_async_url()
+    db_path = target.sqlite_path if target.is_sqlite else None
 
-        target = DatabaseTarget.from_url(database_path)
-        sync_url = target.resolve_sync_url()
-        async_url = target.resolve_async_url()
-        db_path = target.sqlite_path if target.is_sqlite else None
-
-        _init_engine(sync_url, async_url, db_path)
-
-    # Run migrations off the event loop; _init_lock is NOT held here so the
-    # thread can acquire it if needed (it won't — engine is already set).
-    await asyncio.to_thread(_apply_migrations_sync, sync_url)
+    await _init_with_once_future(sync_url, async_url, db_path)
 
 
 async def init_database_from_url(database_url: str) -> None:
     """Initialise the database from a fully-formed SQLAlchemy URL.
 
-    Migrations run via ``asyncio.to_thread`` so this coroutine never blocks
-    the event loop.
+    Concurrent callers await the SAME in-flight initialization — no caller
+    returns before migrations complete.  Migrations run via
+    ``asyncio.to_thread`` so this coroutine never blocks the event loop.
 
     Used by ``serve`` after the parent has resolved the canonical URL from the
     ``DatabaseTarget`` precedence chain and exported it as ``SNORE_DATABASE_URL``.
@@ -256,27 +325,20 @@ async def init_database_from_url(database_url: str) -> None:
     Args:
         database_url: A fully-formed SQLAlchemy URL string.
     """
-    import asyncio  # noqa: PLC0415
-
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
-    global _engine, _AsyncSessionFactory
+    if _engine is not None and _AsyncSessionFactory is not None:
+        return  # Already initialized — ultra-fast path.
 
-    with _init_lock:
-        if _engine is not None and _AsyncSessionFactory is not None:
-            return
+    if not database_url:
+        raise ValueError(f"Invalid database URL: {database_url!r}")
 
-        if not database_url:
-            raise ValueError(f"Invalid database URL: {database_url!r}")
+    target = DatabaseTarget.from_url(database_url)
+    sync_url = target.resolve_sync_url()
+    async_url = target.resolve_async_url()
+    db_path = target.sqlite_path if target.is_sqlite else None
 
-        target = DatabaseTarget.from_url(database_url)
-        sync_url = target.resolve_sync_url()
-        async_url = target.resolve_async_url()
-        db_path = target.sqlite_path if target.is_sqlite else None
-
-        _init_engine(sync_url, async_url, db_path)
-
-    await asyncio.to_thread(_apply_migrations_sync, sync_url)
+    await _init_with_once_future(sync_url, async_url, db_path)
 
 
 def get_session() -> AsyncSession:
@@ -329,33 +391,20 @@ def get_db_path() -> str:
     return _db_path
 
 
-def get_sync_session_for_alembic() -> Any:
-    """Return a synchronous session for Alembic operations only.
-
-    This is intentionally sync — Alembic's migration runner is synchronous.
-    Do NOT use this for application logic.
-    """
-    from sqlalchemy import create_engine  # noqa: PLC0415
-    from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
-
-    if _db_path is None:
-        raise RuntimeError("Database not initialized.")
-    url = f"sqlite:///{_db_path}"
-    engine = create_engine(url, connect_args={"check_same_thread": False})
-    factory = sessionmaker(bind=engine)
-    return factory()
-
-
 async def cleanup_database() -> None:
     """Clean up database connections and reset global state.
 
     This function should be called during test cleanup to prevent resource warnings.
     """
-    global _engine, _AsyncSessionFactory, _db_path
+    global _engine, _AsyncSessionFactory, _db_path, _init_future, _init_lock
 
-    with _init_lock:
+    lock = _get_init_lock()
+    async with lock:
         if _engine is not None:
             await _engine.dispose()
             _engine = None
         _AsyncSessionFactory = None
         _db_path = None
+        _init_future = None
+    # Reset the lock itself so a fresh event loop gets a fresh lock.
+    _init_lock = None

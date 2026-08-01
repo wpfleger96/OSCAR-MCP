@@ -3,7 +3,7 @@
 import asyncio
 import logging
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -464,21 +464,23 @@ class AnalysisFacade:
             stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
-        # Fetch all session ID/date pairs upfront so worker threads don't need
-        # async context (yield_per requires a sync engine; scalars passed to
-        # asyncio.to_thread workers, not ORM objects).
-        rows = (await self.db_session.execute(stmt)).all()
-        if not rows:
+        # Count matched sessions up front without materializing rows so
+        # `total` reflects matched, not started (honest cancellation accounting).
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        matched_total: int = (await self.db_session.execute(count_stmt)).scalar_one()
+        if matched_total == 0:
             return BatchAnalysisResult(
                 total=0, successful=0, failed=0, cancelled=0, results=[]
             )
 
-        session_pairs = [(row.session_id, row.day_date) for row in rows]
+        # Stream rows lazily — never materialize a full 10k list.
+        async_result = await self.db_session.stream(stmt)
 
         coordinator = BatchAnalysisCoordinator()
         self._batch_coordinator = coordinator
         return await coordinator.submit(
-            session_pairs=session_pairs,
+            matched_total=matched_total,
+            session_stream=async_result,
             modes=modes,
             store_results=store_results,
             max_workers=max_workers,
@@ -517,7 +519,8 @@ class BatchAnalysisCoordinator:
     async def submit(
         self,
         *,
-        session_pairs: Iterable[tuple[int, date | None]],
+        matched_total: int,
+        session_stream: Any,  # AsyncResult from session.stream(); yields rows lazily
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
@@ -533,7 +536,9 @@ class BatchAnalysisCoordinator:
         session held — identical to the previous per-session pipeline.
 
         Args:
-            session_pairs: List of ``(session_id, day_date)`` scalar pairs.
+            matched_total: Count of matched sessions (from COUNT query); defines
+                ``total`` in the result so cancelled sessions are never silently dropped.
+            session_stream: Async stream from ``session.stream(stmt)``; yields rows lazily.
                 Scalars only — no ORM objects passed to workers.
             modes: Detection modes to run (``None`` = default).
             store_results: If True, write each result to the DB.
@@ -548,7 +553,7 @@ class BatchAnalysisCoordinator:
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
         from snore.database.session import _db_path  # noqa: PLC0415
 
-        self._total = -1  # Unknown until exhausted; updated at completion.
+        self._total = matched_total
         self._completed = 0
         # Do NOT reset _cancel_requested if cancel() was called before submit().
 
@@ -695,10 +700,13 @@ class BatchAnalysisCoordinator:
 
             return "success"
 
-        # Build a lazy iterator over the pairs; maintain at most max_workers tasks
-        # in flight (sliding window).  Never create all tasks upfront — task count,
-        # frames, and results must scale with max_workers, not batch length.
-        pairs_iter = iter(session_pairs)
+        # Build a lazy async iterator from the stream — never materialize all rows.
+        # The sliding window pulls pairs one at a time; at most max_workers tasks
+        # are in flight simultaneously.  session_dates is pruned as tasks complete
+        # so retained metadata stays window-bounded.
+        stream_iter = session_stream.__aiter__()
+        stream_exhausted = False
+
         batch_results: list[BatchSessionResult] = []
         pending: dict[asyncio.Task[str], int] = {}  # task → sid
         session_dates: dict[int, date | None] = {}
@@ -714,20 +722,32 @@ class BatchAnalysisCoordinator:
                     )
                     return "error"
 
-        def _fill_window() -> None:
-            """Enqueue pairs until max_workers tasks are in flight or exhausted."""
+        async def _next_pair() -> tuple[int, date | None] | None:
+            """Pull one row from the stream; return None when exhausted."""
+            nonlocal stream_exhausted
+            if stream_exhausted:
+                return None
+            try:
+                row = await stream_iter.__anext__()
+                return (row.session_id, row.day_date)
+            except StopAsyncIteration:
+                stream_exhausted = True
+                return None
+
+        async def _fill_window() -> None:
+            """Enqueue pairs until max_workers tasks are in flight or stream exhausted."""
             while len(pending) < max_workers:
                 if self._cancel_requested:
                     break
-                try:
-                    sid, day_date = next(pairs_iter)
-                except StopIteration:
+                pair = await _next_pair()
+                if pair is None:
                     break
+                sid, day_date = pair
                 session_dates[sid] = day_date
                 task: asyncio.Task[str] = asyncio.create_task(_run_one(sid))
                 pending[task] = sid
 
-        _fill_window()
+        await _fill_window()
         while pending:
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -741,7 +761,7 @@ class BatchAnalysisCoordinator:
                 batch_results.append(
                     BatchSessionResult(
                         session_id=sid,
-                        session_date=session_dates.get(sid),
+                        session_date=session_dates.pop(sid, None),
                         success=success,
                         cancelled=cancelled,
                         error=error,
@@ -749,18 +769,34 @@ class BatchAnalysisCoordinator:
                 )
                 self._completed += 1
                 if progress_callback:
-                    progress_callback(self._completed, None)
+                    progress_callback(self._completed, matched_total)
             # Refill the window after each completion.
-            _fill_window()
+            await _fill_window()
 
-        total = len(batch_results)
-        self._total = total
+        # Drain any rows remaining in the stream after cancellation.
+        # Each unconsumed row is counted as cancelled so `total` stays honest.
+        if self._cancel_requested:
+            while True:
+                pair = await _next_pair()
+                if pair is None:
+                    break
+                sid, day_date = pair
+                batch_results.append(
+                    BatchSessionResult(
+                        session_id=sid,
+                        session_date=day_date,
+                        success=False,
+                        cancelled=True,
+                        error=None,
+                    )
+                )
+
         successful = sum(1 for r in batch_results if r.success)
         cancelled_count = sum(1 for r in batch_results if r.cancelled)
         return BatchAnalysisResult(
-            total=total,
+            total=matched_total,
             successful=successful,
-            failed=total - successful - cancelled_count,
+            failed=matched_total - successful - cancelled_count,
             cancelled=cancelled_count,
             results=batch_results,
         )

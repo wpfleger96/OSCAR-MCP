@@ -186,10 +186,10 @@ async def db_session(tmp_path: Path) -> AsyncGenerator[AsyncSession]:
 
     db_path = str(tmp_path / "test.db")
 
-    # Reset the singleton so each test gets a fresh DB
-    db_mod._engine = None
-    db_mod._AsyncSessionFactory = None
-    db_mod._db_path = None
+    # Full cleanup of the singleton — resets engine, factory, db_path,
+    # _init_future, and _init_lock so concurrent xdist workers can't see
+    # a stale future from another test's init cycle.
+    await db_mod.cleanup_database()
     await db_mod.init_database(db_path)
 
     async with db_mod.session_scope() as session:
@@ -249,12 +249,9 @@ async def db_session(tmp_path: Path) -> AsyncGenerator[AsyncSession]:
 
         yield session
 
-    # Reset for next test
-    if db_mod._engine is not None:
-        await db_mod._engine.dispose()
-    db_mod._engine = None
-    db_mod._AsyncSessionFactory = None
-    db_mod._db_path = None
+    # Full cleanup — disposes engine and resets all singleton state including
+    # _init_future and _init_lock so the next test starts clean.
+    await db_mod.cleanup_database()
 
 
 class TestExportCsv:

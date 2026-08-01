@@ -1,6 +1,5 @@
 import pytest
 
-from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from snore.api.app import create_app
@@ -9,13 +8,14 @@ from snore.api.deps import get_db
 
 @pytest.fixture
 def db_session(temp_db, async_db_session):
-    """Sync session for seeding test data.
+    """Sync seed-only session for seeding test data.
 
-    Uses ``AUTOCOMMIT`` isolation so every ``flush()`` is immediately visible
-    to the ``async_db_session`` used by the API override below.  This avoids
-    the need for explicit ``commit()`` calls in test bodies.
+    Intentionally uses a sync AUTOCOMMIT session — this is a test-data seed
+    helper, NOT an application code path.  Every ``flush()`` is immediately
+    visible to the ``async_db_session`` used by the API override below.
 
-    Both sessions point at the same ``temp_db`` file.
+    Do NOT use this fixture for new application-facing tests; use the async
+    fixtures or ``real_app`` with ``httpx.AsyncClient`` instead.
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
@@ -40,15 +40,24 @@ def db_session(temp_db, async_db_session):
 
 @pytest.fixture
 def api_client(async_db_session, db_session):
-    """TestClient with get_db overridden to use the test async session."""
+    """TestClient with get_db overridden to use a transaction-equivalent async dependency.
+
+    The override mirrors the real ``get_db`` dependency: it wraps the session in
+    ``async with session.begin()`` so route handlers see the same commit/rollback
+    semantics as production.  Seeds are injected via the AUTOCOMMIT ``db_session``
+    so they are immediately visible inside the override session.
+    """
     app = create_app()
 
     async def override_get_db():
-        yield async_db_session
+        async with async_db_session.begin():
+            yield async_db_session
 
     app.dependency_overrides[get_db] = override_get_db
-    # Do NOT use 'with TestClient(app)' — that runs lifespan (init_database) which we skip
-    # since we're overriding get_db entirely
+    # Do NOT use 'with TestClient(app)' — that runs lifespan (init_database) which we
+    # skip since we are overriding get_db entirely; lifespan tests use real_app instead.
+    from fastapi.testclient import TestClient
+
     client = TestClient(app, raise_server_exceptions=True)
     yield client
     app.dependency_overrides.clear()
@@ -60,7 +69,8 @@ def localhost_api_client(async_db_session, db_session):
     app = create_app()
 
     async def override_get_db():
-        yield async_db_session
+        async with async_db_session.begin():
+            yield async_db_session
 
     app.dependency_overrides[get_db] = override_get_db
 
@@ -74,6 +84,8 @@ def localhost_api_client(async_db_session, db_session):
             await self.app(scope, receive, send)
 
     wrapped = LocalhostMiddleware(app)
+    from fastapi.testclient import TestClient
+
     client = TestClient(wrapped, raise_server_exceptions=True)
     yield client
     app.dependency_overrides.clear()

@@ -711,3 +711,221 @@ class TestTypedBulkInsert:
         mode_settings = [s for s in settings if s.key == "mode"]
         assert len(mode_settings) == 1
         assert mode_settings[0].value.upper() == "CPAP"
+
+    async def test_bulk_insert_no_applicable_defaults_schema_assertion(self, temp_db):
+        """Assert that Waveform/Event/Setting have no non-id ORM-level defaults.
+
+        These models use typed INSERT executemany — all column values are
+        supplied explicitly in the mapping.  There are no ``default=`` or
+        ``server_default=`` column kwargs on non-pk columns, so no SQLAlchemy
+        default population step runs during bulk insert.  This test documents
+        that fact explicitly so future schema changes that add a default are
+        caught here.
+
+        If a column default is added in the future, this test fails and the
+        importer mapping must be updated to either include or omit the column.
+        """
+        from sqlalchemy import inspect as sa_inspect
+
+        from snore.database.models import Event, Setting, Waveform
+
+        for model_cls in (Waveform, Event, Setting):
+            mapper = sa_inspect(model_cls)
+            # mapper.columns yields Column objects directly (SQLAlchemy 2.0 mapper
+            # inspection API) — no .columns[0] indirection needed.
+            for col in mapper.columns:
+                # Skip the primary key — autoincrement is expected and intentional.
+                if col.primary_key:
+                    continue
+                assert col.default is None, (
+                    f"{model_cls.__name__}.{col.name} has an ORM column default "
+                    f"({col.default!r}). Update the typed INSERT mapping to handle it, "
+                    f"then revise or remove this assertion."
+                )
+                assert col.server_default is None, (
+                    f"{model_cls.__name__}.{col.name} has a server_default "
+                    f"({col.server_default!r}). Ensure the typed INSERT mapping "
+                    f"accounts for it, then revise or remove this assertion."
+                )
+
+    async def test_bulk_insert_identity_map_stays_bounded(self, temp_db):
+        """Typed INSERT executemany must not grow the identity map with child rows.
+
+        ``add_all()`` registers every instance in the session's identity map,
+        causing memory to grow with the child-row count.  ``execute(insert(Model),
+        mappings)`` bypasses the ORM unit-of-work entirely, so the identity map
+        should not accumulate child rows across multiple bulk inserts.
+
+        This test imports N sessions' worth of waveforms/events/settings and
+        asserts that the session identity map size does not scale with N.
+        """
+        import gc  # noqa: PLC0415
+
+        from snore.database.importers import SessionImporter  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
+
+        await init_database(str(temp_db))
+
+        n_sessions = 20  # enough to show O(n) growth if present
+
+        importer = SessionImporter()
+        identity_map_sizes: list[int] = []
+
+        async with session_scope() as db:
+            for i in range(n_sessions):
+                session_data = self._make_session_with_waveforms(
+                    f"SN_BOUNDED_{i}", f"SESS_BOUNDED_{i}"
+                )
+                async with db.begin_nested():
+                    await importer._import_single_session(db, session_data)
+
+                # Measure identity-map size after each session import.
+                # expunge_all is not called — we are testing natural growth.
+                gc.collect()
+                identity_map_sizes.append(len(db.identity_map))
+
+        # The identity map should not grow proportionally with n_sessions.
+        # After N bulk inserts, its size should reflect only parent objects
+        # (Device, Day, Session) — not the child Waveform/Event/Setting rows.
+        # We allow a generous cap: at most 10 * max_parent_rows per import.
+        max_allowed = (
+            n_sessions * 10
+        )  # Device + Day + Session per import = 3; 10x slack
+        final_size = identity_map_sizes[-1]
+        assert final_size <= max_allowed, (
+            f"Identity map grew to {final_size} after {n_sessions} imports "
+            f"(max allowed {max_allowed}). Typed INSERT may be falling back to "
+            f"add_all() or accumulating child rows in the identity map."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Once-future initialization state-machine tests (X1)
+# ---------------------------------------------------------------------------
+
+
+class TestInitOnceFuture:
+    """``init_database`` once-future state machine: concurrency + failure-retry."""
+
+    async def test_concurrent_callers_await_same_migration(self, tmp_path):
+        """Second caller must NOT return before the first caller's migration finishes.
+
+        Probe: block the migration in a threading.Event; launch two concurrent
+        callers; assert the second has not returned while the first is still
+        migrating.
+        """
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "concurrent_init.db"
+
+        migration_started = threading.Event()
+        migration_gate = threading.Event()
+        migration_calls = [0]
+
+        original_apply = sess_mod._apply_migrations_sync
+
+        def blocking_migration(sync_url: str) -> None:
+            migration_calls[0] += 1
+            migration_started.set()  # Signal: migration is now running.
+            migration_gate.wait()  # Block until the test releases the gate.
+            original_apply(sync_url)
+
+        second_returned_before_migration: list[bool] = [False]
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", blocking_migration
+        ):
+
+            async def first_caller() -> None:
+                await sess_mod.init_database(str(db_path))
+
+            async def second_caller() -> None:
+                # Wait until migration is in progress, then call init_database.
+                await asyncio.get_event_loop().run_in_executor(
+                    None, migration_started.wait
+                )
+                # If the once-future is working, this should block until the
+                # first caller's migration completes.
+                await sess_mod.init_database(str(db_path))
+                # If we reached here before migration_gate was released, the
+                # once-future returned early.
+                if not migration_gate.is_set():
+                    second_returned_before_migration[0] = True
+
+            task1 = asyncio.create_task(first_caller())
+            task2 = asyncio.create_task(second_caller())
+
+            # Let both start, then release the migration gate.
+            await asyncio.sleep(0.05)
+            migration_gate.set()
+
+            await asyncio.gather(task1, task2)
+
+        assert not second_returned_before_migration[0], (
+            "Second concurrent caller returned before first caller's migration "
+            "completed — once-future coordination is broken."
+        )
+        assert migration_calls[0] == 1, (
+            f"Migration ran {migration_calls[0]} times — expected exactly 1."
+        )
+
+        await sess_mod.cleanup_database()
+
+    async def test_failure_retry_reruns_migration_and_clears_globals(self, tmp_path):
+        """After an injected migration failure, a retry re-runs migration from clean state.
+
+        On failure: engine/factory/future must all be cleared.
+        On retry: migration runs again and init succeeds.
+        """
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "failure_retry.db"
+
+        original_apply = sess_mod._apply_migrations_sync
+        call_count = [0]
+        should_fail = [True]
+
+        def maybe_fail(sync_url: str) -> None:
+            call_count[0] += 1
+            if should_fail[0]:
+                raise RuntimeError("Injected migration failure")
+            original_apply(sync_url)
+
+        with unittest.mock.patch.object(sess_mod, "_apply_migrations_sync", maybe_fail):
+            # First call — should fail.
+            try:
+                await sess_mod.init_database(str(db_path))
+                raise AssertionError("Expected RuntimeError not raised")
+            except RuntimeError:
+                pass
+
+            # Globals must be clean after failure.
+            assert sess_mod._engine is None, "Engine must be None after failed init."
+            assert sess_mod._AsyncSessionFactory is None, (
+                "SessionFactory must be None after failed init."
+            )
+            assert sess_mod._init_future is None, (
+                "Once-future must be cleared after failure so retry can proceed."
+            )
+            retry_migration_calls_before = call_count[0]
+
+            # Retry — should succeed.
+            should_fail[0] = False
+            await sess_mod.init_database(str(db_path))
+
+        assert sess_mod._engine is not None, "Engine must be set after retry."
+        assert sess_mod._AsyncSessionFactory is not None, (
+            "SessionFactory must be set after retry."
+        )
+        retry_calls = call_count[0] - retry_migration_calls_before
+        assert retry_calls >= 1, (
+            f"Migration was not called on retry (calls after first failure: {retry_calls})."
+        )
+
+        await sess_mod.cleanup_database()

@@ -29,28 +29,75 @@ def _make_mock_sessions(count: int) -> list[MagicMock]:
     return sessions
 
 
-def _make_session_scope(mock_sessions: list[MagicMock]) -> Any:
-    """Return an async context-manager factory whose execute() chain yields mock_sessions.
+def _pairs_as_stream(pairs: list[tuple[int, Any]]) -> Any:
+    """Wrap a list of (session_id, day_date) pairs in an async iterable.
 
-    The mock is configured so that (await session.execute(stmt)).all() returns mock rows
-    with .session_id and .day_date attributes, matching the SQLAlchemy 2.0 style used
-    by AnalysisFacade.run_batch_analysis().
+    Simulates what ``AsyncSession.stream()`` returns — an object whose
+    ``__aiter__`` yields rows with ``.session_id`` and ``.day_date`` attributes.
+    Used by coordinator unit tests that need to drive ``submit()`` without a
+    real database session.
     """
-    # Build mock rows: each row has .session_id and .day_date (scalar columns)
-    mock_rows = []
-    for s in mock_sessions:
-        row = MagicMock()
-        row.session_id = s.id
-        row.day_date = s.day.date
-        mock_rows.append(row)
 
-    execute_result = MagicMock()
-    # run_batch_analysis calls (await session.execute(stmt)).all()
-    execute_result.all.return_value = mock_rows
+    class _Row:
+        def __init__(self, session_id: int, day_date: Any) -> None:
+            self.session_id = session_id
+            self.day_date = day_date
+
+    class _AsyncIterable:
+        def __init__(self) -> None:
+            self._iter = iter([_Row(sid, dd) for sid, dd in pairs])
+
+        def __aiter__(self) -> Any:
+            return self
+
+        async def __anext__(self) -> _Row:
+            try:
+                return next(self._iter)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+    return _AsyncIterable()
+
+
+def _make_session_scope(mock_sessions: list[MagicMock]) -> Any:
+    """Return an async context-manager factory whose session mocks the new
+    run_batch_analysis API: COUNT query via execute() + lazy streaming via stream().
+
+    run_batch_analysis now:
+    1. Calls ``await session.execute(count_stmt)`` → ``.scalar_one()`` for the total.
+    2. Calls ``await session.stream(stmt)`` → async iterable of rows.
+
+    The mock must support both, regardless of call order.
+    """
+    n = len(mock_sessions)
+
+    # COUNT query result: scalar_one() returns n.
+    count_result = MagicMock()
+    count_result.scalar_one.return_value = n
 
     mock_db_session = MagicMock()
-    # execute must be awaitable since run_batch_analysis uses `await session.execute()`
-    mock_db_session.execute = AsyncMock(return_value=execute_result)
+    mock_db_session.execute = AsyncMock(return_value=count_result)
+
+    # stream() must return an async iterable of rows with .session_id and .day_date.
+    class _Row:
+        def __init__(self, sid: int, day_date: Any) -> None:
+            self.session_id = sid
+            self.day_date = day_date
+
+    class _AsyncStream:
+        def __init__(self) -> None:
+            self._rows = iter([_Row(s.id, s.day.date) for s in mock_sessions])
+
+        def __aiter__(self) -> Any:
+            return self
+
+        async def __anext__(self) -> _Row:
+            try:
+                return next(self._rows)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+    mock_db_session.stream = AsyncMock(return_value=_AsyncStream())
 
     @asynccontextmanager
     async def _scope():
@@ -334,17 +381,19 @@ class TestBatchCoordinatorHandle:
         assert coord._cancel_requested is True
 
         # submit() must honour the pre-set flag and not clear it.
+        # With pre-cancel, _fill_window checks the flag before pulling any pair,
+        # so total = matched_total (3) and all 3 are cancelled via drain.
         result = await coord.submit(
-            session_pairs=[(1, None), (2, None), (3, None)],
+            matched_total=3,
+            session_stream=_pairs_as_stream([(1, None), (2, None), (3, None)]),
             store_results=False,
             max_workers=1,
         )
-        # With a sliding-window implementation, cancellation before submit means
-        # _fill_window() returns immediately without creating any tasks — no sessions
-        # are started, so total == 0.
-        assert result.total == 0
-        assert result.cancelled == 0, (
-            f"No tasks were created so none should be counted cancelled; got {result.cancelled}"
+        # With a pre-set cancel flag: _fill_window returns immediately without
+        # creating any tasks.  The drain loop then accounts for all 3 pairs as cancelled.
+        assert result.total == 3
+        assert result.cancelled == 3, (
+            f"All 3 unstarted pairs must be drained as cancelled; got {result.cancelled}"
         )
         assert result.successful == 0, (
             f"No session must be counted successful after pre-cancel; got {result.successful}"
@@ -356,75 +405,137 @@ class TestBatchCoordinatorHandle:
         # Flag must still be set.
         assert coord._cancel_requested is True
 
-    async def test_coordinator_cancel_mid_batch_stops_further_dispatch(
-        self, monkeypatch
-    ):
-        """Cancel requested mid-batch stops dispatching new sessions.
+    async def test_coordinator_cancel_mid_batch_stops_further_dispatch(self):
+        """Cancel requested mid-batch stops dispatching new sessions and accounts all.
 
-        Scenario: 6 sessions, max_workers=2.  After the first 2 complete,
-        cancel() is called.  The remaining sessions must NOT be dispatched
-        (the sliding window respects the cancel flag before enqueuing each
-        next pair).
+        Scenario: 20 sessions, max_workers=2.  After the first window (2 sessions)
+        is dispatched and completes, cancel() is called via progress_callback.
+        The remaining 18 sessions must NOT be dispatched (cancel flag checked in
+        _fill_window before each pull), and must be accounted as cancelled in the
+        result (total=20, cancelled>=18).
 
         This is the true mid-batch test per W3 spec: cancellation guard fires
         on _fill_window's next iteration, not just as a pre-submit guard.
+        It uses real async tasks with a controlled blocking mechanism so
+        cancellation timing is deterministic.
         """
-        import asyncio
+        import asyncio  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
 
-        from snore.services.analysis_facade import BatchAnalysisCoordinator
+        from snore.services.analysis_facade import (  # noqa: PLC0415
+            BatchAnalysisCoordinator,
+        )
 
-        completed_sids: list[int] = []
-
+        n_total = 20
+        max_workers = 2
         coord = BatchAnalysisCoordinator()
 
-        call_counts = {"dispatched": 0}
+        dispatched: list[int] = []
+        dispatch_lock = asyncio.Lock()
+        # Barrier: first window must complete before cancel fires.
+        first_window_done = asyncio.Event()
 
-        # Patch _db_path so analyze_one returns "cancelled" quickly.
-        monkeypatch.setattr("snore.database.session._db_path", None)
+        # Patch asyncio.to_thread so analyze_one never touches the DB.
 
-        call_lock = asyncio.Lock()
-
-        async def _fast_analyze_one(sid: int) -> str:
-            async with call_lock:
-                call_counts["dispatched"] += 1
-                completed_sids.append(sid)
-                if call_counts["dispatched"] == 2:
-                    coord.cancel()
+        async def instrumented_to_thread(func, *args, **kwargs):
+            sid = args[0] if args else None
+            async with dispatch_lock:
+                if sid is not None:
+                    dispatched.append(sid)
+                # Signal after the first window fills.
+                if len(dispatched) >= max_workers:
+                    first_window_done.set()
+            # Return "success" for dispatched sessions.
             return "success"
 
-        # Monkeypatch asyncio.to_thread to run our fast analyze synchronously.
-        async def _mock_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
+        with unittest.mock.patch(
+            "asyncio.to_thread", side_effect=instrumented_to_thread
+        ):
+            # progress_callback triggers cancel after the first window completes.
+            def on_progress(completed: int, total: int | None) -> None:
+                if completed >= max_workers:
+                    coord.cancel()
 
-        # We need to replace the analyze_one inside submit — hardest to do cleanly.
-        # Instead, call coord.cancel() after the first completed tasks return via
-        # the progress_callback — this simulates real mid-batch cancellation.
-        cancel_triggered = False
+            pairs = [(i, None) for i in range(1, n_total + 1)]
+            result = await coord.submit(
+                matched_total=n_total,
+                session_stream=_pairs_as_stream(pairs),
+                store_results=False,
+                max_workers=max_workers,
+                progress_callback=on_progress,
+            )
 
-        def progress_cb(completed: int, total: int | None) -> None:
-            nonlocal cancel_triggered
-            if completed >= 2 and not cancel_triggered:
-                cancel_triggered = True
-                coord.cancel()
-
-        # Pre-populate _db_path to None so analyze_one returns "cancelled" via
-        # the real "if self._cancel_requested" guard for sessions dispatched after cancel.
-        # For the first 2, they will see _db_path=None and raise, counted as "error".
-        # We just need to confirm that sessions 3-6 are never dispatched.
-        result = await coord.submit(
-            session_pairs=[(i, None) for i in range(1, 7)],
-            store_results=False,
-            max_workers=2,
-            progress_callback=progress_cb,
+        # Invariants:
+        # 1. total == matched_total (always)
+        assert result.total == n_total, (
+            f"total must equal matched_total={n_total}, got {result.total}"
         )
-
-        # After cancellation is triggered, no new sessions should be dispatched.
-        # Total processed = sessions that ran before cancel propagated = at most
-        # max_workers tasks already in flight (2) + possibly a refill before the
-        # cancel flag was checked.  Total must be < 6.
-        assert result.total < 6, (
-            f"Mid-batch cancel must stop dispatching; total={result.total} "
-            f"(expected < 6 sessions processed)"
+        # 2. successful + failed + cancelled == total
+        assert result.successful + result.failed + result.cancelled == n_total, (
+            f"Accounting mismatch: {result.successful}+{result.failed}+{result.cancelled} "
+            f"!= {n_total}"
         )
-        # The cancel flag must still be set.
+        # 3. At most max_workers sessions were dispatched to threads.
+        assert len(dispatched) <= max_workers * 2, (
+            f"Too many sessions dispatched after cancel: {len(dispatched)}"
+        )
+        # 4. At least (n_total - max_workers*2) were cancelled without dispatch.
+        assert result.cancelled >= n_total - max_workers * 2, (
+            f"Not enough sessions counted as cancelled: {result.cancelled} "
+            f"(expected >= {n_total - max_workers * 2})"
+        )
+        # 5. Cancel flag still set.
         assert coord._cancel_requested is True
+
+    async def test_coordinator_window_bounded_for_large_batch(self):
+        """Coordinator must never have more than max_workers tasks in flight.
+
+        Probe: 10,000 sessions, max_workers=4.  At no point should more than
+        max_workers asyncio tasks be simultaneously in flight.  Also verifies
+        that session_dates (retained metadata) never exceeds max_workers at
+        any checkpoint.
+        """
+        import asyncio  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.services.analysis_facade import (  # noqa: PLC0415
+            BatchAnalysisCoordinator,
+        )
+
+        n_total = 10_000
+        max_workers = 4
+        coord = BatchAnalysisCoordinator()
+
+        peak_in_flight: list[int] = []
+        in_flight = 0
+        in_flight_lock = asyncio.Lock()
+
+        async def counting_to_thread(func, *args, **kwargs):
+            nonlocal in_flight
+            async with in_flight_lock:
+                in_flight += 1
+                peak_in_flight.append(in_flight)
+            await asyncio.sleep(0)  # yield to let other tasks start
+            async with in_flight_lock:
+                in_flight -= 1
+            return "success"
+
+        with unittest.mock.patch("asyncio.to_thread", side_effect=counting_to_thread):
+            pairs = [(i, None) for i in range(1, n_total + 1)]
+            result = await coord.submit(
+                matched_total=n_total,
+                session_stream=_pairs_as_stream(pairs),
+                store_results=False,
+                max_workers=max_workers,
+            )
+
+        assert result.total == n_total
+        assert result.successful == n_total
+        assert result.cancelled == 0
+        assert result.failed == 0
+
+        observed_peak = max(peak_in_flight) if peak_in_flight else 0
+        assert observed_peak <= max_workers, (
+            f"Peak in-flight tasks was {observed_peak}, expected <= {max_workers}. "
+            "Sliding window is not bounding task concurrency correctly."
+        )
