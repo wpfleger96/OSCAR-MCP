@@ -1,9 +1,19 @@
 """Pydantic response schemas for SNORE MCP tools.
 
-All date/time fields use ISO 8601 strings with explicit UTC offset.
-All measurement fields carry their unit as a sibling ``_unit`` field or are
-documented in the tool docstring.  Absent data is ``null`` with a companion
-``_reason`` field (e.g. ``rera_index: null, rera_index_reason: "analysis_not_run"``).
+Timestamp contract (three tiers, A6):
+  Tier 1 — absolute audit instants (e.g. ``AnalysisResult.created_at``):
+    UTC ISO 8601 with ``Z`` suffix.
+  Tier 2 — device/session wall-clock times (e.g. ``Event.start_time``,
+    ``Session.start_time``): offset-free ISO 8601 string (the DB deliberately
+    stores these as naive datetimes — no TZ is known from the source device).
+    Always accompanied by ``timezone_status: "unknown"``.  Never emit a UTC
+    offset or fabricate one via ``.timestamp()`` / ``astimezone()``.
+  Tier 3 — in-session positions: numeric ``offset_seconds`` from
+    ``Session.start_time``.
+
+Absent data is ``null`` with a companion ``*_reason`` field
+(e.g. ``rera_index: null, rera_index_reason: "analysis_not_run"``).
+All measurement fields carry their unit in the field name or tool docstring.
 """
 
 from __future__ import annotations
@@ -163,13 +173,21 @@ class EventContext(BaseModel):
 
 
 class EventRow(BaseModel):
-    """A single respiratory event with inline context."""
+    """A single respiratory event with inline context.
+
+    Timestamp contract (A6):
+    - ``start_time_wall_clock``: device wall-clock, offset-free ISO 8601 (tier 2).
+    - ``timezone_status``: always ``"unknown"`` — no TZ is recorded for device times.
+    - ``offset_seconds``: position from session start (tier 3).
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     id: int
     event_type: str
-    start_time_iso: str
+    start_time_wall_clock: str  # offset-free ISO 8601 device wall-clock (tier 2)
+    timezone_status: str = "unknown"  # always "unknown" for device wall-clock
+    offset_seconds: float  # seconds from Session.start_time (tier 3)
     duration_seconds: float | None = None
     spo2_drop_pct: float | None = None
     peak_flow_limitation: float | None = None
@@ -177,12 +195,18 @@ class EventRow(BaseModel):
 
 
 class EventsResponse(BaseModel):
-    """Response from get_events."""
+    """Response from get_events.
+
+    ``session_start_wall_clock`` is the tier-2 device wall-clock for the
+    session, so callers can convert ``offset_seconds`` to absolute positions.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     date: str
     session_id: int
+    session_start_wall_clock: str  # offset-free ISO 8601 (tier 2)
+    timezone_status: str = "unknown"
     events: list[EventRow]
     total_events: int
     device_capabilities: DeviceCapabilities | None = None

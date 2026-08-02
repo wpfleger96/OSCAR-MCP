@@ -1,4 +1,11 @@
-"""get_events tool — EventService adapter with inline context."""
+"""get_events tool — EventService adapter with inline context.
+
+Timestamp contract (A6):
+- Event positions are stored as device wall-clock (naive datetime).
+- Output uses tier-2 (offset-free ISO 8601 + timezone_status="unknown")
+  for absolute times and tier-3 (offset_seconds from Session.start_time)
+  for in-session positions.  No UTC offsets are fabricated.
+"""
 
 from __future__ import annotations
 
@@ -88,11 +95,14 @@ async def get_events(
     for ev in event_rows:
         context: EventContext | None = None
         if include_context:
-            minutes_since_start = (ev.start_time - session_start).total_seconds() / 60.0
+            offset_seconds = (ev.start_time - session_start).total_seconds()
+            minutes_since_start = offset_seconds / 60.0
             context = EventContext(
-                # Pressure/leak at event and MV-prior-120s require waveform
-                # sample-at-timestamp lookups — deferred to Phase 4 (render_window).
-                # Mark as None with no reason field; capability-honest per G2.
+                # TODO(PR-A seam): pressure/leak at event and MV-prior-120s require
+                # BreathService.get_contextual_events() — a multi-channel waveform
+                # window lookup. Deferred to Phase 4 when PR-A merges.
+                # Swap site: replace None values here with seam call results.
+                # Ref: docs/mcp-server-plan.md Appendix A §8 (ContextualEvent).
                 pressure_at_event_cmh2o=None,
                 leak_at_event_lpm=None,
                 mv_prior_120s_lpm=None,
@@ -103,7 +113,11 @@ async def get_events(
             EventRow(
                 id=int(ev.id),
                 event_type=ev.event_type,
-                start_time_iso=ev.start_time.isoformat(),
+                # Tier-2: device wall-clock, offset-free ISO 8601, no TZ fabricated
+                start_time_wall_clock=ev.start_time.isoformat(),
+                timezone_status="unknown",
+                # Tier-3: in-session position
+                offset_seconds=(ev.start_time - session_start).total_seconds(),
                 duration_seconds=ev.duration_seconds,
                 spo2_drop_pct=ev.spo2_drop,
                 peak_flow_limitation=ev.peak_flow_limitation,
@@ -114,6 +128,9 @@ async def get_events(
     return EventsResponse(
         date=event_date.isoformat(),
         session_id=session_id,
+        # Tier-2: session start as device wall-clock anchor for offset_seconds
+        session_start_wall_clock=session_start.isoformat(),
+        timezone_status="unknown",
         events=rows,
         total_events=len(rows),
     )

@@ -1,4 +1,24 @@
-"""get_nightly_summary tool — StatsService / DayService adapter."""
+"""get_nightly_summary tool — StatsService / DayService adapter.
+
+Timestamp contract (A6): date fields are Python ``date`` objects serialized as
+``YYYY-MM-DD`` — no timezone issue since dates have no time component.
+
+Domain-computation note (F5):
+  Compliance calc (days_compliant / compliance_pct) is currently computed
+  inline here as a temporary measure pending PR-A merge.
+  TODO(PR-A seam): replace the compliance block with a call to
+  BreathService.get_nightly_range_summary(), which returns NightlyRangeSummary
+  with pre-computed compliance fields.  Swap site: the ComplianceFields block
+  at the bottom of this function.
+  Ref: docs/mcp-server-plan.md Appendix A §10 + Amendment 2.
+
+  Similarly, RERA/FL analysis fields are read directly from
+  AnalysisResult.programmatic_result_json (latest run by created_at per session).
+  TODO(PR-A seam): when BreathService.get_nightly_summary() is available,
+  replace the per-session analysis dict parsing with a single seam call that
+  returns NightlyAnalysisSummary per night with fl_median/95th/max from Breath rows.
+  Ref: docs/mcp-server-plan.md Appendix A §10 (NightlyAnalysisSummary).
+"""
 
 from __future__ import annotations
 
@@ -202,6 +222,11 @@ async def get_nightly_summary(
 
     compliance: ComplianceFields | None = None
     if len(day_rows) > 1 or (start != end):
+        # TODO(PR-A seam): replace this inline compliance calc with a call to
+        # BreathService.get_nightly_range_summary() once PR-A merges.
+        # This is a temporary implementation — the calc is simple arithmetic
+        # over Day.total_therapy_hours, but it belongs in the service layer
+        # per Thufir F5. Swap: one call → extract compliance_pct / days_compliant.
         compliance = ComplianceFields(
             threshold_hours=compliance_threshold_hours,
             days_compliant=days_compliant,

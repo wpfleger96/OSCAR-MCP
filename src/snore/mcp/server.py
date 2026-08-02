@@ -7,9 +7,21 @@ Design doctrine:
   - Tiered data access: overview → summary → events → breath table → raw waveform
   - Compute server-side, return compact JSON; units on every field
   - Data-quality flags / null + reason everywhere (G2)
-  - Stateless: no module-global state; DB via lifespan-provided session factory (G3)
+  - Stateless: no module-global state beyond the active profile; DB access via
+    _scope_provider seam (G3) — see ``_scope_provider`` below
   - Profile-parameterized: profiles shape instructions only, not data (G1)
   - Vendor dispatch stays in the parser/service layer (G4)
+
+DB-access pattern (M2 / Thufir MINOR):
+  Tools call the module-level ``_scope_provider()`` function, NOT ``session_scope``
+  directly.  ``_scope_provider`` is installed by ``_lifespan`` and currently
+  delegates to the global ``session_scope()`` (which relies on the global
+  ``_AsyncSessionFactory`` populated by ``init_database_from_url``).
+
+  This seam exists so PR-C can swap in an actor-scoped session factory without
+  touching any tool code.  Do NOT call ``session_scope()`` directly from tools.
+  Do NOT describe this as lifespan factory injection — the factory is global state
+  that lifespan initializes; the seam is a thin callable wrapper.
 """
 
 from __future__ import annotations
@@ -18,7 +30,7 @@ import json
 import logging
 
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import wraps
 from importlib.metadata import version
 from pathlib import Path
@@ -26,6 +38,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.session import (
     cleanup_database,
@@ -43,6 +56,13 @@ logger = logging.getLogger(__name__)
 # Module-level profile holder — set during lifespan, read-only from tools.
 # This is the ONLY module-level state permitted in this package (G3).
 _active_profile: ClinicalProfile | None = None
+
+# DB-access seam (M2): tools call _scope_provider(), never session_scope() directly.
+# Lifespan installs the concrete implementation; PR-C swaps in an actor-scoped version.
+# Default delegates to the global session_scope() (populated by init_database_from_url).
+# Type: a zero-arg callable returning an async context manager that yields AsyncSession.
+_ScopeProvider = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+_scope_provider: _ScopeProvider = session_scope
 
 RESPONSE_SIZE_LIMIT = 500_000  # bytes; tools return narrow-your-query guidance
 
@@ -90,14 +110,24 @@ See docs://capabilities for dataset-specific channel availability.
 async def _lifespan(
     app: Any, db_flag: str | None = None, profile_name: str = "neutral"
 ) -> AsyncGenerator[None]:
-    """FastMCP lifespan: initialize DB and set active profile."""
-    global _active_profile
+    """FastMCP lifespan: initialize DB, install scope-provider seam, set active profile.
+
+    Lifespan teardown calls ``cleanup_database()`` in a ``finally`` block so it
+    runs even if tool errors occur during shutdown.  The ``_scope_provider`` seam
+    is reset to the default (global ``session_scope``) on teardown.
+    """
+    global _active_profile, _scope_provider
 
     target = DatabaseTarget.from_env_and_flags(db_flag=db_flag, warn_ignored=True)
     async_url = target.resolve_async_url()
 
     await init_database_from_url(async_url)
     _active_profile = get_profile(profile_name)
+
+    # Install the scope-provider seam: currently delegates to the global
+    # session_scope() that init_database_from_url populated.  PR-C replaces
+    # this with an actor-scoped factory at this exact assignment site.
+    _scope_provider = session_scope
 
     logger.info(
         "SNORE MCP server started — db=%r profile=%s", target.location, profile_name
@@ -107,6 +137,7 @@ async def _lifespan(
         yield
     finally:
         await cleanup_database()
+        _scope_provider = session_scope  # reset to safe default
         _active_profile = None
         logger.info("SNORE MCP server stopped")
 
@@ -210,17 +241,30 @@ def _register_resources(mcp: FastMCP) -> None:
         Lists which waveform channels, event types, and analysis features are
         present in the imported dataset.  Use this to understand what is and is
         not available before calling tools.
+
+        Channels/settings are derived from DB rows (G2 — capability-honest).
+        Parser registry is consulted for supported-vendor context only.
         """
         from snore.mcp.tools.overview import get_data_overview
+        from snore.parsers.register_all import register_all_parsers
+        from snore.parsers.registry import parser_registry
 
-        async with session_scope() as db:
+        # Idempotent: safe to call every time; noop if already registered.
+        register_all_parsers()
+
+        async with _scope_provider() as db:
             overview = await get_data_overview(db)
+
+        supported_parsers = [
+            f"{p.manufacturer} ({p.parser_id})" for p in parser_registry.list_parsers()
+        ]
 
         caps = {
             "description": (
                 "Available data channels and features in the imported SNORE dataset. "
                 "Channels listed as present=false are not available — tool fields "
-                "for absent channels return null with a reason."
+                "for absent channels return null with a reason. "
+                "supported_parsers lists registered device parsers (supplementary context only)."
             ),
             "devices": [
                 {
@@ -254,6 +298,7 @@ def _register_resources(mcp: FastMCP) -> None:
                     else "Analysis results are available. RERA index and RDI fields are populated."
                 ),
             },
+            "supported_parsers": supported_parsers,
         }
 
         return json.dumps(caps, indent=2, default=str)
@@ -280,7 +325,7 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         from snore.mcp.tools.overview import get_data_overview as _impl
 
-        async with session_scope() as db:
+        async with _scope_provider() as db:
             result = await _impl(db)
 
         payload = result.model_dump(mode="json")
@@ -313,7 +358,7 @@ def _register_tools(mcp: FastMCP) -> None:
 
         start_d, end_d = parse_date_range(start, end)
 
-        async with session_scope() as db:
+        async with _scope_provider() as db:
             result = await _impl(db, start_d, end_d, device_id=device_id)
 
         payload = result.model_dump(mode="json")
@@ -355,7 +400,7 @@ def _register_tools(mcp: FastMCP) -> None:
         if page < 1:
             raise ValidationError("page must be >= 1")
 
-        async with session_scope() as db:
+        async with _scope_provider() as db:
             result = await _impl(
                 db,
                 start_d,
@@ -380,9 +425,10 @@ def _register_tools(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Return respiratory events for a single session date.
 
-        Includes per-event context: minutes since session start.
-        Pressure/leak at event and MV-prior-120s context require waveform
-        lookups and will be added in Phase 3 (render_window).
+        Includes per-event context: minutes since session start, and
+        offset_seconds (from session start). Pressure/leak at event and
+        MV-prior-120s context require waveform lookups and will be populated
+        in Phase 4 via BreathService.get_contextual_events() (PR-A seam).
 
         Args:
             date: Session date in YYYY-MM-DD format.
@@ -398,7 +444,7 @@ def _register_tools(mcp: FastMCP) -> None:
 
         event_date = parse_date(date, "date")
 
-        async with session_scope() as db:
+        async with _scope_provider() as db:
             result = await _impl(
                 db,
                 event_date,
