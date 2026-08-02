@@ -1580,12 +1580,24 @@ class TestInitOnceFuture:
             init_coro = asyncio.create_task(sess_mod.init_database(str(db_path)))
             await asyncio.get_event_loop().run_in_executor(None, migration_started.wait)
 
+            # Instrument _do_cleanup to count actual teardown executions.
+            # A single shared _cleanup_task must execute teardown exactly once;
+            # a two-owner implementation would execute it twice.
+            do_cleanup_call_count: list[int] = [0]
+            original_do_cleanup = sess_mod._do_cleanup
+
+            async def counting_do_cleanup(
+                owned_init_task: asyncio.Task[None] | None,
+            ) -> None:
+                do_cleanup_call_count[0] += 1
+                return await original_do_cleanup(owned_init_task)
+
+            sess_mod._do_cleanup = counting_do_cleanup
+
             # Start two concurrent cleanups while init is in flight.
             cleanup1 = asyncio.create_task(sess_mod.cleanup_database())
             # Give cleanup1 one turn so it creates _cleanup_task first.
             await asyncio.sleep(0)
-            # Capture the first task ref before cleanup2 can see it.
-            first_cleanup_task_ref = sess_mod._cleanup_task
             cleanup2 = asyncio.create_task(sess_mod.cleanup_database())
 
             # Let both cleanups queue up.
@@ -1609,17 +1621,19 @@ class TestInitOnceFuture:
                 f"Concurrent cleanup raised unexpected exceptions: {errors}"
             )
 
+            # Restore original _do_cleanup.
+            sess_mod._do_cleanup = original_do_cleanup
+
         # State is fully clean.
         assert sess_mod._engine is None
         assert sess_mod._AsyncSessionFactory is None
         assert sess_mod._init_task is None
         assert sess_mod._cleanup_task is None
-        # Single teardown: both callers awaited the same _cleanup_task instance.
-        assert first_cleanup_task_ref is not None, (
-            "First _cleanup_task must have been created"
-        )
-        assert first_cleanup_task_ref.done(), (
-            "The shared cleanup task must be done after both callers returned"
+        # Single teardown: the shared _cleanup_task ran _do_cleanup exactly once.
+        # A two-owner implementation would produce count == 2 here.
+        assert do_cleanup_call_count[0] == 1, (
+            f"_do_cleanup must execute exactly once across both concurrent cleanup "
+            f"callers (executed {do_cleanup_call_count[0]} times)"
         )
 
     async def test_cancelled_cleanup_caller_teardown_still_completes(self, tmp_path):
