@@ -55,6 +55,7 @@ def cli(verbose: bool) -> None:
 
 def _register_commands() -> None:
     from snore.cli.commands.import_data import import_data
+    from snore.cli.commands.mcp import mcp
     from snore.cli.commands.serve import serve
     from snore.cli.commands.setup import setup
     from snore.cli.commands.stats import stats
@@ -78,6 +79,7 @@ def _register_commands() -> None:
     cli.add_command(stats)
     cli.add_command(validate)
     cli.add_command(serve)
+    cli.add_command(mcp)
 
     cli.add_command(db)
     cli.add_command(session)

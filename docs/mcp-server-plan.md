@@ -1,99 +1,131 @@
-# SNORE MCP Server Plan — v2
+# SNORE MCP Server Plan — v3.3
 
-MCP as a third thin presentation layer over the existing service layer, peer of the
-CLI and FastAPI backend. Purpose-built for LLM-assisted PAP settings tuning.
-
-**Sequenced behind the async migration.** MCP tools will be native-async from day one
-(no retrofit). Dispatch begins after PR-2 merges.
+MCP as a third thin presentation layer over the existing async service layer, peer of the
+CLI and FastAPI backend. Purpose-built for LLM-assisted PAP settings tuning but designed
+with generic contracts suitable for any PAP dataset.
 
 ---
 
 ## Context
 
-~60% of the analysis machinery already exists: breath segmenter, 7-class flow-shape
-classifier, RERA-proxy detector, `RxTracker` epochs, LTTB waveform downsampling. The
-work is MCP wiring + per-breath persistence + three new query tools.
+SNORE started life as OSCAR-MCP; commit `dd08225` deliberately removed a 762-line FastMCP
+server (8 tools, 3 resources) with intent to re-add later. This plan re-adds MCP as a
+**third thin presentation layer** over the existing async service layer — never a place
+where analysis logic lives.
 
 ---
 
-## Locked decisions
+## Design Doctrine
 
-1. **Transport: stdio now, HTTP-ready by construction.** FastMCP serves both stdio and
-   streamable-HTTP from the same tool definitions. We ship `snore mcp` (stdio); the
-   future hosted mode is `snore mcp --http` plus auth — zero tool rewrites required.
+**Tiered data access — computed metrics primary, rendered PNG charts secondary, raw arrays
+tertiary and tightly capped.** Progressive disclosure: overview → summary → events → breath
+table → raw waveform. Raw data is never the entry point.
 
-2. **No backfill, no lazy path.** Breath features are computed in the import pipeline
-   only. Drop-DB-and-reimport is the sole population mechanism and the recovery path
-   if the algorithm version changes. One code path; import gets slightly slower when
-   Phase 2 lands (timing reported at that PR).
+- **Compute server-side, return compact JSON.** Units on every field. Timestamps ISO 8601
+  with explicit offset.
+- **Data-quality flags everywhere**: per-window/per-breath `leak_valid`, `mask_off`,
+  `ramp_active` so junk is excludable automatically.
+- **Algorithm versioning in output** (`fl_algo: "v1.2"`) so epoch comparisons never
+  silently span algorithm changes.
 
-3. **Journal/subjective: dropped.** `log_subjective`/`get_subjective` are out. The
-   roadmap's Phase 3 journal item is a separate, unrelated thing.
+## Genericity Principles
 
----
-
-## Phases
-
-### Phase 1 — MCP skeleton + free tools
-
-**Depends on:** async migration complete (PR-2 merged)
-
-- `src/snore/mcp/` package, FastMCP, `snore mcp` CLI entry point
-  (stdio; transport param plumbed for HTTP later)
-- **`get_settings_timeline`** — adapter over `RxTracker`
-- **`get_nightly_summary`** — adapter over `StatsService`/`DayService`, paginated
-  (~30 nights/call); returns AHI split + RERA + leak/pressure percentiles + MV/RR/TV
-- **`get_events`** — `EventService` + inline context per event: pressure/leak at
-  event time, MV prior 120 s, minutes since session start
-- Clinical-context instructions resource (reframed for UARS/RDI; AHI de-emphasised)
-- Every field carries units; timestamps ISO 8601 with UTC offset
-
-### Phase 2 — Breath-feature persistence
-
-**Depends on:** async migration complete (can run parallel with Phase 1)
-
-- New `breaths` table persisting per-breath metrics at import time:
-  - `BreathMetrics` fields + `ShapeFeatures`
-  - Flow class + confidence (7-class classifier)
-  - Mid-inspiratory flattening index (alongside existing `flatness_index`; both
-    versioned)
-  - Recovery-breath flag
-  - Inferred trigger/cycle type (flagged `experimental`, with confidence)
-  - Per-breath quality flags: `leak_valid`, `ramp_active`, `mask_off`
-  - Algorithm version stamp per row batch
-- Alembic migration; populated only by fresh imports (reimport populates, no backfill)
-
-### Phase 3 — Core tuning tools
-
-**Depends on:** Phases 1 + 2
-
-- **`get_breath_table`** — windowed (~15 min cap), binned aggregates beyond the cap
-- **`find_windows`** — criteria queries over the `breaths` table:
-  - Worst-N windows by flattening with leak-valid filter
-  - Windows centred on central apnoeas
-  - FL-run-ending-in-recovery-breath
-- **`compare_epochs`** — `RxTracker` epochs × breath-feature distributions, leak-valid
-  time only; median/IQR/95th + nights-per-epoch
-
-### Phase 4 — Vision + TECA
-
-**Depends on:** Phase 3
-
-- **`render_window`** — server-rendered PNG (matplotlib) for short windows; enables
-  visual review without the client downloading raw arrays
-- **`get_waveform`** — raw downsampled arrays, tier-3 escape hatch (≤ 2 min,
-  ≤ 1000 pts/channel)
-- **`get_ca_analysis`** — per-CA preceding MV slope + PS delivered + stability;
-  night-level periodic-breathing % and MV rolling variance (extends existing pattern
-  detector); the ASV case-file tool
+- **G1 — Profile-parameterized, neutral by default.** Clinical emphasis lives in named
+  profiles, not in tool design. No tool returns different data per profile.
+- **G2 — Capability-honest.** Absent data is `null` + reason, never fabricated.
+- **G3 — Stateless and scope-ready.** No module-global state; DB via lifespan-provided
+  session factory; explicit ranges/filters in every tool.
+- **G4 — Vendor dispatch stays in the parser/service layer.**
 
 ---
 
-## Success criteria
+## Locked Decisions
 
-Claude Desktop/Code connects over stdio and can, in one conversation:
+1. **Transport: stdio now, HTTP-ready by construction.** `snore mcp` (stdio). FastMCP
+   serves stdio and streamable-HTTP from the same tool definitions.
+2. **Full analysis at import time as async background job.** Import commits first,
+   analysis follows without blocking ingestion. On-demand `snore analysis run` stays.
+3. **No Alembic migrations — ever.** Fresh DBs get the right schema via `create_all`.
+   Pre-existing DBs: breath-backed tools return capability-honest error → drop + reimport.
+4. **`matplotlib` as a main dependency** when `render_window` lands (Phase 2/PR-B Stage 3).
+5. **Tools are `async def`** calling the async service layer natively.
 
-1. Identify a night's worst flow-limitation windows with leak-valid filtering
-2. Pull the breath table for one window
-3. View the server-rendered PNG
-4. Compare two settings epochs with real distribution stats
+---
+
+## 2-PR Structure
+
+### PR-A — Substrate (@Hayt, merges first)
+`Breath` model, import-time background analysis, breath persistence, `breath_service.py`.
+Zero MCP knowledge. Branch: `will/import-time-analysis`.
+
+**Boundary:** `database/models.py`, `analysis/**`, `services/**` (incl. new
+`breath_service.py`), `api/**`, `cli/commands/import_data.py`, tests.
+
+### PR-B — Complete MCP layer (@Duncan, merges second)
+`src/snore/mcp/` package, all ~10 tools across Stages 1–3, resources, profiles, CLI entry,
+`fastmcp`/`matplotlib` deps, this doc. Branch: `will/mcp-server`.
+
+**Boundary:** `src/snore/mcp/**`, `cli/commands/mcp.py`, `cli/__init__.py` (register only),
+`pyproject.toml`, `docs/mcp-server-plan.md`.
+
+**Staged internally:**
+- Stage 1 (no PR-A dependency): skeleton + free tools (`get_data_overview`,
+  `get_settings_timeline`, `get_nightly_summary`, `get_events`) + resources + profiles.
+- Stage 2 (after PR-A merges + rebase): `get_breath_table`, `find_windows`,
+  `compare_epochs` (via `breath_service`).
+- Stage 3 (same PR): `render_window` (matplotlib), `get_waveform` (LTTB),
+  `get_ca_analysis`.
+
+---
+
+## Tools (current — Stage 1)
+
+### get_data_overview
+Cold-start orientation. Call first. Returns devices, date ranges, available waveform
+channels, event types, analysis status.
+
+### get_settings_timeline(start, end, device_id?)
+Therapy settings epochs. Generic `RX_KEYS` only. Changed keys flagged per epoch.
+
+### get_nightly_summary(start, end, device_id?, page, page_size, compliance_threshold_hours)
+Per-night summary, paginated. Analysis-derived fields (RERA index, RDI) are `null` +
+`analysis_not_run` when analysis absent. Compliance block in range mode.
+
+### get_events(date, types?, min_duration?, include_context)
+Respiratory events for a session date. Inline context: minutes since session start.
+
+---
+
+## Resources
+
+- `docs://tools` — complete tool reference (this package's `docs/tools.md`)
+- `docs://schemas/{type}` — JSON schema for any named Pydantic response type
+- `docs://capabilities` — dynamically generated from imported data
+
+---
+
+## Clinical Profiles
+
+Profiles shape the INSTRUCTIONS resource and priority hints only (G1). No tool returns
+different data per profile. Available: `neutral` (default), `uars`, `osa`, `csa`.
+
+---
+
+## Implementation Conventions
+
+- `fastmcp>=3` standalone (NOT `mcp[cli]`)
+- `tool_error_boundary` on every tool
+- `RESPONSE_SIZE_LIMIT` guard (500 KB); returns narrow-your-query guidance
+- `docs://tools` resource + REQUIRED-READING preamble
+- Lifespan resolves DB via `DatabaseTarget.from_env_and_flags`
+- `session_scope()` per tool call — no module-global state
+
+---
+
+## Success Criteria
+
+Claude Desktop/Code connects over stdio and can, in one conversation: orient via
+`get_data_overview` → identify worst flow-limitation windows → pull the breath table for
+one → view the PNG → compare two settings epochs with real distribution stats — using only
+generic tool contracts, with `clinical_profile: uars` active. Stage 1 covers the
+orientation and summary half of this workflow; Stages 2–3 complete it.
