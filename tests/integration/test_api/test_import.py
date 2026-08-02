@@ -67,9 +67,18 @@ class TestImportUpload:
         assert isinstance(data["job_id"], str)
         assert len(data["job_id"]) > 0
 
-    def test_upload_writes_files_to_temp_dir(self, api_client):
-        """Upload creates temp files that can be retrieved via the job store."""
-        from snore.api.import_jobs import get_job
+    def test_upload_writes_files_to_temp_dir(self, api_client, monkeypatch):
+        """Upload creates temp files that can be retrieved via the job store.
+
+        _start_worker is patched to a no-op so the background worker never runs
+        and its finally-cleanup_files() cannot race the file-existence assertions.
+        These tests validate upload path layout and content, not worker execution.
+        """
+        import snore.api.routers.import_data as import_mod  # noqa: PLC0415
+
+        from snore.api.import_jobs import get_job  # noqa: PLC0415
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job: None)
 
         response = api_client.post(
             "/api/v1/import",
@@ -95,16 +104,24 @@ class TestImportUpload:
         ).read_bytes() == b"edf content"
 
         # Cleanup
-        import shutil
+        import shutil  # noqa: PLC0415
 
-        from snore.api.import_jobs import remove_job
+        from snore.api.import_jobs import remove_job  # noqa: PLC0415
 
         shutil.rmtree(job.temp_dir, ignore_errors=True)
         remove_job(job_id)
 
-    def test_upload_path_traversal_sanitized(self, api_client):
-        """Path traversal components are stripped from uploaded filenames."""
-        from snore.api.import_jobs import get_job
+    def test_upload_path_traversal_sanitized(self, api_client, monkeypatch):
+        """Path traversal components are stripped from uploaded filenames.
+
+        _start_worker is patched to a no-op so the background worker never runs
+        and its finally-cleanup_files() cannot race the temp-dir rglob assertions.
+        """
+        import snore.api.routers.import_data as import_mod  # noqa: PLC0415
+
+        from snore.api.import_jobs import get_job  # noqa: PLC0415
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job: None)
 
         response = api_client.post(
             "/api/v1/import",
@@ -122,9 +139,9 @@ class TestImportUpload:
         for path in job.temp_dir.rglob("*"):
             assert path.resolve().is_relative_to(tmp_root)
 
-        import shutil
+        import shutil  # noqa: PLC0415
 
-        from snore.api.import_jobs import remove_job
+        from snore.api.import_jobs import remove_job  # noqa: PLC0415
 
         shutil.rmtree(job.temp_dir, ignore_errors=True)
         remove_job(job_id)
