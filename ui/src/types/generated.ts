@@ -529,7 +529,7 @@ export interface paths {
         post?: never
         /**
          * Cancel Import
-         * @description Cancel an import job.  Idempotent — returns 204 whether or not the job existed.
+         * @description Cancel an import job. Idempotent — returns 204 whether or not the job existed.
          */
         delete: operations['cancel_import_api_v1_import__job_id__delete']
         options?: never
@@ -546,7 +546,7 @@ export interface paths {
         }
         /**
          * Import Progress
-         * @description Attach an SSE observer to an existing job.  Never starts/restarts the worker.
+         * @description Attach an SSE observer to an existing job. Never starts/restarts the worker.
          */
         get: operations['import_progress_api_v1_import__job_id__progress_get']
         put?: never
@@ -668,7 +668,12 @@ export interface paths {
         }
         get?: never
         put?: never
-        /** Vacuum Db */
+        /**
+         * Vacuum Db
+         * @description Vacuum the SQLite database to reclaim space after deletions.
+         *
+         *     Requires a SQLite file target; raises 422 for non-SQLite databases.
+         */
         post: operations['vacuum_db_api_v1_db_vacuum_post']
         delete?: never
         options?: never
@@ -685,7 +690,13 @@ export interface paths {
         }
         get?: never
         put?: never
-        /** Reset Db */
+        /**
+         * Reset Db
+         * @description Delete all rows from all tables (generic) and vacuum if SQLite.
+         *
+         *     Generic row reset works for any dialect.  SQLite targets additionally
+         *     receive a VACUUM pass after the commit.
+         */
         post: operations['reset_db_api_v1_db_reset_post']
         delete?: never
         options?: never
@@ -708,6 +719,44 @@ export interface paths {
         options?: never
         head?: never
         patch?: never
+        trace?: never
+    }
+    '/api/v1/profiles/': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Profiles
+         * @description List all live profiles for the current user.
+         */
+        get: operations['list_profiles_api_v1_profiles__get']
+        put?: never
+        /** Create Profile */
+        post: operations['create_profile_api_v1_profiles__post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/profiles/{profile_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        /** Update Profile */
+        patch: operations['update_profile_api_v1_profiles__profile_id__patch']
         trace?: never
     }
 }
@@ -1151,6 +1200,11 @@ export interface components {
              * @default false
              */
             delete_all: boolean
+        }
+        /** CreateProfileRequest */
+        CreateProfileRequest: {
+            /** Name */
+            name: string
         }
         /** DatabaseStatsPublic */
         DatabaseStatsPublic: {
@@ -1847,6 +1901,15 @@ export interface components {
              */
             avg_rera?: number | null
         }
+        /** ProfileResponse */
+        ProfileResponse: {
+            /** Id */
+            id: number
+            /** Name */
+            name: string
+            /** User Id */
+            user_id: number
+        }
         /**
          * RERAEvent
          * @description Detected RERA (Respiratory Effort-Related Arousal) event.
@@ -1899,6 +1962,13 @@ export interface components {
              * @description Baseline flow before event (L/min)
              */
             baseline_flow: number
+        }
+        /** RenameProfileRequest */
+        RenameProfileRequest: {
+            /** Name */
+            name?: string | null
+            /** Default */
+            default?: boolean | null
         }
         /**
          * ResetResult
@@ -3904,6 +3974,109 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_profiles_api_v1_profiles__get: {
+        parameters: {
+            query: {
+                request: unknown
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ProfileResponse'][]
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    create_profile_api_v1_profiles__post: {
+        parameters: {
+            query: {
+                request: unknown
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['CreateProfileRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ProfileResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    update_profile_api_v1_profiles__profile_id__patch: {
+        parameters: {
+            query: {
+                request: unknown
+            }
+            header?: never
+            path: {
+                profile_id: number
+            }
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['RenameProfileRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ProfileResponse']
                 }
             }
             /** @description Validation Error */

@@ -29,8 +29,9 @@ def _make_waveform_patches():
         patch("snore.database.session.session_scope", side_effect=_mock_session_scope),
         # Short-circuit profile resolution — no real DB available in these unit tests
         patch(
-            "snore.auth.factory.ActorContextFactory.make_local",
+            "snore.auth.factory.ActorContextFactory.make_from_cli",
             new_callable=AsyncMock,
+            return_value=MagicMock(profile_id=1),
         ),
     ]
 
@@ -52,8 +53,9 @@ class TestWaveformMultiTypeAllFail:
             patch("snore.waveform.WaveformInspector") as mock_inspector_cls,
             patch("snore.waveform.WaveformRenderer"),
             patch(
-                "snore.auth.factory.ActorContextFactory.make_local",
+                "snore.auth.factory.ActorContextFactory.make_from_cli",
                 new_callable=AsyncMock,
+                return_value=MagicMock(profile_id=1),
             ),
         ):
             mock_inspector = mock_inspector_cls.return_value
@@ -103,8 +105,9 @@ class TestWaveformMultiTypePartialFailure:
             patch("snore.waveform.WaveformInspector") as mock_inspector_cls,
             patch("snore.waveform.WaveformRenderer", return_value=mock_renderer),
             patch(
-                "snore.auth.factory.ActorContextFactory.make_local",
+                "snore.auth.factory.ActorContextFactory.make_from_cli",
                 new_callable=AsyncMock,
+                return_value=MagicMock(profile_id=1),
             ),
         ):
             mock_inspector = mock_inspector_cls.return_value
@@ -164,8 +167,9 @@ class TestWaveformMultiTypeOrdering:
             patch("snore.waveform.WaveformInspector") as mock_inspector_cls,
             patch("snore.waveform.WaveformRenderer", return_value=mock_renderer),
             patch(
-                "snore.auth.factory.ActorContextFactory.make_local",
+                "snore.auth.factory.ActorContextFactory.make_from_cli",
                 new_callable=AsyncMock,
+                return_value=MagicMock(profile_id=1),
             ),
         ):
             mock_inspector = mock_inspector_cls.return_value

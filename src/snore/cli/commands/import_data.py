@@ -12,7 +12,7 @@ import click
 
 from rich.markup import escape
 
-from snore.cli.decorators import date_range_options, db_option, init_db
+from snore.cli.decorators import actor_options, date_range_options, db_option, init_db
 from snore.cli.display import (
     ICON_BACKUP,
     ICON_FILTERS,
@@ -38,6 +38,7 @@ from snore.services.import_service import ImportService
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--force", is_flag=True, help="Re-import existing sessions")
 @db_option
+@actor_options
 @click.option("--limit", "-n", type=int, help="Limit to first N sessions")
 @click.option(
     "--sort-by",
@@ -78,6 +79,8 @@ def import_data(
     path: str,
     force: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
     limit: int | None,
     sort_by: str,
     date_from: datetime | None,
@@ -97,7 +100,6 @@ def import_data(
 
     console.print(f"{ICON_SCAN} Scanning {data_path}...")
     sources = service.detect_sources(data_path)
-
     if not sources:
         supported = "\n".join(
             f"  - {p.manufacturer}: {p.parser_id}"
@@ -327,6 +329,8 @@ def import_data(
                     date_to=date_to_str,
                     parallel=not no_parallel,
                     progress_callback=_progress,
+                    user_ref=actor_user,
+                    profile_ref=actor_profile,
                 )
             )
         except RuntimeError as e:

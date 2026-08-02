@@ -591,14 +591,10 @@ async def _list_sessions(
     limit: int,
     analyzed_only: bool,
     sort_by: str = "date-desc",
-    profile_id: int | None = None,
+    profile_id: int = 0,
 ) -> None:
     from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
-    if profile_id is None:
-        from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
-
-        profile_id = await resolve_local_profile_id(session)
     facade = AnalysisFacade(session, profile_id)
     results = await facade.list_sessions_with_status(
         start=start, end=end, limit=limit, analyzed_only=analyzed_only, sort_by=sort_by

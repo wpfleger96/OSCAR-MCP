@@ -96,6 +96,8 @@ class ImportService:
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
+        user_ref: str | None = None,
+        profile_ref: str | None = None,
     ) -> ImportResult:
         """Run the import pipeline for the selected sources.
 
@@ -106,6 +108,8 @@ class ImportService:
             cancel_predicate: Optional callable that returns True when the caller
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
+            user_ref:   Value of --user / SNORE_USER for profile resolution.
+            profile_ref: Value of --profile / SNORE_PROFILE for profile resolution.
         """
         return await self._import_sources_async(
             sources,
@@ -121,6 +125,8 @@ class ImportService:
             dry_run=dry_run,
             progress_callback=progress_callback,
             cancel_predicate=cancel_predicate,
+            user_ref=user_ref,
+            profile_ref=profile_ref,
         )
 
     async def _import_sources_async(
@@ -139,6 +145,8 @@ class ImportService:
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
+        user_ref: str | None = None,
+        profile_ref: str | None = None,
     ) -> ImportResult:
 
         def emit(msg: str) -> None:
@@ -157,7 +165,14 @@ class ImportService:
         # are owned by this profile.  In local mode this auto-provisions the first
         # admin user + profile on first run.
         async with session_scope() as _profile_db:
-            profile_id = await resolve_local_profile_id(_profile_db)
+            if user_ref is not None or profile_ref is not None:
+                from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+                profile_id = await resolve_cli_profile_id(
+                    _profile_db, user_ref, profile_ref
+                )
+            else:
+                profile_id = await resolve_local_profile_id(_profile_db)
 
         if not dry_run:
             async with session_scope() as db_session:

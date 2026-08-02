@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.auth.actor import ActorContext, AuthMode, Role
@@ -186,6 +186,21 @@ class ActorContextFactory:
         Click-friendly errors should use resolve_cli_profile_id() instead.
         """
         if user_ref is None:
+            # Fail fast when multiple non-disabled users exist: guessing the
+            # "first" one silently breaks multi-user setups.  Single-user and
+            # zero-user (auto-provision) paths continue to make_local().
+            user_count = (
+                await self._db.execute(
+                    select(func.count())
+                    .select_from(models.User)
+                    .where(models.User.disabled_at.is_(None))
+                )
+            ).scalar_one()
+            if user_count > 1:
+                raise ValueError(
+                    f"Multiple users found ({user_count}). "
+                    "Specify one with --user <email> or SNORE_USER=<email>."
+                )
             actor = await self.make_local(mode)
             if profile_ref is None:
                 return actor
@@ -256,10 +271,14 @@ async def resolve_local_profile_id(db: AsyncSession) -> int:
     """Return the active profile_id for local (single-user) CLI mode.
 
     Resolves or auto-provisions the first admin user and their default profile.
-    Convenience wrapper over ``ActorContextFactory.make_local`` for CLI callers
-    that only need the ``profile_id``.
+    Fails with ValueError if multiple non-disabled users exist without an
+    explicit --user / SNORE_USER selection — no silent first-row guessing.
     """
-    actor = await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
+    actor = await ActorContextFactory(db).make_from_cli(
+        user_ref=None,
+        profile_ref=None,
+        mode=AuthMode.LOCAL,
+    )
     return actor.profile_id
 
 
