@@ -408,16 +408,14 @@ class TestBatchCoordinatorHandle:
     async def test_coordinator_cancel_mid_batch_stops_further_dispatch(self):
         """Cancel requested mid-batch stops dispatching new sessions and accounts all.
 
-        Scenario: 20 sessions, max_workers=2.  After the first window (2 sessions)
-        is dispatched and completes, cancel() is called via progress_callback.
-        The remaining sessions must NOT be dispatched (cancel flag checked in
-        _fill_window before each pull), and must be accounted as cancelled in the
-        result.
+        Scenario: 20 sessions, max_workers=2.  The first window dispatches
+        sessions 1 and 2 concurrently.  As soon as the first session completes,
+        cancel() is called via the progress_callback.  By the time _fill_window
+        is called again, _cancel_requested is True, so no further sessions are
+        dispatched.  Sessions 3-20 are drained as cancelled.
 
-        This is the true mid-batch test per W3 spec: cancellation guard fires
-        on _fill_window's next iteration, not just as a pre-submit guard.
-        It uses real async tasks with mocked I/O so cancellation timing is
-        deterministic and the coordinator never touches the database.
+        Exact deterministic boundary: dispatched == max_workers == 2 (both
+        from the first window), cancelled == n_total - max_workers == 18.
         """
         import asyncio  # noqa: PLC0415
         import unittest.mock  # noqa: PLC0415
@@ -472,9 +470,12 @@ class TestBatchCoordinatorHandle:
                 "asyncio.to_thread", side_effect=instrumented_to_thread
             ),
         ):
-            # progress_callback triggers cancel after max_workers complete.
+            # progress_callback triggers cancel on the very first completion.
+            # This fires before _fill_window can pull any more sessions, so the
+            # exact boundary is: dispatched == max_workers (first window only),
+            # cancelled == n_total - max_workers.
             def on_progress(completed: int, total: int | None) -> None:
-                if completed >= max_workers:
+                if completed >= 1:
                     coord.cancel()
 
             pairs = [(i, None) for i in range(1, n_total + 1)]
@@ -495,15 +496,14 @@ class TestBatchCoordinatorHandle:
             f"Accounting mismatch: {result.successful}+{result.failed}+{result.cancelled} "
             f"!= {n_total}"
         )
-        # 3. At most max_workers*2 sessions reached the compute phase
-        #    (first window + one possible refill window before cancel takes effect).
-        assert len(compute_calls) <= max_workers * 2, (
-            f"Too many compute dispatches after cancel: {len(compute_calls)}"
+        # 3. Exactly max_workers sessions were dispatched (first window only).
+        assert len(compute_calls) == max_workers, (
+            f"Expected exactly {max_workers} compute dispatches (first window); "
+            f"got {len(compute_calls)}"
         )
-        # 4. At least (n_total - max_workers*2) sessions were cancelled without dispatch.
-        assert result.cancelled >= n_total - max_workers * 2, (
-            f"Not enough sessions counted as cancelled: {result.cancelled} "
-            f"(expected >= {n_total - max_workers * 2})"
+        # 4. Exactly n_total - max_workers sessions were cancelled without dispatch.
+        assert result.cancelled == n_total - max_workers, (
+            f"Expected cancelled={n_total - max_workers}, got {result.cancelled}"
         )
         # 5. Cancel flag still set.
         assert coord._cancel_requested is True
