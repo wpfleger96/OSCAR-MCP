@@ -1412,6 +1412,10 @@ class TestInitOnceFuture:
                 ),
             ):
                 caller_task = asyncio.create_task(sess_mod.init_database(str(db_path)))
+                # Capture the shared _init_task before cancelling the caller —
+                # after cancel+gather, _init_task may still be set but running.
+                await asyncio.sleep(0)  # let caller create _init_task
+                task_ref = sess_mod._init_task
                 # Wait until migration has started.
                 await asyncio.get_event_loop().run_in_executor(
                     None, migration_started.wait
@@ -1424,9 +1428,17 @@ class TestInitOnceFuture:
                 # Release the gate — migration will fail; the shared task will
                 # fail with RuntimeError.  The done-callback should catch it.
                 migration_gate.set()
-                # Give the event loop enough turns for the done-callback to fire.
-                for _ in range(5):
-                    await asyncio.sleep(0)
+                # Wait (bounded) for the shared task to finish WITHOUT awaiting
+                # it — nobody may retrieve the exception except the done-callback.
+                import time  # noqa: PLC0415
+
+                deadline = time.monotonic() + 5.0
+                while task_ref is not None and not task_ref.done():
+                    assert time.monotonic() < deadline, "init task did not finish"
+                    await asyncio.sleep(0.01)
+                # One extra turn: done-callbacks run via call_soon after the
+                # task completes.
+                await asyncio.sleep(0)
 
         # T2 assertion 1: no asyncio "never retrieved" warning.
         unretrieved = [
