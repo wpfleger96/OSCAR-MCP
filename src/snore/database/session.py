@@ -67,18 +67,21 @@ _engine: AsyncEngine | None = None
 _AsyncSessionFactory: async_sessionmaker[AsyncSession] | None = None
 _db_path: str | None = None
 
-# Once-future coordination: concurrent callers await the same in-flight
-# initialization task.  Published engine/factory only after migration success;
-# disposed and cleared atomically on failure so a retry re-runs migrations.
-# Protected by an asyncio.Lock so concurrent async callers serialize correctly.
+# Once-task coordination: concurrent callers await the SAME in-flight
+# initialization task via asyncio.shield().  Published engine/factory only
+# after migration success; disposed and cleared atomically on cancellation or
+# failure so a retry re-runs migrations from a clean state.
+# Protected by a stable asyncio.Lock (never replaced so no two lock domains
+# can overlap).
 _init_lock: asyncio.Lock | None = None  # Created lazily inside an event loop.
-_init_future: asyncio.Future[None] | None = None  # The in-flight once-future.
+_init_task: asyncio.Task[None] | None = None  # The in-flight once-task.
 
 
 def _get_init_lock() -> asyncio.Lock:
     """Return the module-level asyncio.Lock, creating it on first call.
 
-    Must be called from within a running event loop.
+    Must be called from within a running event loop.  The lock is never
+    replaced once created so all callers always share the same domain.
     """
     global _init_lock
     if _init_lock is None:
@@ -177,8 +180,12 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
 async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
     """Build the engine, run migrations, then publish globals atomically.
 
-    Called exactly once per initialization lifecycle.  On failure, disposes
-    any partially-built engine and clears all globals so a retry starts fresh.
+    Called exactly once per initialization lifecycle.  On failure or
+    cancellation, disposes any partially-built engine and clears all globals
+    (including ``_init_task``) so a retry starts fresh.
+
+    ``CancelledError`` is caught as ``BaseException`` so a cancelled driver
+    tears down cleanly and lets the next caller retry rather than hanging.
     """
     global _engine, _AsyncSessionFactory, _db_path
 
@@ -218,26 +225,41 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
             expire_on_commit=False,
             class_=AsyncSession,
         )
-    except Exception:
-        # Atomic teardown: dispose partial engine, clear all globals.
+    except BaseException:
+        # Atomic teardown on any failure including CancelledError.
+        # Use synchronous disposal only — awaiting inside an except-BaseException
+        # block after catching CancelledError can re-raise CancelledError at the
+        # next await in Python 3.11+ cancellation semantics.
+        # _init_task does NOT need explicit clearing here: _init_with_once_task
+        # checks ``_init_task.done()`` under the lock, which returns True once
+        # this task is cancelled or failed — so retries always create a fresh task.
         if engine is not None:
-            await engine.dispose()
+            engine.sync_engine.dispose()
         _engine = None
         _AsyncSessionFactory = None
         _db_path = None
         raise
 
 
-async def _init_with_once_future(
+async def _init_with_once_task(
     sync_url: str, async_url: str, db_path: str | None
 ) -> None:
-    """Coordinate initialization via a once-future.
+    """Coordinate initialization via a shared once-task.
 
-    Concurrent callers await the SAME in-flight future.  On success, the future
-    resolves and all waiters return immediately with the published globals.
-    On failure, the future is cleared atomically so the next caller retries.
+    The first caller creates an ``asyncio.Task`` that runs ``_do_init`` and
+    stores it in ``_init_task``.  Every subsequent concurrent caller awaits the
+    SAME task through ``asyncio.shield()`` so cancelling a waiter never cancels
+    the shared work.
+
+    Cancellation semantics (cancel-cleans-up-and-retries-fresh):
+    - Cancelling a **waiter** raises ``CancelledError`` in the waiter only; the
+      shared task keeps running and eventually publishes globals for any other
+      concurrent caller.
+    - Cancelling the **driver** (the task itself) causes ``_do_init`` to catch
+      ``BaseException``, tear down, and clear ``_init_task`` atomically, so
+      the next ``init_database`` call creates a fresh task and retries.
     """
-    global _init_future
+    global _init_task
 
     lock = _get_init_lock()
     async with lock:
@@ -245,33 +267,15 @@ async def _init_with_once_future(
             # Already initialized — fast path.
             return
 
-        if _init_future is not None:
-            # Another caller is in flight — grab a reference before releasing the lock.
-            fut = _init_future
-            is_driver = False
-        else:
-            # First caller: create the once-future and start initialization.
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
-            _init_future = fut
-            is_driver = True
+        if _init_task is None or _init_task.done():
+            # No task in flight (first call or previous task finished/failed).
+            _init_task = asyncio.create_task(_do_init(sync_url, async_url, db_path))
 
-    if not is_driver:
-        # We are a waiter — block until the driver resolves the future.
-        await fut
-        return
+        task = _init_task
 
-    # We are the driver — run initialization and resolve the future for waiters.
-    try:
-        await _do_init(sync_url, async_url, db_path)
-        fut.set_result(None)
-    except Exception as exc:
-        # Clear the once-future so the next caller retries from a clean state.
-        async with lock:
-            if _init_future is fut:
-                _init_future = None
-        fut.set_exception(exc)
-        raise
+    # Await the shared task through shield() so cancelling this coroutine
+    # never cancels the shared work.
+    await asyncio.shield(task)
 
 
 async def init_database(database_path: str | None = None) -> None:
@@ -309,7 +313,7 @@ async def init_database(database_path: str | None = None) -> None:
     async_url = target.resolve_async_url()
     db_path = target.sqlite_path if target.is_sqlite else None
 
-    await _init_with_once_future(sync_url, async_url, db_path)
+    await _init_with_once_task(sync_url, async_url, db_path)
 
 
 async def init_database_from_url(database_url: str) -> None:
@@ -338,7 +342,7 @@ async def init_database_from_url(database_url: str) -> None:
     async_url = target.resolve_async_url()
     db_path = target.sqlite_path if target.is_sqlite else None
 
-    await _init_with_once_future(sync_url, async_url, db_path)
+    await _init_with_once_task(sync_url, async_url, db_path)
 
 
 def get_session() -> AsyncSession:
@@ -394,17 +398,31 @@ def get_db_path() -> str:
 async def cleanup_database() -> None:
     """Clean up database connections and reset global state.
 
-    This function should be called during test cleanup to prevent resource warnings.
+    Atomically detaches and awaits any in-flight initialization task before
+    disposing published state — no engine/factory can be published after
+    cleanup returns.  The stable lock is never replaced.
+
+    This function should be called during test teardown or application shutdown.
     """
-    global _engine, _AsyncSessionFactory, _db_path, _init_future, _init_lock
+    global _engine, _AsyncSessionFactory, _db_path, _init_task
 
     lock = _get_init_lock()
+    async with lock:
+        task = _init_task
+        _init_task = None
+
+    # Cancel and await the task outside the lock so _do_init's own lock
+    # acquisition (in its BaseException handler) cannot deadlock.
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     async with lock:
         if _engine is not None:
             await _engine.dispose()
             _engine = None
         _AsyncSessionFactory = None
         _db_path = None
-        _init_future = None
-    # Reset the lock itself so a fresh event loop gets a fresh lock.
-    _init_lock = None

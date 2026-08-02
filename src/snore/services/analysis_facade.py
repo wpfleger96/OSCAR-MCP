@@ -552,157 +552,21 @@ class BatchAnalysisCoordinator:
         import time  # noqa: PLC0415
 
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
-        from snore.database.session import _db_path  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
 
         self._total = matched_total
         self._completed = 0
         # Do NOT reset _cancel_requested if cancel() was called before submit().
 
         modes_list: list[str] | None = list(modes) if modes is not None else None
-        # Snapshot the db path once — threads must not access module globals.
-        db_path_snapshot = _db_path
 
-        def analyze_one(sid: int) -> str:
-            """Run one session in a thread.  Returns 'cancelled', 'success', or 'error'."""
-            if self._cancel_requested:
-                return "cancelled"
-
-            from sqlalchemy import create_engine  # noqa: PLC0415
-            from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
-
-            def _make_sync_session() -> tuple[Any, Any]:
-                """Create a short-lived sync session for this thread."""
-                engine = create_engine(
-                    f"sqlite:///{db_path_snapshot}",
-                    connect_args={"check_same_thread": False},
-                )
-                factory = sessionmaker(bind=engine)
-                return engine, factory()
-
-            t_start = time.monotonic()
-
-            # --- Read phase ---
-            read_engine, read_session = _make_sync_session()
-            try:
-                from sqlalchemy import select as _select  # noqa: PLC0415
-
-                from snore.analysis.data.waveform_loader import (  # noqa: PLC0415
-                    fetch_waveform_blob_sync,
-                )
-                from snore.analysis.types import AnalysisEvent  # noqa: PLC0415
-                from snore.database import models as _models  # noqa: PLC0415
-
-                # Fetch session row
-                session_row = (
-                    read_session.execute(_select(_models.Session).filter_by(id=sid))
-                    .scalars()
-                    .first()
-                )
-                if not session_row:
-                    raise ValueError(f"Session {sid} not found")
-
-                session_start_ts = session_row.start_time.timestamp()
-                events = (
-                    read_session.execute(
-                        _select(_models.Event)
-                        .filter_by(session_id=sid)
-                        .order_by(_models.Event.start_time)
-                    )
-                    .scalars()
-                    .all()
-                )
-                machine_events = [
-                    AnalysisEvent(
-                        event_type=e.event_type,
-                        start_time=e.start_time.timestamp() - session_start_ts,
-                        duration=e.duration_seconds or 10.0,
-                        source="machine",
-                        confidence=1.0,
-                    )
-                    for e in events
-                ]
-
-                flow_blob, flow_count, flow_meta = fetch_waveform_blob_sync(
-                    read_session, sid, "flow"
-                )
-
-                spo2_blob = spo2_count = spo2_meta = None
-                try:
-                    spo2_blob, spo2_count, spo2_meta = fetch_waveform_blob_sync(
-                        read_session, sid, "spo2"
-                    )
-                except Exception:
-                    spo2_count = 0
-                    spo2_meta = {}
-
-                pulse_blob = pulse_count = pulse_meta = None
-                try:
-                    pulse_blob, pulse_count, pulse_meta = fetch_waveform_blob_sync(
-                        read_session, sid, "pulse"
-                    )
-                except Exception:
-                    pulse_count = 0
-                    pulse_meta = {}
-
-                from snore.analysis.modes import DEFAULT_MODE  # noqa: PLC0415
-                from snore.analysis.service import RawSessionBlobs  # noqa: PLC0415
-
-                raw = RawSessionBlobs(
-                    session_id=sid,
-                    flow_blob=flow_blob,
-                    flow_sample_count=flow_count,
-                    flow_metadata=flow_meta,
-                    machine_events=machine_events,
-                    spo2_blob=spo2_blob,
-                    spo2_sample_count=spo2_count or 0,
-                    spo2_metadata=spo2_meta or {},
-                    pulse_blob=pulse_blob,
-                    pulse_sample_count=pulse_count or 0,
-                    pulse_metadata=pulse_meta or {},
-                    modes=modes_list if modes_list is not None else [DEFAULT_MODE],
-                )
-            finally:
-                read_session.close()
-                read_engine.dispose()
-
-            # --- Compute phase (no session held) ---
+        def _compute_only(raw: Any) -> Any:
+            """Pure-compute phase — NumPy/scipy only, zero DB access."""
             inputs = AnalysisService.prepare_inputs(raw)
-            compute_svc = AnalysisService()
-            result = compute_svc.compute_analysis(inputs)
-            processing_time_ms = int((time.monotonic() - t_start) * 1000)
-
-            # --- Write phase ---
-            if store_results and result is not None:
-                write_engine, write_session = _make_sync_session()
-                try:
-                    from datetime import datetime as _dt  # noqa: PLC0415
-
-                    from snore.database import models as _wm  # noqa: PLC0415
-
-                    analysis = _wm.AnalysisResult(
-                        session_id=result.session_id,
-                        timestamp_start=_dt.fromtimestamp(result.timestamp_start),
-                        timestamp_end=_dt.fromtimestamp(result.timestamp_end),
-                        programmatic_result_json=result.model_dump(),
-                        processing_time_ms=processing_time_ms,
-                        engine_versions_json={
-                            "format_version": 2,
-                            "modes": list(result.mode_results.keys()),
-                        },
-                    )
-                    write_session.add(analysis)
-                    write_session.commit()
-                except Exception:
-                    write_session.rollback()
-                    raise
-                finally:
-                    write_session.close()
-                    write_engine.dispose()
-
-            return "success"
+            return AnalysisService().compute_analysis(inputs)
 
         # Build a lazy async iterator from the stream — never materialize all rows.
-        # The sliding window pulls pairs one at a time; at most max_workers tasks
+        # The sliding window pulls pairs one at a time; at most max_workers jobs
         # are in flight simultaneously.  session_dates is pruned as tasks complete
         # so retained metadata stays window-bounded.
         stream_iter = session_stream.__aiter__()
@@ -715,9 +579,35 @@ class BatchAnalysisCoordinator:
         sem = asyncio.Semaphore(max_workers)
 
         async def _run_one(sid: int) -> str:
+            """Read → thread-compute → write, all async; semaphore caps concurrency."""
             async with sem:
+                if self._cancel_requested:
+                    return "cancelled"
                 try:
-                    return await asyncio.to_thread(analyze_one, sid)
+                    t_start = time.monotonic()
+
+                    # --- I/O read phase: fetch raw blobs on the event loop ---
+                    async with session_scope() as read_session:
+                        svc = AnalysisService(
+                            read_session,
+                            # Reuse modes_list from outer scope (snapshot).
+                        )
+                        raw = await svc.load_session_inputs_raw(
+                            sid,
+                            modes=modes_list,
+                        )
+
+                    # --- Compute phase: NumPy only in a thread, no session held ---
+                    result = await asyncio.to_thread(_compute_only, raw)
+                    processing_time_ms = int((time.monotonic() - t_start) * 1000)
+
+                    # --- Write phase: persist result on the event loop ---
+                    if store_results and result is not None:
+                        async with session_scope() as write_session:
+                            write_svc = AnalysisService(write_session)
+                            await write_svc.store_result(result, processing_time_ms)
+
+                    return "success"
                 except Exception as e:
                     logger.warning(
                         "Failed to analyze session %d: %s", sid, e, exc_info=True

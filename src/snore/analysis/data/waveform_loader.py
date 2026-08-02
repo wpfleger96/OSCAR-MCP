@@ -15,7 +15,6 @@ import numpy as np
 from scipy import signal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from snore.database.models import Waveform
 
@@ -198,45 +197,6 @@ async def fetch_waveform_blob(
                 select(Waveform).filter_by(
                     session_id=session_id, waveform_type=waveform_type
                 )
-            )
-        )
-        .scalars()
-        .first()
-    )
-
-    if not waveform:
-        raise ValueError(
-            f"Waveform not found: session_id={session_id}, type={waveform_type}"
-        )
-
-    metadata_scalars = {
-        "waveform_id": waveform.id,
-        "session_id": waveform.session_id,
-        "waveform_type": waveform.waveform_type,
-        "sample_rate": waveform.sample_rate,
-        "unit": waveform.unit,
-        "min_value": waveform.min_value,
-        "max_value": waveform.max_value,
-        "mean_value": waveform.mean_value,
-        "sample_count": waveform.sample_count,
-    }
-    return waveform.data_blob, waveform.sample_count or 0, metadata_scalars
-
-
-def fetch_waveform_blob_sync(
-    db_session: Session, session_id: int, waveform_type: str
-) -> tuple[bytes, int, dict[str, Any]]:
-    """Sync fetch of waveform blob for coordinator worker threads.
-
-    Worker threads opened by ``BatchAnalysisCoordinator.submit`` run in
-    ``asyncio.to_thread()`` and hold a short-lived sync SQLite session — they
-    cannot use the async ``fetch_waveform_blob``.  This function is the
-    correct seam for that path per the v8 spec.
-    """
-    waveform = (
-        db_session.execute(
-            select(Waveform).filter_by(
-                session_id=session_id, waveform_type=waveform_type
             )
         )
         .scalars()

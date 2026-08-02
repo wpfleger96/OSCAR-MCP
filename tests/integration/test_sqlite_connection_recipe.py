@@ -977,8 +977,9 @@ class TestInitOnceFuture:
             assert sess_mod._AsyncSessionFactory is None, (
                 "SessionFactory must be None after failed init."
             )
-            assert sess_mod._init_future is None, (
-                "Once-future must be cleared after failure so retry can proceed."
+            # _init_task.done() is True (failed); retry will create a fresh task.
+            assert sess_mod._init_task is None or sess_mod._init_task.done(), (
+                "Once-task must be done (failed) after migration failure so retry can proceed."
             )
             retry_migration_calls_before = call_count[0]
 
@@ -996,3 +997,263 @@ class TestInitOnceFuture:
         )
 
         await sess_mod.cleanup_database()
+
+    async def test_cancelled_caller_does_not_interrupt_init_task(self, tmp_path):
+        """Cancelling a caller's awaiting coroutine does not cancel the shared Task.
+
+        With asyncio.shield(), cancelling the caller (the coroutine that created
+        the init task) raises CancelledError in the caller only; the inner
+        _do_init Task keeps running and eventually publishes engine/factory.
+
+        This is the "init-survives-caller-cancellation" semantic: once _do_init
+        is underway, it always runs to completion.
+
+        A second caller launched after the first is cancelled can await the same
+        task (or find globals already set) and succeed.
+        """
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "cancel_caller.db"
+
+        migration_started = threading.Event()
+        migration_gate = threading.Event()
+        original_apply = sess_mod._apply_migrations_sync
+
+        def blocking_migration(sync_url: str) -> None:
+            migration_started.set()
+            migration_gate.wait()
+            original_apply(sync_url)
+
+        second_succeeded = [False]
+        first_got_cancelled = [False]
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", blocking_migration
+        ):
+
+            async def first_caller() -> None:
+                try:
+                    await sess_mod.init_database(str(db_path))
+                except asyncio.CancelledError:
+                    first_got_cancelled[0] = True
+
+            async def second_caller() -> None:
+                # Wait until migration is in progress, then call init.
+                await asyncio.get_event_loop().run_in_executor(
+                    None, migration_started.wait
+                )
+                await sess_mod.init_database(str(db_path))
+                second_succeeded[0] = True
+
+            first_task = asyncio.create_task(first_caller())
+            second_task = asyncio.create_task(second_caller())
+
+            # Let migration start, cancel first caller, then release gate.
+            await asyncio.sleep(0.05)
+            first_task.cancel()
+            migration_gate.set()
+
+            await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+        # Inner _do_init task completed (survived first_task cancellation).
+        assert sess_mod._engine is not None, (
+            "Engine must be published — _do_init survives caller cancellation."
+        )
+        assert sess_mod._AsyncSessionFactory is not None
+        # First caller got CancelledError (shield propagated it).
+        assert first_got_cancelled[0], (
+            "First caller should have received CancelledError."
+        )
+        # Second caller succeeded.
+        assert second_succeeded[0], (
+            "Second caller must succeed after _do_init completes."
+        )
+
+        await sess_mod.cleanup_database()
+
+    async def test_cancelled_waiter_does_not_affect_successful_driver(self, tmp_path):
+        """Cancelling a waiter via shield() leaves the driver's success intact.
+
+        The other concurrent caller (the driver's shielded await) must get
+        success — no InvalidStateError, no unretrieved-future warning.
+        """
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "cancel_waiter.db"
+
+        migration_started = threading.Event()
+        migration_gate = threading.Event()
+        original_apply = sess_mod._apply_migrations_sync
+
+        def blocking_migration(sync_url: str) -> None:
+            migration_started.set()
+            migration_gate.wait()
+            original_apply(sync_url)
+
+        waiter_got_cancelled = [False]
+        driver_got_error = [False]
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", blocking_migration
+        ):
+
+            async def driver_caller() -> None:
+                try:
+                    await sess_mod.init_database(str(db_path))
+                except Exception:
+                    driver_got_error[0] = True
+
+            async def waiter_caller() -> None:
+                # Wait until migration is running, then try to init (becomes a waiter).
+                await asyncio.get_event_loop().run_in_executor(
+                    None, migration_started.wait
+                )
+                try:
+                    await sess_mod.init_database(str(db_path))
+                except asyncio.CancelledError:
+                    waiter_got_cancelled[0] = True
+
+            driver_task = asyncio.create_task(driver_caller())
+            waiter_task = asyncio.create_task(waiter_caller())
+
+            # Let both callers get into migration, then cancel the waiter.
+            await asyncio.sleep(0.05)
+            waiter_task.cancel()
+            # Release the migration gate so the driver can finish.
+            migration_gate.set()
+
+            await asyncio.gather(driver_task, waiter_task, return_exceptions=True)
+
+        # Waiter got CancelledError (shield propagates it to the waiter only).
+        assert waiter_got_cancelled[0], "Waiter should have received CancelledError"
+        # Driver must have succeeded — no InvalidStateError.
+        assert not driver_got_error[0], (
+            "Driver must not raise after waiter cancellation"
+        )
+        assert sess_mod._engine is not None, (
+            "Engine must be published after driver success"
+        )
+        assert sess_mod._AsyncSessionFactory is not None
+
+        await sess_mod.cleanup_database()
+
+    async def test_failure_leaves_no_unretrieved_future_warning(self, tmp_path):
+        """A failed init must not emit 'Future exception was never retrieved'.
+
+        With a shared Task (not a bare Future), the exception is attached to the
+        Task object; the Task is cleared on failure so there is no orphan
+        future/task whose exception is never consumed.
+        """
+        import asyncio  # noqa: PLC0415
+        import logging  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "no_warning_failure.db"
+
+        # Capture asyncio's internal logger to detect the warning.
+        warning_messages: list[str] = []
+
+        def failing_once(sync_url: str) -> None:
+            raise RuntimeError("Injected failure for warning test")
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", failing_once
+        ):
+            with unittest.mock.patch.object(
+                logging.getLogger("asyncio"),
+                "error",
+                side_effect=lambda msg, *a, **kw: warning_messages.append(str(msg)),
+            ):
+                try:
+                    await sess_mod.init_database(str(db_path))
+                except RuntimeError:
+                    pass
+                # Allow event loop to process any pending task callbacks.
+                await asyncio.sleep(0)
+
+        unretrieved = [
+            m for m in warning_messages if "exception was never retrieved" in m
+        ]
+        assert not unretrieved, (
+            f"Unretrieved exception warning(s) detected: {unretrieved}"
+        )
+        # Globals must be clean; _init_task is done (failed).
+        assert sess_mod._engine is None
+        assert sess_mod._AsyncSessionFactory is None
+        assert sess_mod._init_task is None or sess_mod._init_task.done(), (
+            "_init_task must be None or done after a failed init"
+        )
+
+    async def test_cleanup_during_init_prevents_engine_publish(self, tmp_path):
+        """cleanup_database() awaits the in-flight task; no engine appears after it returns.
+
+        Scenario: block _do_init, call cleanup_database(), assert cleanup does
+        not return while the task is live, and no engine/factory is published
+        after cleanup returns.
+
+        Note: asyncio.to_thread wraps a real OS thread; cancelling the Task
+        injects CancelledError into the coroutine but the thread keeps running.
+        The gate is released after cleanup so the orphan thread exits cleanly.
+        """
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "cleanup_race.db"
+
+        migration_started = threading.Event()
+        migration_gate = threading.Event()
+        original_apply = sess_mod._apply_migrations_sync
+
+        def blocking_migration(sync_url: str) -> None:
+            migration_started.set()
+            migration_gate.wait()
+            # Gate is released by the test after cleanup; thread completes harmlessly.
+            original_apply(sync_url)
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", blocking_migration
+        ):
+            init_task = asyncio.create_task(sess_mod.init_database(str(db_path)))
+            # Wait until migration is in progress.
+            await asyncio.get_event_loop().run_in_executor(None, migration_started.wait)
+
+            # Call cleanup while init is blocked.  cleanup cancels the task and
+            # awaits it — the blocked migration coroutine is interrupted via
+            # CancelledError; the underlying thread is still running but
+            # cleanup does not need to wait for it.
+            await sess_mod.cleanup_database()
+
+        # After cleanup returns, no engine or factory may be live.
+        assert sess_mod._engine is None, (
+            "Engine must be None after cleanup_database() returns"
+        )
+        assert sess_mod._AsyncSessionFactory is None, (
+            "SessionFactory must be None after cleanup_database() returns"
+        )
+        # cleanup_database() explicitly sets _init_task = None
+        assert sess_mod._init_task is None, (
+            "init_task must be None after cleanup_database() returns"
+        )
+
+        # Release the orphan thread so it can exit cleanly, then give the
+        # event loop a turn so init_task's shield propagates cancellation.
+        migration_gate.set()
+        await asyncio.sleep(0.05)
+
+        # After the event loop turn, init_task should be done (cancelled).
+        assert init_task.done(), (
+            "Init task must be done after cleanup + event loop turn"
+        )

@@ -410,17 +410,19 @@ class TestBatchCoordinatorHandle:
 
         Scenario: 20 sessions, max_workers=2.  After the first window (2 sessions)
         is dispatched and completes, cancel() is called via progress_callback.
-        The remaining 18 sessions must NOT be dispatched (cancel flag checked in
+        The remaining sessions must NOT be dispatched (cancel flag checked in
         _fill_window before each pull), and must be accounted as cancelled in the
-        result (total=20, cancelled>=18).
+        result.
 
         This is the true mid-batch test per W3 spec: cancellation guard fires
         on _fill_window's next iteration, not just as a pre-submit guard.
-        It uses real async tasks with a controlled blocking mechanism so
-        cancellation timing is deterministic.
+        It uses real async tasks with mocked I/O so cancellation timing is
+        deterministic and the coordinator never touches the database.
         """
         import asyncio  # noqa: PLC0415
         import unittest.mock  # noqa: PLC0415
+
+        from contextlib import asynccontextmanager  # noqa: PLC0415
 
         from snore.services.analysis_facade import (  # noqa: PLC0415
             BatchAnalysisCoordinator,
@@ -430,28 +432,47 @@ class TestBatchCoordinatorHandle:
         max_workers = 2
         coord = BatchAnalysisCoordinator()
 
-        dispatched: list[int] = []
-        dispatch_lock = asyncio.Lock()
-        # Barrier: first window must complete before cancel fires.
-        first_window_done = asyncio.Event()
+        compute_calls: list[int] = []
+        compute_lock = asyncio.Lock()
 
-        # Patch asyncio.to_thread so analyze_one never touches the DB.
+        # Mock session_scope so _run_one never touches the real DB.
+        mock_raw = unittest.mock.MagicMock()
+
+        @asynccontextmanager
+        async def mock_session_scope():
+            mock_session = unittest.mock.AsyncMock()
+            mock_session.load_session_inputs_raw = unittest.mock.AsyncMock(
+                return_value=mock_raw
+            )
+            yield mock_session
+
+        # Mock AnalysisService so load_session_inputs_raw returns a DTO.
+        mock_svc = unittest.mock.AsyncMock()
+        mock_svc.load_session_inputs_raw = unittest.mock.AsyncMock(
+            return_value=mock_raw
+        )
 
         async def instrumented_to_thread(func, *args, **kwargs):
-            sid = args[0] if args else None
-            async with dispatch_lock:
-                if sid is not None:
-                    dispatched.append(sid)
-                # Signal after the first window fills.
-                if len(dispatched) >= max_workers:
-                    first_window_done.set()
-            # Return "success" for dispatched sessions.
-            return "success"
+            # _compute_only(raw) is the call; track that it fires.
+            async with compute_lock:
+                compute_calls.append(len(compute_calls) + 1)
+                if len(compute_calls) >= max_workers:
+                    pass  # signal tracked by count
+            return unittest.mock.MagicMock()  # mock AnalysisResult
 
-        with unittest.mock.patch(
-            "asyncio.to_thread", side_effect=instrumented_to_thread
+        with (
+            unittest.mock.patch(
+                "snore.database.session.session_scope", mock_session_scope
+            ),
+            unittest.mock.patch(
+                "snore.analysis.service.AnalysisService",
+                return_value=mock_svc,
+            ),
+            unittest.mock.patch(
+                "asyncio.to_thread", side_effect=instrumented_to_thread
+            ),
         ):
-            # progress_callback triggers cancel after the first window completes.
+            # progress_callback triggers cancel after max_workers complete.
             def on_progress(completed: int, total: int | None) -> None:
                 if completed >= max_workers:
                     coord.cancel()
@@ -465,21 +486,21 @@ class TestBatchCoordinatorHandle:
                 progress_callback=on_progress,
             )
 
-        # Invariants:
-        # 1. total == matched_total (always)
+        # 1. total == matched_total (always).
         assert result.total == n_total, (
             f"total must equal matched_total={n_total}, got {result.total}"
         )
-        # 2. successful + failed + cancelled == total
+        # 2. Accounting invariant: successful + failed + cancelled == total.
         assert result.successful + result.failed + result.cancelled == n_total, (
             f"Accounting mismatch: {result.successful}+{result.failed}+{result.cancelled} "
             f"!= {n_total}"
         )
-        # 3. At most max_workers sessions were dispatched to threads.
-        assert len(dispatched) <= max_workers * 2, (
-            f"Too many sessions dispatched after cancel: {len(dispatched)}"
+        # 3. At most max_workers*2 sessions reached the compute phase
+        #    (first window + one possible refill window before cancel takes effect).
+        assert len(compute_calls) <= max_workers * 2, (
+            f"Too many compute dispatches after cancel: {len(compute_calls)}"
         )
-        # 4. At least (n_total - max_workers*2) were cancelled without dispatch.
+        # 4. At least (n_total - max_workers*2) sessions were cancelled without dispatch.
         assert result.cancelled >= n_total - max_workers * 2, (
             f"Not enough sessions counted as cancelled: {result.cancelled} "
             f"(expected >= {n_total - max_workers * 2})"
@@ -499,6 +520,8 @@ class TestBatchCoordinatorHandle:
         import asyncio  # noqa: PLC0415
         import unittest.mock  # noqa: PLC0415
 
+        from contextlib import asynccontextmanager  # noqa: PLC0415
+
         from snore.services.analysis_facade import (  # noqa: PLC0415
             BatchAnalysisCoordinator,
         )
@@ -512,6 +535,17 @@ class TestBatchCoordinatorHandle:
         in_flight = 0
         in_flight_lock = asyncio.Lock()
 
+        # Mock session_scope and AnalysisService so _run_one never touches the DB.
+        mock_raw = unittest.mock.MagicMock()
+        mock_svc = unittest.mock.AsyncMock()
+        mock_svc.load_session_inputs_raw = unittest.mock.AsyncMock(
+            return_value=mock_raw
+        )
+
+        @asynccontextmanager
+        async def mock_session_scope():
+            yield unittest.mock.AsyncMock()
+
         async def counting_to_thread(func, *args, **kwargs):
             nonlocal in_flight
             async with in_flight_lock:
@@ -522,9 +556,18 @@ class TestBatchCoordinatorHandle:
             await asyncio.sleep(0)  # yield to let other tasks start
             async with in_flight_lock:
                 in_flight -= 1
-            return "success"
+            return unittest.mock.MagicMock()  # mock AnalysisResult
 
-        with unittest.mock.patch("asyncio.to_thread", side_effect=counting_to_thread):
+        with (
+            unittest.mock.patch(
+                "snore.database.session.session_scope", mock_session_scope
+            ),
+            unittest.mock.patch(
+                "snore.analysis.service.AnalysisService",
+                return_value=mock_svc,
+            ),
+            unittest.mock.patch("asyncio.to_thread", side_effect=counting_to_thread),
+        ):
             pairs = [(i, None) for i in range(1, n_total + 1)]
             result = await coord.submit(
                 matched_total=n_total,
