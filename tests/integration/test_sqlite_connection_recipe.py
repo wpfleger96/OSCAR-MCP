@@ -1456,3 +1456,318 @@ class TestInitOnceFuture:
         # Globals are clean (teardown ran in BaseException handler).
         assert sess_mod._engine is None
         assert sess_mod._AsyncSessionFactory is None
+
+    # -----------------------------------------------------------------------
+    # New prescriptive tests for the shared-cleanup-task state machine
+    # (Thufir's "Alternatives" design, Paul's A-round dispatch)
+    # -----------------------------------------------------------------------
+
+    async def test_lock_queue_init_then_cleanup_no_unowned_task(self, tmp_path):
+        """Lock-queue interleaving: init queued then cleanup wins — no unowned task.
+
+        Deterministically forces the worst-case FIFO order:
+        1. Test holds _init_lock.
+        2. init_database() queues behind the lock (it will see idle state when
+           it eventually acquires).
+        3. cleanup_database() queues behind init_database() (FIFO).
+        4. Lock is released.  init_database() runs first (creates init task),
+           cleanup_database() runs second (sees init task and owns it).
+
+        Asserts: at cleanup return, no unowned init task capable of publication
+        exists; state is fully clean.  This is the exact shape that killed the
+        old check/use-gap barrier.
+        """
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "lock_queue.db"
+
+        migration_gate = threading.Event()
+        migration_started = threading.Event()
+        original_apply = sess_mod._apply_migrations_sync
+
+        def slow_migration(sync_url: str) -> None:
+            migration_started.set()
+            migration_gate.wait()
+            original_apply(sync_url)
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", slow_migration
+        ):
+            # Reset _init_lock so it's created fresh in this test's event loop.
+            # Required because _init_lock is module-level and pytest-asyncio uses
+            # function-scoped event loops — the lock from a prior test is bound to
+            # a different (now closed) loop.
+            sess_mod._init_lock = None
+            lock = sess_mod._get_init_lock()
+
+            # Hold the lock from the test so we can queue init and cleanup
+            # behind it in FIFO order before releasing.
+            async with lock:
+                # Queue: init_database() will be first to acquire after release.
+                init_task = asyncio.create_task(sess_mod.init_database(str(db_path)))
+                # Give init_database() a turn so it blocks on the lock.
+                await asyncio.sleep(0)
+
+                # Queue: cleanup_database() will be second (FIFO behind init).
+                cleanup_task = asyncio.create_task(sess_mod.cleanup_database())
+                # Give cleanup_database() a turn so it also blocks on the lock.
+                await asyncio.sleep(0)
+            # Lock released.  init_database() acquires first, creates _init_task,
+            # releases.  cleanup_database() acquires second, sees the init task,
+            # creates _cleanup_task owning it, releases, then awaits _do_cleanup.
+
+            # Let the event loop run both tasks to their first suspension point.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            # Release migration so cleanup can quiesce the init task.
+            migration_gate.set()
+
+            # Await both tasks; neither should raise.
+            results = await asyncio.gather(
+                init_task, cleanup_task, return_exceptions=True
+            )
+            for r in results:
+                if isinstance(r, BaseException) and not isinstance(
+                    r, asyncio.CancelledError
+                ):
+                    raise r
+
+        # Core invariants after cleanup.
+        assert sess_mod._engine is None, (
+            f"Engine must be None after cleanup — got {sess_mod._engine!r}"
+        )
+        assert sess_mod._AsyncSessionFactory is None
+        assert sess_mod._init_task is None
+        assert sess_mod._cleanup_task is None
+
+    async def test_concurrent_cleanups_both_return_no_attribute_error(self, tmp_path):
+        """Two concurrent cleanup_database() calls complete without AttributeError.
+
+        Makes quiescence slow (migration blocks) so the second cleanup arrives
+        while the first is still running.  Both callers must return cleanly;
+        teardown must execute exactly once; state must be fully clean.
+        """
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "concurrent_cleanup.db"
+
+        migration_started = threading.Event()
+        migration_gate = threading.Event()
+        original_apply = sess_mod._apply_migrations_sync
+
+        def slow_migration(sync_url: str) -> None:
+            migration_started.set()
+            migration_gate.wait()
+            original_apply(sync_url)
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", slow_migration
+        ):
+            # Reset _init_lock for this test's event loop (function-scoped).
+            sess_mod._init_lock = None
+            # Start an init that blocks in migration.
+            await asyncio.create_task(asyncio.sleep(0))  # flush loop
+            init_coro = asyncio.create_task(sess_mod.init_database(str(db_path)))
+            await asyncio.get_event_loop().run_in_executor(None, migration_started.wait)
+
+            # Start two concurrent cleanups while init is in flight.
+            cleanup1 = asyncio.create_task(sess_mod.cleanup_database())
+            cleanup2 = asyncio.create_task(sess_mod.cleanup_database())
+
+            # Let both cleanups queue up.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            # Release the migration gate so teardown can quiesce the init task.
+            migration_gate.set()
+
+            # All three tasks must complete without raising.
+            results = await asyncio.gather(
+                init_coro, cleanup1, cleanup2, return_exceptions=True
+            )
+            errors = [
+                r
+                for r in results
+                if isinstance(r, BaseException)
+                and not isinstance(r, asyncio.CancelledError)
+            ]
+            assert not errors, (
+                f"Concurrent cleanup raised unexpected exceptions: {errors}"
+            )
+
+        # State is fully clean.
+        assert sess_mod._engine is None
+        assert sess_mod._AsyncSessionFactory is None
+        assert sess_mod._init_task is None
+        assert sess_mod._cleanup_task is None
+
+    async def test_cancelled_cleanup_caller_teardown_still_completes(self, tmp_path):
+        """Cancelling a cleanup_database() CALLER does not abandon teardown.
+
+        The shield in cleanup_database() means caller cancellation only raises
+        CancelledError in the caller; the _cleanup_task continues and finishes.
+        A subsequent init_database() must succeed (no stuck-barrier hang).
+        """
+        import asyncio  # noqa: PLC0415
+        import time  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path1 = tmp_path / "cancel_cleanup.db"
+        db_path2 = tmp_path / "after_cancel.db"
+
+        dispose_started = asyncio.Event()
+        dispose_gate = asyncio.Event()
+        original_dispose = sess_mod.AsyncEngine.dispose
+
+        async def slow_dispose(self: object) -> None:
+            dispose_started.set()
+            await dispose_gate.wait()
+            await original_dispose(self)
+
+        # Reset _init_lock for this test's event loop (function-scoped).
+        sess_mod._init_lock = None
+
+        # First: bring up a live engine so cleanup has something to dispose.
+        await sess_mod.init_database(str(db_path1))
+        assert sess_mod._engine is not None
+
+        with unittest.mock.patch.object(sess_mod.AsyncEngine, "dispose", slow_dispose):
+            # Start cleanup — it will block inside slow_dispose.
+            cleanup_caller = asyncio.create_task(sess_mod.cleanup_database())
+
+            # Wait until _do_cleanup is inside dispose.
+            await dispose_started.wait()
+
+            # Cancel the CALLER.  _cleanup_task is shielded and keeps running.
+            cleanup_caller.cancel()
+            await asyncio.gather(cleanup_caller, return_exceptions=True)
+
+            # Verify: cleanup task is still running (not done) right after cancel.
+            assert sess_mod._cleanup_task is not None, (
+                "_cleanup_task must still exist after caller cancel"
+            )
+            assert not sess_mod._cleanup_task.done(), (
+                "_cleanup_task must still be running after caller cancel"
+            )
+            cleanup_task_ref = sess_mod._cleanup_task
+
+            # Release dispose gate — teardown finishes.
+            dispose_gate.set()
+
+            # Wait for cleanup task to finish (bounded).
+            # Poll the TASK OBJECT (not sess_mod._cleanup_task which becomes None
+            # before the task fully returns — the lock is held until task exit).
+            deadline = time.monotonic() + 5.0
+            while not cleanup_task_ref.done():
+                assert time.monotonic() < deadline, "_cleanup_task did not finish"
+                await asyncio.sleep(0.01)
+            # One extra turn for done-callbacks.
+            await asyncio.sleep(0)
+
+        # State is clean after teardown completed.
+        assert sess_mod._engine is None, "Engine must be None after cleanup"
+        assert sess_mod._AsyncSessionFactory is None
+        assert sess_mod._cleanup_task is None
+
+        # Subsequent init must succeed — no stuck-barrier hang.
+        init_task = asyncio.create_task(sess_mod.init_database(str(db_path2)))
+        try:
+            await asyncio.wait_for(init_task, timeout=5.0)
+        except TimeoutError:
+            init_task.cancel()
+            raise AssertionError(
+                "init_database() timed out after cancelled cleanup — stuck barrier"
+            ) from None
+        assert sess_mod._engine is not None, (
+            "init_database() must publish an engine after cleanup"
+        )
+        await sess_mod.cleanup_database()
+
+    async def test_init_during_cleanup_waits_not_fast_path_success(self, tmp_path):
+        """init_database() during cleanup-in-flight waits, not false success.
+
+        While _do_cleanup is mid-dispose, a concurrent init_database() must NOT
+        return via a stale lock-free engine check while cleanup is clearing the
+        engine from under it.  It must wait for cleanup and then re-initialize.
+        """
+        import asyncio  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path1 = tmp_path / "init_during_cleanup.db"
+        db_path2 = tmp_path / "after_cleanup.db"
+
+        dispose_started = asyncio.Event()
+        dispose_gate = asyncio.Event()
+        original_dispose = sess_mod.AsyncEngine.dispose
+
+        async def slow_dispose(self: object) -> None:
+            dispose_started.set()
+            await dispose_gate.wait()
+            await original_dispose(self)
+
+        # Reset _init_lock for this test's event loop (function-scoped).
+        sess_mod._init_lock = None
+
+        # Bring up a live engine.
+        await sess_mod.init_database(str(db_path1))
+        assert sess_mod._engine is not None
+        engine_at_start = sess_mod._engine
+
+        with unittest.mock.patch.object(sess_mod.AsyncEngine, "dispose", slow_dispose):
+            # Start cleanup — will block in slow_dispose.
+            cleanup_task = asyncio.create_task(sess_mod.cleanup_database())
+
+            # Wait until cleanup is inside dispose (engine is still published).
+            await dispose_started.wait()
+            assert sess_mod._engine is not None, (
+                "Engine should still be live inside dispose"
+            )
+
+            # Fire init while cleanup is mid-dispose.  It must NOT return
+            # "success" via the stale engine — it must wait for cleanup.
+            reinit_task = asyncio.create_task(sess_mod.init_database(str(db_path2)))
+
+            # Give reinit a turn to start.
+            await asyncio.sleep(0)
+
+            # Assert: reinit is NOT done — it should be waiting for cleanup.
+            assert not reinit_task.done(), (
+                "init_database() must not return immediately while cleanup is active"
+            )
+
+            # Release dispose so cleanup can finish.
+            dispose_gate.set()
+            await cleanup_task
+
+        # After cleanup: engine is None, reinit should proceed and publish.
+        assert sess_mod._engine is None or sess_mod._engine is not engine_at_start, (
+            "Cleanup must have disposed the original engine"
+        )
+
+        # Wait for reinit to complete.
+        try:
+            await asyncio.wait_for(reinit_task, timeout=5.0)
+        except TimeoutError:
+            reinit_task.cancel()
+            raise AssertionError("reinit_task timed out after cleanup") from None
+
+        assert sess_mod._engine is not None, (
+            "Reinit must publish a fresh engine after cleanup completes"
+        )
+        assert sess_mod._engine is not engine_at_start, (
+            "Reinit must publish a NEW engine, not the disposed one"
+        )
+        await sess_mod.cleanup_database()

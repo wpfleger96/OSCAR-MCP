@@ -67,21 +67,18 @@ _engine: AsyncEngine | None = None
 _AsyncSessionFactory: async_sessionmaker[AsyncSession] | None = None
 _db_path: str | None = None
 
-# Once-task coordination: concurrent callers await the SAME in-flight
-# initialization task via asyncio.shield().  Published engine/factory only
-# after migration success; disposed and cleared atomically on cancellation or
-# failure so a retry re-runs migrations from a clean state.
-# Protected by a stable asyncio.Lock (never replaced so no two lock domains
-# can overlap).
+# Shared state machine: three linearized states under one stable lock.
+#
+#   initialized:       _engine is not None
+#   init-in-flight:    _init_task is not None and not done
+#   cleanup-in-flight: _cleanup_task is not None and not done
+#
+# Protected by _init_lock (created lazily, never replaced).
+# Every public entry point reads/mutates these globals inside ONE lock
+# acquisition — no check-then-reacquire gaps.
 _init_lock: asyncio.Lock | None = None  # Created lazily inside an event loop.
-_init_task: asyncio.Task[None] | None = None  # The in-flight once-task.
-
-# Cleanup barrier: prevents a new init from starting while cleanup_database()
-# is in progress.  Set to True under _init_lock when cleanup begins; cleared
-# under _init_lock after state disposal completes.  New inits wait on
-# _cleanup_done before proceeding when this is True.
-_cleanup_in_progress: bool = False
-_cleanup_done: asyncio.Event | None = None  # Cleared while cleanup runs; set when done.
+_init_task: asyncio.Task[None] | None = None  # The in-flight once-init-task.
+_cleanup_task: asyncio.Task[None] | None = None  # The in-flight once-cleanup-task.
 
 
 def _get_init_lock() -> asyncio.Lock:
@@ -253,10 +250,18 @@ async def _init_with_once_task(
 ) -> None:
     """Coordinate initialization via a shared once-task.
 
-    The first caller creates an ``asyncio.Task`` that runs ``_do_init`` and
-    stores it in ``_init_task``.  Every subsequent concurrent caller awaits the
-    SAME task through ``asyncio.shield()`` so cancelling a waiter never cancels
-    the shared work.
+    Single-acquisition state machine: one lock acquisition decides everything
+    — no check-then-reacquire gap exists.
+
+    State transitions (under _init_lock):
+    - cleanup-in-flight → capture cleanup ref, release lock, await shield,
+      then RETRY the whole acquisition from the top.
+    - initialized → return immediately.
+    - init-in-flight → take the existing task ref.
+    - idle → create a new init task with the T2 done-callback.
+
+    Await via ``asyncio.shield()`` so cancelling a caller never cancels the
+    shared work.
 
     Cancellation semantics (init-survives-caller-cancellation):
     - Cancelling a **waiter** raises ``CancelledError`` in the waiter only; the
@@ -265,57 +270,49 @@ async def _init_with_once_task(
     - If the sole surviving waiter is cancelled and the task later fails,
       a done-callback on the task logs the failure once and consumes the
       exception so asyncio does not emit "Task exception was never retrieved".
-
-    Cleanup barrier:
-    - If ``cleanup_database()`` is in progress, new inits wait until cleanup
-      has fully disposed state before creating a new task.  This prevents a
-      fresh init from publishing an engine that cleanup then silently abandons.
     """
     global _init_task
 
     lock = _get_init_lock()
 
-    # --- Cleanup barrier: wait outside the lock if cleanup is running ---
-    # We check under the lock first, then wait if needed, then re-enter.
     while True:
         async with lock:
-            if not _cleanup_in_progress:
-                break
-            # Cleanup is in progress; grab the event to wait on.
-            done_event = _cleanup_done
+            # --- Single-acquisition decision ---
+            if _cleanup_task is not None and not _cleanup_task.done():
+                # Cleanup is in flight: wait for it, then retry.
+                cleanup_ref = _cleanup_task
+            elif _engine is not None and _AsyncSessionFactory is not None:
+                # Already initialized — fast path (inside the lock).
+                return
+            elif _init_task is None or _init_task.done():
+                # No task in flight (first call or previous task done/failed).
+                new_task: asyncio.Task[None] = asyncio.create_task(
+                    _do_init(sync_url, async_url, db_path)
+                )
+                # T2: done-callback observes terminal failure when no waiter
+                # remains.  If _do_init fails after all callers have been
+                # cancelled, this callback logs it once and marks it retrieved —
+                # preventing asyncio's "Task exception was never retrieved"
+                # warning.  It does not affect propagation to live waiters.
+                new_task.add_done_callback(_observe_init_task_exception)
+                _init_task = new_task
+                task = new_task
+                cleanup_ref = None
+            else:
+                # init-in-flight: join the existing task.
+                task = _init_task
+                cleanup_ref = None
 
-        # Wait outside the lock so cleanup can proceed (it needs the lock to
-        # finish disposing state).
-        if done_event is not None:
-            await done_event.wait()
-        # Re-check under the lock in case another cleanup started.
+        if cleanup_ref is not None:
+            # Wait for cleanup outside the lock so _do_cleanup can acquire it.
+            await asyncio.shield(cleanup_ref)
+            # Cleanup finished — retry the state-machine acquisition.
+            continue
 
-    # --- Main init logic ---
-    # The while loop above exits by breaking out of 'async with lock', which
-    # releases the lock.  Re-acquire it here for the actual init work.
-    async with lock:
-        if _engine is not None and _AsyncSessionFactory is not None:
-            # Already initialized — fast path.
-            return
-
-        if _init_task is None or _init_task.done():
-            # No task in flight (first call or previous task finished/failed).
-            new_task: asyncio.Task[None] = asyncio.create_task(
-                _do_init(sync_url, async_url, db_path)
-            )
-            # T2: done-callback observes terminal failure when no waiter remains.
-            # If _do_init fails after all callers have been cancelled (so nobody
-            # awaits the exception), this callback logs it once and marks it
-            # retrieved — preventing asyncio's "Task exception was never retrieved"
-            # warning.  It does not affect propagation to live waiters.
-            new_task.add_done_callback(_observe_init_task_exception)
-            _init_task = new_task
-
-        task = _init_task
-
-    # Await the shared task through shield() so cancelling this coroutine
-    # never cancels the shared work.
-    await asyncio.shield(task)
+        # Await the shared init task through shield() so cancelling this
+        # coroutine never cancels the shared work.
+        await asyncio.shield(task)
+        return
 
 
 def _observe_init_task_exception(task: asyncio.Task[None]) -> None:
@@ -362,9 +359,6 @@ async def init_database(database_path: str | None = None) -> None:
     """
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
-    if _engine is not None and _AsyncSessionFactory is not None:
-        return  # Already initialized — ultra-fast path before taking the lock.
-
     if database_path is None:
         database_path = DEFAULT_DATABASE_PATH
 
@@ -393,9 +387,6 @@ async def init_database_from_url(database_url: str) -> None:
         database_url: A fully-formed SQLAlchemy URL string.
     """
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
-
-    if _engine is not None and _AsyncSessionFactory is not None:
-        return  # Already initialized — ultra-fast path.
 
     if not database_url:
         raise ValueError(f"Invalid database URL: {database_url!r}")
@@ -458,52 +449,71 @@ def get_db_path() -> str:
     return _db_path
 
 
-async def cleanup_database() -> None:
-    """Clean up database connections and reset global state.
+async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
+    """Owned teardown coroutine — runs as the shared ``_cleanup_task``.
 
-    Atomically sets the cleanup barrier so no new init can start, then detaches
-    and awaits any in-flight initialization task before disposing published
-    state.  After this function returns, no unowned init task exists that can
-    publish an engine/factory, and any concurrent ``init_database()`` call that
-    arrived during cleanup will wait for the barrier to clear before proceeding.
-    The stable lock is never replaced.
+    Accepts the init task that was in-flight when cleanup was requested (already
+    detached from ``_init_task`` under the lock by the caller).  Cancels + awaits
+    it to quiescence, disposes the published engine, and clears all globals.
 
-    This function should be called during test teardown or application shutdown.
+    The ``finally`` block always runs ``_cleanup_task = None`` under the lock so
+    the state machine exits cleanup-in-flight on EVERY exit — including
+    cancellation and exceptions — leaving no stuck-barrier state.
     """
-    global _engine, _AsyncSessionFactory, _db_path, _init_task
-    global _cleanup_in_progress, _cleanup_done
+    global _engine, _AsyncSessionFactory, _db_path, _cleanup_task
 
     lock = _get_init_lock()
 
-    # --- Step 1: Set the cleanup barrier and detach the current init task ---
-    # New init_database() callers that arrive now will block on _cleanup_done
-    # rather than starting a fresh _do_init.
-    async with lock:
-        _cleanup_in_progress = True
-        _cleanup_done = asyncio.Event()  # not set — callers will wait
-        task = _init_task
-        _init_task = None
+    try:
+        # Cancel and await the captured init task outside the lock so _do_init's
+        # BaseException handler can run without deadlocking on the lock.
+        if owned_init_task is not None and not owned_init_task.done():
+            owned_init_task.cancel()
+            try:
+                await owned_init_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
-    # --- Step 2: Quiesce the detached task outside the lock ---
-    # Awaiting outside prevents deadlock: _do_init's BaseException handler
-    # may need to acquire the lock (it does not, but keeping it lock-free here
-    # is the safe invariant regardless).
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+        # Dispose published state (engine.dispose() is an awaitable).
+        async with lock:
+            if _engine is not None:
+                await _engine.dispose()
+                _engine = None
+            _AsyncSessionFactory = None
+            _db_path = None
+    finally:
+        # Terminal state transition: always exit cleanup-in-flight,
+        # whether we completed normally, raised, or were cancelled.
+        async with lock:
+            _cleanup_task = None
 
-    # --- Step 3: Dispose published state and clear the barrier ---
+
+async def cleanup_database() -> None:
+    """Clean up database connections and reset global state.
+
+    Concurrent callers all await the SAME cleanup operation via
+    ``asyncio.shield()``.  If a caller is cancelled, the underlying teardown
+    task continues to completion so state is always left clean.
+
+    After this coroutine returns, ``_engine``, ``_AsyncSessionFactory``,
+    ``_db_path``, ``_init_task``, and ``_cleanup_task`` are all ``None``.
+    Subsequent ``init_database()`` calls create a fresh engine.
+
+    This function should be called during test teardown or application shutdown.
+    """
+    global _init_task, _cleanup_task
+
+    lock = _get_init_lock()
+
+    # Under the lock: create the cleanup task if none is running, detach
+    # _init_task so it becomes the cleanup task's owned input, then take a
+    # local ref regardless.  Concurrent callers all get the same task ref.
     async with lock:
-        if _engine is not None:
-            await _engine.dispose()
-            _engine = None
-        _AsyncSessionFactory = None
-        _db_path = None
-        # Clear barrier last — only after state is fully disposed — so
-        # newly-arriving inits see a clean slate.
-        _cleanup_in_progress = False
-        _cleanup_done.set()  # Wake any waiting init_database() callers.
-        _cleanup_done = None
+        if _cleanup_task is None or _cleanup_task.done():
+            owned_init = _init_task
+            _init_task = None
+            _cleanup_task = asyncio.create_task(_do_cleanup(owned_init))
+        cleanup_ref = _cleanup_task
+
+    # Await via shield: caller cancellation does not cancel the teardown task.
+    await asyncio.shield(cleanup_ref)
