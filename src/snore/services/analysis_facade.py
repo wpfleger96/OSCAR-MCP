@@ -496,10 +496,11 @@ class AnalysisFacade:
 class BatchAnalysisCoordinator:
     """Thin coordinator that backs batch analysis scheduling.
 
-    Uses ``asyncio.to_thread()`` for per-session work (CPU-bound numpy stays on
-    threads).  Each thread creates its own short-lived sync SQLite session for
-    the read and write phases so no ORM session crosses a thread boundary.
-    The ``submit`` interface is the stable boundary — callers are unchanged.
+    Uses ``asyncio.to_thread()`` for per-session CPU-bound work (NumPy/scipy).
+    Database reads and writes happen on the event loop through short-lived
+    ``AsyncSession`` scopes; only detached ``RawSessionBlobs`` DTOs cross the
+    thread boundary.  The ``submit`` interface is the stable boundary — callers
+    are unchanged.
     """
 
     def __init__(self) -> None:
@@ -529,12 +530,12 @@ class BatchAnalysisCoordinator:
     ) -> BatchAnalysisResult:
         """Execute batch analysis and return aggregated results.
 
-        Each session runs in ``asyncio.to_thread()``.  The thread-local worker
-        opens its own short sync SQLite sessions for the read and write phases so
-        no ORM session crosses a thread boundary.
-
-        CPU-bound NumPy/scipy work runs between the two sync sessions without any
-        session held — identical to the previous per-session pipeline.
+        Each session is processed in three async phases: (1) read — fetch raw
+        blobs on the event loop via short-lived ``AsyncSession`` scopes, (2)
+        compute — run CPU-bound NumPy/scipy work in ``asyncio.to_thread()`` with
+        only a detached ``RawSessionBlobs`` DTO crossing the thread boundary
+        (zero DB access in thread), (3) write — persist the result on the event
+        loop via ``AsyncSession``.
 
         Args:
             matched_total: Count of matched sessions (from COUNT query); defines
@@ -543,7 +544,7 @@ class BatchAnalysisCoordinator:
                 Scalars only — no ORM objects passed to workers.
             modes: Detection modes to run (``None`` = default).
             store_results: If True, write each result to the DB.
-            max_workers: Concurrency cap (number of simultaneous threads).
+            max_workers: Concurrency cap (number of simultaneous coroutines).
             progress_callback: Called with (completed, total) after each session.
 
         Returns:

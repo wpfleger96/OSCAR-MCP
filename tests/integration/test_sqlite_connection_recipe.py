@@ -1257,3 +1257,190 @@ class TestInitOnceFuture:
         assert init_task.done(), (
             "Init task must be done after cleanup + event loop turn"
         )
+
+    async def test_cleanup_does_not_allow_concurrent_reinit_to_publish(self, tmp_path):
+        """cleanup_database() blocks concurrent re-inits until disposal is complete.
+
+        T1 scenario: block _do_init for the first init, start cleanup, fire a
+        concurrent init_database() while cleanup is waiting on the old task.
+        Assert:
+        - At cleanup return, no engine/factory is live.
+        - The new init, once the barrier clears, publishes normally.
+
+        Acceptance shape (Paul/Thufir probes): the re-init must not publish an
+        engine before cleanup returns.
+
+        Migration function: the fake migration blocks on the first call (to keep
+        the first init in flight for the race) and is a no-op on subsequent calls
+        (to let the re-init publish without spawning a concurrent Alembic session,
+        which would corrupt Alembic's process-global EnvironmentContext).
+        """
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path1 = tmp_path / "cleanup_old.db"
+        db_path2 = tmp_path / "cleanup_new.db"
+
+        migration_started = threading.Event()
+        migration_gate = threading.Event()
+        call_count: list[int] = [0]
+
+        def fake_migration(sync_url: str) -> None:
+            """Block the first call; return immediately on subsequent calls.
+
+            Alembic's EnvironmentContext uses process-global state, so two
+            concurrent stamp/upgrade calls corrupt each other.  This fake avoids
+            that by letting only one Alembic session run at a time: the first
+            call blocks until the gate is set (giving cleanup something to cancel)
+            and subsequent calls are no-ops (so the re-init can publish without a
+            real database).
+            """
+            call_count[0] += 1
+            if call_count[0] == 1:
+                migration_started.set()
+                migration_gate.wait()
+            # No-op — engine creation + migration stub is enough for the
+            # barrier test; the engine object is published without a real DB file.
+
+        # Track state at the moment cleanup returns.
+        engine_at_cleanup_return: list[object] = []
+        factory_at_cleanup_return: list[object] = []
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", fake_migration
+        ):
+            # Start an init that blocks in migration (db_path1).
+            init_task = asyncio.create_task(sess_mod.init_database(str(db_path1)))
+            await asyncio.get_event_loop().run_in_executor(None, migration_started.wait)
+
+            # Start cleanup while init is blocked.  It will set the barrier,
+            # cancel+await the old task, then dispose state.
+            cleanup_task = asyncio.create_task(sess_mod.cleanup_database())
+
+            # Give cleanup one event loop turn so it can acquire the lock and
+            # set _cleanup_in_progress = True before the re-init can see it.
+            await asyncio.sleep(0)
+
+            # Fire the re-init while cleanup is in progress.  The barrier
+            # should make it wait until cleanup fully disposes state.
+            reinit_task = asyncio.create_task(sess_mod.init_database(str(db_path2)))
+
+            # Release the blocked migration thread so cleanup can quiesce.
+            migration_gate.set()
+
+            # Wait for cleanup to finish.
+            await cleanup_task
+
+            # init_task was cancelled by cleanup (shield propagates CancelledError);
+            # collect it so the task is not left pending.
+            await asyncio.gather(init_task, return_exceptions=True)
+
+        # Record state immediately after cleanup returns (inside the patch or not
+        # doesn't matter here — we captured the reference just after await).
+        engine_at_cleanup_return.append(sess_mod._engine)
+        factory_at_cleanup_return.append(sess_mod._AsyncSessionFactory)
+
+        # Let the re-init complete now that the barrier is clear.
+        await asyncio.gather(reinit_task, return_exceptions=True)
+
+        # Core invariant: at cleanup return, no engine was live.
+        assert engine_at_cleanup_return[0] is None, (
+            "Engine must be None at cleanup_database() return — "
+            f"got {engine_at_cleanup_return[0]!r}"
+        )
+        assert factory_at_cleanup_return[0] is None, (
+            "SessionFactory must be None at cleanup_database() return — "
+            f"got {factory_at_cleanup_return[0]!r}"
+        )
+
+        # After the re-init, the new engine should be live.
+        assert sess_mod._engine is not None, (
+            "New init must publish an engine after cleanup barrier clears"
+        )
+        assert sess_mod._AsyncSessionFactory is not None
+
+        await sess_mod.cleanup_database()
+
+    async def test_cancelled_sole_caller_then_failure_no_unretrieved_warning(
+        self, tmp_path
+    ):
+        """No 'Task exception was never retrieved' when sole caller is cancelled.
+
+        T2 scenario: cancel the only caller while init is running, then fail
+        the shared task.  Assert:
+        - No asyncio "Task exception was never retrieved" warning is emitted.
+        - The failure IS logged (via the done-callback's logger.error call).
+        """
+        import asyncio  # noqa: PLC0415
+        import logging  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "cancelled_sole_then_fail.db"
+
+        migration_started = threading.Event()
+        migration_gate = threading.Event()
+
+        failure_message = "late init failure after sole caller cancelled"
+
+        def failing_migration(sync_url: str) -> None:
+            migration_started.set()
+            migration_gate.wait()
+            raise RuntimeError(failure_message)
+
+        warning_messages: list[str] = []
+        logged_errors: list[str] = []
+
+        with unittest.mock.patch.object(
+            sess_mod, "_apply_migrations_sync", failing_migration
+        ):
+            with (
+                unittest.mock.patch.object(
+                    logging.getLogger("asyncio"),
+                    "error",
+                    side_effect=lambda msg, *a, **kw: warning_messages.append(str(msg)),
+                ),
+                unittest.mock.patch.object(
+                    sess_mod.logger,
+                    "error",
+                    side_effect=lambda msg, *a, **kw: logged_errors.append(str(msg)),
+                ),
+            ):
+                caller_task = asyncio.create_task(sess_mod.init_database(str(db_path)))
+                # Wait until migration has started.
+                await asyncio.get_event_loop().run_in_executor(
+                    None, migration_started.wait
+                )
+
+                # Cancel the sole caller.
+                caller_task.cancel()
+                await asyncio.gather(caller_task, return_exceptions=True)
+
+                # Release the gate — migration will fail; the shared task will
+                # fail with RuntimeError.  The done-callback should catch it.
+                migration_gate.set()
+                # Give the event loop enough turns for the done-callback to fire.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+
+        # T2 assertion 1: no asyncio "never retrieved" warning.
+        unretrieved = [
+            m for m in warning_messages if "exception was never retrieved" in m
+        ]
+        assert not unretrieved, (
+            f"'Task exception was never retrieved' warning detected: {unretrieved}"
+        )
+
+        # T2 assertion 2: the done-callback logged the failure (not silent suppression).
+        assert any("initialization failed" in m for m in logged_errors), (
+            f"Expected an error log from the done-callback; got: {logged_errors}"
+        )
+
+        # Globals are clean (teardown ran in BaseException handler).
+        assert sess_mod._engine is None
+        assert sess_mod._AsyncSessionFactory is None
