@@ -48,7 +48,10 @@ def stats(
 
     async def _run() -> None:
         async with db_session(db) as session:
-            service = StatsService(session)
+            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_local_profile_id(session)
+            service = StatsService(session, profile_id)
             summary = await service.get_summary(days)
 
             if not summary:

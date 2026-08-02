@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.types import AnalysisResult
@@ -28,15 +28,23 @@ logger = logging.getLogger(__name__)
 class AnalysisFacade:
     """Facade for analysis listing and deletion operations."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int | None = None) -> None:
         """
         Initialize analysis facade.
 
         Args:
             db_session: SQLAlchemy database session
+            profile_id: Active profile — analysis queries are scoped to this profile.
+                When *None*, only non-profile-filtered methods (``run_analysis``,
+                ``get_analysis_result``) should be called.
         """
         self.db_session = db_session
+        self.profile_id = profile_id
         self._batch_coordinator: BatchAnalysisCoordinator | None = None
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit sessions to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
 
     @property
     def batch_coordinator(self) -> "BatchAnalysisCoordinator | None":
@@ -55,8 +63,11 @@ class AnalysisFacade:
         analyzed_only: bool,
     ) -> Any:
         """Build the shared 2.0-style select for list/count of analysis status."""
-        stmt = select(models.Session).join(
-            models.Day, models.Session.day_id == models.Day.id
+        stmt = (
+            select(models.Session)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(self._profile_filter())
         )
 
         if start:
@@ -231,6 +242,7 @@ class AnalysisFacade:
                 models.AnalysisResult,
                 models.Session.id == models.AnalysisResult.session_id,
             )
+            .where(self._profile_filter())
             .distinct()
         )
 
@@ -454,10 +466,15 @@ class AnalysisFacade:
         Returns:
             BatchAnalysisResult with per-session outcomes and aggregate counts
         """
-        stmt = select(
-            models.Session.id.label("session_id"),
-            models.Day.date.label("day_date"),
-        ).join(models.Day, models.Session.day_id == models.Day.id)
+        stmt = (
+            select(
+                models.Session.id.label("session_id"),
+                models.Day.date.label("day_date"),
+            )
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(self._profile_filter())
+        )
         if from_date:
             stmt = stmt.where(models.Day.date >= from_date.date())
         if to_date:

@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
+from snore.auth.factory import resolve_local_profile_id
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
 from snore.parsers.register_all import register_all_parsers
@@ -152,6 +153,12 @@ class ImportService:
         total_skipped = 0
         total_failed = 0
 
+        # Resolve the active profile once — all devices created during this import
+        # are owned by this profile.  In local mode this auto-provisions the first
+        # admin user + profile on first run.
+        async with session_scope() as _profile_db:
+            profile_id = await resolve_local_profile_id(_profile_db)
+
         if not dry_run:
             async with session_scope() as db_session:
                 orphaned = await SessionImporter.cleanup_orphaned_records(db_session)
@@ -269,6 +276,7 @@ class ImportService:
                         progress_callback=progress_callback,
                         cancel_predicate=cancel_predicate,
                         db=chunk_db,
+                        profile_id=profile_id,
                     )
                 imported += ci
                 skipped += cs

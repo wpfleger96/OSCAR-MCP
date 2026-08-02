@@ -140,7 +140,10 @@ def export_csv(
 
     async def _run() -> None:
         async with session_scope() as db_session:
-            svc = ExportService()
+            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_local_profile_id(db_session)
+            svc = ExportService(profile_id=profile_id)
             try:
                 result = await svc.export_csv(
                     db_session=db_session,
@@ -193,7 +196,10 @@ def export_json(
 
     async def _run() -> None:
         async with session_scope() as db_session:
-            svc = ExportService()
+            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_local_profile_id(db_session)
+            svc = ExportService(profile_id=profile_id)
             try:
                 result = await svc.export_json(
                     db_session=db_session,

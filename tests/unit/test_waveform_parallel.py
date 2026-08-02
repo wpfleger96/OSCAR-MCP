@@ -16,6 +16,25 @@ async def _mock_session_scope():
     yield MagicMock()
 
 
+def _make_waveform_patches():
+    """Return the standard patch stack for waveform CLI tests.
+
+    Includes a stub for ``resolve_local_profile_id`` so tests do not need a
+    real database to resolve the local profile.
+    """
+    return [
+        patch("snore.cli.decorators.init_db"),
+        patch("snore.database.session.init_database", new_callable=AsyncMock),
+        # session_scope is imported inside show_waveform; patch at source
+        patch("snore.database.session.session_scope", side_effect=_mock_session_scope),
+        # Short-circuit profile resolution — no real DB available in these unit tests
+        patch(
+            "snore.auth.factory.ActorContextFactory.make_local",
+            new_callable=AsyncMock,
+        ),
+    ]
+
+
 class TestWaveformMultiTypeAllFail:
     """All waveform types return empty data: command should fail with a clear message."""
 
@@ -32,6 +51,10 @@ class TestWaveformMultiTypeAllFail:
             # WaveformInspector is imported from snore.waveform inside show_waveform
             patch("snore.waveform.WaveformInspector") as mock_inspector_cls,
             patch("snore.waveform.WaveformRenderer"),
+            patch(
+                "snore.auth.factory.ActorContextFactory.make_local",
+                new_callable=AsyncMock,
+            ),
         ):
             mock_inspector = mock_inspector_cls.return_value
             mock_inspector.get_window = AsyncMock(
@@ -79,6 +102,10 @@ class TestWaveformMultiTypePartialFailure:
             ),
             patch("snore.waveform.WaveformInspector") as mock_inspector_cls,
             patch("snore.waveform.WaveformRenderer", return_value=mock_renderer),
+            patch(
+                "snore.auth.factory.ActorContextFactory.make_local",
+                new_callable=AsyncMock,
+            ),
         ):
             mock_inspector = mock_inspector_cls.return_value
             mock_inspector.get_window = AsyncMock(side_effect=get_window_side_effect)
@@ -136,6 +163,10 @@ class TestWaveformMultiTypeOrdering:
             ),
             patch("snore.waveform.WaveformInspector") as mock_inspector_cls,
             patch("snore.waveform.WaveformRenderer", return_value=mock_renderer),
+            patch(
+                "snore.auth.factory.ActorContextFactory.make_local",
+                new_callable=AsyncMock,
+            ),
         ):
             mock_inspector = mock_inspector_cls.return_value
             mock_inspector.get_window = AsyncMock(side_effect=get_window_side_effect)

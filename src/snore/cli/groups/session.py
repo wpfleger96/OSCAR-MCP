@@ -8,6 +8,7 @@ from datetime import datetime
 
 import click
 
+from snore.auth.factory import resolve_local_profile_id
 from snore.cli.decorators import (
     date_range_options,
     db_option,
@@ -68,7 +69,8 @@ def session_list(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            service = SessionService(db_session)
+            profile_id = await resolve_local_profile_id(db_session)
+            service = SessionService(db_session, profile_id)
             result = await service.list_sessions(
                 device=device,
                 from_date=date_from,
@@ -136,7 +138,8 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            service = SessionService(db_session)
+            profile_id = await resolve_local_profile_id(db_session)
+            service = SessionService(db_session, profile_id)
 
             try:
                 detail = await service.get_session_detail(
@@ -184,7 +187,8 @@ def session_delete(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            service = SessionService(db_session)
+            profile_id = await resolve_local_profile_id(db_session)
+            service = SessionService(db_session, profile_id)
 
             try:
                 preview = await service.get_delete_preview(
@@ -267,7 +271,8 @@ async def _toggle_session_async(session_id: int, enabled: bool, db: str | None) 
     from snore.services.session_service import SessionService
 
     async with open_db_session(db) as db_session:
-        service = SessionService(db_session)
+        profile_id = await resolve_local_profile_id(db_session)
+        service = SessionService(db_session, profile_id)
 
         try:
             detail = await service.get_session_detail(session_id)

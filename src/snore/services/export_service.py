@@ -22,10 +22,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.constants import DEFAULT_RAW_BACKUP_DIR
+from snore.database import models
 from snore.parsers.base import RawFileManifest
 
 if TYPE_CHECKING:
@@ -49,8 +50,17 @@ class ExportResult:
 class ExportService:
     """Unified export service for CPAP data."""
 
-    def __init__(self, backup_root: Path | None = None) -> None:
+    def __init__(
+        self, backup_root: Path | None = None, profile_id: int | None = None
+    ) -> None:
         self.backup_root = backup_root or DEFAULT_RAW_BACKUP_DIR
+        self.profile_id = profile_id
+
+    def _profile_filters(self) -> list[ColumnElement[bool]]:
+        """Return profile isolation predicate(s) if a profile is set."""
+        if self.profile_id is not None:
+            return [models.Device.profile_id == self.profile_id]
+        return []
 
     # ------------------------------------------------------------------
     # Raw export (filesystem only, no DB)
@@ -635,7 +645,7 @@ class ExportService:
             )
             .join(models.Device, models.Session.device_id == models.Device.id)
             .outerjoin(stats_alias, models.Session.id == stats_alias.session_id)
-            .where(models.Session.enabled.is_(True))
+            .where(models.Session.enabled.is_(True), *self._profile_filters())
             .order_by(models.Session.start_time)
         )
 

@@ -15,9 +15,7 @@ class TestListWaveforms:
 
     def test_list_waveforms_not_found_session(self, api_client):
         response = api_client.get("/api/v1/sessions/99999/waveforms")
-        assert response.status_code == 200
-        data = response.json()
-        assert data == []
+        assert response.status_code == 404
 
 
 class TestGetWaveform:

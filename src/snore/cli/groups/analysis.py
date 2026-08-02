@@ -299,7 +299,10 @@ def analysis_delete(
 
     async def _run() -> int:
         async with open_db_session(db) as session:
-            facade = AnalysisFacade(session)
+            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_local_profile_id(session)
+            facade = AnalysisFacade(session, profile_id)
 
             try:
                 preview = await facade.get_delete_preview(
@@ -421,10 +424,12 @@ async def _analyze_single_session(
     plain: bool,
 ) -> None:
     from snore.analysis.modes import AVAILABLE_CONFIGS
+    from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
     from snore.database import models
     from snore.services.analysis_facade import AnalysisFacade
 
     # I/O: look up session_id / date while the injected session is open.
+    profile_id = await resolve_local_profile_id(session)
     if date:
         db_session = (
             (
@@ -476,9 +481,7 @@ async def _analyze_single_session(
     try:
         # AnalysisFacade.run_analysis owns its own short read/write scopes;
         # the injected session (already closed) is not used here.
-        facade = AnalysisFacade(
-            session
-        )  # session only needed for listing, not analysis
+        facade = AnalysisFacade(session, profile_id)
         result = await facade.run_analysis(
             session_id=session_id,
             modes=modes,
@@ -515,7 +518,10 @@ async def _analyze_batch(
     from_date = None if analyze_all else start
     to_date = None if analyze_all else end
 
-    facade = AnalysisFacade(session)
+    from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+
+    profile_id = await resolve_local_profile_id(session)
+    facade = AnalysisFacade(session, profile_id)
     task_holder: list[Any] = []
 
     with Progress(
@@ -565,9 +571,11 @@ async def _list_sessions(
     analyzed_only: bool,
     sort_by: str = "date-desc",
 ) -> None:
+    from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
     from snore.services.analysis_facade import AnalysisFacade
 
-    facade = AnalysisFacade(session)
+    profile_id = await resolve_local_profile_id(session)
+    facade = AnalysisFacade(session, profile_id)
     results = await facade.list_sessions_with_status(
         start=start, end=end, limit=limit, analyzed_only=analyzed_only, sort_by=sort_by
     )

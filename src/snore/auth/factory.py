@@ -128,3 +128,51 @@ class ActorContextFactory:
             models.Profile.deleting_at.is_(None),
         )
         return (await self._db.execute(stmt)).scalars().first()
+
+    async def make_local(self, mode: AuthMode) -> ActorContext:
+        """Return an ActorContext for local (single-user) mode.
+
+        Resolves the first admin user and their default (or first live) profile.
+        If no user exists, auto-provisions a minimal admin user + default profile.
+
+        This is the only entry point that does not require an existing user_id —
+        it is safe only in LOCAL mode where there is exactly one operator.
+        """
+        # Try to find the first existing admin user.
+        stmt = (
+            select(models.User)
+            .where(models.User.disabled_at.is_(None))
+            .order_by(models.User.id)
+            .limit(1)
+        )
+        user = (await self._db.execute(stmt)).scalars().first()
+
+        if user is None:
+            # Auto-provision: create admin user + default profile on first run.
+            user = models.User(canonical_email="local@localhost", role="admin")
+            self._db.add(user)
+            await self._db.flush()
+            profile = models.Profile(user_id=user.id, name="Default")
+            self._db.add(profile)
+            await self._db.flush()
+            user.default_profile_id = profile.id
+            logger.info("Local mode: auto-provisioned admin user id=%d", user.id)
+
+        profile_id = await self._resolve_profile(user, user.default_profile_id)
+        return ActorContext(
+            user_id=user.id,
+            profile_id=profile_id,
+            role=Role(user.role),
+            mode=mode,
+        )
+
+
+async def resolve_local_profile_id(db: AsyncSession) -> int:
+    """Return the active profile_id for local (single-user) CLI mode.
+
+    Resolves or auto-provisions the first admin user and their default profile.
+    Convenience wrapper over ``ActorContextFactory.make_local`` for CLI callers
+    that only need the ``profile_id``.
+    """
+    actor = await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
+    return actor.profile_id

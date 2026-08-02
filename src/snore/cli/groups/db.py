@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from snore.auth.factory import resolve_local_profile_id
 from snore.cli.decorators import db_option, db_session
 from snore.cli.display import (
     ICON_STATS,
@@ -65,7 +66,8 @@ def db_stats(db: str | None) -> None:
 
     async def _run() -> None:
         async with db_session(db) as session:
-            service = DatabaseService(session)
+            profile_id = await resolve_local_profile_id(session)
+            service = DatabaseService(session, profile_id)
             stats = await service.get_stats(str(db_path))
 
             print_header("Database Statistics", ICON_STATS)
@@ -117,7 +119,7 @@ def vacuum(db: str | None) -> None:
 
     async def _run() -> None:
         async with db_session(db) as session:
-            service = DatabaseService(session)
+            service = DatabaseService(session, await resolve_local_profile_id(session))
             result = service.vacuum_sqlite(str(db_path))
             print_success(
                 f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)"
@@ -142,7 +144,8 @@ def drop(db: str | None, force: bool) -> None:
 
         async def _show_stats() -> None:
             async with session_scope() as session:
-                service = DatabaseService(session)
+                profile_id = await resolve_local_profile_id(session)
+                service = DatabaseService(session, profile_id)
                 stats = await service.get_stats(str(db_path))
 
                 console.print(f"\nDatabase: {db_path}")

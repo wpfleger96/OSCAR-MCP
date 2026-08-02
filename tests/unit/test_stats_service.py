@@ -48,7 +48,7 @@ class TestStatsService:
 
     async def test_empty_database_returns_none(self, async_db_session):
         """Empty database returns None for get_summary."""
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary()
 
         assert summary is None
@@ -71,7 +71,7 @@ class TestStatsService:
             ahi=3.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary()
 
         assert summary is not None
@@ -101,7 +101,7 @@ class TestStatsService:
             ahi=3.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary(days_limit=5)
 
         assert summary is not None
@@ -138,7 +138,7 @@ class TestStatsService:
 
         await async_db_session.flush()
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary()
 
         assert summary is not None
@@ -186,7 +186,7 @@ class TestStatsService:
         async_db_session.add(stats2)
         await async_db_session.flush()
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary()
 
         assert summary is not None
@@ -215,7 +215,7 @@ class TestStatsService:
             ahi=3.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         period_stats = await service.get_period_statistics("week")
 
         assert len(period_stats) > 0
@@ -237,7 +237,7 @@ class TestStatsService:
                 spo2_min=92.0 - i,
             )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         records = await service.get_records(top_n=5)
 
         assert "ahi" in records
@@ -282,7 +282,7 @@ class TestStatsService:
             pressure_median=9.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary()
 
         assert summary is not None
@@ -313,7 +313,7 @@ class TestStatsService:
             spo2_min=88,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary()
 
         assert summary is not None
@@ -336,7 +336,7 @@ class TestQueryDaysFiltering:
             async_db_session, async_test_device, date(2024, 6, 1), duration_hours=8.0
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         result = await service._query_days(from_date=date(2024, 3, 1))
 
         assert len(result) == 1
@@ -353,7 +353,7 @@ class TestQueryDaysFiltering:
             async_db_session, async_test_device, date(2024, 6, 1), duration_hours=8.0
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         result = await service._query_days(to_date=date(2024, 3, 1))
 
         assert len(result) == 1
@@ -371,7 +371,7 @@ class TestQueryDaysFiltering:
                 duration_hours=8.0,
             )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         result = await service._query_days(
             from_date=date(2024, 3, 1), to_date=date(2024, 8, 1)
         )
@@ -403,7 +403,7 @@ class TestQueryDaysFiltering:
             duration_hours=8.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         # days_limit=30 excludes the oldest day; from_date also excludes days before 4 days ago
         result = await service._query_days(
             days_limit=30, from_date=today - timedelta(days=4)
@@ -460,7 +460,7 @@ class TestAggregateSessionStatsPerPeriod:
         async_db_session.add(stats2)
         await async_db_session.flush()
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         day_records = await service._query_days()
         period_stats = await service.get_period_statistics("month")
 
@@ -494,7 +494,7 @@ class TestAggregateSessionStatsPerPeriod:
         async_db_session.add(stats)
         await async_db_session.flush()
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         day_records = await service._query_days()
         period_stats = await service.get_period_statistics("month")
 
@@ -514,7 +514,7 @@ class TestAggregateSessionStatsPerPeriod:
             period_start=date(2024, 3, 1),
             period_end=date(2024, 3, 31),
         )
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         extras = await service._aggregate_session_stats_per_period([], [ps])
 
         assert extras[date(2024, 3, 1)] == {
@@ -541,7 +541,7 @@ class TestGetTrends:
             ahi=2.5,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         result = await service.get_trends("week")
 
         expected = {
@@ -575,7 +575,7 @@ class TestGetTrends:
                 ahi=float(i + 1),
             )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         result = await service.get_trends("day")
 
         assert len(result["ahi"]) == 3
@@ -598,7 +598,7 @@ class TestGetTrends:
             duration_hours=8.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         result = await service.get_trends("month", days_limit=30)
 
         # Only the recent day should appear
@@ -606,7 +606,7 @@ class TestGetTrends:
 
     async def test_get_trends_empty_returns_13_empty_lists(self, async_db_session):
         """Empty database returns 13-key dict with empty lists."""
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         result = await service.get_trends("week")
 
         assert len(result) == 13

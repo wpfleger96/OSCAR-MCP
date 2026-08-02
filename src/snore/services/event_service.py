@@ -7,10 +7,11 @@ import bisect
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
+from snore.database import models
 from snore.exceptions import NotFoundError
 from snore.services.schemas import EventMatchResult
 
@@ -20,21 +21,25 @@ __all__ = ["EVENT_MATCH_TOLERANCE_SECONDS", "EventService"]
 class EventService:
     """Service for event matching and comparison."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
+        self.profile_id = profile_id
 
-    async def list_session_events(
-        self,
-        session_id: int,
-        event_type: str | None = None,
-    ) -> tuple[list[Any], datetime]:
-        """Return (events, session_start) for a session."""
-        from snore.database import models  # noqa: PLC0415
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit sessions to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
 
+    async def _get_session_owned(self, session_id: int) -> Any:
+        """Return the session if it belongs to this profile, else raise NotFoundError."""
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session).where(models.Session.id == session_id)
+                    select(models.Session)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()
@@ -42,6 +47,16 @@ class EventService:
         )
         if session is None:
             raise NotFoundError(f"Session {session_id} not found")
+        return session
+
+    async def list_session_events(
+        self,
+        session_id: int,
+        event_type: str | None = None,
+    ) -> tuple[list[Any], datetime]:
+        """Return (events, session_start) for a session."""
+
+        session = await self._get_session_owned(session_id)
 
         stmt = select(models.Event).where(models.Event.session_id == session_id)
         if event_type:
@@ -52,19 +67,8 @@ class EventService:
 
     async def get_machine_event_times(self, session_id: int) -> list[float]:
         """Return sorted machine event timestamps for a session."""
-        from snore.database import models  # noqa: PLC0415
 
-        session = (
-            (
-                await self.db_session.execute(
-                    select(models.Session).where(models.Session.id == session_id)
-                )
-            )
-            .scalars()
-            .first()
-        )
-        if session is None:
-            raise NotFoundError(f"Session {session_id} not found")
+        await self._get_session_owned(session_id)
 
         events = (
             (

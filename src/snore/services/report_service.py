@@ -6,7 +6,7 @@ from datetime import date
 from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.svg_charts import render_trend_line
@@ -134,16 +134,23 @@ class ReportService:
     unchanged.
     """
 
-    def __init__(self, db_session: AsyncSession) -> None:
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self._db = db_session
-        self._stats = StatsService(db_session)
+        self.profile_id = profile_id
+        self._stats = StatsService(db_session, profile_id)
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: scope device/data queries to this profile."""
+        return models.Device.profile_id == self.profile_id
 
     async def _first_device(self) -> DeviceInfo | None:
-        """Return the first device as a plain detached schema, or None."""
+        """Return the first device in this profile as a plain detached schema, or None."""
         device = (
             (
                 await self._db.execute(
-                    select(models.Device).order_by(models.Device.first_seen)
+                    select(models.Device)
+                    .where(self._profile_filter())
+                    .order_by(models.Device.first_seen)
                 )
             )
             .scalars()

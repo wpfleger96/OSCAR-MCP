@@ -62,9 +62,11 @@ def summary(
 
     async def _run() -> str:
         async with open_db_session(db) as session:
+            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
             from snore.services import ReportService
 
-            svc = ReportService(session)
+            profile_id = await resolve_local_profile_id(session)
+            svc = ReportService(session, profile_id)
             return await svc.generate_summary_report(fd, td)
 
     html = asyncio.run(_run())
@@ -144,9 +146,11 @@ def comparison(
 
     async def _run() -> str:
         async with open_db_session(db) as session:
+            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
             from snore.services import ReportService
 
-            svc = ReportService(session)
+            profile_id = await resolve_local_profile_id(session)
+            svc = ReportService(session, profile_id)
             return await svc.generate_comparison_report((fd, td), (cfd, ctd))
 
     html = asyncio.run(_run())

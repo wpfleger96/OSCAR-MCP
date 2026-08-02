@@ -23,7 +23,7 @@ async def _resolve_session_id(
     db_session: Any,
     session_id: int | None,
     date: datetime | None,
-) -> int:
+) -> tuple[int, int]:
     """
     Resolve session ID from either explicit ID or date.
 
@@ -33,17 +33,19 @@ async def _resolve_session_id(
         date: Date to look up session
 
     Returns:
-        Resolved session ID
+        Tuple of (resolved session ID, profile_id)
 
     Raises:
         SystemExit: If session cannot be resolved
     """
-    from snore.services.session_service import SessionService
+    from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+    from snore.services.session_service import SessionService  # noqa: PLC0415
 
-    service = SessionService(db_session)
+    profile_id = await resolve_local_profile_id(db_session)
+    service = SessionService(db_session, profile_id)
 
     try:
-        return await service.resolve_session_id(session_id, date)
+        return await service.resolve_session_id(session_id, date), profile_id
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -79,9 +81,11 @@ def list_waveforms(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            resolved_id = await _resolve_session_id(db_session, session_id, date)
+            resolved_id, profile_id = await _resolve_session_id(
+                db_session, session_id, date
+            )
 
-            service = WaveformService(db_session)
+            service = WaveformService(db_session, profile_id)
             waveforms = await service.list_waveforms(resolved_id)
 
             if not waveforms:
@@ -189,7 +193,7 @@ def show_waveform(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            resolved_id = await _resolve_session_id(db_session, session_id, date)
+            resolved_id, _ = await _resolve_session_id(db_session, session_id, date)
 
             inspector = WaveformInspector(db_session)
 
@@ -364,9 +368,11 @@ def compare_events(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            resolved_id = await _resolve_session_id(db_session, session_id, date)
+            resolved_id, profile_id = await _resolve_session_id(
+                db_session, session_id, date
+            )
 
-            service = WaveformService(db_session)
+            service = WaveformService(db_session, profile_id)
             try:
                 comparison = await service.compare_events(
                     resolved_id, mode, tolerance_seconds=5.0

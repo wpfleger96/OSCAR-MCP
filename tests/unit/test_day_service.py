@@ -58,7 +58,7 @@ async def _create_session_for_day(
 class TestDayServiceList:
     async def test_list_empty(self, async_db_session, async_test_device):
         """Empty database returns empty list and zero total."""
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, total = await service.list_days()
         assert items == []
         assert total == 0
@@ -76,7 +76,7 @@ class TestDayServiceList:
         )
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, total = await service.list_days(limit=0)
 
         assert total == 3
@@ -89,7 +89,7 @@ class TestDayServiceList:
         await _create_day(async_db_session, async_test_device, date(2025, 1, 2))
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, _ = await service.list_days(limit=0)
 
         assert items[0].date == date(2025, 1, 3)
@@ -105,7 +105,7 @@ class TestDayServiceList:
         await _create_day(async_db_session, async_test_device, date(2025, 1, 10))
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, total = await service.list_days(from_date=date(2025, 1, 5), limit=0)
 
         assert total == 2
@@ -118,7 +118,7 @@ class TestDayServiceList:
         await _create_day(async_db_session, async_test_device, date(2025, 1, 10))
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, total = await service.list_days(to_date=date(2025, 1, 5), limit=0)
 
         assert total == 2
@@ -132,7 +132,7 @@ class TestDayServiceList:
         await _create_day(async_db_session, async_test_device, date(2025, 1, 15))
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, total = await service.list_days(
             from_date=date(2025, 1, 4), to_date=date(2025, 1, 11), limit=0
         )
@@ -159,7 +159,7 @@ class TestDayServiceList:
         await _create_day(async_db_session, other_device, date(2025, 1, 2))
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, total = await service.list_days(device_id=async_test_device.id, limit=0)
 
         assert total == 1
@@ -175,7 +175,7 @@ class TestDayServiceList:
             )
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, total = await service.list_days(limit=3)
 
         assert total == 10
@@ -191,7 +191,7 @@ class TestDayServiceList:
             )
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items_page1, total = await service.list_days(limit=2, offset=0)
         items_page2, _ = await service.list_days(limit=2, offset=2)
 
@@ -214,7 +214,7 @@ class TestDayServiceList:
         )
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         items, _ = await service.list_days()
 
         assert len(items) == 1
@@ -229,7 +229,7 @@ class TestDayServiceList:
 class TestDayServiceGet:
     async def test_get_nonexistent(self, async_db_session):
         """Raises NotFoundError for a date with no Day record."""
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         with pytest.raises(NotFoundError):
             await service.get_day(date(2024, 1, 1))
 
@@ -244,7 +244,7 @@ class TestDayServiceGet:
         )
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         result = await service.get_day(date(2025, 4, 10))
 
         assert result is not None
@@ -274,7 +274,7 @@ class TestDayServiceGet:
         async_db_session.add(sess2)
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         result = await service.get_day(date(2025, 5, 20))
 
         assert result is not None
@@ -285,7 +285,7 @@ class TestDayServiceGet:
         await _create_day(async_db_session, async_test_device, date(2025, 7, 1))
         await async_db_session.flush()
 
-        service = DayService(async_db_session)
+        service = DayService(async_db_session, profile_id=1)
         result = await service.get_day(date(2025, 7, 1))
 
         assert result is not None

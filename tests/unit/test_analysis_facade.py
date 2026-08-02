@@ -45,7 +45,7 @@ class TestListSessionsWithStatus:
 
     async def test_list_empty(self, async_db_session):
         """Empty database returns empty list."""
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         results = await service.list_sessions_with_status()
 
         assert results == []
@@ -73,7 +73,7 @@ class TestListSessionsWithStatus:
         async_db_session.add(sess2)
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         results = await service.list_sessions_with_status()
 
         assert len(results) == 2
@@ -109,7 +109,7 @@ class TestListSessionsWithStatus:
         async_db_session.add(sess2)
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         results = await service.list_sessions_with_status(analyzed_only=True)
 
         assert len(results) == 1
@@ -126,7 +126,7 @@ class TestListSessionsWithStatus:
         await _create_session_with_analysis(async_db_session, async_test_device, d3)
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         results = await service.list_sessions_with_status(
             start=datetime(2024, 1, 2), end=datetime(2024, 1, 9)
         )
@@ -140,7 +140,7 @@ class TestGetDeletePreview:
 
     async def test_delete_preview_no_filters(self, async_db_session):
         """Raises ValueError when no filters are specified."""
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
 
         with pytest.raises(ValueError) as exc:
             await service.get_delete_preview()
@@ -160,7 +160,7 @@ class TestGetDeletePreview:
         )
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         preview = await service.get_delete_preview(delete_all=True)
 
         assert preview.sessions_with_analysis == 2
@@ -189,7 +189,7 @@ class TestGetDeletePreview:
         )
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         preview = await service.get_delete_preview(delete_all=True, all_versions=False)
 
         assert preview.sessions_with_analysis == 2
@@ -211,7 +211,7 @@ class TestDeleteAnalysis:
         )
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         deleted = await service.delete_analysis([sess.id], all_versions=True)
 
         assert deleted == 3
@@ -236,7 +236,7 @@ class TestDeleteAnalysis:
         )
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         deleted = await service.delete_analysis([sess.id], all_versions=False)
 
         assert deleted == 1
@@ -265,7 +265,7 @@ class TestDeleteAnalysis:
 
     async def test_delete_empty(self, async_db_session):
         """Returns 0 when no matching sessions exist."""
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         deleted = await service.delete_analysis([999], all_versions=False)
 
         assert deleted == 0
@@ -286,7 +286,7 @@ class TestDeleteAnalysis:
         )
         await async_db_session.commit()
 
-        service = AnalysisFacade(async_db_session)
+        service = AnalysisFacade(async_db_session, profile_id=1)
         deleted = await service.delete_analysis([sess1.id, sess2.id], all_versions=True)
 
         assert deleted == 2
@@ -301,7 +301,7 @@ class TestDeleteAnalysis:
 
 class TestRunBatchAnalysis:
     async def test_no_sessions_returns_empty_result(self, async_db_session):
-        facade = AnalysisFacade(async_db_session)
+        facade = AnalysisFacade(async_db_session, profile_id=1)
         result = await facade.run_batch_analysis(
             from_date=datetime(2099, 1, 1), to_date=datetime(2099, 12, 31)
         )
@@ -342,7 +342,7 @@ class TestRunBatchAnalysis:
             "snore.services.analysis_facade.BatchAnalysisCoordinator",
             lambda: coord_mock,
         )
-        facade = AnalysisFacade(async_db_session)
+        facade = AnalysisFacade(async_db_session, profile_id=1)
         result = await facade.run_batch_analysis(
             from_date=datetime(2025, 1, 1), to_date=datetime(2025, 1, 31)
         )
@@ -385,7 +385,7 @@ class TestRunBatchAnalysis:
             "snore.services.analysis_facade.BatchAnalysisCoordinator",
             lambda: coord_mock,
         )
-        facade = AnalysisFacade(async_db_session)
+        facade = AnalysisFacade(async_db_session, profile_id=1)
         result = await facade.run_batch_analysis(
             from_date=datetime(2025, 1, 1), to_date=datetime(2025, 1, 31)
         )
@@ -432,7 +432,7 @@ class TestRunBatchAnalysis:
             "snore.services.analysis_facade.BatchAnalysisCoordinator",
             lambda: coord_mock,
         )
-        facade = AnalysisFacade(async_db_session)
+        facade = AnalysisFacade(async_db_session, profile_id=1)
         await facade.run_batch_analysis(
             from_date=datetime(2025, 1, 1),
             to_date=datetime(2025, 1, 31),

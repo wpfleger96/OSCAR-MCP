@@ -13,7 +13,7 @@ class TestDatabaseService:
 
     async def test_empty_database_stats(self, async_db_session, temp_db):
         """Empty database returns zeros for all counts."""
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         stats = await service.get_stats(str(temp_db))
 
         assert stats.profile_count == 0
@@ -62,7 +62,7 @@ class TestDatabaseService:
         async_db_session.add(stats1)
         await async_db_session.commit()
 
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         stats = await service.get_stats(str(temp_db))
 
         assert stats.device_count == 1
@@ -95,7 +95,7 @@ class TestDatabaseService:
             async_db_session.add(session)
         await async_db_session.commit()
 
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         stats = await service.get_stats(str(temp_db))
 
         assert stats.session_count == 10
@@ -109,7 +109,7 @@ class TestDatabaseService:
         self, async_db_session, async_test_device, temp_db
     ):
         """Database file size is computed correctly."""
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         stats = await service.get_stats(str(temp_db))
 
         assert stats.size_mb > 0
@@ -117,7 +117,7 @@ class TestDatabaseService:
 
     async def test_nonexistent_file_size_zero(self, async_db_session):
         """Nonexistent database path returns 0 size."""
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         fake_path = "/nonexistent/path/database.db"
         stats = await service.get_stats(fake_path)
 
@@ -130,7 +130,7 @@ class TestDeviceServiceListDevices:
 
     async def test_list_devices_empty(self, async_db_session):
         """Empty database returns empty list."""
-        service = DeviceService(async_db_session)
+        service = DeviceService(async_db_session, profile_id=1)
         result = await service.list_devices()
 
         assert len(result) == 0
@@ -158,7 +158,7 @@ class TestDeviceServiceListDevices:
         async_db_session.add_all([device1, device2, device3])
         await async_db_session.commit()
 
-        service = DeviceService(async_db_session)
+        service = DeviceService(async_db_session, profile_id=1)
         result = await service.list_devices()
 
         assert len(result) == 3
@@ -198,7 +198,7 @@ class TestDeviceServiceListDevices:
         async_db_session.add_all([device1, device2, device3, device4])
         await async_db_session.commit()
 
-        service = DeviceService(async_db_session)
+        service = DeviceService(async_db_session, profile_id=1)
         result = await service.list_devices()
 
         assert len(result) == 4
@@ -227,7 +227,7 @@ class TestDeviceServiceListDevices:
         async_db_session.add(device)
         await async_db_session.commit()
 
-        service = DeviceService(async_db_session)
+        service = DeviceService(async_db_session, profile_id=1)
         result = await service.list_devices()
 
         assert len(result) == 1
@@ -243,7 +243,7 @@ class TestDeviceServiceListDevices:
 
 class TestVacuum:
     async def test_vacuum_returns_success_status(self, async_db_session, temp_db):
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         result = service.vacuum_sqlite(str(temp_db))
         assert result.status == "success"
 
@@ -283,14 +283,14 @@ class TestReset:
         )
 
     async def test_empty_db_returns_zeros(self, async_db_session, temp_db):
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         result = await self._do_reset(service, async_db_session, temp_db)
         assert result.status == "success"
         assert result.total_rows_deleted == 0
         assert all(v == 0 for v in result.tables_cleared.values())
 
     async def test_includes_all_tables(self, async_db_session, temp_db):
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         result = await self._do_reset(service, async_db_session, temp_db)
         from snore.database.models import Base
 
@@ -312,7 +312,7 @@ class TestReset:
         async_db_session.add(session)
         await async_db_session.commit()
 
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         result = await self._do_reset(service, async_db_session, temp_db)
 
         assert result.tables_cleared["sessions"] == 1
@@ -337,7 +337,7 @@ class TestReset:
         async_db_session.add(session)
         await async_db_session.commit()
 
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         await self._do_reset(service, async_db_session, temp_db)
 
         stats = await service.get_stats(str(temp_db))
@@ -345,7 +345,7 @@ class TestReset:
         assert stats.device_count == 0
 
     async def test_size_reported(self, async_db_session, temp_db):
-        service = DatabaseService(async_db_session)
+        service = DatabaseService(async_db_session, profile_id=1)
         result = await self._do_reset(service, async_db_session, temp_db)
         assert result.size_before_mb >= 0
         assert result.size_after_mb >= 0

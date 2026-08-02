@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
@@ -15,8 +15,13 @@ __all__ = ["DayService"]
 
 
 class DayService:
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
+        self.profile_id = profile_id
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: join session's device to this profile."""
+        return models.Device.profile_id == self.profile_id
 
     async def list_days(
         self,
@@ -27,7 +32,11 @@ class DayService:
         offset: int = 0,
     ) -> tuple[list[DayListItem], int]:
         """Return paginated list of days with optional filters."""
-        query = select(models.Day)
+        query = (
+            select(models.Day)
+            .join(models.Device, models.Day.device_id == models.Device.id)
+            .where(self._profile_filter())
+        )
 
         if from_date is not None:
             query = query.where(models.Day.date >= from_date)
@@ -49,8 +58,15 @@ class DayService:
         return items, total
 
     async def get_day(self, day_date: date) -> DayDetail:
-        """Return detailed day record with session IDs."""
-        stmt = select(models.Day).where(models.Day.date == day_date)
+        """Return detailed day record with session IDs.
+
+        Raises NotFoundError if no day exists for this date in the actor's profile.
+        """
+        stmt = (
+            select(models.Day)
+            .join(models.Device, models.Day.device_id == models.Device.id)
+            .where(self._profile_filter(), models.Day.date == day_date)
+        )
         day = (await self.db_session.execute(stmt)).scalar_one_or_none()
 
         if day is None:

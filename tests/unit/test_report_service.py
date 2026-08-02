@@ -70,7 +70,7 @@ class TestReportService:
         from_date = today - timedelta(days=30)
         to_date = today
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert html.startswith("<!DOCTYPE html>")
@@ -83,7 +83,7 @@ class TestReportService:
         from_date = today - timedelta(days=30)
         to_date = today
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert html.startswith("<!DOCTYPE html>")
@@ -101,7 +101,7 @@ class TestReportService:
             async_db_session, async_test_device, from_date, to_date, step_days=7
         )
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert async_test_device.model in html
@@ -124,7 +124,7 @@ class TestReportService:
             async_db_session, async_test_device, range_b[0], range_b[1], step_days=7
         )
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_comparison_report(range_a, range_b)
 
         assert str(range_a[0]) in html
@@ -143,7 +143,7 @@ class TestReportService:
             async_db_session, async_test_device, range_a[0], range_a[1], step_days=7
         )
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_comparison_report(range_a, range_b)
 
         assert html.startswith("<!DOCTYPE html>")
@@ -168,7 +168,7 @@ class TestReportService:
         from_date = today - timedelta(days=7)
         to_date = today
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert "<script>" not in html
@@ -197,7 +197,7 @@ class TestReportService:
             ahi=10.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary(
             from_date=today - timedelta(days=7), to_date=today
         )

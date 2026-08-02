@@ -3,7 +3,7 @@
 from datetime import date
 from itertools import groupby
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
@@ -22,17 +22,22 @@ __all__ = ["DeviceService"]
 class DeviceService:
     """Service for device listing and per-device detail with usage and settings history."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
+        self.profile_id = profile_id
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit devices to this profile."""
+        return models.Device.profile_id == self.profile_id
 
     async def list_devices(self) -> list[DeviceInfo]:
-        """List all devices ordered by manufacturer and model."""
+        """List all devices for this profile ordered by manufacturer and model."""
         devices = (
             (
                 await self.db_session.execute(
-                    select(models.Device).order_by(
-                        models.Device.manufacturer, models.Device.model
-                    )
+                    select(models.Device)
+                    .where(self._profile_filter())
+                    .order_by(models.Device.manufacturer, models.Device.model)
                 )
             )
             .scalars()
@@ -41,11 +46,18 @@ class DeviceService:
         return [DeviceInfo.model_validate(d) for d in devices]
 
     async def get_device_detail(self, device_id: int) -> DeviceDetail:
-        """Get full device detail including usage summary, current settings, and settings history."""
+        """Get full device detail including usage summary, current settings, and settings history.
+
+        Raises NotFoundError if the device doesn't exist or belongs to a different profile
+        (foreign ID → 404, not 403, to avoid oracle attacks).
+        """
         device = (
             (
                 await self.db_session.execute(
-                    select(models.Device).where(models.Device.id == device_id)
+                    select(models.Device).where(
+                        models.Device.id == device_id,
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()

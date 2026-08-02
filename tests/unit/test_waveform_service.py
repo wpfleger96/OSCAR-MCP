@@ -36,7 +36,7 @@ class TestWaveformService:
         async_db_session.add(session)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         result = await service.list_waveforms(session.id)
 
         assert result == []
@@ -74,7 +74,7 @@ class TestWaveformService:
         async_db_session.add(wf2)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         result = await service.list_waveforms(session.id)
 
         assert len(result) == 2
@@ -110,7 +110,7 @@ class TestWaveformService:
         async_db_session.add(wf)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         result = await service.list_waveforms(session.id)
 
         assert len(result) == 1
@@ -132,7 +132,7 @@ class TestWaveformService:
         async_db_session.add(session)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
 
         with pytest.raises(ValueError, match="Waveform not found"):
             await service.get_waveform_data(session.id, "nonexistent")
@@ -163,7 +163,7 @@ class TestWaveformService:
         async_db_session.add(wf)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         timestamps, values, metadata = await service.get_waveform_data(
             session.id, "flow"
         )
@@ -203,7 +203,7 @@ class TestWaveformService:
         async_db_session.add(wf)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         max_points = 1000
         timestamps, values, metadata = await service.get_waveform_data(
             session.id, "flow", max_points=max_points
@@ -242,7 +242,7 @@ class TestWaveformService:
         async_db_session.add(wf)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
 
         timestamps, values, _ = await service.get_waveform_data(
             session.id, "flow", start_seconds=10.0, end_seconds=20.0
@@ -282,7 +282,7 @@ class TestWaveformService:
         async_db_session.add(wf)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
 
         timestamps, values, _ = await service.get_waveform_data(
             session.id, "flow", start_seconds=30.0
@@ -321,7 +321,7 @@ class TestWaveformService:
         async_db_session.add(wf)
         await async_db_session.flush()
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
 
         timestamps, values, _ = await service.get_waveform_data(
             session.id, "flow", end_seconds=10.0
@@ -395,7 +395,7 @@ class TestCompareEvents:
             "_load_analysis_result",
             AsyncMock(return_value=None),
         )
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         with pytest.raises(NotFoundError, match="No analysis results"):
             await service.compare_events(session.id)
 
@@ -419,7 +419,7 @@ class TestCompareEvents:
             "_load_analysis_result",
             AsyncMock(return_value=fake_result),
         )
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         with pytest.raises(NotFoundError, match="Mode.*not found"):
             await service.compare_events(session.id, mode="resmed")
 
@@ -448,7 +448,7 @@ class TestCompareEvents:
             lambda events: ([], []),
         )
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         result = await service.compare_events(session.id)
         assert result.false_negatives == []
         assert result.false_positives_apnea == []
@@ -481,7 +481,7 @@ class TestCompareEvents:
             lambda events: ([m_event], []),
         )
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         result = await service.compare_events(session.id)
         assert len(result.false_negatives) == 1
         assert result.false_negatives[0].start_time == 100.0
@@ -513,7 +513,7 @@ class TestCompareEvents:
             lambda events: ([], []),
         )
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         result = await service.compare_events(session.id)
         assert len(result.false_positives_apnea) == 1
         assert result.false_positives_apnea[0].start_time == 200.0
@@ -548,7 +548,7 @@ class TestCompareEvents:
             lambda events: ([m_event], []),
         )
 
-        service = WaveformService(async_db_session)
+        service = WaveformService(async_db_session, profile_id=1)
         result = await service.compare_events(session.id)
         assert result.false_negatives == []
         assert result.false_positives_apnea == []

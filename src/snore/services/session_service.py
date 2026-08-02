@@ -26,8 +26,13 @@ __all__ = ["SessionService"]
 class SessionService:
     """Service for session listing, detail, deletion, and management."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
+        self.profile_id = profile_id
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit sessions to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
 
     @staticmethod
     def _session_filters(
@@ -78,7 +83,7 @@ class SessionService:
             select(func.count())
             .select_from(models.Session)
             .join(models.Device, models.Session.device_id == models.Device.id)
-            .where(*filters)
+            .where(self._profile_filter(), *filters)
         )
         total_count = (await self.db_session.execute(count_query)).scalar() or 0
 
@@ -88,7 +93,7 @@ class SessionService:
             .outerjoin(
                 models.Statistics, models.Session.id == models.Statistics.session_id
             )
-            .where(*filters)
+            .where(self._profile_filter(), *filters)
             .order_by(order_by)
         )
 
@@ -120,11 +125,20 @@ class SessionService:
     async def get_session_detail(
         self, session_id: int, include_settings: bool = False
     ) -> SessionDetail:
-        """Get detailed information for a single session."""
+        """Get detailed information for a single session.
+
+        Raises NotFoundError if the session doesn't exist or belongs to a
+        different profile (foreign ID → 404, not 403, to avoid oracle attacks).
+        """
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session).where(models.Session.id == session_id)
+                    select(models.Session)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()
@@ -266,7 +280,7 @@ class SessionService:
         query = (
             select(models.Session, models.Device)
             .join(models.Device, models.Session.device_id == models.Device.id)
-            .where(*filters)
+            .where(self._profile_filter(), *filters)
             .order_by(models.Session.start_time.desc())
         )
 
@@ -328,11 +342,20 @@ class SessionService:
         return cursor.rowcount or 0
 
     async def set_session_enabled(self, session_id: int, enabled: bool) -> None:
-        """Toggle session enabled/disabled status."""
+        """Toggle session enabled/disabled status.
+
+        Raises NotFoundError if the session doesn't exist or belongs to a
+        different profile (foreign ID → 404 to avoid oracle attacks).
+        """
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session).where(models.Session.id == session_id)
+                    select(models.Session)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()
@@ -374,8 +397,12 @@ class SessionService:
             (
                 await self.db_session.execute(
                     select(models.Session)
-                    .join(models.Day)
-                    .where(models.Day.date == date.date())
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .join(models.Day, models.Session.day_id == models.Day.id)
+                    .where(
+                        models.Day.date == date.date(),
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()

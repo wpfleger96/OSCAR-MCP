@@ -44,7 +44,10 @@ class WaveformInspector:
     """Inspector for waveform data extraction and event filtering."""
 
     def __init__(
-        self, db_session: AsyncSession, service: WaveformService | None = None
+        self,
+        db_session: AsyncSession,
+        service: WaveformService | None = None,
+        profile_id: int | None = None,
     ):
         """
         Initialize waveform inspector.
@@ -53,9 +56,12 @@ class WaveformInspector:
             db_session: Database session
             service: Waveform access service (constructed from db_session if
                 not provided)
+            profile_id: Profile to scope ownership checks to.  When *None*
+                the inspector operates without profile isolation — use only
+                after the caller has already validated session ownership.
         """
         self.db_session = db_session
-        self.service = service or WaveformService(db_session)
+        self.service = service or WaveformService(db_session, profile_id)
 
     async def get_window(
         self,
