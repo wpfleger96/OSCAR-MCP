@@ -117,3 +117,32 @@ def parse_id_list(raw: str) -> list[int]:
         raise click.BadParameter(
             f"Invalid ID list: {raw!r}. Expected comma-separated integers."
         ) from e
+
+
+def actor_options(f: Any) -> Any:
+    """Shared --user/--profile options for profile-scoped data commands.
+
+    Adds ``--user`` (``SNORE_USER`` env var) and ``--profile``
+    (``SNORE_PROFILE`` env var) to the decorated command.  The resolved
+    parameter names are ``actor_user`` and ``actor_profile`` — distinct from
+    the ``--user`` option used by ``snore user`` / ``snore profile`` operator
+    commands.
+
+    Pass both values to ``resolve_cli_profile_id(db, actor_user, actor_profile)``
+    inside the command's async body.
+    """
+    f = click.option(
+        "--profile",
+        "actor_profile",
+        default=None,
+        envvar="SNORE_PROFILE",
+        help="Profile name or ID (default: user's default; env: SNORE_PROFILE)",
+    )(f)
+    f = click.option(
+        "--user",
+        "actor_user",
+        default=None,
+        envvar="SNORE_USER",
+        help="User email (default: local admin user; env: SNORE_USER)",
+    )(f)
+    return f

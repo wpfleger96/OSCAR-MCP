@@ -8,8 +8,8 @@ from pathlib import Path
 
 import click
 
-from snore.auth.factory import resolve_local_profile_id
-from snore.cli.decorators import db_option, db_session
+from snore.auth.factory import resolve_cli_profile_id, resolve_local_profile_id
+from snore.cli.decorators import actor_options, db_option, db_session
 from snore.cli.display import (
     ICON_STATS,
     console,
@@ -60,13 +60,16 @@ def init(db: str | None) -> None:
 
 @db.command("stats")
 @db_option
-def db_stats(db: str | None) -> None:
+@actor_options
+def db_stats(db: str | None, actor_user: str | None, actor_profile: str | None) -> None:
     """Show database statistics."""
     db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
 
     async def _run() -> None:
         async with db_session(db) as session:
-            profile_id = await resolve_local_profile_id(session)
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
             service = DatabaseService(session, profile_id)
             stats = await service.get_stats(str(db_path))
 

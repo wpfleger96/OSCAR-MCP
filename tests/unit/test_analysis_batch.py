@@ -158,7 +158,7 @@ class TestAnalyzeBatch:
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
             patch(
-                "snore.auth.factory.resolve_local_profile_id",
+                "snore.auth.factory.resolve_cli_profile_id",
                 new_callable=AsyncMock,
                 return_value=1,
             ),
@@ -223,7 +223,7 @@ class TestAnalyzeBatch:
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
             patch(
-                "snore.auth.factory.resolve_local_profile_id",
+                "snore.auth.factory.resolve_cli_profile_id",
                 new_callable=AsyncMock,
                 return_value=1,
             ),
@@ -256,7 +256,7 @@ class TestAnalyzeBatch:
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
             patch(
-                "snore.auth.factory.resolve_local_profile_id",
+                "snore.auth.factory.resolve_cli_profile_id",
                 new_callable=AsyncMock,
                 return_value=1,
             ),
@@ -302,7 +302,7 @@ class TestAnalyzeBatch:
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
             patch(
-                "snore.auth.factory.resolve_local_profile_id",
+                "snore.auth.factory.resolve_cli_profile_id",
                 new_callable=AsyncMock,
                 return_value=1,
             ),

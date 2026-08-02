@@ -12,7 +12,7 @@ import click
 
 from rich.markup import escape
 
-from snore.cli.decorators import db_option, session_id_date_options
+from snore.cli.decorators import actor_options, db_option, session_id_date_options
 from snore.cli.decorators import db_session as open_db_session
 from snore.cli.display import console, print_table, print_warning
 from snore.waveform import format_time_offset
@@ -23,6 +23,8 @@ async def _resolve_session_id(
     db_session: Any,
     session_id: int | None,
     date: datetime | None,
+    actor_user: str | None = None,
+    actor_profile: str | None = None,
 ) -> tuple[int, int]:
     """
     Resolve session ID from either explicit ID or date.
@@ -31,6 +33,8 @@ async def _resolve_session_id(
         db_session: Database session
         session_id: Explicit session ID (takes precedence)
         date: Date to look up session
+        actor_user: Value of --user / SNORE_USER (may be None)
+        actor_profile: Value of --profile / SNORE_PROFILE (may be None)
 
     Returns:
         Tuple of (resolved session ID, profile_id)
@@ -38,10 +42,10 @@ async def _resolve_session_id(
     Raises:
         SystemExit: If session cannot be resolved
     """
-    from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
     from snore.services.session_service import SessionService  # noqa: PLC0415
 
-    profile_id = await resolve_local_profile_id(db_session)
+    profile_id = await resolve_cli_profile_id(db_session, actor_user, actor_profile)
     service = SessionService(db_session, profile_id)
 
     try:
@@ -59,10 +63,13 @@ def waveform() -> None:
 @waveform.command("list")
 @session_id_date_options
 @db_option
+@actor_options
 def list_waveforms(
     session_id: int | None,
     date: datetime | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """
     List available waveform types for a session.
@@ -82,7 +89,7 @@ def list_waveforms(
     async def _run() -> None:
         async with open_db_session(db) as db_session:
             resolved_id, profile_id = await _resolve_session_id(
-                db_session, session_id, date
+                db_session, session_id, date, actor_user, actor_profile
             )
 
             service = WaveformService(db_session, profile_id)
@@ -138,6 +145,7 @@ def list_waveforms(
     help="Output file path (required for csv format)",
 )
 @db_option
+@actor_options
 @click.option(
     "--mode", "-m", default="aasm", help="Detection mode to compare (default: aasm)"
 )
@@ -155,6 +163,8 @@ def show_waveform(
     output_format: str,
     output: str | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
     mode: str,
     waveform_type: str,
 ) -> None:
@@ -193,7 +203,9 @@ def show_waveform(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            resolved_id, _ = await _resolve_session_id(db_session, session_id, date)
+            resolved_id, _ = await _resolve_session_id(
+                db_session, session_id, date, actor_user, actor_profile
+            )
 
             inspector = WaveformInspector(db_session)
 
@@ -344,12 +356,15 @@ def show_waveform(
 )
 @click.option("--show-unmatched", is_flag=True, help="Only show unmatched events")
 @db_option
+@actor_options
 def compare_events(
     session_id: int | None,
     date: datetime | None,
     mode: str,
     show_unmatched: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """
     Compare machine vs programmatic events with waveform inspection commands.
@@ -369,7 +384,7 @@ def compare_events(
     async def _run() -> None:
         async with open_db_session(db) as db_session:
             resolved_id, profile_id = await _resolve_session_id(
-                db_session, session_id, date
+                db_session, session_id, date, actor_user, actor_profile
             )
 
             service = WaveformService(db_session, profile_id)

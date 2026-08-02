@@ -166,6 +166,91 @@ class ActorContextFactory:
             mode=mode,
         )
 
+    async def make_from_cli(
+        self,
+        user_ref: str | None,
+        profile_ref: str | None,
+        mode: AuthMode,
+    ) -> ActorContext:
+        """Build an ActorContext from CLI --user/--profile overrides.
+
+        Resolution:
+        - user_ref=None → make_local() (single-user dev mode, auto-provisions)
+        - user_ref provided → look up by canonical_email; raises ValueError if missing
+          or disabled
+        - profile_ref=None → user's default_profile_id (standard fallback chain)
+        - profile_ref provided → resolve by exact name or numeric ID; raises ValueError
+          if not found
+
+        Raises ValueError on any resolution failure.  Callers that want
+        Click-friendly errors should use resolve_cli_profile_id() instead.
+        """
+        if user_ref is None:
+            actor = await self.make_local(mode)
+            if profile_ref is None:
+                return actor
+            # Narrow to a specific profile within the local user.
+            profile_id = await self._resolve_profile_by_ref(actor.user_id, profile_ref)
+            return ActorContext(
+                user_id=actor.user_id,
+                profile_id=profile_id,
+                role=actor.role,
+                mode=mode,
+            )
+
+        # Look up by canonical_email (lowercased, as stored).
+        stmt = select(models.User).where(
+            models.User.canonical_email == user_ref.lower().strip()
+        )
+        user = (await self._db.execute(stmt)).scalars().first()
+        if user is None:
+            raise ValueError(f"User {user_ref!r} not found")
+        if user.disabled_at is not None:
+            raise ValueError(f"User {user_ref!r} is disabled")
+
+        role = Role(user.role)
+        if profile_ref is None:
+            profile_id = await self._resolve_profile(user, user.default_profile_id)
+        else:
+            profile_id = await self._resolve_profile_by_ref(user.id, profile_ref)
+
+        return ActorContext(
+            user_id=user.id,
+            profile_id=profile_id,
+            role=role,
+            mode=mode,
+        )
+
+    async def _resolve_profile_by_ref(self, user_id: int, profile_ref: str) -> int:
+        """Resolve a profile by name or numeric ID for user_id.
+
+        Raises ValueError if the profile is not found or does not belong to the user.
+        Never silently falls back to another profile.
+        """
+        # Try numeric ID first.
+        numeric_id: int | None = None
+        try:
+            numeric_id = int(profile_ref)
+        except ValueError:
+            pass
+
+        if numeric_id is not None:
+            profile = await self._get_live_profile(numeric_id, user_id)
+            if profile is None:
+                raise ValueError(f"Profile ID {profile_ref!r} not found for this user")
+            return profile.id
+
+        # Exact name match (names are UNIQUE per user).
+        stmt = select(models.Profile).where(
+            models.Profile.user_id == user_id,
+            models.Profile.name == profile_ref,
+            models.Profile.deleting_at.is_(None),
+        )
+        profile = (await self._db.execute(stmt)).scalars().first()
+        if profile is None:
+            raise ValueError(f"Profile {profile_ref!r} not found")
+        return profile.id
+
 
 async def resolve_local_profile_id(db: AsyncSession) -> int:
     """Return the active profile_id for local (single-user) CLI mode.
@@ -176,3 +261,37 @@ async def resolve_local_profile_id(db: AsyncSession) -> int:
     """
     actor = await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
     return actor.profile_id
+
+
+async def resolve_cli_profile_id(
+    db: AsyncSession,
+    user_ref: str | None,
+    profile_ref: str | None,
+) -> int:
+    """Resolve profile_id for CLI data commands with --user/--profile overrides.
+
+    Wraps ``ActorContextFactory.make_from_cli``; converts ValueError to
+    ``click.ClickException`` so Click handles the error cleanly.
+
+    Args:
+        db:          Open async DB session.
+        user_ref:    Value of --user / SNORE_USER env var (may be None).
+        profile_ref: Value of --profile / SNORE_PROFILE env var (may be None).
+
+    Returns:
+        Resolved profile_id.
+
+    Raises:
+        click.ClickException: If user or profile cannot be resolved.
+    """
+    import click  # noqa: PLC0415
+
+    try:
+        actor = await ActorContextFactory(db).make_from_cli(
+            user_ref=user_ref,
+            profile_ref=profile_ref,
+            mode=AuthMode.LOCAL,
+        )
+        return actor.profile_id
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc

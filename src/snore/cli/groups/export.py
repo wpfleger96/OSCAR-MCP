@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import (
+    actor_options,
     date_range_options,
     db_option,
     device_option,
@@ -118,6 +119,7 @@ def export_raw(
     help="Include per-session waveform CSV files (large!)",
 )
 @db_option
+@actor_options
 def export_csv(
     output: str | None,
     date_from: datetime | None,
@@ -125,6 +127,8 @@ def export_csv(
     device: str | None,
     include_waveforms: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Export parsed data as CSV files (sessions, events, settings).
 
@@ -140,9 +144,11 @@ def export_csv(
 
     async def _run() -> None:
         async with session_scope() as db_session:
-            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
-            profile_id = await resolve_local_profile_id(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
             svc = ExportService(profile_id=profile_id)
             try:
                 result = await svc.export_csv(
@@ -176,12 +182,15 @@ def export_csv(
 @date_range_options
 @device_option
 @db_option
+@actor_options
 def export_json(
     output: str | None,
     date_from: datetime | None,
     date_to: datetime | None,
     device: str | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Export parsed data as a JSON document.
 
@@ -196,9 +205,11 @@ def export_json(
 
     async def _run() -> None:
         async with session_scope() as db_session:
-            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
-            profile_id = await resolve_local_profile_id(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
             svc = ExportService(profile_id=profile_id)
             try:
                 result = await svc.export_json(

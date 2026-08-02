@@ -8,7 +8,7 @@ from typing import cast
 
 import click
 
-from snore.cli.decorators import db_option, db_session
+from snore.cli.decorators import actor_options, db_option, db_session
 from snore.cli.display import (
     ICON_CHART,
     console,
@@ -22,6 +22,7 @@ from snore.cli.display import (
 
 @click.command()
 @db_option
+@actor_options
 @click.option("--days", type=int, help="Limit to last N days")
 @click.option(
     "--period",
@@ -34,6 +35,8 @@ from snore.cli.display import (
 )
 def stats(
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
     days: int | None,
     period: str | None,
     trend: bool,
@@ -48,9 +51,11 @@ def stats(
 
     async def _run() -> None:
         async with db_session(db) as session:
-            from snore.auth.factory import resolve_local_profile_id  # noqa: PLC0415
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
-            profile_id = await resolve_local_profile_id(session)
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
             service = StatsService(session, profile_id)
             summary = await service.get_summary(days)
 
