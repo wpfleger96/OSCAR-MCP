@@ -74,8 +74,10 @@ _db_path: str | None = None
 #   cleanup-in-flight: _cleanup_task is not None and not done
 #
 # Protected by _init_lock (created lazily, never replaced).
-# Every public entry point reads/mutates these globals inside ONE lock
-# acquisition — no check-then-reacquire gaps.
+# Public initialization/cleanup entry points read/mutate these globals
+# inside ONE lock acquisition — no check-then-reacquire gaps.
+# Read-only accessors (get_session, get_engine, get_db_path) remain
+# lock-free; they check single published values, not state transitions.
 _init_lock: asyncio.Lock | None = None  # Created lazily inside an event loop.
 _init_task: asyncio.Task[None] | None = None  # The in-flight once-init-task.
 _cleanup_task: asyncio.Task[None] | None = None  # The in-flight once-cleanup-task.
@@ -338,6 +340,28 @@ def _observe_init_task_exception(task: asyncio.Task[None]) -> None:
         )
 
 
+def _observe_cleanup_task_exception(task: asyncio.Task[None]) -> None:
+    """Done-callback: log a terminal cleanup failure if no waiter consumed it.
+
+    Called by asyncio when the shared ``_cleanup_task`` completes.  If the task
+    failed (not cancelled), calling ``task.exception()`` here marks the
+    exception as retrieved, preventing asyncio's "Task exception was never
+    retrieved" warning.  A proper log line is emitted instead.
+
+    This callback mirrors the T2 pattern for ``_observe_init_task_exception``.
+    It does NOT affect exception propagation to live shield()-waiters.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "Database cleanup failed (no active waiters retrieved the error): %s",
+            exc,
+            exc_info=exc,
+        )
+
+
 async def init_database(database_path: str | None = None) -> None:
     """Initialize the database connection using a once-task state machine.
 
@@ -456,9 +480,14 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
     detached from ``_init_task`` under the lock by the caller).  Cancels + awaits
     it to quiescence, disposes the published engine, and clears all globals.
 
-    The ``finally`` block always runs ``_cleanup_task = None`` under the lock so
-    the state machine exits cleanup-in-flight on EVERY exit — including
-    cancellation and exceptions — leaving no stuck-barrier state.
+    Two nested finalization layers:
+    - Inner ``finally`` (inside the lock): clears ``_engine``, ``_AsyncSessionFactory``,
+      and ``_db_path`` regardless of disposal outcome so a failed dispose never
+      leaves stale published state.  Any disposal exception is re-raised after
+      the clear so the cleanup task fails with the real error.
+    - Outer ``finally``: clears ``_cleanup_task`` under the lock on EVERY exit
+      (normal, exception, or cancellation) — state machine exits cleanup-in-flight
+      with no stuck-barrier.
     """
     global _engine, _AsyncSessionFactory, _db_path, _cleanup_task
 
@@ -475,12 +504,16 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
                 pass
 
         # Dispose published state (engine.dispose() is an awaitable).
+        # The inner finally guarantees all three globals are cleared even if
+        # disposal raises, so a subsequent init always starts from a clean state.
         async with lock:
-            if _engine is not None:
-                await _engine.dispose()
+            try:
+                if _engine is not None:
+                    await _engine.dispose()
+            finally:
                 _engine = None
-            _AsyncSessionFactory = None
-            _db_path = None
+                _AsyncSessionFactory = None
+                _db_path = None
     finally:
         # Terminal state transition: always exit cleanup-in-flight,
         # whether we completed normally, raised, or were cancelled.
@@ -513,6 +546,9 @@ async def cleanup_database() -> None:
             owned_init = _init_task
             _init_task = None
             _cleanup_task = asyncio.create_task(_do_cleanup(owned_init))
+            # V2: observe terminal failure when all callers have been cancelled.
+            # Same pattern as T2 / _observe_init_task_exception.
+            _cleanup_task.add_done_callback(_observe_cleanup_task_exception)
         cleanup_ref = _cleanup_task
 
     # Await via shield: caller cancellation does not cancel the teardown task.

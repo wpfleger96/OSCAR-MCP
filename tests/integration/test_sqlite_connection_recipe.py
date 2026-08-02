@@ -1316,16 +1316,17 @@ class TestInitOnceFuture:
             init_task = asyncio.create_task(sess_mod.init_database(str(db_path1)))
             await asyncio.get_event_loop().run_in_executor(None, migration_started.wait)
 
-            # Start cleanup while init is blocked.  It will set the barrier,
-            # cancel+await the old task, then dispose state.
+            # Start cleanup while init is blocked.  cleanup_database() will
+            # create a _cleanup_task that owns the in-flight init task,
+            # cancel+await it, then dispose state.
             cleanup_task = asyncio.create_task(sess_mod.cleanup_database())
 
             # Give cleanup one event loop turn so it can acquire the lock and
-            # set _cleanup_in_progress = True before the re-init can see it.
+            # create _cleanup_task before the re-init can see it.
             await asyncio.sleep(0)
 
-            # Fire the re-init while cleanup is in progress.  The barrier
-            # should make it wait until cleanup fully disposes state.
+            # Fire the re-init while cleanup is in progress.  The state machine
+            # should make it wait on _cleanup_task until cleanup fully disposes.
             reinit_task = asyncio.create_task(sess_mod.init_database(str(db_path2)))
 
             # Release the blocked migration thread so cleanup can quiesce.
@@ -1581,6 +1582,10 @@ class TestInitOnceFuture:
 
             # Start two concurrent cleanups while init is in flight.
             cleanup1 = asyncio.create_task(sess_mod.cleanup_database())
+            # Give cleanup1 one turn so it creates _cleanup_task first.
+            await asyncio.sleep(0)
+            # Capture the first task ref before cleanup2 can see it.
+            first_cleanup_task_ref = sess_mod._cleanup_task
             cleanup2 = asyncio.create_task(sess_mod.cleanup_database())
 
             # Let both cleanups queue up.
@@ -1609,6 +1614,13 @@ class TestInitOnceFuture:
         assert sess_mod._AsyncSessionFactory is None
         assert sess_mod._init_task is None
         assert sess_mod._cleanup_task is None
+        # Single teardown: both callers awaited the same _cleanup_task instance.
+        assert first_cleanup_task_ref is not None, (
+            "First _cleanup_task must have been created"
+        )
+        assert first_cleanup_task_ref.done(), (
+            "The shared cleanup task must be done after both callers returned"
+        )
 
     async def test_cancelled_cleanup_caller_teardown_still_completes(self, tmp_path):
         """Cancelling a cleanup_database() CALLER does not abandon teardown.
@@ -1771,3 +1783,172 @@ class TestInitOnceFuture:
             "Reinit must publish a NEW engine, not the disposed one"
         )
         await sess_mod.cleanup_database()
+
+    async def test_disposal_failure_clears_globals_and_fresh_init_succeeds(
+        self, tmp_path
+    ):
+        """A failing engine.dispose() must not leave stale published state.
+
+        V1 scenario: patch AsyncEngine.dispose to raise; call cleanup_database().
+        The cleanup task fails with the disposal error.  Assert:
+        - All three globals (_engine, _AsyncSessionFactory, _db_path) are None.
+        - _cleanup_task is None (outer finally ran).
+        - A subsequent init_database() actually calls _do_init (not the stale
+          initialized branch) and publishes a fresh engine.
+        """
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "disposal_failure.db"
+
+        # Reset _init_lock for this test's event loop (function-scoped).
+        sess_mod._init_lock = None
+
+        # Bring up a live engine.
+        await sess_mod.init_database(str(db_path))
+        assert sess_mod._engine is not None
+
+        dispose_error = RuntimeError("dispose-probe-failure")
+        do_init_call_count: list[int] = [0]
+        original_do_init = sess_mod._do_init
+
+        async def counting_do_init(*args: object, **kwargs: object) -> None:
+            do_init_call_count[0] += 1
+            return await original_do_init(*args, **kwargs)
+
+        async def failing_dispose(self: object) -> None:
+            raise dispose_error
+
+        # Phase 1: patch dispose to fail; patch _do_init to count calls.
+        # Run cleanup (must raise) and the subsequent fresh init inside the
+        # counting patch so we can assert _do_init ran exactly once.
+        db_path2 = tmp_path / "after_disposal_failure.db"
+        with (
+            unittest.mock.patch.object(
+                sess_mod.AsyncEngine, "dispose", failing_dispose
+            ),
+            unittest.mock.patch.object(sess_mod, "_do_init", counting_do_init),
+        ):
+            # Cleanup must raise (disposal exception propagates).
+            try:
+                await sess_mod.cleanup_database()
+                raise AssertionError("cleanup_database() should have raised")
+            except RuntimeError as exc:
+                assert exc is dispose_error, f"Expected disposal error, got {exc!r}"
+
+            # V1 assertion: all three globals are cleared despite the disposal failure.
+            assert sess_mod._engine is None, "Engine must be None after failed disposal"
+            assert sess_mod._AsyncSessionFactory is None
+            assert sess_mod._db_path is None
+            assert sess_mod._cleanup_task is None, (
+                "_cleanup_task outer finally must run"
+            )
+
+            # V1 assertion: subsequent init actually runs _do_init (not stale initialized).
+            # The failing_dispose patch is still active but irrelevant here — no engine
+            # to dispose during init.  The counting_do_init patch is what we need.
+            await sess_mod.init_database(str(db_path2))
+            assert do_init_call_count[0] == 1, (
+                f"_do_init must have been called once after failed disposal "
+                f"(was called {do_init_call_count[0]} times)"
+            )
+            assert sess_mod._engine is not None
+
+        await sess_mod.cleanup_database()
+
+    async def test_cancelled_sole_cleanup_caller_then_disposal_failure_no_unretrieved(
+        self, tmp_path
+    ):
+        """No 'Task exception was never retrieved' when sole cleanup caller is cancelled.
+
+        V2 scenario: cancel the only cleanup_database() caller while teardown
+        is in progress, then fail disposal.  Assert:
+        - No asyncio "Task exception was never retrieved" warning is emitted.
+        - The failure IS logged (via the done-callback's logger.error call).
+        """
+        import asyncio  # noqa: PLC0415
+        import logging  # noqa: PLC0415
+        import time  # noqa: PLC0415
+        import unittest.mock  # noqa: PLC0415
+
+        from snore.database import session as sess_mod  # noqa: PLC0415
+
+        db_path = tmp_path / "cleanup_sole_caller_fail.db"
+
+        # Reset _init_lock for this test's event loop (function-scoped).
+        sess_mod._init_lock = None
+
+        dispose_started = asyncio.Event()
+        dispose_gate = asyncio.Event()
+
+        async def slow_failing_dispose(self: object) -> None:
+            dispose_started.set()
+            await dispose_gate.wait()
+            raise RuntimeError("cleanup-probe-failure")
+
+        # Bring up a live engine.
+        await sess_mod.init_database(str(db_path))
+        assert sess_mod._engine is not None
+
+        warning_messages: list[str] = []
+        logged_errors: list[str] = []
+
+        with (
+            unittest.mock.patch.object(
+                sess_mod.AsyncEngine, "dispose", slow_failing_dispose
+            ),
+            unittest.mock.patch.object(
+                logging.getLogger("asyncio"),
+                "error",
+                side_effect=lambda msg, *a, **kw: warning_messages.append(str(msg)),
+            ),
+            unittest.mock.patch.object(
+                sess_mod.logger,
+                "error",
+                side_effect=lambda msg, *a, **kw: logged_errors.append(str(msg)),
+            ),
+        ):
+            cleanup_caller = asyncio.create_task(sess_mod.cleanup_database())
+
+            # Wait until _do_cleanup is inside slow_failing_dispose.
+            await dispose_started.wait()
+
+            # Capture the shared task ref before cancelling the caller.
+            cleanup_task_ref = sess_mod._cleanup_task
+            assert cleanup_task_ref is not None
+
+            # Cancel the sole caller.  _cleanup_task is shielded and keeps running.
+            cleanup_caller.cancel()
+            await asyncio.gather(cleanup_caller, return_exceptions=True)
+
+            # Release the gate — disposal will fail.
+            dispose_gate.set()
+
+            # Wait (bounded) for the shared task to finish WITHOUT awaiting it —
+            # nobody may retrieve the exception except the done-callback.
+            deadline = time.monotonic() + 5.0
+            while not cleanup_task_ref.done():
+                assert time.monotonic() < deadline, "cleanup task did not finish"
+                await asyncio.sleep(0.01)
+            # One extra turn for done-callbacks.
+            await asyncio.sleep(0)
+
+        # V2 assertion 1: no asyncio "never retrieved" warning.
+        unretrieved = [
+            m for m in warning_messages if "exception was never retrieved" in m
+        ]
+        assert not unretrieved, (
+            f"'Task exception was never retrieved' warning detected: {unretrieved}"
+        )
+
+        # V2 assertion 2: the done-callback logged the cleanup failure.
+        assert any("cleanup failed" in m for m in logged_errors), (
+            f"Expected a cleanup-failure error log from the done-callback; "
+            f"got: {logged_errors}"
+        )
+
+        # Globals are clean (V1 inner finally ran despite the failure).
+        assert sess_mod._engine is None
+        assert sess_mod._AsyncSessionFactory is None
+        assert sess_mod._cleanup_task is None
