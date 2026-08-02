@@ -6,7 +6,7 @@ Tests the full flow from parsing → database storage → retrieval.
 
 import pytest
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from snore.database import models
 from snore.database.importers import import_session
@@ -14,18 +14,18 @@ from snore.database.session import init_database, session_scope
 
 
 class TestImportPipeline:
-    """Test complete import pipeline."""
+    """Integration tests for the full import pipeline."""
 
-    def test_database_auto_creation(self, temp_db):
+    async def test_database_auto_creation(self, temp_db):
         """Test that database is auto-created on first use."""
         assert not temp_db.exists()
 
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         assert temp_db.exists()
 
-        with session_scope() as session:
-            result = session.execute(
+        async with session_scope() as session:
+            result = await session.execute(
                 text("SELECT name FROM sqlite_master WHERE type='table'")
             )
             tables = {row[0] for row in result.fetchall()}
@@ -40,70 +40,80 @@ class TestImportPipeline:
         }
         assert required_tables.issubset(tables)
 
-    def test_import_resmed_session(self, temp_db, resmed_parser, resmed_fixture_path):
+    async def test_import_resmed_session(
+        self, temp_db, resmed_parser, resmed_fixture_path
+    ):
         """Test importing a complete ResMed session."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         assert len(sessions) > 0
 
         session_data = sessions[0]
-        result = import_session(session_data)
+        result = await import_session(session_data)
         assert result is True, "Session should be imported"
 
-        with session_scope() as session:
-            device_count = session.query(models.Device).count()
+        async with session_scope() as session:
+            device_count = (
+                await session.execute(select(func.count()).select_from(models.Device))
+            ).scalar()
             assert device_count == 1
 
-            db_session = session.query(models.Session).first()
+            db_session = (
+                (await session.execute(select(models.Session))).scalars().first()
+            )
             assert db_session is not None
             assert db_session.device_session_id == session_data.device_session_id
 
-    def test_duplicate_import_prevention(
+    async def test_duplicate_import_prevention(
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test that duplicate sessions are not re-imported."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
 
-        result1 = import_session(session_data)
+        result1 = await import_session(session_data)
         assert result1 is True
 
-        result2 = import_session(session_data)
+        result2 = await import_session(session_data)
         assert result2 is False
 
-        with session_scope() as session:
-            session_count = session.query(models.Session).count()
+        async with session_scope() as session:
+            session_count = (
+                await session.execute(select(func.count()).select_from(models.Session))
+            ).scalar()
             assert session_count == 1
 
-    def test_force_reimport(self, temp_db, resmed_parser, resmed_fixture_path):
+    async def test_force_reimport(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test force re-import of existing session."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
 
-        import_session(session_data)
+        await import_session(session_data)
 
-        result = import_session(session_data, force=True)
+        result = await import_session(session_data, force=True)
         assert result is True
 
-        with session_scope() as session:
-            session_count = session.query(models.Session).count()
+        async with session_scope() as session:
+            session_count = (
+                await session.execute(select(func.count()).select_from(models.Session))
+            ).scalar()
             assert session_count == 1
 
-    def test_waveform_storage(self, temp_db, resmed_parser, resmed_fixture_path):
+    async def test_waveform_storage(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test that waveforms are stored correctly."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
-        import_session(session_data)
+        await import_session(session_data)
 
-        with session_scope() as session:
-            waveforms = session.query(models.Waveform).all()
+        async with session_scope() as session:
+            waveforms = (await session.execute(select(models.Waveform))).scalars().all()
 
             assert len(waveforms) > 0
 
@@ -113,71 +123,80 @@ class TestImportPipeline:
                 assert wf.sample_rate > 0
                 assert len(wf.data_blob) > 0
 
-    def test_event_storage(self, temp_db, resmed_parser, resmed_fixture_path):
+    async def test_event_storage(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test that events are stored correctly."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
 
         if not session_data.has_event_data or len(session_data.events) == 0:
             pytest.skip("Test session has no events")
-        import_session(session_data)
+        await import_session(session_data)
 
-        with session_scope() as session:
-            event_count = session.query(models.Event).count()
+        async with session_scope() as session:
+            event_count = (
+                await session.execute(select(func.count()).select_from(models.Event))
+            ).scalar()
 
         assert event_count == len(session_data.events)
 
-    def test_statistics_storage(self, temp_db, resmed_parser, resmed_fixture_path):
+    async def test_statistics_storage(
+        self, temp_db, resmed_parser, resmed_fixture_path
+    ):
         """Test that statistics are stored correctly."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
-        import_session(session_data)
+        await import_session(session_data)
 
-        with session_scope() as session:
-            stats = session.query(models.Statistics).first()
+        async with session_scope() as session:
+            stats = (await session.execute(select(models.Statistics))).scalars().first()
 
         if session_data.has_statistics:
             assert stats is not None
 
-    def test_settings_import_skips_none_values(
+    async def test_settings_import_skips_none_values(
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """None values in other_settings must not be persisted as the string 'None'."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
         if session_data.settings is None:
             pytest.skip("fixture session has no settings")
 
-        # Dict mutation bypasses pydantic validation, mirroring a parser that
-        # populates an optional setting with None. The importer must drop it.
         session_data.settings.other_settings["unexpected_none"] = None
-        import_session(session_data)
+        await import_session(session_data)
 
-        with session_scope() as session:
-            values = [s.value for s in session.query(models.Setting).all()]
+        async with session_scope() as session:
+            values = [
+                s.value
+                for s in (await session.execute(select(models.Setting))).scalars().all()
+            ]
 
         assert "None" not in values
 
-    def test_database_stats(self, temp_db, resmed_parser, resmed_fixture_path):
+    async def test_database_stats(self, temp_db, resmed_parser, resmed_fixture_path):
         """Test database statistics reporting."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
 
         for session_data in sessions:
-            import_session(session_data)
+            await import_session(session_data)
 
-        with session_scope() as session:
-            device_count = session.query(models.Device).count()
-            session_count = session.query(models.Session).count()
+        async with session_scope() as session:
+            device_count = (
+                await session.execute(select(func.count()).select_from(models.Device))
+            ).scalar()
+            session_count = (
+                await session.execute(select(func.count()).select_from(models.Session))
+            ).scalar()
 
-            result = session.execute(
+            result = await session.execute(
                 text(
                     "SELECT page_count * page_size / 1024.0 / 1024.0 as size_mb FROM pragma_page_count(), pragma_page_size()"
                 )
@@ -188,12 +207,12 @@ class TestImportPipeline:
         assert session_count == len(sessions)
         assert size_mb > 0
 
-    def test_multiple_devices(self, temp_db):
+    async def test_multiple_devices(self, temp_db):
         """Test handling multiple devices."""
-        init_database(str(temp_db))
+        await init_database(str(temp_db))
 
-        with session_scope() as session:
-            result = session.execute(
+        async with session_scope() as session:
+            result = await session.execute(
                 text(
                     "SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'"
                 )

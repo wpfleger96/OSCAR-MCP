@@ -52,10 +52,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # SNORE_DB_PATH for direct uvicorn invocations and the e2e test harness.
     database_url = os.environ.get("SNORE_DATABASE_URL")
     if database_url:
-        init_database_from_url(database_url)
+        await init_database_from_url(database_url)
     else:
         db_path = os.environ.get("SNORE_DB_PATH")
-        init_database(db_path)
+        await init_database(db_path)
     # Start a single lifespan-owned TTL reaper.  The stop event and thread
     # handle are kept so the reaper is joined cleanly on exit — each lifespan
     # entry gets exactly one reaper; it is stopped on exit rather than left as

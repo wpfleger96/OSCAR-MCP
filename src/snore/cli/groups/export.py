@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime
 from pathlib import Path
 
@@ -11,9 +13,7 @@ from snore.cli.decorators import (
     date_range_options,
     db_option,
     device_option,
-)
-from snore.cli.decorators import (
-    db_session as open_db_session,
+    init_db,
 )
 from snore.cli.display import console, print_dry_run_header, print_warning
 from snore.services.export_service import ExportService
@@ -131,29 +131,36 @@ def export_csv(
     Creates sessions.csv, events.csv, and settings.csv in the output directory.
     Optionally includes per-session waveform files with --include-waveforms.
     """
+    from snore.database.session import session_scope  # noqa: PLC0415
+
     if output is None:
         output = "snore_export_csv"
 
-    with open_db_session(db) as db_session:
-        svc = ExportService()
-        try:
-            result = svc.export_csv(
-                db_session=db_session,
-                output=Path(output),
-                date_from=date_from.date() if date_from else None,
-                date_to=date_to.date() if date_to else None,
-                device_serial=device,
-                include_waveforms=include_waveforms,
-            )
-        except Exception as e:
-            raise click.ClickException(str(e)) from e
+    init_db(db)
 
-    console.print(f"Nights: {result.nights_exported}")
-    console.print(f"Files:  {result.files_written}")
-    console.print(f"Output: {result.output_path}")
+    async def _run() -> None:
+        async with session_scope() as db_session:
+            svc = ExportService()
+            try:
+                result = await svc.export_csv(
+                    db_session=db_session,
+                    output=Path(output),
+                    date_from=date_from.date() if date_from else None,
+                    date_to=date_to.date() if date_to else None,
+                    device_serial=device,
+                    include_waveforms=include_waveforms,
+                )
+            except Exception as e:
+                raise click.ClickException(str(e)) from e
 
-    for w in result.warnings:
-        print_warning(w)
+        console.print(f"Nights: {result.nights_exported}")
+        console.print(f"Files:  {result.files_written}")
+        console.print(f"Output: {result.output_path}")
+
+        for w in result.warnings:
+            print_warning(w)
+
+    asyncio.run(_run())
 
 
 @export.command("json")
@@ -177,24 +184,31 @@ def export_json(
 
     Creates a single JSON file with sessions, events, statistics, and settings.
     """
+    from snore.database.session import session_scope  # noqa: PLC0415
+
     if output is None:
         output = "snore_export.json"
 
-    with open_db_session(db) as db_session:
-        svc = ExportService()
-        try:
-            result = svc.export_json(
-                db_session=db_session,
-                output=Path(output),
-                date_from=date_from.date() if date_from else None,
-                date_to=date_to.date() if date_to else None,
-                device_serial=device,
-            )
-        except Exception as e:
-            raise click.ClickException(str(e)) from e
+    init_db(db)
 
-    console.print(f"Nights: {result.nights_exported}")
-    console.print(f"Output: {result.output_path}")
+    async def _run() -> None:
+        async with session_scope() as db_session:
+            svc = ExportService()
+            try:
+                result = await svc.export_json(
+                    db_session=db_session,
+                    output=Path(output),
+                    date_from=date_from.date() if date_from else None,
+                    date_to=date_to.date() if date_to else None,
+                    device_serial=device,
+                )
+            except Exception as e:
+                raise click.ClickException(str(e)) from e
 
-    for w in result.warnings:
-        print_warning(w)
+        console.print(f"Nights: {result.nights_exported}")
+        console.print(f"Output: {result.output_path}")
+
+        for w in result.warnings:
+            print_warning(w)
+
+    asyncio.run(_run())

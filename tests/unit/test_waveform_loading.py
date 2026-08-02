@@ -7,7 +7,7 @@ Tests the waveform_loader module's ability to:
 - Handle errors and edge cases
 """
 
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
@@ -73,19 +73,21 @@ class TestWaveformDeserialization:
 class TestWaveformLoading:
     """Test loading waveforms from database."""
 
-    def test_load_missing_waveform(self):
+    async def test_load_missing_waveform(self):
         """Loading non-existent waveform should raise ValueError."""
-        mock_session = Mock()
-        execute_result = Mock()
+        mock_session = AsyncMock()
+        execute_result = MagicMock()
         execute_result.scalars.return_value.first.return_value = None
         mock_session.execute.return_value = execute_result
 
         with pytest.raises(ValueError, match="Waveform not found"):
-            load_waveform_from_db(mock_session, session_id=999, waveform_type="flow")
+            await load_waveform_from_db(
+                mock_session, session_id=999, waveform_type="flow"
+            )
 
-    def test_load_waveform_returns_metadata(self):
+    async def test_load_waveform_returns_metadata(self):
         """Should return timestamps, values, and complete metadata."""
-        mock_waveform = Mock()
+        mock_waveform = MagicMock()
         timestamps = np.array([0.0, 1.0, 2.0], dtype=np.float32)
         values = np.array([10.0, 20.0, 15.0], dtype=np.float32)
         data = np.column_stack([timestamps, values])
@@ -101,12 +103,12 @@ class TestWaveformLoading:
         mock_waveform.max_value = 20.0
         mock_waveform.mean_value = 15.0
 
-        mock_session = Mock()
-        execute_result = Mock()
+        mock_session = AsyncMock()
+        execute_result = MagicMock()
         execute_result.scalars.return_value.first.return_value = mock_waveform
         mock_session.execute.return_value = execute_result
 
-        t, v, metadata = load_waveform_from_db(mock_session, 123, "flow")
+        t, v, metadata = await load_waveform_from_db(mock_session, 123, "flow")
 
         assert len(t) == 3
         assert len(v) == 3

@@ -71,6 +71,8 @@ def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
 
 def _run_import(job: ImportJob) -> None:
     """Worker function — runs in a background thread.  Must be started exactly once."""
+    import asyncio  # noqa: PLC0415
+
     try:
         service = ImportService()
         if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
@@ -83,18 +85,25 @@ def _run_import(job: ImportJob) -> None:
             if job.cancel_requested:
                 job._finish_cancelled()
                 return
-            result = service.import_sources(
-                sources,
-                backup=True,
-                progress_callback=lambda msg: job.report_progress(msg),
-                cancel_predicate=lambda: job.cancel_requested,
+            # import_sources is async; this thread has no running event loop,
+            # so asyncio.run() is the correct bridge here (same condition as
+            # the CLI boundary).  A plain threading.Thread has no outer loop.
+            result = asyncio.run(
+                service.import_sources(
+                    sources,
+                    backup=True,
+                    progress_callback=lambda msg: job.report_progress(msg),
+                    cancel_predicate=lambda: job.cancel_requested,
+                )
             )
         elif job.job_type == JobType.PATH and job.sources is not None:
-            result = service.import_sources(
-                job.sources,
-                backup=True,
-                progress_callback=lambda msg: job.report_progress(msg),
-                cancel_predicate=lambda: job.cancel_requested,
+            result = asyncio.run(
+                service.import_sources(
+                    job.sources,
+                    backup=True,
+                    progress_callback=lambda msg: job.report_progress(msg),
+                    cancel_predicate=lambda: job.cancel_requested,
+                )
             )
         else:
             raise ValueError("Invalid job configuration")

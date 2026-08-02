@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.modes.config import AASM_CONFIG
 from snore.analysis.modes.detector import EventDetector
@@ -26,19 +26,19 @@ logger = logging.getLogger(__name__)
 class BatchValidator:
     """Runs validation across multiple sessions."""
 
-    def __init__(self, db_session: Session, profile: str | None = None):
+    def __init__(self, db_session: AsyncSession, profile: str | None = None):
         """
         Initialize batch validator.
 
         Args:
-            db_session: Database session
+            db_session: Async database session
             profile: Device serial number to filter sessions via Device → Day join (optional)
         """
         self.db_session = db_session
         self.profile = profile
         self.analysis_service = AnalysisService(db_session)
 
-    def validate_date_range(
+    async def validate_date_range(
         self,
         date_from: str,
         date_to: str,
@@ -61,11 +61,13 @@ class BatchValidator:
         )
 
         if self.profile:
-            device_ids = list(
-                self.db_session.execute(
-                    select(models.Device.id)
-                    .join(models.Day, models.Day.device_id == models.Device.id)
-                    .where(models.Device.serial_number == self.profile)
+            device_ids = (
+                (
+                    await self.db_session.execute(
+                        select(models.Device.id)
+                        .join(models.Day, models.Day.device_id == models.Device.id)
+                        .where(models.Device.serial_number == self.profile)
+                    )
                 )
                 .scalars()
                 .all()
@@ -73,7 +75,7 @@ class BatchValidator:
             stmt = stmt.where(models.Session.device_id.in_(device_ids))
 
         sessions = (
-            self.db_session.execute(stmt.order_by(models.Session.start_time))
+            (await self.db_session.execute(stmt.order_by(models.Session.start_time)))
             .scalars()
             .all()
         )
@@ -84,7 +86,7 @@ class BatchValidator:
 
         for session in sessions:
             try:
-                validation = self._validate_session(session.id, mode)
+                validation = await self._validate_session(session.id, mode)
                 if validation:
                     session_validations.append(validation)
             except Exception as e:
@@ -101,7 +103,9 @@ class BatchValidator:
             sessions=session_validations,
         )
 
-    def _validate_session(self, session_id: int, mode: str) -> SessionValidation | None:
+    async def _validate_session(
+        self, session_id: int, mode: str
+    ) -> SessionValidation | None:
         """
         Validate a single session.
 
@@ -112,21 +116,17 @@ class BatchValidator:
         Returns:
             SessionValidation or None if validation fails
         """
-        session = self.db_session.get(models.Session, session_id)
+        session = await self.db_session.get(models.Session, session_id)
         if not session:
             return None
 
-        analysis_result = self.analysis_service.get_analysis_result(session_id)
+        analysis_result = await self.analysis_service.get_analysis_result(session_id)
         if not analysis_result:
             logger.info(f"Running analysis for session {session_id}...")
-            # Close the validator's injected session before analysis so it holds
-            # no open transaction during compute — facade.run_analysis() uses its
-            # own short read/write scopes.
-            self.db_session.close()
             from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
             facade = AnalysisFacade(self.db_session)
-            analysis_result = facade.run_analysis(session_id, modes=[mode])
+            analysis_result = await facade.run_analysis(session_id, modes=[mode])
 
         if mode not in analysis_result.mode_results:
             logger.warning(

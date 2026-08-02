@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from pydantic import Field
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db, service_dep
 from snore.database.target import DatabaseTarget
@@ -28,12 +28,12 @@ def _get_target() -> DatabaseTarget:
 
 
 @router.get("/stats", response_model=DatabaseStatsPublic)
-def get_stats(
+async def get_stats(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
 ) -> DatabaseStats:
     db_path = target.sqlite_path if target.dialect == "sqlite" else ""
-    return service.get_stats(db_path)
+    return await service.get_stats(db_path)
 
 
 @router.post("/vacuum", response_model=VacuumResult)
@@ -60,10 +60,10 @@ def vacuum_db(
 
 
 @router.post("/reset", response_model=ResetResult)
-def reset_db(
+async def reset_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ResetResult:
     """Delete all rows from all tables (generic) and vacuum if SQLite.
 
@@ -85,11 +85,11 @@ def reset_db(
     )
 
     # Generic row-deletion phase — caller-transaction-owned.
-    tables_cleared = service.reset_rows()
+    tables_cleared = await service.reset_rows()
     total = sum(tables_cleared.values())
 
     # Commit before VACUUM (SQLite forbids VACUUM inside a transaction).
-    db.commit()
+    await db.commit()
 
     # SQLite-only file maintenance.
     if is_sqlite_file:

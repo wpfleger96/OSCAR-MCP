@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime
 from pathlib import Path
 
@@ -58,12 +60,14 @@ def summary(
     if fd > td:
         raise click.UsageError("--from must not be after --to")
 
-    with open_db_session(db) as session:
-        from snore.services import ReportService
+    async def _run() -> str:
+        async with open_db_session(db) as session:
+            from snore.services import ReportService
 
-        svc = ReportService(session)
-        html = svc.generate_summary_report(fd, td)
+            svc = ReportService(session)
+            return await svc.generate_summary_report(fd, td)
 
+    html = asyncio.run(_run())
     out_path = Path(output)
     out_path.write_text(html, encoding="utf-8")
     size_kb = len(html.encode("utf-8")) / 1024
@@ -138,12 +142,14 @@ def comparison(
     if cfd > ctd:
         raise click.UsageError("--compare-from must not be after --compare-to")
 
-    with open_db_session(db) as session:
-        from snore.services import ReportService
+    async def _run() -> str:
+        async with open_db_session(db) as session:
+            from snore.services import ReportService
 
-        svc = ReportService(session)
-        html = svc.generate_comparison_report((fd, td), (cfd, ctd))
+            svc = ReportService(session)
+            return await svc.generate_comparison_report((fd, td), (cfd, ctd))
 
+    html = asyncio.run(_run())
     out_path = Path(output)
     out_path.write_text(html, encoding="utf-8")
     size_kb = len(html.encode("utf-8")) / 1024

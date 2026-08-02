@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 
 from sqlalchemy import create_engine, func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.database.models import Base
@@ -17,7 +17,7 @@ __all__ = ["DatabaseService"]
 class DatabaseService:
     """Service for database statistics and metadata operations."""
 
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: AsyncSession):
         """
         Initialize database service.
 
@@ -26,7 +26,7 @@ class DatabaseService:
         """
         self.db_session = db_session
 
-    def get_stats(self, db_path: str) -> DatabaseStats:
+    async def get_stats(self, db_path: str) -> DatabaseStats:
         """
         Query database statistics including table counts and coverage metrics.
 
@@ -37,77 +37,65 @@ class DatabaseService:
             DatabaseStats with all counts, percentages, and date range
         """
         profile_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count()).select_from(models.Profile)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
         device_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count()).select_from(models.Device)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
         session_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count()).select_from(models.Session)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
         day_count = (
-            self.db_session.execute(
-                select(func.count()).select_from(models.Day)
-            ).scalar()
-            or 0
-        )
+            await self.db_session.execute(select(func.count()).select_from(models.Day))
+        ).scalar() or 0
         event_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count()).select_from(models.Event)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
         waveform_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count()).select_from(models.Waveform)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
         analysis_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count()).select_from(models.AnalysisResult)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
         pattern_count = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count()).select_from(models.DetectedPattern)
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
 
         sessions_with_waveforms = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count())
                 .select_from(models.Session)
                 .where(models.Session.has_waveform_data.is_(True))
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
         sessions_with_events = (
-            self.db_session.execute(
+            await self.db_session.execute(
                 select(func.count())
                 .select_from(models.Session)
                 .where(models.Session.has_event_data.is_(True))
-            ).scalar()
-            or 0
-        )
+            )
+        ).scalar() or 0
 
-        first_session_raw = self.db_session.execute(
-            select(func.min(models.Session.start_time))
+        first_session_raw = (
+            await self.db_session.execute(select(func.min(models.Session.start_time)))
         ).scalar()
 
-        last_session_raw = self.db_session.execute(
-            select(func.max(models.Session.start_time))
+        last_session_raw = (
+            await self.db_session.execute(select(func.max(models.Session.start_time)))
         ).scalar()
 
         first_session = None
@@ -158,7 +146,7 @@ class DatabaseService:
             last_session=last_session,
         )
 
-    def reset_rows(self) -> dict[str, int]:
+    async def reset_rows(self) -> dict[str, int]:
         """Delete all rows from all data tables.  Caller-transaction-owned.
 
         Performs generic typed ``table.delete()`` statements in FK-safe order.
@@ -170,7 +158,7 @@ class DatabaseService:
         """
         tables_cleared: dict[str, int] = {}
         for table in reversed(Base.metadata.sorted_tables):
-            cursor = self.db_session.execute(table.delete())
+            cursor = await self.db_session.execute(table.delete())
             count = cursor.rowcount or 0  # type: ignore[attr-defined]
             tables_cleared[table.name] = count
         return tables_cleared

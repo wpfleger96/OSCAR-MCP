@@ -19,7 +19,7 @@ SessionServiceDep = Annotated[SessionService, Depends(service_dep(SessionService
 
 
 @router.get("/", response_model=PaginatedResponse[SessionListItem])
-def list_sessions(
+async def list_sessions(
     service: SessionServiceDep,
     pagination: PaginationParams = Depends(),
     dates: DateRangeParams = Depends(),
@@ -29,7 +29,7 @@ def list_sessions(
     ),
     include_disabled: bool = Query(default=False),
 ) -> PaginatedResponse[SessionListItem]:
-    result = service.list_sessions(
+    result = await service.list_sessions(
         device=device,
         from_date=dates.start_datetime,
         to_date=dates.end_datetime,
@@ -47,10 +47,10 @@ def list_sessions(
 
 
 @router.post("/delete-preview", response_model=DeletePreview)
-def bulk_delete_preview(
+async def bulk_delete_preview(
     body: BulkDeletePreviewRequest, service: SessionServiceDep
 ) -> DeletePreview:
-    return service.get_delete_preview(
+    return await service.get_delete_preview(
         device=body.device,
         session_ids=body.session_ids,
         from_date=datetime.combine(body.from_date, time.min)
@@ -62,32 +62,36 @@ def bulk_delete_preview(
 
 
 @router.get("/{session_id}/delete-preview", response_model=DeletePreview)
-def get_delete_preview(session_id: int, service: SessionServiceDep) -> DeletePreview:
-    return service.get_delete_preview(session_ids=[session_id])
+async def get_delete_preview(
+    session_id: int, service: SessionServiceDep
+) -> DeletePreview:
+    return await service.get_delete_preview(session_ids=[session_id])
 
 
 @router.get("/{session_id}", response_model=SessionDetail)
-def get_session(
+async def get_session(
     session_id: int,
     service: SessionServiceDep,
     include_settings: bool = Query(default=False),
 ) -> SessionDetail:
-    return service.get_session_detail(session_id, include_settings=include_settings)
+    return await service.get_session_detail(
+        session_id, include_settings=include_settings
+    )
 
 
 @router.patch("/{session_id}", response_model=SessionDetail)
-def update_session(
+async def update_session(
     session_id: int,
     body: SessionEnabledRequest,
     service: SessionServiceDep,
 ) -> SessionDetail:
-    service.set_session_enabled(session_id, body.enabled)
-    return service.get_session_detail(session_id)
+    await service.set_session_enabled(session_id, body.enabled)
+    return await service.get_session_detail(session_id)
 
 
 @router.delete("/", response_model=dict)
-def delete_sessions(
+async def delete_sessions(
     body: SessionDeleteRequest, service: SessionServiceDep
 ) -> dict[str, int]:
-    deleted_count = service.delete_sessions(body.session_ids)
+    deleted_count = await service.delete_sessions(body.session_ids)
     return {"deleted_count": deleted_count}

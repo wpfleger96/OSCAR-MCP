@@ -25,17 +25,17 @@ AnalysisFacadeDep = Annotated[AnalysisFacade, Depends(service_dep(AnalysisFacade
 
 
 @router.get("/analysis/sessions", response_model=PaginatedResponse[AnalysisListItem])
-def list_analysis_sessions(
+async def list_analysis_sessions(
     facade: AnalysisFacadeDep,
     pagination: PaginationParams = Depends(),
     dates: DateRangeParams = Depends(),
     analyzed_only: bool = Query(default=False),
     sort_by: str = Query(default="date-desc"),
 ) -> PaginatedResponse[AnalysisListItem]:
-    total = facade.count_sessions_with_status(
+    total = await facade.count_sessions_with_status(
         start=dates.start_datetime, end=dates.end_datetime, analyzed_only=analyzed_only
     )
-    items = facade.list_sessions_with_status(
+    items = await facade.list_sessions_with_status(
         start=dates.start_datetime,
         end=dates.end_datetime,
         limit=pagination.limit,
@@ -49,8 +49,8 @@ def list_analysis_sessions(
 
 
 @router.get("/sessions/{session_id}/analysis", response_model=AnalysisResult)
-def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> AnalysisResult:
-    result = facade.get_analysis_result(session_id)
+async def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> AnalysisResult:
+    result = await facade.get_analysis_result(session_id)
     if result is None:
         raise NotFoundError(f"No analysis found for session {session_id}")
     return result
@@ -59,28 +59,28 @@ def get_analysis(session_id: int, facade: AnalysisFacadeDep) -> AnalysisResult:
 @router.post(
     "/sessions/{session_id}/analysis", status_code=201, response_model=AnalysisResult
 )
-def run_analysis(
+async def run_analysis(
     session_id: int,
     body: AnalysisRunRequest,
     facade: AnalysisFacadeDep,
 ) -> AnalysisResult:
-    return facade.run_analysis(
+    return await facade.run_analysis(
         session_id, modes=body.modes, store_results=body.store_results
     )
 
 
 @router.delete("/analysis")
-def delete_analysis(
+async def delete_analysis(
     body: AnalysisDeleteRequest, facade: AnalysisFacadeDep
 ) -> dict[str, int]:
-    deleted_count = facade.delete_analysis(
+    deleted_count = await facade.delete_analysis(
         body.session_ids, all_versions=body.all_versions
     )
     return {"deleted_count": deleted_count}
 
 
 @router.get("/analysis/delete-preview", response_model=AnalysisDeletePreview)
-def get_analysis_delete_preview(
+async def get_analysis_delete_preview(
     facade: AnalysisFacadeDep,
     session_ids: list[int] = Query(default=[]),
     all_versions: bool = Query(default=False),
@@ -92,11 +92,11 @@ def get_analysis_delete_preview(
             records_to_delete=0,
             patterns_count=0,
         )
-    return facade.get_delete_preview(session_ids, all_versions=all_versions)
+    return await facade.get_delete_preview(session_ids, all_versions=all_versions)
 
 
 @router.post("/analysis/batch", status_code=201, response_model=BatchAnalysisResult)
-def run_batch_analysis(
+async def run_batch_analysis(
     body: BatchAnalysisRequest,
     facade: AnalysisFacadeDep,
 ) -> BatchAnalysisResult:
@@ -105,7 +105,7 @@ def run_batch_analysis(
             status_code=400,
             detail="At least one of from_date or to_date is required",
         )
-    return facade.run_batch_analysis(
+    return await facade.run_batch_analysis(
         from_date=datetime.combine(body.from_date, time.min)
         if body.from_date
         else None,

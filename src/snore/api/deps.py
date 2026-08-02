@@ -1,33 +1,32 @@
-from collections.abc import Callable, Generator
+from collections.abc import AsyncGenerator, Callable
 from datetime import date, datetime, time
 from typing import Annotated
 
 from fastapi import Depends, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.session import get_session
 
 
-def get_db() -> Generator[Session]:
-    """FastAPI dependency that mirrors session_scope() commit/rollback behavior."""
+async def get_db() -> AsyncGenerator[AsyncSession]:
+    """FastAPI dependency that provides a committed/rolled-back AsyncSession."""
     session = get_session()
     try:
-        yield session
-        session.commit()
+        async with session.begin():
+            yield session
     except Exception:
-        session.rollback()
         raise
     finally:
-        session.close()
+        await session.close()
 
 
-def service_dep[T](cls: Callable[[Session], T]) -> Callable[..., T]:
+def service_dep[T](cls: Callable[[AsyncSession], T]) -> Callable[..., T]:
     """Return a FastAPI dependency that constructs ``cls(db)``."""
 
-    def _dep(db: Annotated[Session, Depends(get_db)]) -> T:
+    async def _dep(db: Annotated[AsyncSession, Depends(get_db)]) -> T:
         return cls(db)
 
-    return _dep
+    return _dep  # type: ignore[return-value]  # FastAPI resolves async deps; Callable[..., T] matches
 
 
 class PaginationParams:

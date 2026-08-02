@@ -14,7 +14,7 @@ import logging
 import shutil
 import zipfile
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -23,12 +23,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.parsers.base import RawFileManifest
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import Session as DBSession
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -200,9 +201,9 @@ class ExportService:
     # CSV export (from database)
     # ------------------------------------------------------------------
 
-    def export_csv(
+    async def export_csv(
         self,
-        db_session: DBSession,
+        db_session: AsyncSession,
         output: Path,
         date_from: date | None = None,
         date_to: date | None = None,
@@ -226,15 +227,6 @@ class ExportService:
                 "Waveform export enabled. Files may be very large "
                 "(~720K rows per 8-hour session at 25Hz)."
             )
-
-        rows_gen = self._build_export_rows(
-            db_session, date_from, date_to, device_serial
-        )
-
-        # Open all three CSV files simultaneously so we can write in one pass.
-        sessions_path = output / "sessions.csv"
-        events_path = output / "events.csv"
-        settings_path = output / "settings.csv"
 
         session_header = [
             "device_session_id",
@@ -272,6 +264,10 @@ class ExportService:
         ]
         setting_header = ["device_session_id", "session_date", "key", "value"]
 
+        sessions_path = output / "sessions.csv"
+        events_path = output / "events.csv"
+        settings_path = output / "settings.csv"
+
         found_any = False
         with (
             open(sessions_path, "w", newline="") as sf,
@@ -285,7 +281,9 @@ class ExportService:
             ew.writerow(event_header)
             stw.writerow(setting_header)
 
-            for s, evs, stts in rows_gen:
+            async for s, evs, stts in self._build_export_rows(
+                db_session, date_from, date_to, device_serial
+            ):
                 found_any = True
                 stats = s.get("statistics") or {}
                 night = (
@@ -348,15 +346,15 @@ class ExportService:
                         ]
                     )
 
-                # Waveform export — per session, uses serial+date+time filenames
-                # matching the pre-branch format: serial_YYYYMMDD_HHMMSS_type.csv
                 if include_waveforms:
                     sid = s["id"]
                     waveforms_dir = output / "waveforms"
                     waveforms_dir.mkdir(exist_ok=True)
                     waveforms = (
-                        db_session.execute(
-                            select(models.Waveform).filter_by(session_id=sid)
+                        (
+                            await db_session.execute(
+                                select(models.Waveform).filter_by(session_id=sid)
+                            )
                         )
                         .scalars()
                         .all()
@@ -364,7 +362,6 @@ class ExportService:
                     for w in waveforms:
                         if not w.data_blob:
                             continue
-                        # Restore the original filename format: serial_date_time_type.csv
                         fname = (
                             f"{s['serial_number']}_{s['start_time']:%Y%m%d}_"
                             f"{s['start_time']:%H%M%S}_{w.waveform_type}.csv"
@@ -399,9 +396,9 @@ class ExportService:
     # JSON export (from database)
     # ------------------------------------------------------------------
 
-    def export_json(
+    async def export_json(
         self,
-        db_session: DBSession,
+        db_session: AsyncSession,
         output: Path,
         date_from: date | None = None,
         date_to: date | None = None,
@@ -451,7 +448,6 @@ class ExportService:
             return json.dumps(obj, indent=2, default=str)
 
         with open(output, "w") as f:
-            # Write document header and open sessions array.
             header = {
                 "exported_at": datetime.now().isoformat(),
                 "snore_export_format": "1.0",
@@ -460,14 +456,13 @@ class ExportService:
                     "to": date_to.isoformat() if date_to else None,
                 },
             }
-            # Write header fields then open the sessions array incrementally.
             f.write("{\n")
             for k, v in header.items():
                 f.write(f"  {json.dumps(k)}: {json.dumps(v, default=str)},\n")
             f.write('  "sessions": [\n')
 
             first_session = True
-            for s, events, settings in self._build_export_rows(
+            async for s, events, settings in self._build_export_rows(
                 db_session, date_from, date_to, device_serial
             ):
                 night = (
@@ -481,7 +476,6 @@ class ExportService:
                 if not first_session:
                     f.write(",\n")
                 first_session = False
-                # Indent the session object to nest inside the array.
                 obj_str = _session_obj(s, events, settings)
                 indented = "\n".join("    " + line for line in obj_str.splitlines())
                 f.write(indented)
@@ -507,34 +501,47 @@ class ExportService:
 
     _EXPORT_CHUNK_SIZE: int = 500  # Sessions per DB fetch window
 
-    def _build_export_rows(
+    async def _build_export_rows(
         self,
-        db_session: DBSession,
+        db_session: AsyncSession,
         date_from: date | None,
         date_to: date | None,
         device_serial: str | None,
-    ) -> Iterator[tuple[dict[str, Any], list[Any], list[Any]]]:
+    ) -> AsyncIterator[tuple[dict[str, Any], list[Any], list[Any]]]:
         """Yield ``(session_dict, events, settings)`` tuples in bounded chunks.
 
         Fetches sessions in windows of ``_EXPORT_CHUNK_SIZE`` rows and bulk-loads
         events/settings for each window.  No full materialisation of the entire
         result set occurs; memory is bounded to one chunk at a time.
-
-        Shared by ``export_csv`` and ``export_json`` so both consumers work from
-        the same I/O–bounded data path.
         """
-        import itertools  # noqa: PLC0415
 
-        session_gen = self._query_sessions_chunked(
+        chunk: list[dict[str, Any]] = []
+        async for row in self._query_sessions_chunked(
             db_session, date_from, date_to, device_serial
-        )
-        while True:
-            chunk = list(itertools.islice(session_gen, self._EXPORT_CHUNK_SIZE))
-            if not chunk:
-                break
+        ):
+            chunk.append(row)
+            if len(chunk) >= self._EXPORT_CHUNK_SIZE:
+                session_ids = [s["id"] for s in chunk]
+                events_by_session = await self._bulk_load_events(
+                    db_session, session_ids
+                )
+                settings_by_session = await self._bulk_load_settings(
+                    db_session, session_ids
+                )
+                for s in chunk:
+                    yield (
+                        s,
+                        events_by_session.get(s["id"], []),
+                        settings_by_session.get(s["id"], []),
+                    )
+                chunk = []
+
+        if chunk:
             session_ids = [s["id"] for s in chunk]
-            events_by_session = self._bulk_load_events(db_session, session_ids)
-            settings_by_session = self._bulk_load_settings(db_session, session_ids)
+            events_by_session = await self._bulk_load_events(db_session, session_ids)
+            settings_by_session = await self._bulk_load_settings(
+                db_session, session_ids
+            )
             for s in chunk:
                 yield (
                     s,
@@ -569,33 +576,35 @@ class ExportService:
             f"Multiple devices found. Specify one with --device:\n  {device_list}"
         )
 
-    def _query_sessions(
+    async def _query_sessions(
         self,
-        db_session: DBSession,
+        db_session: AsyncSession,
         date_from: date | None,
         date_to: date | None,
         device_serial: str | None,
     ) -> list[dict[str, Any]]:
         """Query sessions with optional filters, returning dicts with joined data."""
-        return list(
-            self._query_sessions_chunked(db_session, date_from, date_to, device_serial)
-        )
+        result = []
+        async for row in self._query_sessions_chunked(
+            db_session, date_from, date_to, device_serial
+        ):
+            result.append(row)
+        return result
 
-    def _query_sessions_chunked(
+    async def _query_sessions_chunked(
         self,
-        db_session: DBSession,
+        db_session: AsyncSession,
         date_from: date | None,
         date_to: date | None,
         device_serial: str | None,
-    ) -> Iterator[dict[str, Any]]:
-        """Yield session dicts one-by-one using a server-side cursor (``yield_per``).
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield session dicts one-by-one using async streaming.
 
         Memory is bounded to one database page at a time regardless of result set
         size.  Callers that need all rows at once should use ``_query_sessions``.
         """
         from snore.database import models  # noqa: PLC0415
 
-        # Build the base join: sessions → devices (required) + statistics (optional).
         stats_alias = models.Statistics
         stmt = (
             select(
@@ -608,7 +617,6 @@ class ExportService:
                 models.Device.serial_number,
                 models.Device.model,
                 models.Device.manufacturer,
-                # Statistics columns — None when no stats row exists.
                 stats_alias.ahi,
                 stats_alias.oai,
                 stats_alias.cai,
@@ -661,17 +669,17 @@ class ExportService:
             "spo2_mean",
             "usage_hours",
         ]
-        for row in db_session.execute(stmt).yield_per(self._EXPORT_CHUNK_SIZE):
+        result = await db_session.execute(stmt)
+        for row in result:
             r = dict(row._mapping)
             r["statistics"] = {k: r.pop(k) for k in stat_keys if r.get(k) is not None}
-            # Remove any stat keys that were None (not present in statistics dict).
             for k in stat_keys:
                 r.pop(k, None)
             yield r
 
     @staticmethod
-    def _bulk_load_events(
-        db_session: DBSession, session_ids: list[int]
+    async def _bulk_load_events(
+        db_session: AsyncSession, session_ids: list[int]
     ) -> dict[int, list[Any]]:
         """Load all events for the given session IDs in one query."""
         from collections import defaultdict
@@ -682,10 +690,12 @@ class ExportService:
             return {}
 
         events = (
-            db_session.execute(
-                select(models.Event)
-                .filter(models.Event.session_id.in_(session_ids))
-                .order_by(models.Event.session_id, models.Event.start_time)
+            (
+                await db_session.execute(
+                    select(models.Event)
+                    .filter(models.Event.session_id.in_(session_ids))
+                    .order_by(models.Event.session_id, models.Event.start_time)
+                )
             )
             .scalars()
             .all()
@@ -696,8 +706,8 @@ class ExportService:
         return dict(grouped)
 
     @staticmethod
-    def _bulk_load_settings(
-        db_session: DBSession, session_ids: list[int]
+    async def _bulk_load_settings(
+        db_session: AsyncSession, session_ids: list[int]
     ) -> dict[int, list[Any]]:
         """Load all settings for the given session IDs in one query."""
         from collections import defaultdict
@@ -708,10 +718,12 @@ class ExportService:
             return {}
 
         settings = (
-            db_session.execute(
-                select(models.Setting)
-                .filter(models.Setting.session_id.in_(session_ids))
-                .order_by(models.Setting.session_id, models.Setting.key)
+            (
+                await db_session.execute(
+                    select(models.Setting)
+                    .filter(models.Setting.session_id.in_(session_ids))
+                    .order_by(models.Setting.session_id, models.Setting.key)
+                )
             )
             .scalars()
             .all()

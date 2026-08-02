@@ -14,60 +14,54 @@ from snore.database.day_manager import DayManager
 
 
 class TestDaySplitLogic:
-    """Test day-splitting algorithm (hardcoded noon boundary logic)."""
+    """Test day-splitting algorithm (hardcoded noon boundary logic).
 
-    def test_default_noon_split_before(self, db_session):
+    These tests exercise a pure classmethod with no DB access — the
+    async_db_session fixture is included for consistency but not used.
+    """
+
+    def test_default_noon_split_before(self):
         """Session before noon belongs to previous calendar day."""
         session_start = datetime(2024, 11, 5, 11, 59, 0)
-
         result = DayManager.get_day_for_session(session_start)
-
         assert result == date(2024, 11, 4)
 
-    def test_default_noon_split_at_boundary(self, db_session):
+    def test_default_noon_split_at_boundary(self):
         """Session exactly at noon belongs to same calendar day."""
         session_start = datetime(2024, 11, 5, 12, 0, 0)
-
         result = DayManager.get_day_for_session(session_start)
-
         assert result == date(2024, 11, 5)
 
-    def test_default_noon_split_after(self, db_session):
+    def test_default_noon_split_after(self):
         """Session after noon belongs to same calendar day."""
         session_start = datetime(2024, 11, 5, 12, 1, 0)
-
         result = DayManager.get_day_for_session(session_start)
-
         assert result == date(2024, 11, 5)
 
-    def test_midnight_session_with_noon_split(self, db_session):
+    def test_midnight_session_with_noon_split(self):
         """Midnight session (00:00) with noon split belongs to previous day."""
         session_start = datetime(2024, 11, 5, 0, 0, 0)
-
         result = DayManager.get_day_for_session(session_start)
-
         assert result == date(2024, 11, 4)
 
-    def test_late_night_session_23_59(self, db_session):
+    def test_late_night_session_23_59(self):
         """Late night session (23:59) with noon split belongs to same day."""
         session_start = datetime(2024, 11, 5, 23, 59, 0)
-
         result = DayManager.get_day_for_session(session_start)
-
         assert result == date(2024, 11, 5)
 
 
 class TestStatisticalAggregation:
     """Test statistical aggregation across multiple sessions."""
 
-    def test_single_session_aggregation(
-        self, db_session, test_device, test_session_factory
+    async def test_single_session_aggregation(
+        self, async_db_session, async_test_device, async_test_session_factory
     ):
         """Single session aggregation should copy statistics directly."""
-        device = test_device
+        device = async_test_device
 
         session_start = datetime(2024, 11, 5, 12, 0, 0)
-        session = test_session_factory(
+        session = await async_test_session_factory(
             device_id=device.id,
             start_time=session_start,
             duration_hours=8.0,
@@ -88,7 +82,7 @@ class TestStatisticalAggregation:
             leak_median=5.0,
         )
 
-        day = DayManager.link_session_to_day(session, device.id, db_session)
+        day = await DayManager.link_session_to_day(session, device.id, async_db_session)
 
         assert day.session_count == 1
         assert day.total_therapy_hours == pytest.approx(8.0, abs=0.01)
@@ -100,13 +94,13 @@ class TestStatisticalAggregation:
         assert day.pressure_min == pytest.approx(8.0, abs=0.01)
         assert day.pressure_max == pytest.approx(15.0, abs=0.01)
 
-    def test_multi_session_event_counts_sum(
-        self, db_session, test_device, test_session_factory
+    async def test_multi_session_event_counts_sum(
+        self, async_db_session, async_test_device, async_test_session_factory
     ):
         """Event counts should sum across sessions."""
-        device = test_device
+        device = async_test_device
 
-        session1 = test_session_factory(
+        session1 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 12, 0, 0),
             duration_hours=4.0,
@@ -116,7 +110,7 @@ class TestStatisticalAggregation:
             reras=3,
         )
 
-        session2 = test_session_factory(
+        session2 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 22, 0, 0),
             duration_hours=6.0,
@@ -126,8 +120,10 @@ class TestStatisticalAggregation:
             reras=5,
         )
 
-        day = DayManager.link_session_to_day(session1, device.id, db_session)
-        day = DayManager.link_session_to_day(session2, device.id, db_session)
+        await DayManager.link_session_to_day(session1, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.session_count == 2
         assert day.obstructive_apneas == 25
@@ -135,36 +131,40 @@ class TestStatisticalAggregation:
         assert day.hypopneas == 20
         assert day.reras == 8
 
-    def test_weighted_average_ahi(self, db_session, test_device, test_session_factory):
+    async def test_weighted_average_ahi(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
         """AHI should be weighted by session duration."""
-        device = test_device
+        device = async_test_device
 
-        session1 = test_session_factory(
+        session1 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 12, 0, 0),
             duration_hours=4.0,
             ahi=10.0,
         )
 
-        session2 = test_session_factory(
+        session2 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 22, 0, 0),
             duration_hours=2.0,
             ahi=4.0,
         )
 
-        day = DayManager.link_session_to_day(session1, device.id, db_session)
-        day = DayManager.link_session_to_day(session2, device.id, db_session)
+        await DayManager.link_session_to_day(session1, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.ahi == pytest.approx(8.0, abs=0.01)
 
-    def test_pressure_min_max_across_sessions(
-        self, db_session, test_device, test_session_factory
+    async def test_pressure_min_max_across_sessions(
+        self, async_db_session, async_test_device, async_test_session_factory
     ):
         """Pressure min/max should be extremes across all sessions."""
-        device = test_device
+        device = async_test_device
 
-        session1 = test_session_factory(
+        session1 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 12, 0, 0),
             duration_hours=4.0,
@@ -173,7 +173,7 @@ class TestStatisticalAggregation:
             pressure_median=11.0,
         )
 
-        session2 = test_session_factory(
+        session2 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 22, 0, 0),
             duration_hours=4.0,
@@ -182,19 +182,21 @@ class TestStatisticalAggregation:
             pressure_median=9.0,
         )
 
-        day = DayManager.link_session_to_day(session1, device.id, db_session)
-        day = DayManager.link_session_to_day(session2, device.id, db_session)
+        await DayManager.link_session_to_day(session1, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.pressure_min == pytest.approx(6.0, abs=0.01)
         assert day.pressure_max == pytest.approx(15.0, abs=0.01)
 
-    def test_empty_day_resets_statistics(
-        self, db_session, test_device, test_session_factory
+    async def test_empty_day_resets_statistics(
+        self, async_db_session, async_test_device, async_test_session_factory
     ):
         """Day with no sessions should have reset statistics."""
-        device = test_device
+        device = async_test_device
 
-        session = test_session_factory(
+        session = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 12, 0, 0),
             duration_hours=8.0,
@@ -202,87 +204,91 @@ class TestStatisticalAggregation:
             ahi=5.0,
         )
 
-        day = DayManager.link_session_to_day(session, device.id, db_session)
+        day = await DayManager.link_session_to_day(session, device.id, async_db_session)
         assert day.session_count == 1
         assert day.obstructive_apneas == 10
 
         session.day_id = None
-        db_session.flush()
-        DayManager._aggregate_day_statistics(day, db_session)
+        await async_db_session.flush()
+        await DayManager._aggregate_day_statistics(day, async_db_session)
 
         assert day.session_count == 0
         assert day.total_therapy_hours == 0.0
         assert day.obstructive_apneas == 0
         assert day.ahi is None
 
-    def test_partial_data_null_values(
-        self, db_session, test_device, test_session_factory
+    async def test_partial_data_null_values(
+        self, async_db_session, async_test_device, async_test_session_factory
     ):
         """Sessions with missing statistics should be handled gracefully."""
-        device = test_device
+        device = async_test_device
 
-        session1 = test_session_factory(
+        session1 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 12, 0, 0),
             duration_hours=4.0,
             ahi=8.0,
         )
 
-        session2 = test_session_factory(
+        session2 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 22, 0, 0),
             duration_hours=4.0,
         )
 
-        day = DayManager.link_session_to_day(session1, device.id, db_session)
-        day = DayManager.link_session_to_day(session2, device.id, db_session)
+        await DayManager.link_session_to_day(session1, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session2, device.id, async_db_session
+        )
 
         assert day.ahi == pytest.approx(8.0, abs=0.01)
 
-    def test_zero_duration_session_handling(
-        self, db_session, test_device, test_session_factory
+    async def test_zero_duration_session_handling(
+        self, async_db_session, async_test_device, async_test_session_factory
     ):
         """Sessions with zero duration should not cause division by zero."""
-        device = test_device
+        device = async_test_device
 
-        session = test_session_factory(
+        session = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 12, 0, 0),
             duration_hours=0.0,
             ahi=5.0,
         )
 
-        day = DayManager.link_session_to_day(session, device.id, db_session)
+        day = await DayManager.link_session_to_day(session, device.id, async_db_session)
 
         assert day.total_therapy_hours == pytest.approx(0.0, abs=0.01)
 
-    def test_total_therapy_hours_sums_durations(
-        self, db_session, test_device, test_session_factory
+    async def test_total_therapy_hours_sums_durations(
+        self, async_db_session, async_test_device, async_test_session_factory
     ):
         """Total therapy hours should sum all session durations."""
-        device = test_device
+        device = async_test_device
 
-        session1 = test_session_factory(
+        session1 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 12, 0, 0),
             duration_hours=4.0,
         )
 
-        session2 = test_session_factory(
+        session2 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 18, 0, 0),
             duration_hours=2.5,
         )
 
-        session3 = test_session_factory(
+        session3 = await async_test_session_factory(
             device_id=device.id,
             start_time=datetime(2024, 11, 5, 22, 0, 0),
             duration_hours=1.5,
         )
 
-        day = DayManager.link_session_to_day(session1, device.id, db_session)
-        day = DayManager.link_session_to_day(session2, device.id, db_session)
-        day = DayManager.link_session_to_day(session3, device.id, db_session)
+        await DayManager.link_session_to_day(session1, device.id, async_db_session)
+        await DayManager.link_session_to_day(session2, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session3, device.id, async_db_session
+        )
 
         assert day.total_therapy_hours == pytest.approx(8.0, abs=0.01)
         assert day.session_count == 3

@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
 
 from snore.database.models import Day, Device
 from snore.database.models import Session as SessionModel
@@ -72,13 +73,13 @@ class RxPeriodStats(RxPeriod):
 class RxTracker:
     """Track and analyze therapy prescription changes."""
 
-    def get_history(self, db_session: Session) -> list[RxPeriodResponse]:
+    async def get_history(self, db_session: AsyncSession) -> list[RxPeriodResponse]:
         """Return all RX periods with stats."""
-        periods = self._compute_periods(db_session)
+        periods = await self._compute_periods(db_session)
         stats = self._compute_period_stats(periods)
         return [self._to_response(p) for p in stats]
 
-    def get_current(self, db_session: Session) -> RxPeriodResponse | None:
+    async def get_current(self, db_session: AsyncSession) -> RxPeriodResponse | None:
         """Return the current (most recent) RX period, or None if no data.
 
         Invariant: for any DB state, result equals get_history()[-1] when
@@ -86,8 +87,8 @@ class RxTracker:
         devices.  Empty DB / no periods → None.
         """
         candidates: list[RxPeriod] = []
-        for device_id, device_name in self._get_devices(db_session):
-            period = self._find_last_period_for_device(
+        for device_id, device_name in await self._get_devices(db_session):
+            period = await self._find_last_period_for_device(
                 db_session, device_id, device_name
             )
             if period is not None:
@@ -100,11 +101,11 @@ class RxTracker:
         stats = self._compute_period_stats([best])[0]
         return self._to_response(stats)
 
-    def get_comparison(
-        self, db_session: Session, min_days: int = 7
+    async def get_comparison(
+        self, db_session: AsyncSession, min_days: int = 7
     ) -> RxComparisonResponse:
         """Return all periods with best/worst indices."""
-        periods = self._compute_periods(db_session)
+        periods = await self._compute_periods(db_session)
         stats = self._compute_period_stats(periods)
         best_index, worst_index = self._best_worst_indices(stats, min_days)
         return RxComparisonResponse(
@@ -113,7 +114,7 @@ class RxTracker:
             worst_index=worst_index,
         )
 
-    def get_changes(self, db_session: Session) -> RxChangesResponse:
+    async def get_changes(self, db_session: AsyncSession) -> RxChangesResponse:
         """Return a log of every per-key settings change across all devices.
 
         Intentionally diffs ALL persisted settings keys — including comfort
@@ -122,11 +123,13 @@ class RxTracker:
         every setting the clinician or patient touched.  Do not narrow this to
         _get_day_rx_settings; use _get_day_settings (no key filter).
         """
-        return self._compute_changes(self._days_by_device(db_session))
+        return self._compute_changes(await self._days_by_device(db_session))
 
-    def get_all(self, db_session: Session, min_days: int = 7) -> RxAllResponse:
+    async def get_all(
+        self, db_session: AsyncSession, min_days: int = 7
+    ) -> RxAllResponse:
         """Return all RX data from a single database query."""
-        device_groups = self._days_by_device(db_session)
+        device_groups = await self._days_by_device(db_session)
 
         periods = self._compute_periods_from_groups(device_groups)
         stats = self._compute_period_stats(periods)
@@ -158,9 +161,9 @@ class RxTracker:
             device_name=period.device_name,
         )
 
-    def _compute_periods(self, db_session: Session) -> list[RxPeriod]:
+    async def _compute_periods(self, db_session: AsyncSession) -> list[RxPeriod]:
         """Query all days and group into RX periods."""
-        return self._compute_periods_from_groups(self._days_by_device(db_session))
+        return self._compute_periods_from_groups(await self._days_by_device(db_session))
 
     def _compute_periods_from_groups(
         self, device_groups: list[tuple[int, str, list[Day]]]
@@ -203,7 +206,9 @@ class RxTracker:
         all_changes.sort(key=lambda c: (c.date, c.device_id, c.key))
         return RxChangesResponse(changes=all_changes)
 
-    def _days_by_device(self, db_session: Session) -> list[tuple[int, str, list[Day]]]:
+    async def _days_by_device(
+        self, db_session: AsyncSession
+    ) -> list[tuple[int, str, list[Day]]]:
         """Query all days grouped by device, ordered by (device_id, date).
 
         Returns a list of (device_id, device_name, days) tuples, one per
@@ -211,12 +216,14 @@ class RxTracker:
         matching Device row (device is None) are skipped with a warning.
         """
         days = (
-            db_session.execute(
-                select(Day)
-                .order_by(Day.device_id, Day.date)
-                .options(
-                    joinedload(Day.sessions).joinedload(SessionModel.settings),
-                    joinedload(Day.device),
+            (
+                await db_session.execute(
+                    select(Day)
+                    .order_by(Day.device_id, Day.date)
+                    .options(
+                        joinedload(Day.sessions).joinedload(SessionModel.settings),
+                        joinedload(Day.device),
+                    )
                 )
             )
             .unique()
@@ -399,16 +406,18 @@ class RxTracker:
         sorted_items = sorted(settings.items())
         return "|".join(f"{k}={v}" for k, v in sorted_items)
 
-    def _get_devices(self, db_session: Session) -> list[tuple[int, str]]:
+    async def _get_devices(self, db_session: AsyncSession) -> list[tuple[int, str]]:
         """Return (device_id, device_name) for all devices that have Day rows.
 
         Uses an inner join so Day rows with no matching Device are naturally
         excluded — same outcome as the missing-device guard in _days_by_device.
         """
-        rows = db_session.execute(
-            select(Day.device_id, Device.manufacturer, Device.model)
-            .join(Device, Day.device_id == Device.id)
-            .distinct()
+        rows = (
+            await db_session.execute(
+                select(Day.device_id, Device.manufacturer, Device.model)
+                .join(Device, Day.device_id == Device.id)
+                .distinct()
+            )
         ).all()
         return [
             (
@@ -418,9 +427,9 @@ class RxTracker:
             for device_id, manufacturer, model in rows
         ]
 
-    def _query_device_days_desc(
+    async def _query_device_days_desc(
         self,
-        db_session: Session,
+        db_session: AsyncSession,
         device_id: int,
         *,
         before: date | None,
@@ -435,19 +444,21 @@ class RxTracker:
         if before is not None:
             q = q.where(Day.date < before)
         return list(
-            db_session.execute(
-                q.options(
-                    selectinload(Day.sessions).selectinload(SessionModel.settings),
-                ).limit(limit)
+            (
+                await db_session.execute(
+                    q.options(
+                        selectinload(Day.sessions).selectinload(SessionModel.settings),
+                    ).limit(limit)
+                )
             )
             .unique()
             .scalars()
             .all()
         )
 
-    def _find_last_period_for_device(
+    async def _find_last_period_for_device(
         self,
-        db_session: Session,
+        db_session: AsyncSession,
         device_id: int,
         device_name: str,
     ) -> RxPeriod | None:
@@ -466,7 +477,7 @@ class RxTracker:
         done = False
 
         while not done:
-            batch = self._query_device_days_desc(
+            batch = await self._query_device_days_desc(
                 db_session, device_id, before=cursor, limit=_TAIL_WALK_BATCH_SIZE
             )
             if not batch:

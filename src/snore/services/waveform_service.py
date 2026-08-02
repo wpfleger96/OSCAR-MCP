@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.data.waveform_loader import (
     WaveformLoader,
@@ -28,17 +28,11 @@ __all__ = ["WaveformService"]
 class WaveformService:
     """Service for waveform listing and loading operations."""
 
-    def __init__(self, db_session: Session):
-        """
-        Initialize waveform service.
-
-        Args:
-            db_session: SQLAlchemy database session
-        """
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
         self._loader = WaveformLoader(db_session)
 
-    def list_waveforms(self, session_id: int) -> list[WaveformInfo]:
+    async def list_waveforms(self, session_id: int) -> list[WaveformInfo]:
         """
         List available waveform types for a session.
 
@@ -51,10 +45,12 @@ class WaveformService:
             List of WaveformInfo objects with metadata
         """
         waveforms = (
-            self.db_session.execute(
-                select(models.Waveform)
-                .where(models.Waveform.session_id == session_id)
-                .order_by(models.Waveform.waveform_type)
+            (
+                await self.db_session.execute(
+                    select(models.Waveform)
+                    .where(models.Waveform.session_id == session_id)
+                    .order_by(models.Waveform.waveform_type)
+                )
             )
             .scalars()
             .all()
@@ -77,7 +73,7 @@ class WaveformService:
             )
         return result
 
-    def get_waveform_data(
+    async def get_waveform_data(
         self,
         session_id: int,
         waveform_type: str,
@@ -110,14 +106,14 @@ class WaveformService:
         """
         # --- I/O phase: DB access only ---
         try:
-            data_blob, sample_count, metadata = fetch_waveform_blob(
+            data_blob, sample_count, metadata = await fetch_waveform_blob(
                 self.db_session, session_id, waveform_type
             )
         except ValueError as e:
             raise NotFoundError(str(e)) from e
 
         # Close the session now — deserialization and LTTB are pure compute.
-        self.db_session.close()
+        await self.db_session.close()
 
         # --- Compute phase: no DB session needed after this point ---
         timestamps, values = deserialize_waveform_blob(data_blob, sample_count)
@@ -136,7 +132,30 @@ class WaveformService:
 
         return timestamps, values, metadata
 
-    def compare_events(
+    async def _load_analysis_result(self, session_id: int) -> Any:
+        """Load the latest AnalysisResult row for a session, returning a validated result object."""
+        from sqlalchemy import select as _select
+
+        from snore.analysis.types import AnalysisResult as _AnalysisResult
+        from snore.database import models as _models
+
+        analysis_row = (
+            (
+                await self.db_session.execute(
+                    _select(_models.AnalysisResult)
+                    .filter_by(session_id=session_id)
+                    .order_by(_models.AnalysisResult.created_at.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+        if analysis_row is None:
+            return None
+        return _AnalysisResult.model_validate(analysis_row.programmatic_result_json)
+
+    async def compare_events(
         self,
         session_id: int,
         mode: str = "aasm",
@@ -156,10 +175,9 @@ class WaveformService:
         Raises:
             NotFoundError: If no analysis result found or mode not available
         """
-        from snore.analysis.service import AnalysisService
         from snore.analysis.utils import convert_machine_events
 
-        result = AnalysisService(self.db_session).get_analysis_result(session_id)
+        result = await self._load_analysis_result(session_id)
 
         if result is None:
             raise NotFoundError("No analysis results found for this session")

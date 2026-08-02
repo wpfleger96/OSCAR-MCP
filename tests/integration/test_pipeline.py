@@ -21,21 +21,19 @@ import pytest
 from snore.analysis.data.waveform_loader import WaveformLoader
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
 from snore.analysis.shared.feature_extractors import WaveformFeatureExtractor
-from snore.database.models import Session
 
 
 @pytest.mark.integration_pipeline
 class TestEndToEndPipeline:
     """Verify complete workflow processes real data successfully."""
 
-    def test_full_pipeline_baseline_session(self, recorded_session):
+    async def test_full_pipeline_baseline_session(self, async_recorded_session):
         """Load → segment → extract features on real CPAP data."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         assert session is not None
 
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow", apply_filter=False
         )
 
@@ -62,14 +60,13 @@ class TestEndToEndPipeline:
         assert peak is not None
         assert stats is not None
 
-    def test_multi_segment_discontinuity_handling(self, recorded_session):
+    async def test_multi_segment_discontinuity_handling(self, async_recorded_session):
         """Sessions with mask-off periods process correctly."""
-        db = recorded_session("20250910")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250910")
         assert session is not None
 
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -92,12 +89,11 @@ class TestEndToEndPipeline:
 class TestPhysiologicalValidation:
     """Verify real data produces physiologically realistic results."""
 
-    def test_respiratory_rate_realistic_range(self, recorded_session):
+    async def test_respiratory_rate_realistic_range(self, async_recorded_session):
         """RR should be in normal adult range (8-25 breaths/min typical)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -117,12 +113,11 @@ class TestPhysiologicalValidation:
             f"{len(outliers)} RR outliers ({outlier_percent:.2f}%) exceed 0.5% threshold"
         )
 
-    def test_tidal_volume_realistic_range(self, recorded_session):
+    async def test_tidal_volume_realistic_range(self, async_recorded_session):
         """TV should be in normal adult range (300-800 mL typical)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -139,12 +134,11 @@ class TestPhysiologicalValidation:
         in_range = sum(200 <= tv <= 1000 for tv in tv_values)
         assert in_range / len(tv_values) >= 0.95, "Too many TV outliers"
 
-    def test_peak_flows_realistic_range(self, recorded_session):
+    async def test_peak_flows_realistic_range(self, async_recorded_session):
         """Peak inspiratory/expiratory flows should be realistic."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -161,12 +155,11 @@ class TestPhysiologicalValidation:
                 f"PEF out of range: {breath.peak_expiratory_flow}"
             )
 
-    def test_ie_ratio_realistic(self, recorded_session):
+    async def test_ie_ratio_realistic(self, async_recorded_session):
         """I:E ratio should be in typical range (0.4-0.8 for sleep)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -185,12 +178,11 @@ class TestPhysiologicalValidation:
 class TestOSCARAlgorithms:
     """Verify OSCAR-aligned algorithms function correctly."""
 
-    def test_amplitude_filter_8_lpm(self, recorded_session):
+    async def test_amplitude_filter_8_lpm(self, async_recorded_session):
         """All breaths should have amplitude > 2 L/min (improved threshold)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -204,12 +196,13 @@ class TestOSCARAlgorithms:
                 f"Breath {breath.breath_number} below 2 L/min threshold"
             )
 
-    def test_rolling_rr_more_stable_than_instantaneous(self, recorded_session):
+    async def test_rolling_rr_more_stable_than_instantaneous(
+        self, async_recorded_session
+    ):
         """Rolling 60s window RR should be more stable than instantaneous."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -226,12 +219,11 @@ class TestOSCARAlgorithms:
                 "Rolling RR not smoothing variability"
             )
 
-    def test_tv_smoothing_reduces_variability(self, recorded_session):
+    async def test_tv_smoothing_reduces_variability(self, async_recorded_session):
         """5-point weighted TV smoothing should reduce jitter."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -248,12 +240,11 @@ class TestOSCARAlgorithms:
                 "TV smoothing not reducing variability"
             )
 
-    def test_complete_breaths_have_both_phases(self, recorded_session):
+    async def test_complete_breaths_have_both_phases(self, async_recorded_session):
         """All returned breaths must be complete (inspiration + expiration)."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 
@@ -274,12 +265,11 @@ class TestOSCARAlgorithms:
 class TestFeatureExtraction:
     """Verify feature extraction produces valid results."""
 
-    def test_flatness_index_in_valid_range(self, recorded_session):
+    async def test_flatness_index_in_valid_range(self, async_recorded_session):
         """Flatness index should be in [0, 1] range."""
-        db = recorded_session("20250808")
-        session = db.query(Session).first()
+        db, session = await async_recorded_session("20250808")
         loader = WaveformLoader(db)
-        timestamps, flow_values, metadata = loader.load_waveform(
+        timestamps, flow_values, metadata = await loader.load_waveform(
             session_id=session.id, waveform_type="flow"
         )
 

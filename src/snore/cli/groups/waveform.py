@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 
 from datetime import datetime
@@ -18,7 +19,7 @@ from snore.waveform import format_time_offset
 from snore.waveform.inspector import parse_time_offset
 
 
-def _resolve_session_id(
+async def _resolve_session_id(
     db_session: Any,
     session_id: int | None,
     date: datetime | None,
@@ -42,7 +43,7 @@ def _resolve_session_id(
     service = SessionService(db_session)
 
     try:
-        return service.resolve_session_id(session_id, date)
+        return await service.resolve_session_id(session_id, date)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -76,38 +77,41 @@ def list_waveforms(
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")
 
-    with open_db_session(db) as db_session:
-        resolved_id = _resolve_session_id(db_session, session_id, date)
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            resolved_id = await _resolve_session_id(db_session, session_id, date)
 
-        service = WaveformService(db_session)
-        waveforms = service.list_waveforms(resolved_id)
+            service = WaveformService(db_session)
+            waveforms = await service.list_waveforms(resolved_id)
 
-        if not waveforms:
-            console.print(f"No waveforms found for session {resolved_id}")
-            return
+            if not waveforms:
+                console.print(f"No waveforms found for session {resolved_id}")
+                return
 
-        console.print(f"Available waveforms for session {resolved_id}:")
-        print_table(
-            [
-                ("TYPE", 12),
-                ("RATE", 12),
-                ("SAMPLES", 10),
-                ("UNIT", 10),
-                ("DURATION", 0),
-            ],
-            (
+            console.print(f"Available waveforms for session {resolved_id}:")
+            print_table(
+                [
+                    ("TYPE", 12),
+                    ("RATE", 12),
+                    ("SAMPLES", 10),
+                    ("UNIT", 10),
+                    ("DURATION", 0),
+                ],
                 (
-                    wf.waveform_type,
-                    f"{wf.sample_rate:.1f}Hz",
-                    str(wf.sample_count),
-                    wf.unit or "?",
-                    f"{wf.duration_hours:.1f}h",
-                )
-                for wf in waveforms
-            ),
-            header_separator=False,
-            indent=1,
-        )
+                    (
+                        wf.waveform_type,
+                        f"{wf.sample_rate:.1f}Hz",
+                        str(wf.sample_count),
+                        wf.unit or "?",
+                        f"{wf.duration_hours:.1f}h",
+                    )
+                    for wf in waveforms
+                ),
+                header_separator=False,
+                indent=1,
+            )
+
+    asyncio.run(_run())
 
 
 @waveform.command("show")
@@ -162,7 +166,6 @@ def show_waveform(
         snore waveform show --session-id 37 --time 01:25:16 --format csv --output waveform.csv
     """
     from snore.analysis.service import AnalysisService
-    from snore.database.session import session_scope
     from snore.waveform import WaveformInspector, WaveformRenderer
 
     if session_id is None and date is None:
@@ -184,138 +187,150 @@ def show_waveform(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
-    with open_db_session(db) as db_session:
-        session_id = _resolve_session_id(db_session, session_id, date)
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            resolved_id = await _resolve_session_id(db_session, session_id, date)
 
-        inspector = WaveformInspector(db_session)
+            inspector = WaveformInspector(db_session)
 
-        if len(waveform_types) == 1:
-            waveform_type_single = waveform_types[0]
-            try:
-                timestamps, values, metadata = inspector.get_window(
-                    session_id=session_id,
-                    center_seconds=center_seconds,
-                    window_seconds=float(window),
-                    waveform_type=waveform_type_single,
-                )
-            except Exception as e:
-                raise click.ClickException(f"Error loading waveform: {e}") from e
-
-            if len(timestamps) == 0:
-                raise click.ClickException("No data in window")
-
-            machine_events = []
-            programmatic_events = []
-
-            if waveform_type_single == "flow":
-                analysis_service = AnalysisService(db_session)
+            if len(waveform_types) == 1:
+                waveform_type_single = waveform_types[0]
                 try:
-                    result = analysis_service.get_analysis_result(session_id)
-                except Exception:
-                    result = None
-
-                if result:
-                    start_time = center_seconds - window / 2
-                    end_time = center_seconds + window / 2
-
-                    if result.machine_events:
-                        machine_events = inspector.find_events_in_window(
-                            result.machine_events, start_time, end_time
-                        )
-
-                    if mode in result.mode_results:
-                        mode_result = result.mode_results[mode]
-                        all_prog_events = list(mode_result.apneas) + list(
-                            mode_result.hypopneas
-                        )
-                        programmatic_events = inspector.find_events_in_window(
-                            all_prog_events, start_time, end_time
-                        )
-
-            if output_format == "plot":
-                show_events = waveform_type_single == "flow"
-                renderer = WaveformRenderer(
-                    width=80, height=20, show_events=show_events
-                )
-                renderer.render(
-                    timestamps=timestamps,
-                    values=values,
-                    machine_events=machine_events,
-                    programmatic_events=programmatic_events,
-                    session_id=session_id,
-                    center_time=time,
-                    waveform_type=waveform_type_single,
-                )
-
-            elif output_format == "csv":
-                assert output is not None
-                column_name = f"{waveform_type_single}_value"
-                with open(output, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["timestamp_seconds", column_name])
-                    for ts, value in zip(timestamps, values, strict=True):
-                        writer.writerow([f"{ts:.3f}", f"{value:.3f}"])
-
-                console.print(f"Exported {len(timestamps)} samples to {output}")
-
-        else:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            import numpy as np
-
-            def load_waveform(
-                wf_type: str,
-            ) -> tuple[np.ndarray, np.ndarray, str] | None:
-                with session_scope() as thread_session:
-                    thread_inspector = WaveformInspector(thread_session)
-                    ts, vals, _meta = thread_inspector.get_window(
-                        session_id=session_id,
+                    timestamps, values, metadata = await inspector.get_window(
+                        session_id=resolved_id,
                         center_seconds=center_seconds,
                         window_seconds=float(window),
-                        waveform_type=wf_type,
+                        waveform_type=waveform_type_single,
                     )
-                if len(ts) > 0:
-                    return (ts, vals, wf_type)
-                return None
+                except Exception as e:
+                    raise click.ClickException(f"Error loading waveform: {e}") from e
 
-            waveform_data = []
-            warnings: list[str] = []
-            max_workers = min(4, len(waveform_types))
+                if len(timestamps) == 0:
+                    raise click.ClickException("No data in window")
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(load_waveform, wf_type): wf_type
-                    for wf_type in waveform_types
-                }
+                machine_events = []
+                programmatic_events = []
 
-                for future in as_completed(futures):
-                    wf_type = futures[future]
+                if waveform_type_single == "flow":
+                    analysis_service = AnalysisService(db_session)
                     try:
-                        wf_result = future.result()
-                        if wf_result is not None:
-                            waveform_data.append(wf_result)
-                        else:
-                            warnings.append(f"No data for waveform type '{wf_type}'")
-                    except Exception as e:
-                        warnings.append(
-                            f"Failed to load waveform type '{wf_type}': {e}"
+                        result = await analysis_service.get_analysis_result(resolved_id)
+                    except Exception:
+                        result = None
+
+                    if result:
+                        start_time = center_seconds - window / 2
+                        end_time = center_seconds + window / 2
+
+                        if result.machine_events:
+                            machine_events = inspector.find_events_in_window(
+                                result.machine_events, start_time, end_time
+                            )
+
+                        if mode in result.mode_results:
+                            mode_result = result.mode_results[mode]
+                            all_prog_events = list(mode_result.apneas) + list(
+                                mode_result.hypopneas
+                            )
+                            programmatic_events = inspector.find_events_in_window(
+                                all_prog_events, start_time, end_time
+                            )
+
+                if output_format == "plot":
+                    show_events = waveform_type_single == "flow"
+                    renderer = WaveformRenderer(
+                        width=80, height=20, show_events=show_events
+                    )
+                    renderer.render(
+                        timestamps=timestamps,
+                        values=values,
+                        machine_events=machine_events,
+                        programmatic_events=programmatic_events,
+                        session_id=resolved_id,
+                        center_time=time,
+                        waveform_type=waveform_type_single,
+                    )
+
+                elif output_format == "csv":
+                    assert output is not None
+                    column_name = f"{waveform_type_single}_value"
+                    with open(output, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["timestamp_seconds", column_name])
+                        for ts, value in zip(timestamps, values, strict=True):
+                            writer.writerow([f"{ts:.3f}", f"{value:.3f}"])
+
+                    console.print(f"Exported {len(timestamps)} samples to {output}")
+
+            else:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                import numpy as np
+
+                from snore.database.session import session_scope
+
+                async def _load_waveform_async(
+                    wf_type: str,
+                ) -> tuple[np.ndarray, np.ndarray, str] | None:
+                    async with session_scope() as thread_session:
+                        thread_inspector = WaveformInspector(thread_session)
+                        ts, vals, _meta = await thread_inspector.get_window(
+                            session_id=resolved_id,
+                            center_seconds=center_seconds,
+                            window_seconds=float(window),
+                            waveform_type=wf_type,
                         )
+                    if len(ts) > 0:
+                        return (ts, vals, wf_type)
+                    return None
 
-            for w in warnings:
-                print_warning(w)
+                def load_waveform(
+                    wf_type: str,
+                ) -> tuple[np.ndarray, np.ndarray, str] | None:
+                    return asyncio.run(_load_waveform_async(wf_type))
 
-            if not waveform_data:
-                raise click.ClickException("No waveform data loaded")
+                waveform_data = []
+                warnings: list[str] = []
+                max_workers = min(4, len(waveform_types))
 
-            type_order = {t: i for i, t in enumerate(waveform_types)}
-            waveform_data.sort(key=lambda x: type_order.get(x[2], 999))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(load_waveform, wf_type): wf_type
+                        for wf_type in waveform_types
+                    }
 
-            renderer = WaveformRenderer(width=80, height=20, show_events=False)
-            renderer.render_multi(
-                waveform_data=waveform_data,
-                session_id=session_id,
-                center_time=time,
-            )
+                    for future in as_completed(futures):
+                        wf_type = futures[future]
+                        try:
+                            wf_result = future.result()
+                            if wf_result is not None:
+                                waveform_data.append(wf_result)
+                            else:
+                                warnings.append(
+                                    f"No data for waveform type '{wf_type}'"
+                                )
+                        except Exception as e:
+                            warnings.append(
+                                f"Failed to load waveform type '{wf_type}': {e}"
+                            )
+
+                for w in warnings:
+                    print_warning(w)
+
+                if not waveform_data:
+                    raise click.ClickException("No waveform data loaded")
+
+                type_order = {t: i for i, t in enumerate(waveform_types)}
+                waveform_data.sort(key=lambda x: type_order.get(x[2], 999))
+
+                renderer = WaveformRenderer(width=80, height=20, show_events=False)
+                renderer.render_multi(
+                    waveform_data=waveform_data,
+                    session_id=resolved_id,
+                    center_time=time,
+                )
+
+    asyncio.run(_run())
 
 
 @waveform.command("compare")
@@ -347,63 +362,68 @@ def compare_events(
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")
 
-    with open_db_session(db) as db_session:
-        session_id = _resolve_session_id(db_session, session_id, date)
+    async def _run() -> None:
+        async with open_db_session(db) as db_session:
+            resolved_id = await _resolve_session_id(db_session, session_id, date)
 
-        service = WaveformService(db_session)
-        try:
-            comparison = service.compare_events(session_id, mode, tolerance_seconds=5.0)
-        except NotFoundError as e:
-            raise click.ClickException(str(e)) from e
+            service = WaveformService(db_session)
+            try:
+                comparison = await service.compare_events(
+                    resolved_id, mode, tolerance_seconds=5.0
+                )
+            except NotFoundError as e:
+                raise click.ClickException(str(e)) from e
 
-        console.print(f"Session {session_id} - Event Comparison ({mode} mode)")
-        console.print(
-            f"Machine: {comparison.machine_event_count} events | Programmatic: {comparison.programmatic_event_count} events"
-        )
-        console.print("")
-
-        if not show_unmatched or len(comparison.false_negatives) > 0:
+            console.print(f"Session {resolved_id} - Event Comparison ({mode} mode)")
             console.print(
-                f"FALSE NEGATIVES (machine events missed by programmatic): {len(comparison.false_negatives)}"
+                f"Machine: {comparison.machine_event_count} events | Programmatic: {comparison.programmatic_event_count} events"
             )
-            for event in comparison.false_negatives:
-                time_str = format_time_offset(event.start_time)
-                console.print(
-                    f"  {escape(str(event.event_type))} at {time_str} ({event.duration:.1f}s)"
-                )
-                console.print(
-                    f"    → View: snore waveform show --session-id {session_id} --time {time_str}"
-                )
             console.print("")
 
-        if (
-            not show_unmatched
-            or len(comparison.false_positives_apnea)
-            + len(comparison.false_positives_hypopnea)
-            > 0
-        ):
-            console.print(
-                f"FALSE POSITIVES (programmatic events not in machine): {len(comparison.false_positives_apnea) + len(comparison.false_positives_hypopnea)}"
-            )
+            if not show_unmatched or len(comparison.false_negatives) > 0:
+                console.print(
+                    f"FALSE NEGATIVES (machine events missed by programmatic): {len(comparison.false_negatives)}"
+                )
+                for event in comparison.false_negatives:
+                    time_str = format_time_offset(event.start_time)
+                    console.print(
+                        f"  {escape(str(event.event_type))} at {time_str} ({event.duration:.1f}s)"
+                    )
+                    console.print(
+                        f"    → View: snore waveform show --session-id {resolved_id} --time {time_str}"
+                    )
+                console.print("")
 
-            for event in comparison.false_positives_apnea:
-                time_str = format_time_offset(event.start_time)
-                conf = event.confidence or 0
-                flow_red = event.flow_reduction or 0
+            if (
+                not show_unmatched
+                or len(comparison.false_positives_apnea)
+                + len(comparison.false_positives_hypopnea)
+                > 0
+            ):
                 console.print(
-                    f"  {escape(str(event.event_type))} at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
-                )
-                console.print(
-                    f"    → View: snore waveform show --session-id {session_id} --time {time_str}"
+                    f"FALSE POSITIVES (programmatic events not in machine): {len(comparison.false_positives_apnea) + len(comparison.false_positives_hypopnea)}"
                 )
 
-            for event in comparison.false_positives_hypopnea:
-                time_str = format_time_offset(event.start_time)
-                conf = event.confidence or 0
-                flow_red = event.flow_reduction or 0
-                console.print(
-                    f"  H at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
-                )
-                console.print(
-                    f"    → View: snore waveform show --session-id {session_id} --time {time_str}"
-                )
+                for event in comparison.false_positives_apnea:
+                    time_str = format_time_offset(event.start_time)
+                    conf = event.confidence or 0
+                    flow_red = event.flow_reduction or 0
+                    console.print(
+                        f"  {escape(str(event.event_type))} at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
+                    )
+                    console.print(
+                        f"    → View: snore waveform show --session-id {resolved_id} --time {time_str}"
+                    )
+
+                for event in comparison.false_positives_hypopnea:
+                    time_str = format_time_offset(event.start_time)
+                    conf = event.confidence or 0
+                    flow_red = event.flow_reduction or 0
+                    console.print(
+                        f"  H at {time_str} (conf: {conf:.2f}, flow_red: {flow_red * 100:.0f}%)"
+                    )
+                    console.print(
+                        f"    → View: snore waveform show --session-id {resolved_id} --time {time_str}"
+                    )
+
+    asyncio.run(_run())

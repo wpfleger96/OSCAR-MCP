@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from snore.database.models import Day, Statistics
 from snore.database.models import Session as SessionModel
@@ -38,11 +39,11 @@ class DayManager:
         return session_start.date()
 
     @classmethod
-    def get_or_create_day(
+    async def get_or_create_day(
         cls,
         device_id: int,
         day_date: date,
-        db_session: Session,
+        db_session: AsyncSession,
     ) -> Day:
         """
         Get or create day WITHOUT triggering aggregation.
@@ -53,14 +54,16 @@ class DayManager:
         Args:
             device_id: Device ID
             day_date: Date for the day record
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy async database session
 
         Returns:
             Day object (without aggregated statistics)
         """
         day = (
-            db_session.execute(
-                select(Day).filter_by(device_id=device_id, date=day_date)
+            (
+                await db_session.execute(
+                    select(Day).filter_by(device_id=device_id, date=day_date)
+                )
             )
             .scalars()
             .first()
@@ -69,16 +72,16 @@ class DayManager:
         if not day:
             day = Day(device_id=device_id, date=day_date)
             db_session.add(day)
-            db_session.flush()
+            await db_session.flush()
 
         return day
 
     @classmethod
-    def create_or_update_day(
+    async def create_or_update_day(
         cls,
         device_id: int,
         day_date: date,
-        db_session: Session,
+        db_session: AsyncSession,
     ) -> Day:
         """
         Create or update a day record with aggregated statistics from all sessions.
@@ -86,13 +89,13 @@ class DayManager:
         Args:
             device_id: Device ID
             day_date: Date for the day record
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy async database session
 
         Returns:
             Updated Day object
         """
-        day = cls.get_or_create_day(device_id, day_date, db_session)
-        cls._aggregate_day_statistics(day, db_session)
+        day = await cls.get_or_create_day(device_id, day_date, db_session)
+        await cls._aggregate_day_statistics(day, db_session)
         return day
 
     @classmethod
@@ -115,19 +118,23 @@ class DayManager:
         return float(total_weighted / total_weight)
 
     @classmethod
-    def _aggregate_day_statistics(cls, day: Day, db_session: Session) -> None:
+    async def _aggregate_day_statistics(
+        cls, day: Day, db_session: AsyncSession
+    ) -> None:
         """
         Aggregate statistics from all sessions belonging to a day.
 
         Args:
             day: Day object to update
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy async database session
         """
         sessions = (
-            db_session.execute(
-                select(SessionModel)
-                .filter_by(day_id=day.id, enabled=True)
-                .options(joinedload(SessionModel.statistics))
+            (
+                await db_session.execute(
+                    select(SessionModel)
+                    .filter_by(day_id=day.id, enabled=True)
+                    .options(joinedload(SessionModel.statistics))
+                )
             )
             .scalars()
             .all()
@@ -242,11 +249,11 @@ class DayManager:
                 )
 
     @classmethod
-    def link_session_to_day(
+    async def link_session_to_day(
         cls,
         session: SessionModel,
         device_id: int,
-        db_session: Session,
+        db_session: AsyncSession,
     ) -> Day:
         """
         Link a session to its appropriate day record based on day-splitting logic.
@@ -256,28 +263,28 @@ class DayManager:
         Args:
             session: Session to link
             device_id: Device ID the session belongs to
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy async database session
 
         Returns:
             Day object the session was linked to
         """
         day_date = cls.get_day_for_session(session.start_time)
 
-        day = cls.get_or_create_day(device_id, day_date, db_session)
+        day = await cls.get_or_create_day(device_id, day_date, db_session)
 
         session.day_id = day.id
 
-        cls._aggregate_day_statistics(day, db_session)
+        await cls._aggregate_day_statistics(day, db_session)
 
         return day
 
     @classmethod
-    def recalculate_day(cls, day: Day, db_session: Session) -> None:
+    async def recalculate_day(cls, day: Day, db_session: AsyncSession) -> None:
         """
         Recalculate aggregated statistics for a day.
 
         Args:
             day: Day object to recalculate
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy async database session
         """
-        cls._aggregate_day_statistics(day, db_session)
+        await cls._aggregate_day_statistics(day, db_session)

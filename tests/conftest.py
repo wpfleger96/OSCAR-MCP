@@ -112,7 +112,14 @@ def temp_db(tmp_path):
 
 @pytest.fixture
 def db_session(temp_db):
-    """Create fresh database session for each test with proper isolation."""
+    """Sync seed-only session for tests that need a synchronous ORM handle.
+
+    Intentionally uses the sync ORM (``Session``) — this is an isolated
+    test-data seed helper, NOT an application code path.  Application tests
+    that exercise transaction semantics must use ``async_db_session`` or the
+    full FastAPI lifespan.  Do NOT use this fixture for new application-facing
+    tests.
+    """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -132,6 +139,39 @@ def db_session(temp_db):
 
 
 @pytest.fixture
+async def async_db_session(temp_db):
+    """Create fresh async database session for each test.
+
+    Used by tests for services that have been converted to AsyncSession in PR-2.
+    The underlying database is the same temporary SQLite file as ``db_session``.
+    """
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    from snore.database.models import Base
+
+    async_url = f"sqlite+aiosqlite:///{temp_db}"
+    engine = create_async_engine(async_url, echo=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(
+        bind=engine, expire_on_commit=False, class_=AsyncSession
+    )
+    session = factory()
+
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@pytest.fixture
 def test_device(db_session):
     """Create a test device."""
     import uuid
@@ -145,6 +185,23 @@ def test_device(db_session):
     )
     db_session.add(device)
     db_session.flush()
+    return device
+
+
+@pytest.fixture
+async def async_test_device(async_db_session):
+    """Create a test device using the async session fixture."""
+    import uuid
+
+    from snore.database.models import Device
+
+    device = Device(
+        manufacturer="Test Manufacturer",
+        model="Test Model",
+        serial_number=f"TEST_{uuid.uuid4().hex[:8]}",
+    )
+    async_db_session.add(device)
+    await async_db_session.flush()
     return device
 
 
@@ -178,19 +235,55 @@ def test_session_factory(db_session):
     return _create_session
 
 
+@pytest.fixture
+def async_test_session_factory(async_db_session):
+    """Async factory for creating test sessions with statistics.
+
+    Returns a coroutine factory — callers must await each call:
+        session = await async_test_session_factory(device_id, start_time)
+    """
+    import uuid
+
+    from snore.database.models import Session, Statistics
+
+    async def _create_session(
+        device_id, start_time, duration_hours=8.0, **stats_kwargs
+    ):
+        session = Session(
+            device_id=device_id,
+            device_session_id=f"test_{start_time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}",
+            start_time=start_time,
+            end_time=start_time + timedelta(hours=duration_hours),
+            duration_seconds=duration_hours * 3600,
+            has_statistics=bool(stats_kwargs),
+        )
+        async_db_session.add(session)
+        await async_db_session.flush()
+
+        if stats_kwargs:
+            stats = Statistics(session_id=session.id, **stats_kwargs)
+            async_db_session.add(stats)
+            await async_db_session.flush()
+            await async_db_session.refresh(session)
+
+        return session
+
+    return _create_session
+
+
 # =============================================================================
 # Integration Test Fixtures
 # =============================================================================
 
 
 @pytest.fixture
-def recorded_session(db_session):
-    """Factory for loading recorded session fixtures by YYYYMMDD ID.
+def async_recorded_session(async_db_session):
+    """Async factory for loading recorded session fixtures by YYYYMMDD ID.
 
     Usage:
-        def test_something(self, recorded_session):
-            db = recorded_session("20250808")
-            session = db.query(Session).first()
+        async def test_something(self, async_recorded_session):
+            db, session = await async_recorded_session("20250808")
+            # db is the AsyncSession, session is the CPAPSession ORM object
 
     Available sessions:
         - 20250110: Early therapy session (January 2025)
@@ -198,12 +291,12 @@ def recorded_session(db_session):
         - 20250910: Multi-segment session (September 2025, 4 therapy segments)
         - 20251025: Event detection test session (October 2025)
     """
-    from tests.helpers.fixtures_loader import import_to_test_db
+    from tests.helpers.fixtures_loader import async_import_to_test_db
 
-    def _load(session_id: str) -> Any:
+    async def _load(session_id: str) -> Any:
         try:
-            import_to_test_db(session_id, db_session)
-            return db_session
+            session = await async_import_to_test_db(session_id, async_db_session)
+            return async_db_session, session
         except (ValueError, FileNotFoundError) as e:
             pytest.skip(f"Fixture {session_id} not available: {e}")
 

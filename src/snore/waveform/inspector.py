@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.services.waveform_service import WaveformService
 
@@ -43,7 +43,9 @@ def parse_time_offset(time_str: str) -> float:
 class WaveformInspector:
     """Inspector for waveform data extraction and event filtering."""
 
-    def __init__(self, db_session: Session, service: WaveformService | None = None):
+    def __init__(
+        self, db_session: AsyncSession, service: WaveformService | None = None
+    ):
         """
         Initialize waveform inspector.
 
@@ -55,7 +57,7 @@ class WaveformInspector:
         self.db_session = db_session
         self.service = service or WaveformService(db_session)
 
-    def get_window(
+    async def get_window(
         self,
         session_id: int,
         center_seconds: float,
@@ -77,7 +79,7 @@ class WaveformInspector:
         start = center_seconds - window_seconds / 2
         end = center_seconds + window_seconds / 2
 
-        return self.service.get_waveform_data(
+        return await self.service.get_waveform_data(
             session_id=session_id,
             waveform_type=waveform_type,
             start_seconds=start,

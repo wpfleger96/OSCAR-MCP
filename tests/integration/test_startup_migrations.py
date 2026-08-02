@@ -60,11 +60,11 @@ def _read_version(db_path: str) -> str | None:
 class TestStartupMigrations:
     """Verify init_database applies alembic migrations correctly on first call."""
 
-    def test_fresh_database(self, tmp_path):
+    async def test_fresh_database(self, tmp_path):
         """Fresh DB: tables created via create_all and version stamped at head."""
         db_path = str(tmp_path / "fresh.db")
 
-        init_database(db_path)
+        await init_database(db_path)
 
         head = _current_head()
         assert _read_version(db_path) == head
@@ -79,25 +79,25 @@ class TestStartupMigrations:
         finally:
             engine.dispose()
 
-    def test_idempotent(self, tmp_path):
+    async def test_idempotent(self, tmp_path):
         """Calling init_database twice on the same DB is a no-op."""
         db_path = str(tmp_path / "idempotent.db")
 
-        init_database(db_path)
+        await init_database(db_path)
         version_first = _read_version(db_path)
 
         # Reset global engine so the second init_database call actually re-runs
         # _apply_migrations; without this the early-return guard silently skips it.
-        cleanup_database()
+        await cleanup_database()
 
-        init_database(db_path)
+        await init_database(db_path)
         version_second = _read_version(db_path)
 
         head = _current_head()
         assert version_first == head
         assert version_second == head
 
-    def test_unknown_revision_fails_loudly(self, tmp_path):
+    async def test_unknown_revision_fails_loudly(self, tmp_path):
         """Pre-squash or unstamped DBs with an unknown revision fail loudly.
 
         Pre-alpha contract: delete the DB file and re-import rather than
@@ -105,8 +105,8 @@ class TestStartupMigrations:
         """
         db_path = str(tmp_path / "stale.db")
 
-        init_database(db_path)
-        cleanup_database()
+        await init_database(db_path)
+        await cleanup_database()
 
         # Overwrite alembic_version with a revision absent from the migration chain.
         engine = create_engine(f"sqlite:///{db_path}")
@@ -119,4 +119,40 @@ class TestStartupMigrations:
             engine.dispose()
 
         with pytest.raises(Exception, match="deadbeef0000|Can't locate"):
-            init_database(db_path)
+            await init_database(db_path)
+
+    async def test_migrations_run_off_event_loop(self, tmp_path):
+        """``init_database`` runs ``_apply_migrations_sync`` via ``asyncio.to_thread``.
+
+        This test verifies that the migration call is never made directly from
+        the event loop — if it were, the ``to_thread`` wrapper would be absent
+        and blocking I/O would stall uvicorn.
+
+        Strategy: patch ``asyncio.to_thread`` globally to record calls, then confirm
+        it was invoked with ``_apply_migrations_sync`` as the first positional arg.
+        """
+        import asyncio
+
+        from unittest.mock import patch
+
+        from snore.database.session import _apply_migrations_sync
+
+        calls: list[tuple] = []
+        original_to_thread = asyncio.to_thread
+
+        async def _recording_to_thread(func, *args, **kwargs):
+            calls.append((func, args, kwargs))
+            return await original_to_thread(func, *args, **kwargs)
+
+        db_path = str(tmp_path / "off_loop.db")
+
+        # Patch at the asyncio module level so the inline ``import asyncio``
+        # inside ``init_database`` picks up the same patched function.
+        with patch.object(asyncio, "to_thread", side_effect=_recording_to_thread):
+            await init_database(db_path)
+
+        migration_calls = [c for c in calls if c[0] is _apply_migrations_sync]
+        assert len(migration_calls) >= 1, (
+            "``_apply_migrations_sync`` must be called via ``asyncio.to_thread``; "
+            "got zero such calls — migrations may be running on the event loop"
+        )

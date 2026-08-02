@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-def _make_fake_csv_export(
+async def _make_fake_csv_export(
     self: object, db: object, output: Path, **kwargs: object
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)

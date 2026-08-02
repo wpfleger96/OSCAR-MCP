@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from datetime import datetime
@@ -313,18 +314,20 @@ def import_data(
 
         # Real import — delegate backup + parse + import to service
         try:
-            result = service.import_sources(
-                [source],
-                force=force,
-                batch_size=batch_size,
-                backup=not no_backup,
-                backup_root=(Path(backup_dir).expanduser() if backup_dir else None),
-                sort_by=sort_by if sort_by != "filesystem" else None,
-                limit=limit,
-                date_from=date_from_str,
-                date_to=date_to_str,
-                parallel=not no_parallel,
-                progress_callback=_progress,
+            result = asyncio.run(
+                service.import_sources(
+                    [source],
+                    force=force,
+                    batch_size=batch_size,
+                    backup=not no_backup,
+                    backup_root=(Path(backup_dir).expanduser() if backup_dir else None),
+                    sort_by=sort_by if sort_by != "filesystem" else None,
+                    limit=limit,
+                    date_from=date_from_str,
+                    date_to=date_to_str,
+                    parallel=not no_parallel,
+                    progress_callback=_progress,
+                )
             )
         except RuntimeError as e:
             if logging.getLogger().level == logging.DEBUG:

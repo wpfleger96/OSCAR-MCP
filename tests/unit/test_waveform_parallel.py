@@ -1,7 +1,7 @@
 """Unit tests for parallelized multi-type waveform loading in the show command."""
 
-from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 
@@ -10,8 +10,8 @@ from click.testing import CliRunner
 from snore.cli.groups.waveform import waveform
 
 
-@contextmanager
-def _mock_session_scope():
+@asynccontextmanager
+async def _mock_session_scope():
     """Yield a mock DB session.  session_id pass-through requires no real DB."""
     yield MagicMock()
 
@@ -24,6 +24,7 @@ class TestWaveformMultiTypeAllFail:
 
         with (
             patch("snore.cli.decorators.init_db"),
+            patch("snore.database.session.init_database", new_callable=AsyncMock),
             # session_scope is imported inside show_waveform; patch at source
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
@@ -33,7 +34,9 @@ class TestWaveformMultiTypeAllFail:
             patch("snore.waveform.WaveformRenderer"),
         ):
             mock_inspector = mock_inspector_cls.return_value
-            mock_inspector.get_window.return_value = (np.array([]), np.array([]), {})
+            mock_inspector.get_window = AsyncMock(
+                return_value=(np.array([]), np.array([]), {})
+            )
 
             result = runner.invoke(
                 waveform,
@@ -61,7 +64,7 @@ class TestWaveformMultiTypePartialFailure:
         good_timestamps = np.array([1.0, 2.0, 3.0])
         good_values = np.array([0.1, 0.2, 0.3])
 
-        def get_window_side_effect(**kwargs):
+        async def get_window_side_effect(**kwargs):
             if kwargs.get("waveform_type") == "flow":
                 return (good_timestamps, good_values, {"waveform_type": "flow"})
             raise RuntimeError("pressure sensor unavailable")
@@ -70,6 +73,7 @@ class TestWaveformMultiTypePartialFailure:
 
         with (
             patch("snore.cli.decorators.init_db"),
+            patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
             ),
@@ -77,7 +81,7 @@ class TestWaveformMultiTypePartialFailure:
             patch("snore.waveform.WaveformRenderer", return_value=mock_renderer),
         ):
             mock_inspector = mock_inspector_cls.return_value
-            mock_inspector.get_window.side_effect = get_window_side_effect
+            mock_inspector.get_window = AsyncMock(side_effect=get_window_side_effect)
 
             result = runner.invoke(
                 waveform,
@@ -118,7 +122,7 @@ class TestWaveformMultiTypeOrdering:
         ts = np.array([1.0, 2.0])
         vals = np.array([0.5, 0.6])
 
-        def get_window_side_effect(**kwargs):
+        async def get_window_side_effect(**kwargs):
             wf_type = kwargs.get("waveform_type", "")
             return (ts, vals, {"waveform_type": wf_type})
 
@@ -126,6 +130,7 @@ class TestWaveformMultiTypeOrdering:
 
         with (
             patch("snore.cli.decorators.init_db"),
+            patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch(
                 "snore.database.session.session_scope", side_effect=_mock_session_scope
             ),
@@ -133,7 +138,7 @@ class TestWaveformMultiTypeOrdering:
             patch("snore.waveform.WaveformRenderer", return_value=mock_renderer),
         ):
             mock_inspector = mock_inspector_cls.return_value
-            mock_inspector.get_window.side_effect = get_window_side_effect
+            mock_inspector.get_window = AsyncMock(side_effect=get_window_side_effect)
 
             result = runner.invoke(
                 waveform,

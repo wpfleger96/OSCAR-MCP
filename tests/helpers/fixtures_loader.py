@@ -4,9 +4,11 @@ Fixture loading utilities for test data.
 Provides functions to load real session fixtures and import them to test databases.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.models import Session as CPAPSession
 from snore.parsers.resmed_edf import ResmedEDFParser
@@ -97,31 +99,67 @@ def load_real_session(fixture_name: str) -> tuple[Path, dict]:
     return fixture_path, files
 
 
-def import_to_test_db(
+def get_fixture_metadata(fixture_name: str) -> dict:
+    """
+    Get metadata about a fixture.
+
+    Args:
+        fixture_name: Name of the fixture
+
+    Returns:
+        Dict with metadata (date, file count, file types, etc.)
+    """
+    fixture_path, files = load_real_session(fixture_name)
+
+    session_date = None
+    if "BRP" in files:
+        filename = files["BRP"].stem
+        parts = filename.split("_")
+        if len(parts) >= 2:
+            date_str = parts[0]
+            time_str = parts[1]
+            session_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} {time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}"
+
+    total_size = sum(f.stat().st_size for f in files.values())
+
+    return {
+        "name": fixture_name,
+        "path": str(fixture_path),
+        "session_date": session_date,
+        "file_count": len(files),
+        "file_types": list(files.keys()),
+        "total_size_bytes": total_size,
+        "total_size_kb": total_size / 1024,
+    }
+
+
+def list_fixtures_with_metadata() -> list[dict]:
+    """
+    List all available fixtures with their metadata.
+
+    Returns:
+        List of metadata dicts for each fixture
+    """
+    fixtures = get_available_fixtures()
+    return [get_fixture_metadata(name) for name in fixtures]
+
+
+async def async_import_to_test_db(
     fixture_name: str,
-    db_session: Session,
+    db_session: AsyncSession,
     profile_name: str = "TestProfile",
     machine_model: str = "AirSense 10",
 ) -> CPAPSession:
-    """
-    Import a fixture session to test database.
+    """Async version of import_to_test_db for use with AsyncSession.
 
     Args:
         fixture_name: Name of the fixture to import
-        db_session: SQLAlchemy database session
-        profile_name: Profile name for the session (not currently used)
-        machine_model: Machine model identifier (not currently used)
+        db_session: SQLAlchemy AsyncSession
+        profile_name: Profile name (unused)
+        machine_model: Machine model identifier (unused)
 
     Returns:
         Imported CPAPSession object from database
-
-    Note:
-        This function extracts the database path from the SQLAlchemy session
-        to initialize the database and import the session using SessionImporter.
-
-    Example:
-        >>> session = import_to_test_db("2025_baseline", test_db)
-        >>> print(session.session_date)
     """
     fixture_path, files = load_real_session(fixture_name)
 
@@ -149,12 +187,20 @@ def import_to_test_db(
 
     import json
 
+    from sqlalchemy import select
+
     from snore.database import models
     from snore.database.importers import serialize_waveform
 
     device = (
-        db_session.query(models.Device)
-        .filter_by(serial_number=unified_session.device_info.serial_number)
+        (
+            await db_session.execute(
+                select(models.Device).filter_by(
+                    serial_number=unified_session.device_info.serial_number
+                )
+            )
+        )
+        .scalars()
         .first()
     )
 
@@ -174,13 +220,18 @@ def import_to_test_db(
             product_code=unified_session.device_info.product_code,
         )
         db_session.add(device)
-        db_session.flush()
+        await db_session.flush()
 
     existing = (
-        db_session.query(models.Session)
-        .filter_by(
-            device_id=device.id, device_session_id=unified_session.device_session_id
+        (
+            await db_session.execute(
+                select(models.Session).filter_by(
+                    device_id=device.id,
+                    device_session_id=unified_session.device_session_id,
+                )
+            )
         )
+        .scalars()
         .first()
     )
 
@@ -212,17 +263,12 @@ def import_to_test_db(
         has_statistics=unified_session.has_statistics,
     )
     db_session.add(new_session)
-    db_session.flush()
+    await db_session.flush()
 
     if unified_session.has_waveform_data:
         for waveform_type, waveform in unified_session.waveforms.items():
             data_blob = serialize_waveform(waveform)
-            sample_count = (
-                len(waveform.values)
-                if isinstance(waveform.values, list)
-                else len(waveform.values)
-            )
-
+            sample_count = len(waveform.values)
             waveform_record = models.Waveform(
                 session_id=new_session.id,
                 waveform_type=waveform_type.value,
@@ -310,7 +356,6 @@ def import_to_test_db(
             "tube_temp": settings.tube_temp,
             "mask_type": settings.mask_type,
         }
-
         if settings.other_settings:
             settings_dict.update(settings.other_settings)
 
@@ -321,11 +366,17 @@ def import_to_test_db(
                 )
                 db_session.add(setting_record)
 
-    db_session.commit()
+    await db_session.commit()
 
     cpap_session = (
-        db_session.query(CPAPSession)
-        .filter(CPAPSession.device_session_id == unified_session.device_session_id)
+        (
+            await db_session.execute(
+                select(CPAPSession).filter(
+                    CPAPSession.device_session_id == unified_session.device_session_id
+                )
+            )
+        )
+        .scalars()
         .first()
     )
 
@@ -335,48 +386,3 @@ def import_to_test_db(
         )
 
     return cpap_session
-
-
-def get_fixture_metadata(fixture_name: str) -> dict:
-    """
-    Get metadata about a fixture.
-
-    Args:
-        fixture_name: Name of the fixture
-
-    Returns:
-        Dict with metadata (date, file count, file types, etc.)
-    """
-    fixture_path, files = load_real_session(fixture_name)
-
-    session_date = None
-    if "BRP" in files:
-        filename = files["BRP"].stem
-        parts = filename.split("_")
-        if len(parts) >= 2:
-            date_str = parts[0]
-            time_str = parts[1]
-            session_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} {time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}"
-
-    total_size = sum(f.stat().st_size for f in files.values())
-
-    return {
-        "name": fixture_name,
-        "path": str(fixture_path),
-        "session_date": session_date,
-        "file_count": len(files),
-        "file_types": list(files.keys()),
-        "total_size_bytes": total_size,
-        "total_size_kb": total_size / 1024,
-    }
-
-
-def list_fixtures_with_metadata() -> list[dict]:
-    """
-    List all available fixtures with their metadata.
-
-    Returns:
-        List of metadata dicts for each fixture
-    """
-    fixtures = get_available_fixtures()
-    return [get_fixture_metadata(name) for name in fixtures]
