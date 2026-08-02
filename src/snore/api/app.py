@@ -27,6 +27,7 @@ from snore.api.routers import (
     events,
     export,
     import_data,
+    profiles,
     reports,
     rx,
     sessions,
@@ -56,26 +57,56 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         db_path = os.environ.get("SNORE_DB_PATH")
         await init_database(db_path)
-    # Start a single lifespan-owned TTL reaper.  The stop event and thread
-    # handle are kept so the reaper is joined cleanly on exit — each lifespan
-    # entry gets exactly one reaper; it is stopped on exit rather than left as
-    # an immortal daemon.
+
+    # Startup recovery + acquire lifetime shared writer lease.
+    # 1. Acquire exclusive briefly for startup recovery (finish any interrupted
+    #    deletion sagas from a previous run).
+    # 2. Run recovery synchronously (it uses asyncio.run internally, but we're
+    #    in the lifespan which has its own event loop — call it via to_thread).
+    # 3. Release exclusive, then acquire shared for the process lifetime.
+    import asyncio  # noqa: PLC0415
+
+    from snore.services.profile_service import DeletionSaga  # noqa: PLC0415
+    from snore.services.writer_lease import get_writer_lease  # noqa: PLC0415
+
+    lease = get_writer_lease()
+
+    # Try exclusive for startup recovery.  If we can't get it (another process
+    # is somehow running), log a warning and continue without recovery —
+    # the tombstone will be found again at the next restart.
+    try:
+        lease.acquire_exclusive()
+        saga = DeletionSaga()
+        try:
+            await asyncio.to_thread(saga.recover)
+        finally:
+            # Downgrade to shared hold for process lifetime.
+            # Release exclusive and immediately acquire shared.
+            lease.release_exclusive()
+            lease.acquire_shared()
+    except Exception as exc:
+        # Failed to acquire exclusive (another process) or recovery failed.
+        # Acquire shared anyway — we serve read-write, just without recovery.
+        logger.warning("Startup recovery skipped: %s", exc)
+        lease.acquire_shared()
+
+    # Start a single lifespan-owned TTL reaper.
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
     try:
         yield
     finally:
-        # Stop the reaper first so it doesn't race with shutdown cleanup.
+        # Stop the reaper first.
         reaper_stop.set()
         reaper_thread.join(timeout=5.0)
         # Cancel all in-flight import jobs and await their threads.
-        # Raise a RuntimeError if any worker is still alive after the timeout
-        # so the lifespan does NOT complete clean teardown with active work.
         still_alive = _shutdown_import_jobs()
         if still_alive:
             raise RuntimeError(
                 f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
                 f"after timeout: {still_alive}. Active import writes may be interrupted."
             )
+        # Release the lifetime shared writer lease.
+        lease.release()
 
 
 def create_app() -> FastAPI:
@@ -131,6 +162,9 @@ def create_app() -> FastAPI:
     app.include_router(db.router, prefix=f"{API_V1_PREFIX}/db", tags=["database"])
     app.include_router(
         validation.router, prefix=f"{API_V1_PREFIX}/validate", tags=["validation"]
+    )
+    app.include_router(
+        profiles.router, prefix=f"{API_V1_PREFIX}/profiles", tags=["profiles"]
     )
 
     _mount_spa(app)

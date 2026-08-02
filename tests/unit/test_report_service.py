@@ -150,12 +150,13 @@ class TestReportService:
         assert "No therapy data" in html
 
     async def test_summary_autoescape_escapes_device_model_script_tag(
-        self, async_db_session
+        self, async_db_session, async_test_profile
     ):
         """Device model containing <script> arrives HTML-escaped in the report."""
         import uuid
 
         device = Device(
+            profile_id=async_test_profile.id,
             manufacturer="ACME",
             model="<script>alert(1)</script>",
             serial_number=f"XSS_{uuid.uuid4().hex[:8]}",

@@ -3,6 +3,7 @@
 import uuid
 
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -13,10 +14,14 @@ from snore.database.models import Day, Device, Session, Setting
 
 
 async def _create_device(
-    db_session: AsyncSession, manufacturer: str = "ResMed", model: str = "AirSense 10"
+    db_session: AsyncSession,
+    profile_id: int,
+    manufacturer: str = "ResMed",
+    model: str = "AirSense 10",
 ) -> Device:
     """Create a device with a unique serial number."""
     device = Device(
+        profile_id=profile_id,
         manufacturer=manufacturer,
         model=model,
         serial_number=f"SN_{uuid.uuid4().hex[:8]}",
@@ -163,14 +168,20 @@ class TestRxTrackerHistory:
         assert result[0].total_hours == pytest.approx(7.5 * 7)
 
     async def test_history_two_devices_same_settings_produce_separate_periods(
-        self, async_db_session
+        self, async_db_session, async_test_profile
     ):
         """Two devices with identical settings on the same dates yield two separate periods."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 6, 1)
         settings = {"mode": "CPAP", "pressure_fixed": "10.0"}
@@ -393,14 +404,20 @@ class TestRxTrackerCurrentTailWalk:
         )
 
     async def test_current_equals_history_last_multi_device(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """Two devices with interleaved dates: get_current equals get_history()[-1]."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 3, 1)
         settings_a = {"mode": "CPAP", "pressure_fixed": "10.0"}
@@ -430,14 +447,20 @@ class TestRxTrackerCurrentTailWalk:
         )
 
     async def test_current_later_start_on_lower_device_id_wins(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """A later start_date wins over a higher device_id with an earlier start."""
         device_low = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_high = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         assert device_low.id < device_high.id
 
@@ -799,13 +822,21 @@ class TestRxTrackerChanges:
         assert all(c.date == base + timedelta(days=2) for c in result.changes)
         assert len(result.changes) >= 1
 
-    async def test_changes_across_two_devices_are_independent(self, async_db_session):
+    async def test_changes_across_two_devices_are_independent(
+        self, async_db_session, async_test_profile
+    ):
         """Changes from different devices are not cross-diffed."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 4, 1)
 
@@ -842,13 +873,21 @@ class TestRxTrackerChanges:
         assert all(c.device_id == device_a.id for c in result.changes)
         assert len(result.changes) >= 1
 
-    async def test_changes_sorted_by_date_device_key(self, async_db_session):
+    async def test_changes_sorted_by_date_device_key(
+        self, async_db_session, async_test_profile
+    ):
         """Changes are sorted (date, device_id, key) ascending."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 5, 1)
 

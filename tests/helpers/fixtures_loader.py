@@ -186,6 +186,7 @@ async def async_import_to_test_db(
     )
 
     import json
+    import uuid
 
     from sqlalchemy import select
 
@@ -211,7 +212,20 @@ async def async_import_to_test_db(
         device.hardware_version = unified_session.device_info.hardware_version
         device.product_code = unified_session.device_info.product_code
     else:
+        # Create a User + Profile for the device (required by multiuser schema).
+        user = models.User(
+            canonical_email=f"fixture_{uuid.uuid4().hex[:8]}@example.com",
+            role="admin",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        profile = models.Profile(user_id=user.id, name=profile_name)
+        db_session.add(profile)
+        await db_session.flush()
+
         device = models.Device(
+            profile_id=profile.id,
             manufacturer=unified_session.device_info.manufacturer,
             model=unified_session.device_info.model,
             serial_number=unified_session.device_info.serial_number,

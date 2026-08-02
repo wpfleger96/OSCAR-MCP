@@ -12,6 +12,7 @@ from snore.services.device_service import DeviceService
 from snore.services.event_service import EventService
 from snore.services.export_service import ExportService
 from snore.services.import_service import ImportService
+from snore.services.profile_service import ProfileService
 from snore.services.report_service import ReportService
 from snore.services.session_service import SessionService
 from snore.services.stats_service import StatsService
@@ -26,6 +27,7 @@ __all__ = [
     "ExportService",
     "EventService",
     "ImportService",
+    "ProfileService",
     "ReportService",
     "SessionService",
     "StatsService",

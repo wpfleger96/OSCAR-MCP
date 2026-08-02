@@ -123,6 +123,8 @@ class TestSTRSettingsParsing:
         self, temp_db, resmed_parser, resmed_fixture_path
     ):
         """Test that settings are stored in database after import."""
+        import uuid
+
         from sqlalchemy import select
 
         from snore.database import models
@@ -131,12 +133,24 @@ class TestSTRSettingsParsing:
 
         await init_database(str(temp_db))
 
+        # Create a User+Profile for the device.
+        async with session_scope() as db:
+            _u = models.User(
+                canonical_email=f"str_{uuid.uuid4().hex[:8]}@example.com", role="admin"
+            )
+            db.add(_u)
+            await db.flush()
+            _p = models.Profile(user_id=_u.id, name="STR Test")
+            db.add(_p)
+            await db.flush()
+            _pid = _p.id
+
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
         assert len(sessions) > 0, "Should parse at least one session"
 
         session = sessions[0]
         assert session.settings is not None, "Session should have settings"
-        await import_session(session)
+        await import_session(session, profile_id=_pid)
 
         async with session_scope() as db:
             settings = (await db.execute(select(models.Setting))).scalars().all()

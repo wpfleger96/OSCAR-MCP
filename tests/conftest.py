@@ -172,13 +172,62 @@ async def async_db_session(temp_db):
 
 
 @pytest.fixture
-def test_device(db_session):
-    """Create a test device."""
+def test_profile(db_session):
+    """Create a test User + Profile (sync). Returns the Profile.
+
+    Required by any test that seeds a Device — devices.profile_id is NOT NULL
+    after the multiuser schema migration.
+    """
+    import uuid
+
+    from snore.database.models import Profile, User
+
+    user = User(
+        canonical_email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+        role="admin",
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    profile = Profile(user_id=user.id, name="Test Profile")
+    db_session.add(profile)
+    db_session.flush()
+    return profile
+
+
+@pytest.fixture
+async def async_test_profile(async_db_session):
+    """Create a test User + Profile (async). Returns the Profile.
+
+    Required by any test that seeds a Device — devices.profile_id is NOT NULL
+    after the multiuser schema migration.
+    """
+    import uuid
+
+    from snore.database.models import Profile, User
+
+    user = User(
+        canonical_email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+        role="admin",
+    )
+    async_db_session.add(user)
+    await async_db_session.flush()
+
+    profile = Profile(user_id=user.id, name="Test Profile")
+    async_db_session.add(profile)
+    await async_db_session.flush()
+    return profile
+
+
+@pytest.fixture
+def test_device(db_session, test_profile):
+    """Create a test device owned by test_profile."""
     import uuid
 
     from snore.database.models import Device
 
     device = Device(
+        profile_id=test_profile.id,
         manufacturer="Test Manufacturer",
         model="Test Model",
         serial_number=f"TEST_{uuid.uuid4().hex[:8]}",
@@ -189,13 +238,14 @@ def test_device(db_session):
 
 
 @pytest.fixture
-async def async_test_device(async_db_session):
+async def async_test_device(async_db_session, async_test_profile):
     """Create a test device using the async session fixture."""
     import uuid
 
     from snore.database.models import Device
 
     device = Device(
+        profile_id=async_test_profile.id,
         manufacturer="Test Manufacturer",
         model="Test Model",
         serial_number=f"TEST_{uuid.uuid4().hex[:8]}",

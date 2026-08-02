@@ -135,19 +135,22 @@ class TestDeviceServiceListDevices:
 
         assert len(result) == 0
 
-    async def test_list_devices_with_data(self, async_db_session):
+    async def test_list_devices_with_data(self, async_db_session, async_test_profile):
         """Returns correct device data."""
         device1 = Device(
+            profile_id=async_test_profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="TEST001",
         )
         device2 = Device(
+            profile_id=async_test_profile.id,
             manufacturer="Philips",
             model="DreamStation",
             serial_number="TEST002",
         )
         device3 = Device(
+            profile_id=async_test_profile.id,
             manufacturer="ResMed",
             model="AirCurve 10",
             serial_number="TEST003",
@@ -166,24 +169,28 @@ class TestDeviceServiceListDevices:
         assert result[2].manufacturer == "ResMed"
         assert result[2].model == "AirSense 10"
 
-    async def test_list_devices_ordering(self, async_db_session):
+    async def test_list_devices_ordering(self, async_db_session, async_test_profile):
         """Devices are ordered by manufacturer then model."""
         device1 = Device(
+            profile_id=async_test_profile.id,
             manufacturer="Philips",
             model="DreamStation 2",
             serial_number="TEST001",
         )
         device2 = Device(
+            profile_id=async_test_profile.id,
             manufacturer="ResMed",
             model="AirSense 11",
             serial_number="TEST002",
         )
         device3 = Device(
+            profile_id=async_test_profile.id,
             manufacturer="Philips",
             model="DreamStation",
             serial_number="TEST003",
         )
         device4 = Device(
+            profile_id=async_test_profile.id,
             manufacturer="ResMed",
             model="AirCurve 10",
             serial_number="TEST004",
@@ -204,9 +211,12 @@ class TestDeviceServiceListDevices:
         assert result[3].manufacturer == "ResMed"
         assert result[3].model == "AirSense 11"
 
-    async def test_list_devices_includes_all_fields(self, async_db_session):
+    async def test_list_devices_includes_all_fields(
+        self, async_db_session, async_test_profile
+    ):
         """Returns all identity fields including the new firmware/hardware/product_code."""
         device = Device(
+            profile_id=async_test_profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="12345ABC",

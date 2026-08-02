@@ -25,7 +25,21 @@ async def test_device_fixture(temp_db):
     await init_database(str(temp_db))
 
     async with session_scope() as session:
+        import uuid
+
+        from snore.database.models import Profile, User
+
+        _user = User(
+            canonical_email=f"daylink_{uuid.uuid4().hex[:8]}@example.com", role="admin"
+        )
+        session.add(_user)
+        await session.flush()
+        _profile = Profile(user_id=_user.id, name="Test Profile")
+        session.add(_profile)
+        await session.flush()
+
         device = models.Device(
+            profile_id=_profile.id,
             manufacturer="Test",
             model="Test Model",
             serial_number="TEST123",

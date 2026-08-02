@@ -318,8 +318,20 @@ class TestAnalysisResultOrdering:
         end = datetime(2024, 6, 2, 5, 0, 0)  # 8h session
 
         with SASession(engine) as db:
+            from snore.database.models import Profile, User
+
+            user = User(canonical_email="test@example.com", role="admin")
+            db.add(user)
+            db.flush()
+            profile = Profile(user_id=user.id, name="Test Profile")
+            db.add(profile)
+            db.flush()
+
             device = Device(
-                manufacturer="TestMfr", model="M1", serial_number="SN_ORDERING"
+                profile_id=profile.id,
+                manufacturer="TestMfr",
+                model="M1",
+                serial_number="SN_ORDERING",
             )
             db.add(device)
             db.flush()
@@ -439,7 +451,21 @@ class TestAnalysisResultOrdering:
         # Insert rows using sync engine (setup only).
         session_id: int
         with SASession(engine) as db:
-            device = Device(manufacturer="Mfr", model="M", serial_number="SN_MIXED")
+            from snore.database.models import Profile, User
+
+            user = User(canonical_email="mixed@example.com", role="admin")
+            db.add(user)
+            db.flush()
+            profile = Profile(user_id=user.id, name="Test Profile")
+            db.add(profile)
+            db.flush()
+
+            device = Device(
+                profile_id=profile.id,
+                manufacturer="Mfr",
+                model="M",
+                serial_number="SN_MIXED",
+            )
             db.add(device)
             db.flush()
             day = Day(device_id=device.id, date=start.date())

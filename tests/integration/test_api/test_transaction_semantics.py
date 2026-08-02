@@ -92,7 +92,19 @@ class TestDependencyRollbackOnError:
             session = get_session()
             try:
                 async with session.begin():
+                    from snore.database.models import User
+
+                    _user = User(
+                        canonical_email=f"rollback_{serial}@example.com", role="admin"
+                    )
+                    session.add(_user)
+                    await session.flush()
+                    _profile = models.Profile(user_id=_user.id, name="Test Profile")
+                    session.add(_profile)
+                    await session.flush()
+
                     device = models.Device(
+                        profile_id=_profile.id,
                         manufacturer="RollbackTest",
                         model="RouteModel",
                         serial_number=serial,
@@ -162,9 +174,21 @@ class TestDependencyRollbackOnError:
             session = get_session()
             try:
                 async with session.begin():
+                    from snore.database.models import User
+
+                    _user = User(
+                        canonical_email=f"nested_{serial}@example.com", role="admin"
+                    )
+                    session.add(_user)
+                    await session.flush()
+                    _profile = models.Profile(user_id=_user.id, name="Test Profile")
+                    session.add(_profile)
+                    await session.flush()
+
                     # First (and only) write is inside a savepoint.
                     async with session.begin_nested():
                         device = models.Device(
+                            profile_id=_profile.id,
                             manufacturer="NestedWrite",
                             model="RouteNested",
                             serial_number=serial,

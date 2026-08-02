@@ -49,12 +49,15 @@ class TestSessionsList:
         assert data["offset"] == 3
 
     def test_list_filter_by_device(
-        self, api_client, db_session, test_device, test_session_factory
+        self, api_client, db_session, test_device, test_profile, test_session_factory
     ):
         from snore.database.models import Device
 
         other_device = Device(
-            manufacturer="Other", model="Model", serial_number="OTHER_001"
+            profile_id=test_profile.id,
+            manufacturer="Other",
+            model="Model",
+            serial_number="OTHER_001",
         )
         db_session.add(other_device)
         db_session.flush()

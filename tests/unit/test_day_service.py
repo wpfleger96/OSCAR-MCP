@@ -141,13 +141,16 @@ class TestDayServiceList:
         assert {item.date for item in items} == {date(2025, 1, 5), date(2025, 1, 10)}
 
     async def test_list_with_device_id_filter(
-        self, async_db_session, async_test_device
+        self, async_db_session, async_test_device, async_test_profile
     ):
         """device_id filter restricts to that device only."""
         from snore.database.models import Device
 
         other_device = Device(
-            manufacturer="Other", model="Model", serial_number="OTHER_RX_999"
+            profile_id=async_test_profile.id,
+            manufacturer="Other",
+            model="Model",
+            serial_number="OTHER_RX_999",
         )
         async_db_session.add(other_device)
         await async_db_session.flush()

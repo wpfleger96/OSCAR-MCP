@@ -2,7 +2,8 @@
 SQLAlchemy ORM models for SNORE database.
 
 Defines the complete database schema including:
-- Core CPAP data tables (devices, sessions, waveforms, events, statistics, settings)
+- Auth/identity tables (users, auth_identities, invites, oauth_attempts)
+- Core CPAP data tables (profiles, devices, sessions, waveforms, events, statistics, settings)
 - Medical analysis infrastructure (knowledge base, patterns, analysis results)
 
 Relationship loading policy
@@ -36,6 +37,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -58,13 +60,173 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+# ---------------------------------------------------------------------------
+# Auth / identity tables
+# ---------------------------------------------------------------------------
+
+
+class User(Base):
+    """Auth identity and account record.  Owns one or more Profiles."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # Canonical email: stripped + lower-cased at one normalization point.
+    canonical_email: Mapped[str] = mapped_column(String(254), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(150))
+    # admin | member | demo
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    # Bumped on password-change/disable/role-change; invalidates all cookies.
+    session_version: Mapped[int] = mapped_column(Integer, default=0)
+    disabled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # FK to profiles — set after the first profile is created.
+    default_profile_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "profiles.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_users_default_profile_id_profiles",
+        ),
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, default=utc_now, onupdate=utc_now
+    )
+
+    profiles = relationship(
+        "Profile",
+        back_populates="user",
+        foreign_keys="Profile.user_id",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
+    auth_identities = relationship(
+        "AuthIdentity",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
+    invites_created = relationship(
+        "Invite",
+        back_populates="created_by_user",
+        foreign_keys="Invite.created_by",
+        lazy="raise",
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(canonical_email) > 0", name="chk_user_email"),
+        CheckConstraint("role IN ('admin','member','demo')", name="chk_user_role"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, email={self.canonical_email}, role={self.role})>"
+
+
+class AuthIdentity(Base):
+    """OAuth identity linked to a User (provider + subject pair)."""
+
+    __tablename__ = "auth_identities"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(String(50))  # "google"
+    subject: Mapped[str] = mapped_column(String(255))  # provider's user ID
+    email: Mapped[str | None] = mapped_column(String(254))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+    user = relationship("User", back_populates="auth_identities", lazy="raise")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "subject", name="uq_auth_identity_provider_subject"
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AuthIdentity(id={self.id}, provider={self.provider}, user_id={self.user_id})>"
+
+
+class Invite(Base):
+    """Invitation to create a SNORE account."""
+
+    __tablename__ = "invites"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(254))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    redeemed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+    created_by_user = relationship(
+        "User",
+        back_populates="invites_created",
+        foreign_keys=[created_by],
+        lazy="raise",
+    )
+
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','member','demo')", name="chk_invite_role"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Invite(id={self.id}, email={self.email})>"
+
+
+class OauthAttempt(Base):
+    """Server-side OAuth flow state (one-use, browser-bound)."""
+
+    __tablename__ = "oauth_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    state: Mapped[str] = mapped_column(String(128), unique=True)
+    kind: Mapped[str] = mapped_column(String(20))  # "login" | "signup"
+    invite_id: Mapped[int | None] = mapped_column(
+        ForeignKey("invites.id", ondelete="SET NULL")
+    )
+    expected_canonical_email: Mapped[str | None] = mapped_column(String(254))
+    nonce: Mapped[str | None] = mapped_column(String(128))
+    pkce_verifier: Mapped[str | None] = mapped_column(String(128))
+    # SHA-256 of the pre-auth browser session cookie value
+    browser_session_hash: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+    __table_args__ = (
+        Index("ix_oauth_attempts_expires_at", "expires_at"),
+        CheckConstraint("kind IN ('login','signup')", name="chk_oauth_kind"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<OauthAttempt(id={self.id}, kind={self.kind}, state={self.state[:8]}...)>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Profile (dataset container, owned by a User)
+# ---------------------------------------------------------------------------
+
+
 class Profile(Base):
-    """User/patient profile (OSCAR-compatible single-user model)."""
+    """Dataset container for one user's CPAP data (OSCAR-compatible)."""
 
     __tablename__ = "profiles"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(100), unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    # Human-readable display name (e.g. "My ResMed AirSense 11")
+    name: Mapped[str] = mapped_column(String(150))
+    # Legacy OSCAR-compatible fields (kept for import compatibility)
+    username: Mapped[str | None] = mapped_column(String(100))
     first_name: Mapped[str | None] = mapped_column(String(100))
     last_name: Mapped[str | None] = mapped_column(String(100))
     date_of_birth: Mapped[date | None] = mapped_column(Date)
@@ -72,27 +234,54 @@ class Profile(Base):
     settings: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, default=dict
     )
-    # Absolute audit instants — stored as UTC, restored with tzinfo=UTC.
+    # Deletion tombstone: non-null means profile is being deleted.
+    # Tombstoned profiles are invisible to context construction and all queries.
+    deleting_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utc_now, onupdate=utc_now
     )
 
-    __table_args__ = (CheckConstraint("length(username) > 0", name="chk_username"),)
+    user = relationship(
+        "User", back_populates="profiles", foreign_keys=[user_id], lazy="raise"
+    )
+    devices = relationship(
+        "Device",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_profile_user_name"),
+        CheckConstraint("length(name) > 0", name="chk_profile_name"),
+        CheckConstraint(
+            "deleting_at IS NULL OR deleting_at IS NOT NULL",
+            name="chk_profile_deleting",
+        ),
+    )
 
     def __repr__(self) -> str:
-        return f"<Profile(id={self.id}, username={self.username})>"
+        return f"<Profile(id={self.id}, user_id={self.user_id}, name={self.name})>"
+
+
+# ---------------------------------------------------------------------------
+# Core CPAP data tables
+# ---------------------------------------------------------------------------
 
 
 class Device(Base):
-    """CPAP/BiPAP/Oximeter device."""
+    """CPAP/BiPAP/Oximeter device, owned by a Profile."""
 
     __tablename__ = "devices"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE")
+    )
     manufacturer: Mapped[str] = mapped_column(String)
     model: Mapped[str] = mapped_column(String)
-    serial_number: Mapped[str] = mapped_column(String, unique=True)
+    serial_number: Mapped[str] = mapped_column(String)
     firmware_version: Mapped[str | None] = mapped_column(String)
     hardware_version: Mapped[str | None] = mapped_column(String)
     product_code: Mapped[str | None] = mapped_column(String)
@@ -100,6 +289,7 @@ class Device(Base):
     first_seen: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     last_import: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
+    profile = relationship("Profile", back_populates="devices", lazy="raise")
     sessions = relationship(
         "Session",
         back_populates="device",
@@ -114,12 +304,16 @@ class Device(Base):
     )
 
     __table_args__ = (
+        # Serial number is unique per profile (not globally).
+        UniqueConstraint(
+            "profile_id", "serial_number", name="uq_device_profile_serial"
+        ),
         CheckConstraint("length(manufacturer) > 0", name="chk_manufacturer"),
         CheckConstraint("length(serial_number) > 0", name="chk_serial"),
     )
 
     def __repr__(self) -> str:
-        return f"<Device(id={self.id}, manufacturer={self.manufacturer}, model={self.model}, serial={self.serial_number})>"
+        return f"<Device(id={self.id}, profile_id={self.profile_id}, manufacturer={self.manufacturer}, model={self.model}, serial={self.serial_number})>"
 
 
 class Day(Base):
@@ -176,7 +370,12 @@ class Day(Base):
     device = relationship("Device", back_populates="days", lazy="raise")
     sessions = relationship("Session", back_populates="day", lazy="raise")
 
-    __table_args__ = (UniqueConstraint("device_id", "date", name="uq_device_date"),)
+    __table_args__ = (
+        UniqueConstraint("device_id", "date", name="uq_device_date"),
+        # Supports composite FK from Session(day_id, device_id) → Day(id, device_id)
+        # so both ownership joins are provably identical.
+        UniqueConstraint("id", "device_id", name="uq_day_id_device"),
+    )
 
     def __repr__(self) -> str:
         return f"<Day(id={self.id}, device_id={self.device_id}, date={self.date}, ahi={self.ahi})>"

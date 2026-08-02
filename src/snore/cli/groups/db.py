@@ -12,6 +12,7 @@ from snore.cli.decorators import db_option, db_session
 from snore.cli.display import (
     ICON_STATS,
     console,
+    print_error,
     print_footer,
     print_header,
     print_kv,
@@ -188,3 +189,32 @@ def drop(db: str | None, force: bool) -> None:
 
     except Exception as e:
         raise click.ClickException(f"Error dropping database: {e}") from e
+
+
+@db.command("purge-quarantine")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt")
+def db_purge_quarantine(yes: bool) -> None:
+    """Purge all quarantined profile raw data (offline operator command).
+
+    Quarantined directories are left behind when a profile deletion saga is
+    interrupted (e.g. crash after rename but before cascade-delete).  This
+    command removes them permanently.
+
+    The API server must not be running when this command is used.
+    """
+    if not yes:
+        click.confirm(
+            "Purge all quarantined profile raw data? This cannot be undone. "
+            "Ensure the API server is not running.",
+            abort=True,
+        )
+
+    from snore.services.profile_service import DeletionSaga  # noqa: PLC0415
+    from snore.services.writer_lease import WriterLeaseError  # noqa: PLC0415
+
+    saga = DeletionSaga()
+    try:
+        saga.purge_quarantine()
+        print_success("Quarantine purged successfully")
+    except WriterLeaseError as e:
+        print_error(str(e))

@@ -117,7 +117,12 @@ class SessionImporter:
         return total_cleaned
 
     async def _import_single_session(
-        self, db: AsyncSession, session_data: UnifiedSession, force: bool = False
+        self,
+        db: AsyncSession,
+        session_data: UnifiedSession,
+        force: bool = False,
+        *,
+        profile_id: int | None = None,
     ) -> tuple[bool, int | None]:
         """
         Import a single session. Returns (imported, day_id).
@@ -148,6 +153,7 @@ class SessionImporter:
             device.last_import = datetime.now(UTC)
         else:
             device = models.Device(
+                profile_id=profile_id,
                 manufacturer=session_data.device_info.manufacturer,
                 model=session_data.device_info.model,
                 serial_number=session_data.device_info.serial_number,
@@ -223,7 +229,12 @@ class SessionImporter:
         return True, day_id
 
     async def import_session(
-        self, session_data: UnifiedSession, force: bool = False, *, db: AsyncSession
+        self,
+        session_data: UnifiedSession,
+        force: bool = False,
+        *,
+        db: AsyncSession,
+        profile_id: int | None = None,
     ) -> bool:
         """Import a complete session using a caller-provided async session.
 
@@ -236,6 +247,7 @@ class SessionImporter:
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
             db: Required caller-provided async session.
+            profile_id: Profile that owns the device; required by the multiuser schema.
 
         Returns:
             True if imported, False if skipped (already exists)
@@ -245,6 +257,7 @@ class SessionImporter:
             force=force,
             batch_size=1,
             db=db,
+            profile_id=profile_id,
         )
         return imported > 0
 
@@ -257,6 +270,7 @@ class SessionImporter:
         cancel_predicate: Callable[[], bool] | None = None,
         *,
         db: AsyncSession,
+        profile_id: int | None = None,
     ) -> tuple[int, int, int]:
         """
         Import multiple sessions in batched transactions with per-session savepoints.
@@ -327,6 +341,7 @@ class SessionImporter:
                 failed,
                 batch_day_ids,
                 progress_callback,
+                profile_id=profile_id,
             )
             if batch_day_ids:
                 for day_id in batch_day_ids:
@@ -346,6 +361,8 @@ class SessionImporter:
         failed: int,
         batch_day_ids: set[int],
         progress_callback: Callable[[str], None] | None,
+        *,
+        profile_id: int | None = None,
     ) -> tuple[int, int, int, set[int]]:
         """Import one batch of sessions within a caller-provided session.
 
@@ -355,7 +372,7 @@ class SessionImporter:
             try:
                 async with db.begin_nested():
                     was_imported, day_id = await self._import_single_session(
-                        db, session_data, force
+                        db, session_data, force, profile_id=profile_id
                     )
                 if was_imported:
                     imported += 1
@@ -480,7 +497,9 @@ class SessionImporter:
         logger.debug(f"Imported {len(mappings)} settings")
 
 
-async def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
+async def import_session(
+    session_data: UnifiedSession, force: bool = False, *, profile_id: int | None = None
+) -> bool:
     """
     Convenience function to import a session.
 
@@ -491,10 +510,13 @@ async def import_session(session_data: UnifiedSession, force: bool = False) -> b
     Args:
         session_data: UnifiedSession to import
         force: Force re-import if exists
+        profile_id: Profile that owns the device; required by the multiuser schema.
 
     Returns:
         True if imported, False if skipped
     """
     importer = SessionImporter()
     async with session_scope() as db:
-        return await importer.import_session(session_data, force=force, db=db)
+        return await importer.import_session(
+            session_data, force=force, db=db, profile_id=profile_id
+        )

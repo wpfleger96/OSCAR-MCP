@@ -45,7 +45,11 @@ class TestSessionServiceList:
         assert result.sessions[1].ahi == 2.5
 
     async def test_list_sessions_filter_by_device(
-        self, async_db_session, async_test_device, async_test_session_factory
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_profile,
+        async_test_session_factory,
     ):
         """Device filter works correctly."""
         now = datetime.now()
@@ -54,7 +58,10 @@ class TestSessionServiceList:
         from snore.database.models import Device
 
         other_device = Device(
-            manufacturer="Other", model="Model", serial_number="OTHER123"
+            profile_id=async_test_profile.id,
+            manufacturer="Other",
+            model="Model",
+            serial_number="OTHER123",
         )
         async_db_session.add(other_device)
         await async_db_session.flush()

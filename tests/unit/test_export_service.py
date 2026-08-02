@@ -193,7 +193,15 @@ async def db_session(tmp_path: Path) -> AsyncGenerator[AsyncSession]:
     await db_mod.init_database(db_path)
 
     async with db_mod.session_scope() as session:
+        user = models.User(canonical_email="export@example.com", role="admin")
+        session.add(user)
+        await session.flush()
+        profile = models.Profile(user_id=user.id, name="Test Profile")
+        session.add(profile)
+        await session.flush()
+
         device = models.Device(
+            profile_id=profile.id,
             manufacturer="ResMed",
             model="AirSense 11",
             serial_number="SN12345",

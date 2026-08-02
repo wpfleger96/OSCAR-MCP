@@ -78,7 +78,7 @@ class TestImportUpload:
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job: None)
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
 
         response = api_client.post(
             "/api/v1/import",
@@ -121,7 +121,7 @@ class TestImportUpload:
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job: None)
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
 
         response = api_client.post(
             "/api/v1/import",
