@@ -37,6 +37,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -295,6 +296,7 @@ class Device(Base):
         back_populates="device",
         cascade="all, delete-orphan",
         lazy="raise",
+        overlaps="day,sessions",
     )
     days = relationship(
         "Day",
@@ -368,7 +370,9 @@ class Day(Base):
     )
 
     device = relationship("Device", back_populates="days", lazy="raise")
-    sessions = relationship("Session", back_populates="day", lazy="raise")
+    sessions = relationship(
+        "Session", back_populates="day", lazy="raise", overlaps="device,sessions"
+    )
 
     __table_args__ = (
         UniqueConstraint("device_id", "date", name="uq_device_date"),
@@ -388,9 +392,7 @@ class Session(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
-    day_id: Mapped[int | None] = mapped_column(
-        ForeignKey("days.id", ondelete="CASCADE")
-    )
+    day_id: Mapped[int | None] = mapped_column(Integer)
     device_session_id: Mapped[str] = mapped_column(String)
     # Device wall-clock times: no source timezone, never convert.
     start_time: Mapped[datetime] = mapped_column(DateTime)
@@ -409,8 +411,15 @@ class Session(Base):
     has_statistics: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    device = relationship("Device", back_populates="sessions", lazy="raise")
-    day = relationship("Day", back_populates="sessions", lazy="raise")
+    device = relationship(
+        "Device", back_populates="sessions", lazy="raise", overlaps="day,sessions"
+    )
+    day = relationship(
+        "Day",
+        back_populates="sessions",
+        foreign_keys="[Session.day_id]",
+        lazy="raise",
+    )
     waveforms = relationship(
         "Waveform",
         back_populates="session",
@@ -448,6 +457,16 @@ class Session(Base):
         CheckConstraint("end_time >= start_time", name="chk_time_range"),
         CheckConstraint(
             "duration_seconds IS NULL OR duration_seconds >= 0", name="chk_duration"
+        ),
+        # Composite FK: ensures session.day_id and session.device_id agree on ownership.
+        # Day.UNIQUE(id, device_id) makes this constraint enforceable.
+        # When day_id IS NULL (session not yet linked to a day), the FK is skipped.
+        ForeignKeyConstraint(
+            ["day_id", "device_id"],
+            ["days.id", "days.device_id"],
+            name="fk_session_day_device",
+            ondelete="CASCADE",
+            use_alter=True,
         ),
     )
 

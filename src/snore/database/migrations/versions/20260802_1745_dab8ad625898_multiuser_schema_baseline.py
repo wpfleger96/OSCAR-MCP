@@ -212,7 +212,13 @@ def upgrade() -> None:
             "duration_seconds IS NULL OR duration_seconds >= 0", name="chk_duration"
         ),
         sa.CheckConstraint("end_time >= start_time", name="chk_time_range"),
-        sa.ForeignKeyConstraint(["day_id"], ["days.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["day_id", "device_id"],
+            ["days.id", "days.device_id"],
+            name="fk_session_day_device",
+            ondelete="CASCADE",
+            use_alter=True,
+        ),
         sa.ForeignKeyConstraint(["device_id"], ["devices.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("device_id", "device_session_id", name="uq_device_session"),
