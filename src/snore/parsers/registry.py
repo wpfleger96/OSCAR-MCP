@@ -80,6 +80,23 @@ class ParserRegistry:
         """
         return self._parsers.copy()
 
+    def list_supported_models(self) -> list[str]:
+        """
+        Return the union of supported_models across all registered parsers.
+
+        Returns:
+            Sorted, deduplicated list of supported device model strings.
+
+        Example:
+            models = registry.list_supported_models()
+            # ["AirCurve 11 VAuto", "AirSense 10 AutoSet", ...]
+        """
+        seen: set[str] = set()
+        for parser in self._parsers:
+            for model in parser.metadata.supported_models:
+                seen.add(model)
+        return sorted(seen)
+
     def detect_parser(self, path: Path) -> DeviceParser | None:
         """
         Auto-detect which parser can handle the data at the given path.

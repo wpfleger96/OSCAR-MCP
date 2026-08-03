@@ -378,6 +378,7 @@ class TestFindWindows:
         assert result.windows == []
         from snore.services.breath_service import DayAnalysisStatus  # noqa: PLC0415
 
+        # plan §1 line 864 rule 3: all-not-run → NOT_RUN
         assert result.day_status != DayAnalysisStatus.OK
 
     async def test_worst_flattening_criterion_returns_result(self, async_db_session):
@@ -400,6 +401,7 @@ class TestFindWindows:
 
         from snore.services.breath_service import DayAnalysisStatus  # noqa: PLC0415
 
+        # plan §1 line 864 rule 2: all-OK → OK
         assert result.day_status == DayAnalysisStatus.OK
         # May be empty if flattening threshold not met, but no exception
         assert isinstance(result.windows, list)
@@ -513,6 +515,7 @@ class TestGetNightlySummary:
         svc = BreathService(async_db_session, profile_id=profile_id)
         summary = await svc.get_nightly_summary(therapy_date, device_id=dev.id)
 
+        # plan §1 line 864 rule 3: all-not-run → NOT_RUN
         assert summary.day_status == DayAnalysisStatus.NOT_RUN
         assert summary.analyzed_session_count == 0
         assert summary.fl_reason == NullReason.NOT_AVAILABLE
@@ -1753,7 +1756,7 @@ class TestStaleCoverageStateMachine:
         svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.get_nightly_summary(therapy_date)
 
-        # All-stale day must be STALE, not NOT_RUN
+        # plan §1 line 864 rule 4: all-stale → STALE, not NOT_RUN
         assert result.day_status == DayAnalysisStatus.STALE
 
     async def test_stale_session_excluded_from_find_windows_breath_rows(
@@ -1779,16 +1782,17 @@ class TestStaleCoverageStateMachine:
             n=10,
         )
 
+        # plan §1 line 864 rule 4: all-stale → STALE
         assert result.day_status == DayAnalysisStatus.STALE
         assert result.windows == [], "stale breath rows must not appear in windows"
 
-    async def test_stale_and_not_run_find_windows_status_is_stale(
+    async def test_stale_and_not_run_find_windows_status_is_partial(
         self, async_db_session
     ):
-        """find_windows returns STALE (not NOT_RUN) for a stale+not-run mixed day.
+        """find_windows returns PARTIAL for a stale+not-run mixed day.
 
         One session has a stale analysis; a second session on the same day has
-        no analysis at all.  The day_status must be STALE, not NOT_RUN.
+        no analysis at all.  plan §1 line 864 rule 5: any mixed state → PARTIAL.
         """
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
@@ -1823,7 +1827,8 @@ class TestStaleCoverageStateMachine:
             therapy_date, WindowCriterion.WORST_FLATTENING_LEAK_VALID, n=5
         )
 
-        assert result.day_status == DayAnalysisStatus.STALE
+        # plan §1 line 864 rule 5: stale + not-run → PARTIAL (not STALE)
+        assert result.day_status == DayAnalysisStatus.PARTIAL
 
     async def test_ca_events_returned_when_analysis_stale(self, async_db_session):
         """get_ca_analysis returns CA events even when analysis is stale.
@@ -1852,5 +1857,381 @@ class TestStaleCoverageStateMachine:
         svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.get_ca_analysis(therapy_date, device_id=dev.id)
 
+        # plan §1 line 864 rule 4: all-stale → STALE
         assert result.day_status == DayAnalysisStatus.STALE
         assert len(result.ca_events) == 1, "CA events must be returned on stale days"
+
+
+# ---------------------------------------------------------------------------
+# Same-profile, two-device adversarial tests (Thufir pass-2 finding CRITICAL)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSameProfileTwoDevice:
+    """One profile owns two devices with sessions on the same date.
+
+    Without device_id, methods must raise DeviceAmbiguityError.
+    With device_id, methods must use only that device's data.
+    """
+
+    async def _setup_two_devices(
+        self, db: AsyncSession, therapy_date: date
+    ) -> tuple[int, models.Device, models.Session, models.Device, models.Session]:
+        """Create one profile with two devices, each with a session on therapy_date."""
+        _, profile_id = await _make_profile(db)
+        dev_a = await _make_device(db, profile_id, manufacturer="ResMed")
+        _, session_a = await _make_day_and_session(db, dev_a.id, therapy_date)
+        dev_b = await _make_device(db, profile_id, manufacturer="Philips")
+        _, session_b = await _make_day_and_session(db, dev_b.id, therapy_date)
+        return profile_id, dev_a, session_a, dev_b, session_b
+
+    async def test_two_device_same_profile_nightly_summary_raises_device_ambiguity(
+        self, async_db_session
+    ):
+        """get_nightly_summary without device_id raises DeviceAmbiguityError."""
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        therapy_date = date(2025, 11, 1)
+        profile_id, dev_a, _, dev_b, _ = await self._setup_two_devices(
+            async_db_session, therapy_date
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(DeviceAmbiguityError) as exc_info:
+            await svc.get_nightly_summary(therapy_date)
+
+        err = exc_info.value
+        assert dev_a.id in err.owned_device_ids
+        assert dev_b.id in err.owned_device_ids
+
+    async def test_two_device_same_profile_find_windows_with_explicit_device(
+        self, async_db_session
+    ):
+        """find_windows(device_id=dev_a) only uses dev_a's sessions."""
+        therapy_date = date(2025, 11, 2)
+        profile_id, dev_a, session_a, dev_b, session_b = await self._setup_two_devices(
+            async_db_session, therapy_date
+        )
+        # Add OA events to dev_a's session only
+        async_db_session.add(
+            models.Event(
+                session_id=session_a.id,
+                event_type="OA",
+                start_time=session_a.start_time + timedelta(minutes=30),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=3,
+            device_id=dev_a.id,
+        )
+
+        # Should resolve to dev_a without ambiguity
+        assert result.device_id == dev_a.id
+        # Verify dev_b sessions are not in coverage
+        session_ids_in_result = {c.session_id for c in result.session_coverage}
+        assert session_b.id not in session_ids_in_result
+
+    async def test_two_device_same_profile_find_windows_raises_without_device_id(
+        self, async_db_session
+    ):
+        """find_windows without device_id raises DeviceAmbiguityError."""
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        therapy_date = date(2025, 11, 3)
+        profile_id, _, _, _, _ = await self._setup_two_devices(
+            async_db_session, therapy_date
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(DeviceAmbiguityError):
+            await svc.find_windows(
+                therapy_date,
+                criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+                n=3,
+            )
+
+    async def test_two_device_explicit_session_wrong_device_raises(
+        self, async_db_session
+    ):
+        """get_breath_table(session_id=session_a, device_id=dev_b) raises ValueError."""
+        therapy_date = date(2025, 11, 4)
+        profile_id, dev_a, session_a, dev_b, session_b = await self._setup_two_devices(
+            async_db_session, therapy_date
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(ValueError):
+            await svc.get_breath_table(
+                BreathQueryRange(
+                    therapy_date=therapy_date,
+                    session_id=session_a.id,
+                    device_id=dev_b.id,
+                    offset_start=0.0,
+                    offset_end=300.0,
+                )
+            )
+
+    async def test_two_device_get_contextual_events_raises_without_device_id(
+        self, async_db_session
+    ):
+        """get_contextual_events without device_id raises DeviceAmbiguityError."""
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        therapy_date = date(2025, 11, 5)
+        profile_id, _, _, _, _ = await self._setup_two_devices(
+            async_db_session, therapy_date
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(DeviceAmbiguityError):
+            await svc.get_contextual_events(therapy_date=therapy_date)
+
+    async def test_two_device_get_ca_analysis_raises_without_device_id(
+        self, async_db_session
+    ):
+        """get_ca_analysis without device_id raises DeviceAmbiguityError."""
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        therapy_date = date(2025, 11, 6)
+        profile_id, _, _, _, _ = await self._setup_two_devices(
+            async_db_session, therapy_date
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(DeviceAmbiguityError):
+            await svc.get_ca_analysis(therapy_date=therapy_date)
+
+    async def test_two_device_waveform_window_raises_without_device_id(
+        self, async_db_session
+    ):
+        """fetch_waveform_window_raw with two devices raises MultiSessionAmbiguityError."""
+        therapy_date = date(2025, 11, 7)
+        profile_id, _, _, _, _ = await self._setup_two_devices(
+            async_db_session, therapy_date
+        )
+
+        from snore.services.breath_service import (  # noqa: PLC0415
+            MultiSessionAmbiguityError,
+        )
+
+        # fetch_waveform_window_raw resolves sessions profile-wide;
+        # with 2 devices (2 sessions), it raises MultiSessionAmbiguityError
+        with pytest.raises(MultiSessionAmbiguityError):
+            await fetch_waveform_window_raw(
+                async_db_session,
+                WaveformWindowRequest(
+                    therapy_date=therapy_date,
+                    channels=[WaveformChannelName.FLOW],
+                    offset_start=0.0,
+                    offset_end=60.0,
+                ),
+                profile_id,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Split-night tests: one device, two sessions on same date
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSplitNight:
+    """One device, two sessions on the same night.
+
+    Events and CA analysis must aggregate across both sessions.
+    """
+
+    async def _setup_split_night(
+        self, db: AsyncSession, therapy_date: date
+    ) -> tuple[int, models.Device, models.Session, models.Session]:
+        """Create a profile with one device and two sessions on therapy_date."""
+        _, profile_id = await _make_profile(db)
+        dev = await _make_device(db, profile_id)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        db.add(day)
+        await db.flush()
+
+        session_a = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(hours=3),
+            duration_seconds=3 * 3600.0,
+        )
+        session_b = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=4),
+            end_time=start_a + timedelta(hours=7),
+            duration_seconds=3 * 3600.0,
+        )
+        db.add_all([session_a, session_b])
+        await db.flush()
+        return profile_id, dev, session_a, session_b
+
+    async def test_split_night_contextual_events_returns_events_from_both_sessions(
+        self, async_db_session
+    ):
+        """get_contextual_events returns OA events from both split-night sessions."""
+        therapy_date = date(2025, 12, 1)
+        profile_id, dev, session_a, session_b = await self._setup_split_night(
+            async_db_session, therapy_date
+        )
+
+        # Add one OA event to each session
+        async_db_session.add_all(
+            [
+                models.Event(
+                    session_id=session_a.id,
+                    event_type="OA",
+                    start_time=session_a.start_time + timedelta(minutes=30),
+                    duration_seconds=10.0,
+                ),
+                models.Event(
+                    session_id=session_b.id,
+                    event_type="OA",
+                    start_time=session_b.start_time + timedelta(minutes=30),
+                    duration_seconds=8.0,
+                ),
+            ]
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        events = await svc.get_contextual_events(
+            therapy_date=therapy_date, device_id=dev.id
+        )
+
+        # Both sessions' events must be returned
+        assert len(events) == 2
+        session_ids_seen = {e.session_id for e in events}
+        assert session_a.id in session_ids_seen
+        assert session_b.id in session_ids_seen
+
+    async def test_split_night_ca_analysis_returns_ca_events_from_both_sessions(
+        self, async_db_session
+    ):
+        """get_ca_analysis returns CA events from both split-night sessions."""
+        therapy_date = date(2025, 12, 2)
+        profile_id, dev, session_a, session_b = await self._setup_split_night(
+            async_db_session, therapy_date
+        )
+
+        # Add one CA event to each session
+        async_db_session.add_all(
+            [
+                models.Event(
+                    session_id=session_a.id,
+                    event_type="CA",
+                    start_time=session_a.start_time + timedelta(minutes=15),
+                    duration_seconds=20.0,
+                ),
+                models.Event(
+                    session_id=session_b.id,
+                    event_type="CA",
+                    start_time=session_b.start_time + timedelta(minutes=20),
+                    duration_seconds=15.0,
+                ),
+            ]
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        # Both sessions' CA events must be returned
+        assert len(result.ca_events) == 2
+        session_ids_seen = {e.session_id for e in result.ca_events}
+        assert session_a.id in session_ids_seen
+        assert session_b.id in session_ids_seen
+
+
+# ---------------------------------------------------------------------------
+# Input validation tests (Thufir pass-2 finding IMPORTANT-9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestContextualEventsInputValidation:
+    """Input validation for get_contextual_events."""
+
+    async def test_contextual_events_invalid_event_types_raises(self, async_db_session):
+        """get_contextual_events with event_types=123 raises ValueError."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 12, 10)
+        await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(ValueError, match="event_types"):
+            await svc.get_contextual_events(
+                therapy_date=therapy_date,
+                device_id=dev.id,
+                event_types=123,  # noqa: PGH003  # type mismatch is intentional for test
+            )
+
+    async def test_contextual_events_empty_string_in_event_types_raises(
+        self, async_db_session
+    ):
+        """get_contextual_events with event_types=[""] raises ValueError."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 12, 11)
+        await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(ValueError, match="event_types"):
+            await svc.get_contextual_events(
+                therapy_date=therapy_date,
+                device_id=dev.id,
+                event_types=[""],
+            )
+
+    async def test_contextual_events_negative_min_duration_raises(
+        self, async_db_session
+    ):
+        """get_contextual_events with min_duration=-1 raises ValueError."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 12, 12)
+        await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(ValueError, match="min_duration"):
+            await svc.get_contextual_events(
+                therapy_date=therapy_date,
+                device_id=dev.id,
+                min_duration=-1.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Nightly range date validation (Thufir pass-2 finding IMPORTANT-5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNightlyRangeDateValidation:
+    async def test_reversed_date_range_raises_value_error(self, async_db_session):
+        """get_nightly_range_summary with date_end < date_start raises ValueError."""
+        _, profile_id = await _make_profile(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
+
+        with pytest.raises(ValueError, match="date_end"):
+            await svc.get_nightly_range_summary(
+                date_start=date(2025, 4, 10),
+                date_end=date(2025, 4, 1),  # reversed
+            )
