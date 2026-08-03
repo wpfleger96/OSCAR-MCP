@@ -452,6 +452,8 @@ def import_data(
                     session_ids=all_imported_session_ids,
                     primary_mode=DEFAULT_MODE,
                     progress_callback=_on_progress,
+                    # SQLite tolerates only one concurrent writer; keep sequential.
+                    max_workers=1,
                 )
 
             ok = batch_result.successful

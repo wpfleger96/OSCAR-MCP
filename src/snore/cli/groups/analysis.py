@@ -596,6 +596,9 @@ async def _analyze_batch(
             modes=modes,
             store_results=not no_store,
             progress_callback=on_progress,
+            # SQLite tolerates only one concurrent writer; keep sequential.
+            # PostgreSQL (hosted) can increase this via the session_ids path.
+            max_workers=1,
         )
 
     if result.total == 0:

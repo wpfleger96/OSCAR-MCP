@@ -262,6 +262,8 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                             progress_callback=lambda done, total: job.report_progress(
                                 f"Analyzed {done}/{total or '?'} sessions"
                             ),
+                            # SQLite tolerates only one concurrent writer; keep sequential.
+                            max_workers=1,
                         )
 
                 asyncio.run(_run_analysis())
