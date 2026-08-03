@@ -71,24 +71,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     lease = get_writer_lease()
 
-    # Try exclusive for startup recovery.  If we can't get it (another process
-    # is somehow running), log a warning and continue without recovery —
-    # the tombstone will be found again at the next restart.
+    # Acquire the lifetime shared lease exactly once on every branch:
+    #   - Exclusive available: acquire exclusive → run recovery (log on failure) →
+    #     release exclusive → acquire shared.
+    #   - Exclusive unavailable: log warning → acquire shared directly.
+    # The outer try/except only wraps the exclusive-acquire attempt so that a
+    # recovery failure inside does not trigger a second shared acquire.
+    exclusive_held = False
     try:
         lease.acquire_exclusive()
+        exclusive_held = True
+    except Exception as exc:
+        logger.warning(
+            "Startup recovery skipped (exclusive lease unavailable): %s", exc
+        )
+
+    if exclusive_held:
         saga = DeletionSaga()
         try:
             await asyncio.to_thread(saga.recover)
+        except Exception as exc:
+            logger.warning("Startup recovery failed: %s", exc)
         finally:
-            # Downgrade to shared hold for process lifetime.
-            # Release exclusive and immediately acquire shared.
+            # Downgrade: release exclusive, then acquire shared exactly once below.
             lease.release_exclusive()
-            lease.acquire_shared()
-    except Exception as exc:
-        # Failed to acquire exclusive (another process) or recovery failed.
-        # Acquire shared anyway — we serve read-write, just without recovery.
-        logger.warning("Startup recovery skipped: %s", exc)
-        lease.acquire_shared()
+
+    lease.acquire_shared()
 
     # Start a single lifespan-owned TTL reaper.
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)

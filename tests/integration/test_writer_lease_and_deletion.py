@@ -145,6 +145,48 @@ class TestWriterLeaseManager:
             "Shared acquire must succeed after failed exclusive op — lock not stranded"
         )
 
+    def test_lifespan_recovery_failure_yields_exactly_one_shared_acquire(
+        self, tmp_path
+    ):
+        """Injected recovery failure must not double-acquire the shared lease.
+
+        Before the fix, a recovery exception inside the inner try would trigger
+        the inner finally (release exclusive + acquire shared) and then fall
+        through to the outer except (acquire shared again) — leaving refcount 2
+        and a stranded shared hold after shutdown.
+        """
+        lock_path = tmp_path / "writers.lock"
+        mgr = _make_lease(lock_path)
+
+        # Simulate the lifespan sequence with an injected recovery failure.
+        exclusive_held = False
+        try:
+            mgr.acquire_exclusive()
+            exclusive_held = True
+        except Exception:
+            pass
+
+        if exclusive_held:
+            try:
+                raise RuntimeError("injected recovery failure")
+            except Exception:
+                pass  # Log would happen here in production.
+            finally:
+                mgr.release_exclusive()
+
+        mgr.acquire_shared()
+
+        # Exactly one shared acquire must have occurred.
+        assert mgr._refcount == 1, (
+            f"Expected refcount 1 after recovery failure; got {mgr._refcount}"
+        )
+
+        # Releasing once should bring refcount to zero (no stranded hold).
+        mgr.release()
+        assert mgr._refcount == 0, (
+            f"Expected refcount 0 after release; got {mgr._refcount}"
+        )
+
     def test_release_idempotent_when_not_held(self, tmp_path):
         """release() when refcount is already 0 is a safe no-op."""
         lock = tmp_path / "writers.lock"
@@ -471,7 +513,12 @@ class TestDeletionSagaFaultInjection:
         assert not quarantine_dir.exists(), "Quarantine dir must be purged by recovery"
 
     async def test_saga_cascade_only_leaves_recovery_path(self, saga_db):
-        """After cascade (profile row gone) but quarantine remains, recovery purges."""
+        """After cascade (profile row gone) but quarantine remains, recover() purges it.
+
+        This covers the crash-after-cascade scenario: the profile row is gone
+        (no tombstone visible), but the quarantine directory was not yet purged.
+        recover() must enumerate quarantine dirs with no tombstone and purge them.
+        """
         db_path, raw_root = saga_db
 
         user, profile_a, profile_b = await _create_user_and_profiles(db_path, raw_root)
@@ -486,21 +533,23 @@ class TestDeletionSagaFaultInjection:
         from snore.database.session import session_scope
         from snore.services.profile_service import DeletionSaga
 
-        # Simulate: tombstone committed then immediately cascade (profile deleted from DB).
+        # Simulate: tombstone committed then cascade completed (profile row gone).
+        # The purge step was interrupted before completion.
         async with session_scope() as db:
             p_a = await db.get(Profile, profile_a.id)
             await db.delete(p_a)
-        # Profile row is gone; quarantine dir exists (purge step incomplete).
+        # Profile row is gone; quarantine dir still exists (orphaned).
 
-        # Recovery: no tombstone found (profile deleted), but quarantine exists.
-        # The DeletionSaga.recover() only re-runs tombstoned profiles.
-        # The quarantine dir without a tombstone is handled by purge_quarantine.
+        # recover() must find and purge the orphaned quarantine dir even though
+        # no tombstone row exists.
         saga = DeletionSaga(raw_root=raw_root)
-        # Run a purge_quarantine under exclusive lease — simulate what operator would do.
-        # For the test, call the internal purge method directly (no lease needed in test).
-        saga._purge_quarantine_for_profile(profile_a.id)
+        import asyncio  # noqa: PLC0415
 
-        assert not quarantine_dir.exists(), "Quarantine must be purged"
+        await asyncio.to_thread(saga.recover)
+
+        assert not quarantine_dir.exists(), (
+            "recover() must purge quarantine dir even when no tombstone row exists"
+        )
 
     async def test_recovery_leaves_no_orphaned_private_files(self, saga_db):
         """Full recovery run with two tombstoned profiles leaves no orphaned raw files."""

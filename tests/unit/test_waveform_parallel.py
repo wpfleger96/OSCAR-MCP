@@ -33,6 +33,12 @@ def _make_waveform_patches():
             new_callable=AsyncMock,
             return_value=MagicMock(profile_id=1),
         ),
+        # Short-circuit session ID resolution — no real DB available
+        patch(
+            "snore.cli.groups.waveform._resolve_session_id",
+            new_callable=AsyncMock,
+            return_value=(1, 1),
+        ),
     ]
 
 
@@ -56,6 +62,11 @@ class TestWaveformMultiTypeAllFail:
                 "snore.auth.factory.ActorContextFactory.make_from_cli",
                 new_callable=AsyncMock,
                 return_value=MagicMock(profile_id=1),
+            ),
+            patch(
+                "snore.cli.groups.waveform._resolve_session_id",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
             ),
         ):
             mock_inspector = mock_inspector_cls.return_value
@@ -108,6 +119,11 @@ class TestWaveformMultiTypePartialFailure:
                 "snore.auth.factory.ActorContextFactory.make_from_cli",
                 new_callable=AsyncMock,
                 return_value=MagicMock(profile_id=1),
+            ),
+            patch(
+                "snore.cli.groups.waveform._resolve_session_id",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
             ),
         ):
             mock_inspector = mock_inspector_cls.return_value
@@ -170,6 +186,11 @@ class TestWaveformMultiTypeOrdering:
                 "snore.auth.factory.ActorContextFactory.make_from_cli",
                 new_callable=AsyncMock,
                 return_value=MagicMock(profile_id=1),
+            ),
+            patch(
+                "snore.cli.groups.waveform._resolve_session_id",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
             ),
         ):
             mock_inspector = mock_inspector_cls.return_value

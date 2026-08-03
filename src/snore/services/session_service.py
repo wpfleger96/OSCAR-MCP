@@ -332,12 +332,25 @@ class SessionService:
         )
 
     async def delete_sessions(self, session_ids: list[int]) -> int:
-        """Delete sessions by ID list."""
+        """Delete sessions by ID list.
+
+        Only sessions belonging to this profile are deleted.  Foreign IDs are
+        silently ignored — the caller sees the count of rows actually removed,
+        which is 0 for a fully-foreign list (indistinguishable from "not found").
+        """
         if not session_ids:
             return 0
 
+        # The ownership predicate is in the DELETE itself so a foreign session_id
+        # cannot cause a deletion — no separate SELECT needed.
         cursor: CursorResult[Any] = await self.db_session.execute(  # type: ignore[assignment]
-            delete(models.Session).where(models.Session.id.in_(session_ids))
+            delete(models.Session)
+            .where(models.Session.id.in_(session_ids))
+            .where(
+                models.Session.device_id.in_(
+                    select(models.Device.id).where(self._profile_filter())
+                )
+            )
         )
         return cursor.rowcount or 0
 
@@ -386,8 +399,26 @@ class SessionService:
     async def resolve_session_id(
         self, session_id: int | None, date: datetime | None
     ) -> int:
-        """Resolve session ID from either explicit ID or date."""
+        """Resolve session ID from either explicit ID or date.
+
+        When ``session_id`` is supplied, it is validated against the profile
+        predicate so a foreign ID is treated as not found rather than echoed
+        back to the caller.
+        """
         if session_id is not None:
+            # Validate ownership — foreign session → not found.
+            owned = (
+                await self.db_session.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        self._profile_filter(),
+                    )
+                )
+            ).scalar_one_or_none()
+            if owned is None:
+                raise ValueError(f"Session {session_id} not found")
             return session_id
 
         if date is None:

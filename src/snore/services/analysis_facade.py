@@ -28,15 +28,13 @@ logger = logging.getLogger(__name__)
 class AnalysisFacade:
     """Facade for analysis listing and deletion operations."""
 
-    def __init__(self, db_session: AsyncSession, profile_id: int | None = None) -> None:
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         """
         Initialize analysis facade.
 
         Args:
             db_session: SQLAlchemy database session
-            profile_id: Active profile — analysis queries are scoped to this profile.
-                When *None*, only non-profile-filtered methods (``run_analysis``,
-                ``get_analysis_result``) should be called.
+            profile_id: Active profile — all queries are scoped to this profile.
         """
         self.db_session = db_session
         self.profile_id = profile_id
@@ -325,6 +323,10 @@ class AnalysisFacade:
     ) -> int:
         """Delete analysis results for given sessions.
 
+        Only analysis records whose sessions belong to this profile are deleted.
+        Foreign session IDs are silently ignored — the caller sees the count of
+        records actually removed (0 for a fully-foreign list).
+
         Args:
             session_ids: Session IDs to delete analysis for
             all_versions: If True, delete all versions. If False, only latest.
@@ -332,17 +334,32 @@ class AnalysisFacade:
         Returns:
             Number of analysis records deleted
         """
+        if not session_ids:
+            return 0
+
+        # Scope session_ids to this profile to prevent cross-profile deletion.
+        owned_sessions_subq = (
+            select(models.Session.id)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Session.id.in_(session_ids),
+                self._profile_filter(),
+            )
+            .subquery()
+        )
+
         if all_versions:
-            # Delete all analysis results for these sessions.
+            # Delete all analysis results for owned sessions.
             result = await self.db_session.execute(
                 delete(models.AnalysisResult).where(
-                    models.AnalysisResult.session_id.in_(session_ids)
+                    models.AnalysisResult.session_id.in_(
+                        select(owned_sessions_subq.c.id)
+                    )
                 )
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
-            # Delete only the latest (highest created_at) result per session.
-            # Identify the latest result IDs first, then delete by PK.
+            # Delete only the latest (highest created_at) result per owned session.
             ranked = (
                 select(
                     models.AnalysisResult.id,
@@ -353,7 +370,11 @@ class AnalysisFacade:
                     )
                     .label("rn"),
                 )
-                .where(models.AnalysisResult.session_id.in_(session_ids))
+                .where(
+                    models.AnalysisResult.session_id.in_(
+                        select(owned_sessions_subq.c.id)
+                    )
+                )
                 .subquery()
             )
             latest_ids = (
@@ -382,6 +403,9 @@ class AnalysisFacade:
     ) -> AnalysisResult:
         """Run analysis on a session.  Returns AnalysisResult (Pydantic model).
 
+        Validates session ownership before running.  Raises NotFoundError for
+        foreign or missing session IDs.
+
         Owns a short read scope for the I/O phase and closes it before compute,
         so the injected request session is never held across NumPy/scipy work.
         CPU-bound compute runs in a thread via asyncio.to_thread().
@@ -390,8 +414,23 @@ class AnalysisFacade:
 
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.exceptions import NotFoundError as _NotFoundError  # noqa: PLC0415
 
         t_start = time.monotonic()
+
+        # Ownership check: confirm session belongs to this profile before I/O.
+        owned = (
+            await self.db_session.execute(
+                select(models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id == session_id,
+                    self._profile_filter(),
+                )
+            )
+        ).scalar_one_or_none()
+        if owned is None:
+            raise _NotFoundError(f"Session {session_id} not found")
 
         # I/O phase: open a dedicated short async scope — close it before compute.
         async with session_scope() as read_db:
@@ -417,13 +456,22 @@ class AnalysisFacade:
     async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
 
-        Intentionally returns None (rather than raising NotFoundError like the
-        resource lookups elsewhere): "not yet analyzed" is a normal state that
-        callers branch on, not a 404 condition.
+        Validates session ownership — returns None for foreign IDs (treating
+        "not yet analyzed" and "not found" the same to avoid oracle attacks).
         """
-        from sqlalchemy import select
-
-        from snore.database import models
+        # Ownership check: confirm session belongs to this profile.
+        owned = (
+            await self.db_session.execute(
+                select(models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id == session_id,
+                    self._profile_filter(),
+                )
+            )
+        ).scalar_one_or_none()
+        if owned is None:
+            return None
 
         analysis_row = (
             (

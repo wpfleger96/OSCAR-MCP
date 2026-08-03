@@ -28,7 +28,7 @@ __all__ = ["WaveformService"]
 class WaveformService:
     """Service for waveform listing and loading operations."""
 
-    def __init__(self, db_session: AsyncSession, profile_id: int | None = None) -> None:
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
         self.profile_id = profile_id
         self._loader = WaveformLoader(db_session)
@@ -38,13 +38,7 @@ class WaveformService:
         return models.Device.profile_id == self.profile_id
 
     async def _assert_session_owned(self, session_id: int) -> None:
-        """Raise NotFoundError if session_id doesn't belong to this profile.
-
-        When profile_id is None (inspector use after external ownership
-        validation), the ownership check is skipped.
-        """
-        if self.profile_id is None:
-            return
+        """Raise NotFoundError if session_id doesn't belong to this profile."""
         row = (
             await self.db_session.execute(
                 select(models.Session.id)

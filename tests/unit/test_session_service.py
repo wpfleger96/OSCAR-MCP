@@ -346,12 +346,20 @@ class TestSessionServiceEnable:
 class TestSessionServiceResolve:
     """Tests for SessionService.resolve_session_id()."""
 
-    async def test_resolve_session_id_by_id(self, async_db_session):
-        """Pass-through when ID provided."""
-        service = SessionService(async_db_session, profile_id=1)
-        resolved = await service.resolve_session_id(session_id=123, date=None)
+    async def test_resolve_session_id_by_id(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """Resolving by explicit ID validates ownership and returns the same ID."""
+        now = datetime(2025, 1, 15, 12, 0, 0)
+        session = await async_test_session_factory(
+            async_test_device.id, now, duration_hours=8.0
+        )
+        service = SessionService(
+            async_db_session, profile_id=async_test_device.profile_id
+        )
+        resolved = await service.resolve_session_id(session_id=session.id, date=None)
 
-        assert resolved == 123
+        assert resolved == session.id
 
     async def test_resolve_session_id_by_date(
         self, async_db_session, async_test_device, async_test_session_factory

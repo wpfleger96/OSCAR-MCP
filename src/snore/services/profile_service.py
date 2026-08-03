@@ -169,10 +169,19 @@ class DeletionSaga:
         asyncio.run(self._recover_async())
 
     async def _recover_async(self) -> None:
-        """Find committed tombstones and finish interrupted sagas."""
+        """Re-run any interrupted deletion sagas found at startup.
+
+        Two recovery cases:
+        1. Tombstone exists (deleting_at IS NOT NULL): the cascade may not have
+           finished — re-run steps 2-4 (rename → cascade → purge).
+        2. No tombstone but quarantine dir exists: the cascade completed and the
+           profile row is gone, but the purge step was interrupted.  Purge the
+           quarantine dir directly.
+        """
         async with session_scope() as db:
             stmt = select(models.Profile).where(models.Profile.deleting_at.is_not(None))
             tombstoned = list((await db.execute(stmt)).scalars().all())
+            tombstoned_ids = {p.id for p in tombstoned}
 
         for profile in tombstoned:
             logger.info(
@@ -188,6 +197,25 @@ class DeletionSaga:
                     await db.delete(p)
             # Step 4: purge
             self._purge_quarantine_for_profile(profile.id)
+
+        # Case 2: quarantine dirs with no surviving tombstone — cascade completed
+        # but purge was interrupted.  Enumerate and purge directly.
+        if self.quarantine_root.exists():
+            for entry in self.quarantine_root.iterdir():
+                if not entry.is_dir():
+                    continue
+                try:
+                    profile_id = int(entry.name)
+                except ValueError:
+                    continue
+                if profile_id in tombstoned_ids:
+                    # Already handled above.
+                    continue
+                logger.info(
+                    "Startup recovery: purging orphaned quarantine for profile %d",
+                    profile_id,
+                )
+                self._purge_quarantine_for_profile(profile_id)
 
     # ------------------------------------------------------------------
     # Internal saga steps

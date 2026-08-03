@@ -385,14 +385,15 @@ class TestRunTxnIdempotency:
     """
 
     async def test_no_duplicate_session_on_import_chunk_retry(self, temp_db):
-        """Fault-injected contention on import chunk write: run_txn retries and
-        exactly one Session row is persisted (UNIQUE guard prevents duplication).
+        """Fault-injected contention at flush: run_txn retries and exactly one Session
+        row is persisted (UNIQUE guard prevents duplication on replay).
 
-        Strategy: the unit_of_work raises on the first call (simulating SQLite
-        contention), _is_sqlite_contention is patched to return True, so run_txn
-        retries.  The second call succeeds.  After two attempts exactly one row
-        exists — the UNIQUE(device_id, device_session_id) constraint makes the
-        write idempotent.
+        Strategy: attempt 1 flushes the row (write attempt occurs), then raises
+        a contention error — the transaction is rolled back.  _is_sqlite_contention
+        is patched True so run_txn retries.  Attempt 2 inserts the same row and
+        commits successfully.  Because attempt 1 was rolled back, the UNIQUE
+        constraint is not violated on attempt 2 — exactly one row results.
+        This proves that rollback + replay behaves correctly under the UNIQUE guard.
         """
         import uuid
 
@@ -431,16 +432,14 @@ class TestRunTxnIdempotency:
             await db.flush()
             device_id = device.id
 
-        # unit_of_work: raises on attempt 1 (contention), succeeds on attempt 2.
+        # unit_of_work: attempt 1 flushes the row then raises contention.
+        # Attempt 2 succeeds (row is inserted cleanly — attempt 1 was rolled back).
         device_session_id = f"txn_test_{uuid.uuid4().hex[:8]}"
         attempt_count = 0
 
         async def _insert_session(db):
             nonlocal attempt_count
             attempt_count += 1
-            # Simulate SQLite contention on the first attempt.
-            if attempt_count == 1:
-                raise RuntimeError("SQLITE_BUSY simulated")
 
             from datetime import UTC, datetime
 
@@ -452,7 +451,13 @@ class TestRunTxnIdempotency:
                 duration_seconds=28800.0,
             )
             db.add(sess)
-            await db.flush()
+            await db.flush()  # Write attempt occurs here; transaction still open.
+
+            # Simulate SQLite contention at the commit boundary on attempt 1.
+            # run_txn's session_scope will roll back the transaction on this exception.
+            if attempt_count == 1:
+                raise RuntimeError("SQLITE_BUSY simulated at commit")
+
             return True
 
         # _is_sqlite_contention always returns True; asyncio.sleep patched out.
@@ -463,10 +468,10 @@ class TestRunTxnIdempotency:
             await run_txn(_insert_session)
 
         assert attempt_count == 2, (
-            f"Expected 2 attempts (1 contention + 1 success); got {attempt_count}"
+            f"Expected 2 attempts (1 rollback + 1 success); got {attempt_count}"
         )
 
-        # Exactly one row persisted.
+        # Exactly one row persisted — the rolled-back first attempt left nothing behind.
         async with session_scope() as db:
             rows = (
                 (
@@ -525,5 +530,106 @@ class TestRunTxnIdempotency:
                 await run_txn(_always_contention, max_attempts=3)
 
         assert call_count == 3, f"Expected exactly 3 attempts; got {call_count}"
+
+        await cleanup_database()
+
+    async def test_invite_redeem_exactly_once_on_retry(self, temp_db):
+        """Invite redemption via run_txn is idempotent: retry after contention
+        at flush yields exactly one redeemed_at timestamp — the IS NULL guard
+        prevents double-consumption.
+
+        Strategy: attempt 1 flushes the conditional UPDATE (redeemed_at is set
+        in the transaction), then raises contention — transaction rolls back.
+        Attempt 2 successfully commits.  The IS NULL predicate ensures only one
+        commit wins even if both attempts had committed (only one row satisfies
+        ``redeemed_at IS NULL`` at a time).
+        """
+        import uuid
+
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import patch
+
+        from sqlalchemy import select
+
+        from snore.auth.invite import InviteRedemptionError, redeem_invite
+        from snore.database.models import Invite, User
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        db_path = str(temp_db)
+        await init_database(db_path)
+
+        # Seed: user + one valid invite.
+        now = datetime.now(UTC)
+        async with session_scope() as db:
+            admin = User(
+                canonical_email=f"admin_{uuid.uuid4().hex[:8]}@test", role="admin"
+            )
+            db.add(admin)
+            await db.flush()
+            invite = Invite(
+                email="invitee@test.com",
+                token_hash=uuid.uuid4().hex,
+                role="member",
+                created_by=admin.id,
+                expires_at=now + timedelta(days=7),
+            )
+            db.add(invite)
+            await db.flush()
+            invite_id = invite.id
+
+        # Patch run_txn to inject contention on the first attempt inside redeem_invite.
+        attempt_count = 0
+
+        async def _patched_run_txn(unit_of_work, *, max_attempts=5):
+            nonlocal attempt_count
+            from snore.database.session import session_scope  # noqa: PLC0415
+            from snore.database.txn import (
+                _is_sqlite_contention as _isc,  # noqa: PLC0415
+            )
+
+            last_exc = None
+            for attempt in range(1, max_attempts + 1):
+                attempt_count += 1
+                try:
+                    async with session_scope() as db:
+                        result = await unit_of_work(db)
+                        # Simulate contention at commit on first attempt:
+                        # discard without committing by raising before the
+                        # session_scope __aexit__ commits.
+                        if attempt == 1:
+                            raise RuntimeError("SQLITE_BUSY simulated at commit")
+                        return result
+                except Exception as exc:
+                    if not _isc(exc) or attempt >= max_attempts:
+                        raise
+                    last_exc = exc
+            if last_exc:
+                raise last_exc
+            raise RuntimeError("exhausted")
+
+        with patch("snore.auth.invite.run_txn", side_effect=_patched_run_txn):
+            await redeem_invite(invite_id)
+
+        assert attempt_count == 2, (
+            f"Expected 2 attempts (1 rollback + 1 success); got {attempt_count}"
+        )
+
+        # Exactly one redeemed_at timestamp — not None, not duplicated.
+        async with session_scope() as db:
+            refreshed = (
+                (await db.execute(select(Invite).where(Invite.id == invite_id)))
+                .scalars()
+                .first()
+            )
+        assert refreshed is not None
+        assert refreshed.redeemed_at is not None, "Invite must be marked redeemed"
+
+        # Trying to redeem again raises InviteRedemptionError (already consumed).
+        with pytest.raises(InviteRedemptionError, match="already been redeemed"):
+            await redeem_invite(invite_id)
 
         await cleanup_database()

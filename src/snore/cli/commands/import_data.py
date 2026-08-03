@@ -70,11 +70,6 @@ from snore.services.import_service import ImportService
     is_flag=True,
     help="Skip raw file backup (not recommended — SD card will be needed again)",
 )
-@click.option(
-    "--backup-dir",
-    type=click.Path(file_okay=False),
-    help="Raw backup directory (default: ~/.snore/raw/)",
-)
 def import_data(
     path: str,
     force: bool,
@@ -90,7 +85,6 @@ def import_data(
     batch_size: int,
     select_all: bool,
     no_backup: bool,
-    backup_dir: str | None,
 ) -> None:
     """Import CPAP data from device SD card or directory."""
     data_path = Path(path)
@@ -322,7 +316,7 @@ def import_data(
                     force=force,
                     batch_size=batch_size,
                     backup=not no_backup,
-                    backup_root=(Path(backup_dir).expanduser() if backup_dir else None),
+                    backup_root=None,
                     sort_by=sort_by if sort_by != "filesystem" else None,
                     limit=limit,
                     date_from=date_from_str,

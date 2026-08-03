@@ -203,11 +203,11 @@ def show_waveform(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            resolved_id, _ = await _resolve_session_id(
+            resolved_id, profile_id = await _resolve_session_id(
                 db_session, session_id, date, actor_user, actor_profile
             )
 
-            inspector = WaveformInspector(db_session)
+            inspector = WaveformInspector(db_session, profile_id)
 
             if len(waveform_types) == 1:
                 waveform_type_single = waveform_types[0]
@@ -289,7 +289,7 @@ def show_waveform(
                     wf_type: str,
                 ) -> tuple[np.ndarray, np.ndarray, str] | None:
                     async with session_scope() as thread_session:
-                        thread_inspector = WaveformInspector(thread_session)
+                        thread_inspector = WaveformInspector(thread_session, profile_id)
                         ts, vals, _meta = await thread_inspector.get_window(
                             session_id=resolved_id,
                             center_seconds=center_seconds,

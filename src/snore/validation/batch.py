@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.modes.config import AASM_CONFIG
 from snore.analysis.modes.detector import EventDetector
-from snore.analysis.service import AnalysisService
 from snore.analysis.utils import convert_machine_events
 from snore.database import models
 from snore.validation.report import (
@@ -36,7 +35,6 @@ class BatchValidator:
         """
         self.db_session = db_session
         self.profile_id = profile_id
-        self.analysis_service = AnalysisService(db_session)
 
     async def validate_date_range(
         self,
@@ -108,16 +106,18 @@ class BatchValidator:
         Returns:
             SessionValidation or None if validation fails
         """
+        # Use an already-scoped facade so ownership is enforced on every path.
+        from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
+
+        facade = AnalysisFacade(self.db_session, self.profile_id)
+
         session = await self.db_session.get(models.Session, session_id)
         if not session:
             return None
 
-        analysis_result = await self.analysis_service.get_analysis_result(session_id)
+        analysis_result = await facade.get_analysis_result(session_id)
         if not analysis_result:
             logger.info(f"Running analysis for session {session_id}...")
-            from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
-
-            facade = AnalysisFacade(self.db_session)
             analysis_result = await facade.run_analysis(session_id, modes=[mode])
 
         if mode not in analysis_result.mode_results:

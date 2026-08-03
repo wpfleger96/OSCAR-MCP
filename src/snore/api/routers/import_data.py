@@ -189,14 +189,12 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         }
     },
 )
-async def import_files(request: Request) -> JobResponse:
-    # Step 1: Reserve admission slot BEFORE reading any body bytes.
-    owner_user_id: int | None = None
-    actor = getattr(request.state, "actor", None)
-    if actor is not None:
-        owner_user_id = actor.user_id
+async def import_files(request: Request, actor: ActorDep) -> JobResponse:
+    if not actor.can_write:
+        raise HTTPException(status_code=403, detail="Write access required")
 
-    job = reserve_slot(owner_user_id)
+    # Step 1: Reserve admission slot BEFORE reading any body bytes.
+    job = reserve_slot(actor.user_id)
     if job is None:
         raise HTTPException(
             status_code=429,
@@ -235,8 +233,7 @@ async def import_files(request: Request) -> JobResponse:
         job.temp_dir = tmp_path
         tmp = None  # Job owns the directory now.
         job.convert_to_pending()
-        target_profile_id = getattr(actor, "profile_id", None) if actor else None
-        job.target_profile_id = target_profile_id
+        job.target_profile_id = actor.profile_id
     except HTTPException:
         # Release capacity before re-raising: job is abandoned.
         job.try_cancel()
@@ -254,11 +251,9 @@ async def import_files(request: Request) -> JobResponse:
         raise
 
     # Derive profile-scoped backup root from actor.
-    profile_raw_root: Path | None = None
-    if actor is not None:
-        from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
-        profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
 
     # Start worker immediately — /progress is observer-only.
     _start_worker(job, profile_raw_root)
@@ -266,27 +261,25 @@ async def import_files(request: Request) -> JobResponse:
 
 
 @router.post("/path", response_model=JobResponse, status_code=202)
-def import_from_path(body: ImportPathRequest, request: Request) -> JobResponse:
+async def import_from_path(
+    body: ImportPathRequest, request: Request, actor: ActorDep
+) -> JobResponse:
     _require_localhost(request)
-    actor = getattr(request.state, "actor", None)
-    owner_user_id: int | None = getattr(actor, "user_id", None) if actor else None
-    target_profile_id: int | None = (
-        getattr(actor, "profile_id", None) if actor else None
-    )
+    if not actor.can_write:
+        raise HTTPException(status_code=403, detail="Write access required")
 
     try:
         job = create_job(
-            JobType.PATH, owner_user_id=owner_user_id, sources=body.sources
+            JobType.PATH, owner_user_id=actor.user_id, sources=body.sources
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail="Too many active imports.") from exc
 
-    job.target_profile_id = target_profile_id
-    profile_raw_root: Path | None = None
-    if target_profile_id is not None:
-        from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+    job.target_profile_id = actor.profile_id
 
-        profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(target_profile_id)
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
 
     _start_worker(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)

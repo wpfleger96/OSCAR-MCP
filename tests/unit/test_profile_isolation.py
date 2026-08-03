@@ -476,3 +476,126 @@ class TestAnalysisSessionIsolation:
 
         assert row is not None
         assert row.id == sess.id
+
+
+# ---------------------------------------------------------------------------
+# Bulk delete isolation (CRITICAL — cross-profile delete prevention)
+# ---------------------------------------------------------------------------
+
+
+class TestBulkDeleteIsolation:
+    """SessionService.delete_sessions and AnalysisFacade.delete_analysis must
+    never delete rows belonging to a different profile, even when the caller
+    supplies foreign session IDs.
+    """
+
+    async def test_delete_sessions_does_not_touch_foreign_profile(
+        self, async_db_session
+    ):
+        """Supplying a foreign session ID to delete_sessions leaves the foreign
+        row intact — only own-profile rows are deleted.
+        """
+        from snore.services.session_service import SessionService
+
+        profile_a = await _make_profile(async_db_session)
+        profile_b = await _make_profile(async_db_session)
+
+        dev_a = await _make_device(async_db_session, profile_a.id)
+        dev_b = await _make_device(async_db_session, profile_b.id)
+
+        own_sess = await _make_session(async_db_session, dev_a.id)
+        foreign_sess = await _make_session(async_db_session, dev_b.id)
+
+        svc_a = SessionService(async_db_session, profile_a.id)
+
+        # Delete both — profile_a can only delete own_sess.
+        deleted = await svc_a.delete_sessions([own_sess.id, foreign_sess.id])
+        await async_db_session.flush()
+
+        assert deleted == 1, f"Expected 1 deleted (own only); got {deleted}"
+
+        # foreign_sess must still exist.
+        surviving = await async_db_session.get(models.Session, foreign_sess.id)
+        assert surviving is not None, "Foreign session must survive bulk delete"
+
+        # own_sess must be gone.
+        gone = await async_db_session.get(models.Session, own_sess.id)
+        assert gone is None, "Own session must be deleted"
+
+    async def test_delete_sessions_foreign_only_deletes_nothing(self, async_db_session):
+        """Passing only foreign session IDs to delete_sessions returns 0 deleted."""
+        from snore.services.session_service import SessionService
+
+        profile_a = await _make_profile(async_db_session)
+        profile_b = await _make_profile(async_db_session)
+
+        dev_b = await _make_device(async_db_session, profile_b.id)
+        foreign_sess = await _make_session(async_db_session, dev_b.id)
+
+        svc_a = SessionService(async_db_session, profile_a.id)
+        deleted = await svc_a.delete_sessions([foreign_sess.id])
+        await async_db_session.flush()
+
+        assert deleted == 0, "No rows must be deleted for a fully-foreign ID list"
+
+        surviving = await async_db_session.get(models.Session, foreign_sess.id)
+        assert surviving is not None, "Foreign session must survive"
+
+    async def test_delete_analysis_does_not_touch_foreign_profile(
+        self, async_db_session
+    ):
+        """Supplying a foreign session ID to delete_analysis leaves the foreign
+        AnalysisResult intact — only own-profile rows are deleted.
+        """
+        from datetime import UTC, datetime
+
+        from snore.services.analysis_facade import AnalysisFacade
+
+        profile_a = await _make_profile(async_db_session)
+        profile_b = await _make_profile(async_db_session)
+
+        dev_a = await _make_device(async_db_session, profile_a.id)
+        dev_b = await _make_device(async_db_session, profile_b.id)
+
+        own_sess = await _make_session(async_db_session, dev_a.id)
+        foreign_sess = await _make_session(async_db_session, dev_b.id)
+
+        # Seed one AnalysisResult for each session.
+        now = datetime.now(UTC)
+        own_ar = models.AnalysisResult(
+            session_id=own_sess.id,
+            timestamp_start=own_sess.start_time,
+            timestamp_end=own_sess.end_time,
+            programmatic_result_json={},
+            processing_time_ms=0,
+            created_at=now,
+        )
+        foreign_ar = models.AnalysisResult(
+            session_id=foreign_sess.id,
+            timestamp_start=foreign_sess.start_time,
+            timestamp_end=foreign_sess.end_time,
+            programmatic_result_json={},
+            processing_time_ms=0,
+            created_at=now,
+        )
+        async_db_session.add(own_ar)
+        async_db_session.add(foreign_ar)
+        await async_db_session.flush()
+
+        facade_a = AnalysisFacade(async_db_session, profile_a.id)
+
+        # Delete both session IDs as profile_a.
+        deleted = await facade_a.delete_analysis(
+            [own_sess.id, foreign_sess.id], all_versions=True
+        )
+        await async_db_session.flush()
+
+        assert deleted == 1, f"Expected 1 deleted (own only); got {deleted}"
+
+        # Foreign AnalysisResult must survive.
+        surviving = await async_db_session.get(models.AnalysisResult, foreign_ar.id)
+        assert surviving is not None, "Foreign AnalysisResult must survive bulk delete"
+
+        # Own AnalysisResult must be gone.
+        gone = await async_db_session.get(models.AnalysisResult, own_ar.id)
+        assert gone is None, "Own AnalysisResult must be deleted"
