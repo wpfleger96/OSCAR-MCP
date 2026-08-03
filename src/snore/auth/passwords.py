@@ -2,14 +2,30 @@
 
 Uses a maintained-facade style: verification transparently rehashes with
 current parameters when the stored hash was produced with older settings.
+
+Concurrency model
+-----------------
+KDF operations (Argon2id hash and verify) run inside a dedicated
+``ThreadPoolExecutor`` with ``max_workers=4``.  The executor's own worker
+count is the admission bound — submitting more than 4 jobs queues them inside
+the executor rather than starting new threads.  Critically, this bound is owned
+by the thread doing the work, **not** by the coroutine awaiting it.  Cancelling
+an awaiting request does not release the executor slot; the thread runs to
+completion and the slot is freed when the native Argon2 operation finishes.
+This prevents an adversary from defeating the memory ceiling by issuing and
+cancelling requests faster than the semaphore can be freed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import logging
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+
+logger = logging.getLogger(__name__)
 
 # A single shared hasher with sensible defaults.
 # argon2-cffi defaults (time_cost=3, memory_cost=65536, parallelism=4) are
@@ -20,33 +36,36 @@ _hasher = PasswordHasher()
 # truncation, but we cap here to prevent DoS via enormous payloads.
 MAX_PASSWORD_BYTES = 1024
 
-# Bound concurrent KDF operations so an adversary with unique-email credentials
-# cannot trivially saturate memory by flooding the login/redeem endpoints.
-# At memory_cost=65536 (64 MiB per op), 4 concurrent ops peak at ~256 MiB.
-_KDF_SEMAPHORE = asyncio.Semaphore(4)
+# Dedicated bounded executor for KDF operations.  max_workers=4 caps
+# concurrent Argon2 ops at ~256 MiB peak memory.  The executor slot is held
+# by the running thread, not by the awaiting coroutine, so task cancellation
+# cannot free a slot while its underlying Argon2 computation is still live.
+_KDF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="snore-kdf-",
+)
 
 
 def validate_password_bytes(password: str) -> None:
-    """Raise ValueError if the password exceeds MAX_PASSWORD_BYTES when UTF-8-encoded.
+    """Raise ValueError if the password is empty or exceeds MAX_PASSWORD_BYTES encoded.
 
-    Shared by login and invite-redemption so the byte-based check is applied
-    consistently before any Argon2 operation.
+    This is the shared boundary for all KDF callers — both login and invite
+    redemption call this before any Argon2 operation.
+
+    Invariant: 1 ≤ len(password.encode()) ≤ 1024.
     """
-    if len(password.encode()) > MAX_PASSWORD_BYTES:
+    encoded_len = len(password.encode())
+    if encoded_len == 0:
+        raise ValueError("Password must be at least 1 byte")
+    if encoded_len > MAX_PASSWORD_BYTES:
         raise ValueError(f"Password must be at most {MAX_PASSWORD_BYTES} bytes encoded")
 
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password with Argon2id.
 
-    Args:
-        password: Plaintext password string.
-
-    Returns:
-        Encoded Argon2id hash string suitable for storage.
-
     Raises:
-        ValueError: If the password exceeds MAX_PASSWORD_BYTES.
+        ValueError: If the password is empty or exceeds MAX_PASSWORD_BYTES.
     """
     validate_password_bytes(password)
     return _hasher.hash(password)
@@ -56,11 +75,8 @@ def verify_password(stored_hash: str, password: str) -> tuple[bool, str | None]:
     """Verify a password against a stored Argon2id hash.
 
     Returns:
-        ``(True, new_hash)`` where ``new_hash`` is a freshly-computed hash
-        if the stored hash was produced with outdated parameters (rehash
-        policy), otherwise ``None``.
-
-        ``(False, None)`` on mismatch.
+        ``(True, new_hash)`` if the password matches (new_hash is set when
+        the stored hash used outdated parameters); ``(False, None)`` on mismatch.
     """
     try:
         _hasher.verify(stored_hash, password)
@@ -69,7 +85,6 @@ def verify_password(stored_hash: str, password: str) -> tuple[bool, str | None]:
     except (VerificationError, InvalidHashError):
         return False, None
 
-    # Rehash if the stored hash used old parameters.
     new_hash: str | None = None
     if _hasher.check_needs_rehash(stored_hash):
         new_hash = _hasher.hash(password)
@@ -78,11 +93,7 @@ def verify_password(stored_hash: str, password: str) -> tuple[bool, str | None]:
 
 
 def dummy_verify() -> None:
-    """Perform a dummy Argon2id verification to equalize timing for unknown emails.
-
-    Callers should invoke this on the missing-user branch so that
-    "email not found" and "wrong password" take roughly the same time.
-    """
+    """Perform a dummy Argon2id verification to equalize timing for unknown emails."""
     try:
         _hasher.verify(
             "$argon2id$v=19$m=65536,t=3,p=4$"
@@ -90,30 +101,33 @@ def dummy_verify() -> None:
             "dummy_password",
         )
     except Exception:
-        pass  # Expected — the hash above is invalid; the timing is what matters.
+        pass  # Expected — the hash is deliberately invalid; timing is what matters.
 
 
 # ---------------------------------------------------------------------------
-# Async wrappers — run KDF operations in a thread pool behind a semaphore so
-# Argon2 never blocks the event loop and parallel KDF calls are bounded.
+# Async wrappers — run KDF operations in the bounded _KDF_EXECUTOR so Argon2
+# never blocks the event loop.  The executor slot is owned by the thread, not
+# the awaiting coroutine, so task cancellation cannot start a 5th native op.
 # ---------------------------------------------------------------------------
 
 
 async def hash_password_async(password: str) -> str:
-    """Async wrapper for ``hash_password``; runs in a thread, bounded by semaphore."""
-    async with _KDF_SEMAPHORE:
-        return await asyncio.to_thread(hash_password, password)
+    """Hash password in the KDF executor; raises ValueError on byte-limit violation."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_KDF_EXECUTOR, hash_password, password)
 
 
 async def verify_password_async(
     stored_hash: str, password: str
 ) -> tuple[bool, str | None]:
-    """Async wrapper for ``verify_password``; runs in a thread, bounded by semaphore."""
-    async with _KDF_SEMAPHORE:
-        return await asyncio.to_thread(verify_password, stored_hash, password)
+    """Verify password in the KDF executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _KDF_EXECUTOR, verify_password, stored_hash, password
+    )
 
 
 async def dummy_verify_async() -> None:
-    """Async wrapper for ``dummy_verify``; runs in a thread, bounded by semaphore."""
-    async with _KDF_SEMAPHORE:
-        await asyncio.to_thread(dummy_verify)
+    """Run dummy Argon2 verification in the KDF executor."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(_KDF_EXECUTOR, dummy_verify)

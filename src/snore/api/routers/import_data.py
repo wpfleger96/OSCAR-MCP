@@ -8,9 +8,9 @@ import shutil
 import tempfile
 import threading
 
-from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import IO, Any
+from typing import IO
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -28,6 +28,7 @@ from snore.api.import_jobs import (
     remove_job,
     reserve_slot,
 )
+from snore.api.middleware import _ByteCeilingReceive
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
@@ -117,40 +118,6 @@ def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     _require_localhost(request)
     service = ImportService()
     return service.detect_sources(Path(body.path))
-
-
-class _ByteCeilingReceive:
-    """ASGI receive wrapper that raises 413 once the cumulative byte ceiling is hit.
-
-    Wraps ``request.receive`` so bytes are counted as multipart body chunks
-    arrive — before Starlette's form parser spools anything to temp files.
-    This is the authoritative control; the post-spool ``f.size`` sum is
-    defense-in-depth only (handles lying or absent Content-Length).
-    """
-
-    def __init__(
-        self,
-        inner: Callable[[], Awaitable[MutableMapping[str, Any]]],
-        max_bytes: int,
-    ) -> None:
-        self._inner = inner
-        self._max = max_bytes
-        self._seen = 0
-
-    async def __call__(self) -> MutableMapping[str, Any]:
-        msg = await self._inner()
-        if msg.get("type") == "http.request":
-            chunk: bytes = msg.get("body", b"")
-            self._seen += len(chunk)
-            if self._seen > self._max:
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        f"Upload exceeds the {self._max // (1024**2)} MiB "
-                        "per-upload limit"
-                    ),
-                )
-        return msg
 
 
 def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
@@ -286,10 +253,18 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
     # Wrap the ASGI receive callable with the ingress byte ceiling.
     # This raises 413 as soon as the cumulative chunk stream exceeds the
     # limit — before Starlette's multipart parser spools to temp files.
-    ceiling_receive = _ByteCeilingReceive(request.receive, max_upload_bytes)
+    ceiling_receive = _ByteCeilingReceive(
+        request.receive,
+        max_upload_bytes,
+        detail=f"Upload exceeds the {max_upload_bytes // (1024**2)} MiB per-upload limit",
+    )
     request._receive = ceiling_receive  # noqa: SLF001
 
+    # _job_cleanup: True until the job is handed to the worker.  The finally
+    # block uses this flag to decide whether to clean up the job.
+    _job_cleanup = True
     tmp: str | None = None
+
     try:
         async with request.form(max_files=max_upload_files) as form:
             uploads = [
@@ -326,10 +301,24 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                     logger.warning("Skipping file with unsafe path: %r", filename)
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                # Run copy in a thread so the event loop stays responsive.
+                # asyncio.create_task wraps the coroutine in a task that can be
+                # individually awaited; asyncio.shield lets us wait for it even
+                # under task cancellation so the copy thread runs to completion
+                # before we clean up.
+                copy_task = asyncio.create_task(
+                    asyncio.to_thread(_copy_chunked, upload.file, dest, max_file_bytes)
+                )
                 try:
-                    await asyncio.to_thread(
-                        _copy_chunked, upload.file, dest, max_file_bytes
-                    )
+                    await asyncio.shield(copy_task)
+                except asyncio.CancelledError:
+                    # Request cancelled: wait for the copy thread to finish so
+                    # cleanup doesn't race a still-running write.
+                    try:
+                        await asyncio.shield(copy_task)
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise  # propagates to finally → cleanup
                 except _FileSizeExceeded:
                     raise HTTPException(
                         status_code=413,
@@ -339,25 +328,23 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                         ),
                     ) from None
 
+        # Transfer ownership to the job; the worker will clean up on completion.
         job.temp_dir = tmp_path
         tmp = None  # Job owns the directory now.
         job.convert_to_pending()
         job.target_profile_id = actor.profile_id
-    except HTTPException:
-        # Release capacity before re-raising: job is abandoned.
-        job.try_cancel()
-        remove_job(job.job_id)
-        job.cleanup_files()
-        job.release_capacity()
-        raise
-    except Exception:
-        if tmp is not None:
-            shutil.rmtree(tmp, ignore_errors=True)
-        job.try_cancel()
-        remove_job(job.job_id)
-        job.cleanup_files()
-        job.release_capacity()
-        raise
+        _job_cleanup = False  # Worker owns the job from here.
+
+    finally:
+        # Runs on every exit: normal (no-op), HTTPException, Exception,
+        # CancelledError.  _job_cleanup is False only when the worker started.
+        if _job_cleanup:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+            job.try_cancel()
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
 
     # Derive profile-scoped backup root from actor.
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415

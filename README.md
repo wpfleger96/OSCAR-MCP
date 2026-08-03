@@ -247,11 +247,17 @@ uv run snore validate --from 2024-01-01 --to 2024-12-31
 just serve
 
 # Or start the API server directly (serves UI if already built)
-uv run snore serve                                    # Default: localhost:8000
-uv run snore serve --host 0.0.0.0 --port 5000 --reload  # binds to all interfaces — auth not yet implemented
+uv run snore serve                              # Default: local mode, 127.0.0.1:8000
+uv run snore serve --host 127.0.0.1 --port 8000 --reload  # explicit loopback
 
 # Web UI at http://localhost:8000, API docs at http://localhost:8000/docs
 ```
+
+> **Deployment note:** `snore serve` is the supported network launcher.  In
+> **local mode** (`SNORE_AUTH_MODE=local`, the default), the server refuses to
+> bind to a non-loopback address.  Use **multiuser mode** for any network
+> deployment; set `SNORE_AUTH_MODE=multiuser`, `SNORE_SESSION_SECRET`, and
+> `SNORE_PUBLIC_BASE_URL`.  See `local.just` for the `dev-auth` recipe.
 
 ### 9. Shell Completions
 

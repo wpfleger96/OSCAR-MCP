@@ -134,22 +134,53 @@ class RateLimitStore:
         self._lock = threading.Lock()
 
     def check_and_record(self, ip: str) -> bool:
-        """Return True (allowed) or False (rate-limited); records allowed requests."""
+        """Return True (allowed) or False (rate-limited); records allowed requests.
+
+        Before applying the capacity ceiling, performs a bounded purge of
+        expired and empty IP entries so the table recovers from saturation
+        when old tracking windows close.  This prevents the table from filling
+        permanently and thereafter allowing every new IP untracked forever.
+        """
         now = time.monotonic()
         cutoff = now - self._window
         with self._lock:
             if ip not in self._entries:
                 if len(self._entries) >= self._max_ips:
-                    # Table full — allow without tracking.
+                    # Try to reclaim stale entries before declaring the table full.
+                    self._purge_stale(cutoff, budget=64)
+                if len(self._entries) >= self._max_ips:
+                    # Still at capacity — allow without tracking rather than
+                    # becoming a DoS amplifier.
                     return True
                 self._entries[ip] = deque()
             times = self._entries[ip]
+            # Prune expired timestamps from this IP's window.
             while times and times[0] < cutoff:
                 times.popleft()
             if len(times) >= self._max:
                 return False
             times.append(now)
             return True
+
+    def _purge_stale(self, cutoff: float, budget: int) -> None:
+        """Evict IPs whose tracking windows have fully expired.
+
+        Only examines up to ``budget`` entries to bound per-call work.  Must
+        be called with ``_lock`` held.
+        """
+        stale: list[str] = []
+        examined = 0
+        for ip_key, times in self._entries.items():
+            if examined >= budget:
+                break
+            examined += 1
+            # Prune the deque in place.
+            while times and times[0] < cutoff:
+                times.popleft()
+            if not times:
+                stale.append(ip_key)
+        for ip_key in stale:
+            del self._entries[ip_key]
 
 
 _rate_limit_store = RateLimitStore()

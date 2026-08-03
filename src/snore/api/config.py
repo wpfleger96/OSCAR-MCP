@@ -18,6 +18,9 @@ Environment variables
     Required in multiuser mode.  Must be a loopback HTTP URL or any HTTPS
     URL.  Drives the ``Secure`` cookie attribute and CSRF origin check.
     Example: ``http://127.0.0.1:8000`` (dev-auth) or ``https://snore.example.com``.
+    Must not contain userinfo, path, query string, fragment, or an invalid/out-
+    of-range port — these would cause the configured origin to disagree with
+    the ``Origin`` header browsers actually send.
 
 ``SNORE_BIND_HOST``
     The host uvicorn binds to (default ``"127.0.0.1"``).  Startup refuses
@@ -31,7 +34,8 @@ Environment variables
 ``SNORE_DEV_ORIGINS``
     Comma-separated list of additional origins allowed by the CSRF middleware.
     For development only (e.g. ``http://localhost:5173`` when the Vite dev
-    server runs on a separate port).  Never set in production.
+    server runs on a separate port).  Every entry is validated at startup;
+    malformed entries raise ``ConfigError``.  Never set in production.
 
 ``SNORE_MAX_UPLOAD_BYTES``
     Per-upload ingress byte ceiling, enforced in the ASGI receive stream before
@@ -65,6 +69,33 @@ class ConfigError(ValueError):
     """Raised when the application configuration is invalid."""
 
 
+def parse_origin(url: str) -> tuple[str, str, int] | None:
+    """Parse ``url`` to a canonical ``(scheme, host, effective_port)`` tuple.
+
+    Returns ``None`` when the URL cannot be parsed to a valid origin.  Never
+    raises — invalid inputs produce ``None`` so callers get consistent
+    comparison semantics.
+
+    This is the single origin-parsing function used by config validation, the
+    CSRF middleware, and dev-origin pre-parsing so all three work from the same
+    algorithm.
+    """
+    try:
+        p = urlparse(url)
+        scheme = p.scheme.lower()
+        host = (p.hostname or "").lower()
+        if not scheme or not host:
+            return None
+        port = p.port  # raises ValueError on malformed port text
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        if not 1 <= port <= 65535:
+            return None
+        return (scheme, host, port)
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Immutable application configuration."""
@@ -72,9 +103,12 @@ class AppConfig:
     auth_mode: AuthMode
     session_secret: str  # Empty string in local mode; required in multiuser.
     public_base_url: str  # Validated URL or empty string in local mode.
+    public_origin: (
+        tuple[str, str, int] | None
+    )  # Parsed once at load; None in local mode.
     bind_host: str
     trusted_proxies: frozenset[str]
-    dev_origins: frozenset[str]  # Extra CSRF-allowed origins (dev only; empty in prod).
+    dev_origins: frozenset[tuple[str, str, int]]  # Pre-parsed; validated at startup.
     # Upload / job resource bounds
     max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
@@ -86,42 +120,23 @@ class AppConfig:
         return self.auth_mode is AuthMode.MULTIUSER
 
     @property
-    def public_origin(self) -> tuple[str, str, int] | None:
-        """Parsed ``(scheme, host, effective_port)`` from ``public_base_url``.
-
-        Returns ``None`` in local mode (no base URL configured).  The port is
-        the explicit value or the scheme default (443 for https, 80 for http).
-        Used by the CSRF middleware for exact-origin comparison.
-        """
-        if not self.public_base_url:
-            return None
-        parsed = urlparse(self.public_base_url)
-        scheme = parsed.scheme.lower()
-        host = (parsed.hostname or "").lower()
-        port = parsed.port
-        if port is None:
-            port = 443 if scheme == "https" else 80
-        return (scheme, host, port)
-
-    @property
     def secure_cookie(self) -> bool:
         """True when the public base URL is HTTPS (non-loopback).
 
-        ``Secure`` is off only when the validated public base URL is a
-        loopback HTTP URL — i.e. ``just dev-auth`` over plain local HTTP.
-        Any non-loopback public URL must be HTTPS and forces ``Secure``.
+        Derives from the pre-parsed ``public_origin`` field so the same parsed
+        value is used for both cookie attributes and CSRF comparison.
+        ``Secure`` is off only for loopback HTTP (``just dev-auth`` over plain
+        local HTTP); any non-loopback public URL must be HTTPS.
         """
-        if not self.public_base_url:
+        if self.public_origin is None:
             return False
-        parsed = urlparse(self.public_base_url)
-        if parsed.scheme == "https":
+        scheme, host, _ = self.public_origin
+        if scheme == "https":
             return True
         # HTTP is allowed only for loopback.
-        host = parsed.hostname or ""
         try:
             return not ipaddress.ip_address(host).is_loopback
         except ValueError:
-            # Non-numeric host (e.g. "localhost") — treat as loopback-safe.
             return host not in ("localhost", "localhost.localdomain")
 
 
@@ -156,8 +171,20 @@ def load_config(
     raw_proxies = os.environ.get("SNORE_TRUSTED_PROXIES", "")
     trusted_proxies = frozenset(p.strip() for p in raw_proxies.split(",") if p.strip())
 
+    # Parse and validate dev origins at startup; malformed entries are a ConfigError.
     raw_dev = os.environ.get("SNORE_DEV_ORIGINS", "")
-    dev_origins = frozenset(o.strip() for o in raw_dev.split(",") if o.strip())
+    dev_origins: set[tuple[str, str, int]] = set()
+    for raw_origin in raw_dev.split(","):
+        raw_origin = raw_origin.strip()
+        if not raw_origin:
+            continue
+        parsed_origin = parse_origin(raw_origin)
+        if parsed_origin is None:
+            raise ConfigError(
+                f"SNORE_DEV_ORIGINS contains an invalid origin: {raw_origin!r}. "
+                "Expected format: http://hostname or https://hostname[:port]"
+            )
+        dev_origins.add(parsed_origin)
 
     # Resource bounds — read with safe int parsing.
     try:
@@ -196,6 +223,7 @@ def load_config(
     if max_jobs_global <= 0:
         raise ConfigError("SNORE_MAX_JOBS_GLOBAL must be a positive integer")
 
+    public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:
         if not session_secret:
             raise ConfigError(
@@ -212,6 +240,14 @@ def load_config(
                 "Example: http://127.0.0.1:8000 or https://snore.example.com"
             )
         _validate_public_base_url(public_base_url)
+        # Parse once; all consumers (CSRF, secure_cookie) use this value.
+        public_origin = parse_origin(public_base_url)
+        if public_origin is None:
+            # _validate_public_base_url passed, so this should not happen.
+            raise ConfigError(
+                f"SNORE_PUBLIC_BASE_URL {public_base_url!r} could not be parsed "
+                "to a canonical origin — unexpected internal error"
+            )
 
     if auth_mode is AuthMode.LOCAL:
         # Refuse local mode on a non-loopback bind — it would expose the
@@ -236,9 +272,10 @@ def load_config(
         auth_mode=auth_mode,
         session_secret=session_secret,
         public_base_url=public_base_url,
+        public_origin=public_origin,
         bind_host=bind_host,
         trusted_proxies=trusted_proxies,
-        dev_origins=dev_origins,
+        dev_origins=frozenset(dev_origins),
         max_upload_bytes=max_upload_bytes,
         max_file_bytes=max_file_bytes,
         max_jobs_per_user=max_jobs_per_user,
@@ -249,8 +286,9 @@ def load_config(
 def _validate_public_base_url(url: str) -> None:
     """Raise ConfigError if ``url`` is not a valid loopback HTTP or HTTPS URL.
 
-    Rejects userinfo, path, query string, and fragment so that the value can
-    be used as a canonical origin for CSRF comparison without ambiguity.
+    Rejects userinfo, path, query string, fragment, malformed ports, and
+    out-of-range ports (0 or >65535) so that the value can be used as a
+    canonical origin without ambiguity.
     """
     try:
         parsed = urlparse(url)
@@ -266,14 +304,13 @@ def _validate_public_base_url(url: str) -> None:
     if not host:
         raise ConfigError("SNORE_PUBLIC_BASE_URL must include a host")
 
-    # Reject userinfo (username/password in the URL) — it would make the
-    # configured origin disagree with the Origin header browsers send.
+    # Reject userinfo (username/password in the URL).
     if parsed.username or parsed.password:
         raise ConfigError(
             "SNORE_PUBLIC_BASE_URL must not contain userinfo (user:pass@host)"
         )
 
-    # Reject path, query, and fragment for the same reason.
+    # Reject path, query, and fragment.
     if parsed.path not in ("", "/"):
         raise ConfigError(
             f"SNORE_PUBLIC_BASE_URL must not include a path, got {parsed.path!r}"
@@ -282,6 +319,14 @@ def _validate_public_base_url(url: str) -> None:
         raise ConfigError("SNORE_PUBLIC_BASE_URL must not include a query string")
     if parsed.fragment:
         raise ConfigError("SNORE_PUBLIC_BASE_URL must not include a fragment")
+
+    # Validate port — reject malformed text and out-of-range values.
+    try:
+        port = parsed.port  # raises ValueError for non-numeric port text
+    except ValueError as exc:
+        raise ConfigError(f"SNORE_PUBLIC_BASE_URL has an invalid port: {exc}") from exc
+    if port is not None and not (1 <= port <= 65535):
+        raise ConfigError(f"SNORE_PUBLIC_BASE_URL port must be 1–65535, got {port}")
 
     if parsed.scheme == "http":
         # HTTP is only allowed for loopback addresses.

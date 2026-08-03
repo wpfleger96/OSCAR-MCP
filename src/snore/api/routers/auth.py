@@ -37,10 +37,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.api.client_ip import get_client_ip
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth
 from snore.auth.actor import ActorContext
@@ -100,35 +101,37 @@ async def _opportunistic_purge_oauth_attempts(db: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _client_ip(request: Request) -> str:
-    """Return the trusted client IP for lockout keying.
-
-    Respects ``SNORE_TRUSTED_PROXIES``: if the immediate peer is in the
-    trusted list, prefer ``cf-connecting-ip``.  Otherwise use the peer IP.
-    """
-    from snore.api.config import get_config  # noqa: PLC0415
-
-    peer = request.client.host if request.client else "unknown"
-    cfg = get_config()
-    if peer in cfg.trusted_proxies:
-        forwarded = request.headers.get("cf-connecting-ip", "").strip()
-        if forwarded:
-            return forwarded
-    return peer
-
-
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
 
+# Conservative character bounds on model fields so Pydantic rejects oversized
+# inputs before the byte validator runs.  The auth body ceiling in
+# CsrfMiddleware (_AUTH_BODY_LIMIT) is the first resource boundary; these
+# model limits are the second.
+_EMAIL_MAX_LEN = 254  # RFC 5321 maximum email length
+_PASSWORD_MAX_CHARS = (
+    4096  # Conservative char cap; byte validator refines to 1024 bytes
+)
+_TOKEN_MAX_LEN = 256  # Invite tokens are 43-char URL-safe base64; cap with margin
+
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: Annotated[str, StringConstraints(max_length=_EMAIL_MAX_LEN)]
+    password: Annotated[str, StringConstraints(max_length=_PASSWORD_MAX_CHARS)]
 
 
-class RedeemRequest(BaseModel):
-    password: str
+class InviteLookupRequest(BaseModel):
+    """Invite lookup — token in request body, never in the URL path."""
+
+    token: Annotated[str, StringConstraints(max_length=_TOKEN_MAX_LEN)]
+
+
+class InviteRedeemRequest(BaseModel):
+    """Invite redemption — both token and password in request body."""
+
+    token: Annotated[str, StringConstraints(max_length=_TOKEN_MAX_LEN)]
+    password: Annotated[str, StringConstraints(max_length=_PASSWORD_MAX_CHARS)]
 
 
 class ActiveProfileRequest(BaseModel):
@@ -181,7 +184,7 @@ async def login(
     cfg = get_config()
     lockout = get_lockout_store()
     canonical = body.email.lower().strip()
-    ip = _client_ip(request)
+    ip = get_client_ip(request)
 
     # Validate password byte length before any DB work or KDF.
     try:
@@ -378,20 +381,24 @@ async def set_active_profile(
     return response
 
 
-@router.get("/invites/{token}", response_model=InviteInfoResponse)
+@router.post("/invites/lookup", response_model=InviteInfoResponse)
 async def lookup_invite(
-    token: str,
     request: Request,
+    body: InviteLookupRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
-    """Return invite metadata (email, valid) for a given token.
+    """Return invite metadata (email, valid) for a token submitted in the request body.
 
-    The token itself is never echoed in the response.
-    Rate-limited by per-IP lockout to slow down token enumeration.
+    The token is never echoed in the response and never appears in the URL path
+    so it does not enter access logs.  The invite URL printed by
+    ``snore user invite`` carries the token in a URL fragment
+    (``/invite#<token>``) so the UI extracts it client-side and POST it here.
+
+    Rate-limited by per-IP lockout to slow down token probing.
     """
-    ip = _client_ip(request)
+    ip = get_client_ip(request)
     lockout = get_lockout_store()
-    token_hash = _hash_invite_token(token)
+    token_hash = _hash_invite_token(body.token)
 
     # Rate limit per (token_hash, IP): slow down repeated probing of the same
     # token while the RateLimitMiddleware handles cross-token IP enumeration.
@@ -428,18 +435,20 @@ async def lookup_invite(
     )
 
 
-@router.post("/invites/{token}/redeem", response_model=MessageResponse)
+@router.post("/invites/redeem", response_model=MessageResponse)
 async def redeem_invite_route(
-    token: str,
     request: Request,
-    body: RedeemRequest,
+    body: InviteRedeemRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Redeem an invite with a password — create user + profile atomically.
 
-    The full password-signup state machine:
-    1. Validate the invite (token hash lookup, not expired/revoked/redeemed).
-    2. Validate the password byte length.
+    Both token and password are in the request body so neither appears in the
+    URL path or access logs.  SNORE_MULTIUSER_PLAN.md:233 (secret hygiene).
+
+    State machine:
+    1. Validate the password byte length (shared byte-based validator).
+    2. Validate the invite (token hash lookup, not expired/revoked/redeemed).
     3. In one transaction via ``run_txn``:
        - Consume the invite (conditional UPDATE — race-safe).
        - Create the User row with Argon2id password hash.
@@ -452,21 +461,16 @@ async def redeem_invite_route(
     from snore.api.config import get_config  # noqa: PLC0415
 
     cfg = get_config()
-    ip = _client_ip(request)
+    ip = get_client_ip(request)
     lockout = get_lockout_store()
-    token_hash = _hash_invite_token(token)
+    token_hash = _hash_invite_token(body.token)
 
-    # Rate limit per (token_hash, IP): slow down repeated redeem attempts on
-    # the same token.  The RateLimitMiddleware handles cross-token enumeration.
+    # Rate limit per (token_hash, IP).
     if lockout.is_locked(token_hash, ip):
         raise HTTPException(status_code=429, detail="Too many requests")
 
     # Validate password byte length using the shared byte-based validator.
-    if not body.password:
-        lockout.record_failure(token_hash, ip)
-        raise HTTPException(
-            status_code=422, detail="Password must be 1–1024 bytes encoded"
-        )
+    # validate_password_bytes also rejects empty passwords (invariant: 1–1024 bytes).
     try:
         validate_password_bytes(body.password)
     except ValueError:

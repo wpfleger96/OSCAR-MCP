@@ -84,29 +84,34 @@ export interface paths {
         patch?: never
         trace?: never
     }
-    '/api/v1/auth/invites/{token}': {
+    '/api/v1/auth/invites/lookup': {
         parameters: {
             query?: never
             header?: never
             path?: never
             cookie?: never
         }
+        get?: never
+        put?: never
         /**
          * Lookup Invite
-         * @description Return invite metadata (email, valid) for a given token.
+         * @description Return invite metadata (email, valid) for a token submitted in the request body.
          *
-         *     The token itself is never echoed in the response.
+         *     The token is never echoed in the response and never appears in the URL path
+         *     so it does not enter access logs.  The invite URL printed by
+         *     ``snore user invite`` carries the token in a URL fragment
+         *     (``/invite#<token>``) so the UI extracts it client-side and POST it here.
+         *
+         *     Rate-limited by per-IP lockout to slow down token probing.
          */
-        get: operations['lookup_invite_api_v1_auth_invites__token__get']
-        put?: never
-        post?: never
+        post: operations['lookup_invite_api_v1_auth_invites_lookup_post']
         delete?: never
         options?: never
         head?: never
         patch?: never
         trace?: never
     }
-    '/api/v1/auth/invites/{token}/redeem': {
+    '/api/v1/auth/invites/redeem': {
         parameters: {
             query?: never
             header?: never
@@ -119,9 +124,12 @@ export interface paths {
          * Redeem Invite Route
          * @description Redeem an invite with a password — create user + profile atomically.
          *
-         *     The full password-signup state machine:
-         *     1. Validate the invite (token hash lookup, not expired/revoked/redeemed).
-         *     2. Validate the password length.
+         *     Both token and password are in the request body so neither appears in the
+         *     URL path or access logs.  SNORE_MULTIUSER_PLAN.md:233 (secret hygiene).
+         *
+         *     State machine:
+         *     1. Validate the password byte length (shared byte-based validator).
+         *     2. Validate the invite (token hash lookup, not expired/revoked/redeemed).
          *     3. In one transaction via ``run_txn``:
          *        - Consume the invite (conditional UPDATE — race-safe).
          *        - Create the User row with Argon2id password hash.
@@ -131,7 +139,7 @@ export interface paths {
          *
          *     Fails generically on any invite problem (no oracle attack on state).
          */
-        post: operations['redeem_invite_route_api_v1_auth_invites__token__redeem_post']
+        post: operations['redeem_invite_route_api_v1_auth_invites_redeem_post']
         delete?: never
         options?: never
         head?: never
@@ -1887,6 +1895,24 @@ export interface components {
             /** Valid */
             valid: boolean
         }
+        /**
+         * InviteLookupRequest
+         * @description Invite lookup — token in request body, never in the URL path.
+         */
+        InviteLookupRequest: {
+            /** Token */
+            token: string
+        }
+        /**
+         * InviteRedeemRequest
+         * @description Invite redemption — both token and password in request body.
+         */
+        InviteRedeemRequest: {
+            /** Token */
+            token: string
+            /** Password */
+            password: string
+        }
         /** JobResponse */
         JobResponse: {
             /** Job Id */
@@ -2150,11 +2176,6 @@ export interface components {
              * @description Baseline flow before event (L/min)
              */
             baseline_flow: number
-        }
-        /** RedeemRequest */
-        RedeemRequest: {
-            /** Password */
-            password: string
         }
         /** RenameProfileRequest */
         RenameProfileRequest: {
@@ -2913,16 +2934,18 @@ export interface operations {
             }
         }
     }
-    lookup_invite_api_v1_auth_invites__token__get: {
+    lookup_invite_api_v1_auth_invites_lookup_post: {
         parameters: {
             query?: never
             header?: never
-            path: {
-                token: string
-            }
+            path?: never
             cookie?: never
         }
-        requestBody?: never
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['InviteLookupRequest']
+            }
+        }
         responses: {
             /** @description Successful Response */
             200: {
@@ -2944,18 +2967,16 @@ export interface operations {
             }
         }
     }
-    redeem_invite_route_api_v1_auth_invites__token__redeem_post: {
+    redeem_invite_route_api_v1_auth_invites_redeem_post: {
         parameters: {
             query?: never
             header?: never
-            path: {
-                token: string
-            }
+            path?: never
             cookie?: never
         }
         requestBody: {
             content: {
-                'application/json': components['schemas']['RedeemRequest']
+                'application/json': components['schemas']['InviteRedeemRequest']
             }
         }
         responses: {

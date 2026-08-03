@@ -473,11 +473,11 @@ class TestCSRFOriginCheck:
         assert resp.status_code == 200
 
     def test_redeem_invite_wrong_origin_rejected(self, async_db_session):
-        """POST /auth/invites/{token}/redeem with wrong Origin → 403."""
+        """POST /auth/invites/redeem with wrong Origin → 403."""
         client = _make_multiuser_client(async_db_session)
         resp = client.post(
-            "/api/v1/auth/invites/sometoken/redeem",
-            json={"password": "password123"},
+            "/api/v1/auth/invites/redeem",
+            json={"token": "sometoken", "password": "password123"},
             headers={"origin": "https://evil.example.com"},
         )
         assert resp.status_code == 403
@@ -665,7 +665,11 @@ class TestInviteLifecycle:
             app.dependency_overrides[get_db] = _override_db
             app.dependency_overrides[get_actor] = _override_actor
             client = TestClient(app, raise_server_exceptions=True)
-            resp = client.get(f"/api/v1/auth/invites/{token}")
+            resp = client.post(
+                "/api/v1/auth/invites/lookup",
+                json={"token": token},
+                headers={"origin": "http://127.0.0.1:8000"},
+            )
 
         await engine.dispose()
 
@@ -734,8 +738,8 @@ class TestInviteLifecycle:
             app.dependency_overrides[get_actor] = _override_actor
             client = TestClient(app, raise_server_exceptions=True)
             resp = client.post(
-                f"/api/v1/auth/invites/{token}/redeem",
-                json={"password": "securepassword"},
+                "/api/v1/auth/invites/redeem",
+                json={"token": token, "password": "securepassword"},
                 headers={"origin": "http://127.0.0.1:8000"},
             )
 
@@ -806,8 +810,8 @@ class TestInviteLifecycle:
             app.dependency_overrides[get_actor] = _override_actor
             client = TestClient(app, raise_server_exceptions=True)
             resp = client.post(
-                f"/api/v1/auth/invites/{token}/redeem",
-                json={"password": "newpassword"},
+                "/api/v1/auth/invites/redeem",
+                json={"token": token, "password": "newpassword"},
                 headers={"origin": "http://127.0.0.1:8000"},
             )
 
@@ -878,8 +882,8 @@ class TestInviteLifecycle:
             app.dependency_overrides[get_actor] = _override_actor
             client = TestClient(app, raise_server_exceptions=True)
             resp = client.post(
-                f"/api/v1/auth/invites/{token}/redeem",
-                json={"password": "a-secure-password-123"},
+                "/api/v1/auth/invites/redeem",
+                json={"token": token, "password": "a-secure-password-123"},
                 headers={"origin": "http://127.0.0.1:8000"},
             )
 

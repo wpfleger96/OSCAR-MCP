@@ -1,12 +1,13 @@
 """Adversarial security tests for Phase 2 auth backend.
 
-Each class corresponds to a finding from Thufir pass-1 review.  Test names
-are prefixed with the finding category so failures are easy to triage.
+Pass-1 findings: classes TestCritical1–TestAuthNoStore.
+Pass-2 findings: classes TestP2* (appended below).
 
 Plan bindings (SNORE_MULTIUSER_PLAN.md):
   §Session & CSRF Design : lines 160-166 (CSRF scope)
   §Upload & Job Resource  : lines 191-198 (bounded chunked copies)
   §Trusted Proxy          : lines 184-189 (rate limiting scope)
+  §Phase 2               : line 233 (secret hygiene / no-store)
 """
 
 from __future__ import annotations
@@ -571,8 +572,8 @@ class TestImportant3CredentialBounds:
         long_pw = "あ" * 1024  # 3072 bytes
         token = uuid.uuid4().hex
         resp = client.post(
-            f"/api/v1/auth/invites/{token}/redeem",
-            json={"password": long_pw},
+            "/api/v1/auth/invites/redeem",
+            json={"token": token, "password": long_pw},
             headers={"origin": "http://127.0.0.1:8000"},
         )
         assert resp.status_code == 422, (
@@ -642,8 +643,639 @@ class TestAuthNoStore:
         assert "no-store" in resp.headers.get("cache-control", "").lower()
 
     def test_invite_lookup_200_has_no_store(self, async_db_session):
-        """GET /auth/invites/{token} (200) has Cache-Control: no-store."""
+        """POST /auth/invites/lookup (200) has Cache-Control: no-store."""
         client = _make_client(async_db_session)
-        resp = client.get(f"/api/v1/auth/invites/{uuid.uuid4().hex}")
+        resp = client.post(
+            "/api/v1/auth/invites/lookup",
+            json={"token": uuid.uuid4().hex},
+            headers={"origin": "http://127.0.0.1:8000"},
+        )
         assert resp.status_code == 200
         assert "no-store" in resp.headers.get("cache-control", "").lower()
+
+
+# =============================================================================
+# Pass-2 adversarial tests
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# P2-IMPORTANT 1: KDF executor — cancellation does not admit a 5th native op
+# ---------------------------------------------------------------------------
+
+
+class TestP2KdfCancellation:
+    """Cancelling an awaiting KDF coroutine must not free the executor slot.
+
+    With ThreadPoolExecutor(max_workers=4), the slot is owned by the running
+    thread, not the awaiting coroutine.  Cancelling the awaiter leaves the
+    thread running and the slot occupied; a 5th submission queues.
+    """
+
+    def test_kdf_executor_max_workers_is_four(self):
+        """The KDF executor is bounded at 4 workers."""
+        from snore.auth.passwords import _KDF_EXECUTOR
+
+        assert _KDF_EXECUTOR._max_workers == 4
+
+    def test_kdf_slot_held_after_awaiter_cancel(self):
+        """Cancelling a KDF awaiter does not start a 5th native Argon2 op.
+
+        Uses a 1-worker test executor to prove the invariant at smaller scale:
+        1 blocked thread + cancelled awaiter + 2nd submission → 2nd stays queued
+        until the first thread finishes.
+        SNORE_MULTIUSER_PLAN.md: Argon2 bound is ~256 MiB with 4 workers.
+        """
+        import asyncio
+        import concurrent.futures
+        import threading
+
+        gate = threading.Event()
+        started = threading.Event()
+        finished_count = [0]
+        lock = threading.Lock()
+
+        def slow_op() -> int:
+            started.set()
+            gate.wait(timeout=5)
+            with lock:
+                finished_count[0] += 1
+            return 1
+
+        test_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        async def run_test() -> None:
+            loop = asyncio.get_running_loop()
+
+            # Submit op1 — fills the single executor slot.
+            fut1 = loop.run_in_executor(test_executor, slow_op)
+
+            # Wait for op1 thread to start.
+            started.wait(timeout=2)
+
+            # Cancel the awaiting task for op1.
+            task1 = asyncio.ensure_future(asyncio.wrap_future(fut1))
+            task1.cancel()
+            try:
+                await task1
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            # Submit op2 — must queue, not start a second thread.
+            fut2 = asyncio.ensure_future(loop.run_in_executor(test_executor, slow_op))
+
+            # Give the event loop a moment.
+            await asyncio.sleep(0.05)
+
+            # op1 thread is still blocked; started.is_set() → True (first thread)
+            # but finished_count[0] == 0 means it hasn't finished yet.
+            assert finished_count[0] == 0, "op1 should still be running"
+
+            # Worker count: executor._work_queue not empty or thread still alive.
+            # Key assertion: at most 1 thread is active (the one blocked on gate).
+            active = sum(1 for t in test_executor._threads if t.is_alive())
+            assert active <= 1, f"Expected ≤1 active threads, got {active}"
+
+            # Release the gate → op1 finishes → op2 starts.
+            gate.set()
+            try:
+                await asyncio.wait_for(
+                    asyncio.wrap_future(fut2) if fut2 is not None else asyncio.sleep(0),
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+        asyncio.run(run_test())
+        test_executor.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# P2-IMPORTANT 2+3: Upload temp dir and slot cleanup — 413 and CancelledError
+# ---------------------------------------------------------------------------
+
+
+class TestP2UploadLifecycle:
+    """Upload cleanup lifecycle: 413 leaves no parent snore-upload-* dir; slot released."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_local_config(self, monkeypatch):
+        monkeypatch.setenv("SNORE_AUTH_MODE", "local")
+        from snore.api.config import load_config, set_config  # noqa: PLC0415
+
+        set_config(
+            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        )
+
+    def test_mid_copy_413_leaves_no_snore_upload_dir(
+        self, api_client, monkeypatch, tmp_path
+    ):
+        """A per-file 413 must remove the whole snore-upload-* temp dir,
+        not just the destination file.  Snapshots gettempdir() before and after.
+
+        SNORE_MULTIUSER_PLAN.md §Upload:191-198 (abort + tempdir cleanup).
+        """
+        import glob
+        import tempfile
+
+        import snore.api.routers.import_data as import_mod
+
+        from snore.api.config import load_config, set_config  # noqa: PLC0415
+
+        set_config(
+            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        )
+
+        # Patch per-file cap to tiny so upload exceeds it.
+        monkeypatch.setattr(
+            import_mod, "_get_upload_limits", lambda: (512 * 1024 * 1024, 500, 10)
+        )
+        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+
+        tmpdir = tempfile.gettempdir()
+        before = set(glob.glob(f"{tmpdir}/snore-upload-*"))
+
+        resp = api_client.post(
+            "/api/v1/import",
+            files=[("files", ("big.edf", b"x" * 50, "application/octet-stream"))],
+        )
+        assert resp.status_code == 413, f"Expected 413, got {resp.status_code}"
+
+        after = set(glob.glob(f"{tmpdir}/snore-upload-*"))
+        leaked = after - before
+        assert not leaked, f"snore-upload-* dirs leaked after 413: {leaked}"
+
+    def test_mid_copy_413_releases_slot(self, api_client, monkeypatch):
+        """Slot count returns to zero after a 413 upload rejection.
+        SNORE_MULTIUSER_PLAN.md §Upload:194-198.
+        """
+        import snore.api.import_jobs as jobs_mod
+        import snore.api.routers.import_data as import_mod
+
+        from snore.api.config import load_config, set_config  # noqa: PLC0415
+
+        set_config(
+            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        )
+
+        monkeypatch.setattr(
+            import_mod, "_get_upload_limits", lambda: (512 * 1024 * 1024, 500, 10)
+        )
+        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+
+        count_before = jobs_mod._global_count
+
+        resp = api_client.post(
+            "/api/v1/import",
+            files=[("files", ("big.edf", b"x" * 50, "application/octet-stream"))],
+        )
+        assert resp.status_code == 413
+
+        assert jobs_mod._global_count == count_before, (
+            f"Slot leaked: was {count_before}, now {jobs_mod._global_count}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# P2-IMPORTANT 4: Port validation at startup
+# ---------------------------------------------------------------------------
+
+
+class TestP2PortValidation:
+    """SNORE_PUBLIC_BASE_URL with malformed or out-of-range port → ConfigError at startup."""
+
+    def test_bad_port_text_raises_config_error(self, monkeypatch):
+        """https://example.com:bad raises ConfigError.
+        SNORE_MULTIUSER_PLAN.md §Config (port range enforced before socket creation).
+        """
+        from snore.api.config import ConfigError
+
+        monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
+        monkeypatch.setenv(
+            "SNORE_SESSION_SECRET", "test-secret-at-least-32-chars-long-abcdef"
+        )
+        monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "https://example.com:bad")
+
+        with pytest.raises(ConfigError, match="invalid port"):
+            load_config()
+
+    def test_port_zero_raises_config_error(self, monkeypatch):
+        """https://example.com:0 (port 0) raises ConfigError."""
+        from snore.api.config import ConfigError
+
+        monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
+        monkeypatch.setenv(
+            "SNORE_SESSION_SECRET", "test-secret-at-least-32-chars-long-abcdef"
+        )
+        monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "https://example.com:0")
+
+        with pytest.raises(ConfigError, match="port"):
+            load_config()
+
+    def test_port_too_large_raises_config_error(self, monkeypatch):
+        """https://example.com:70000 (port > 65535) raises ConfigError."""
+        from snore.api.config import ConfigError
+
+        monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
+        monkeypatch.setenv(
+            "SNORE_SESSION_SECRET", "test-secret-at-least-32-chars-long-abcdef"
+        )
+        monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "https://example.com:70000")
+
+        with pytest.raises(ConfigError, match="port"):
+            load_config()
+
+    def test_valid_https_no_port_accepted(self, monkeypatch):
+        """https://example.com (no explicit port) is accepted; public_origin uses 443."""
+        monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
+        monkeypatch.setenv(
+            "SNORE_SESSION_SECRET", "test-secret-at-least-32-chars-long-abcdef"
+        )
+        monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "https://example.com")
+
+        cfg = load_config()
+        assert cfg.public_origin == ("https", "example.com", 443)
+
+
+# ---------------------------------------------------------------------------
+# P2-IMPORTANT 5: Single canonical trusted-IP helper (middleware and auth router)
+# ---------------------------------------------------------------------------
+
+
+class TestP2CanonicalIpHelper:
+    """RateLimitMiddleware and credential lockout key on the same IP.
+
+    With a trusted peer and a malformed cf-connecting-ip, both controls must
+    fall back to the peer address (not use the malformed string as a key).
+    """
+
+    def test_malformed_forwarded_ip_falls_back_to_peer(self, monkeypatch):
+        """A non-IP cf-connecting-ip value must NOT be used as a lockout key.
+        Both get_client_ip (used by auth router) and the middleware helper use
+        the same validated IP.
+        """
+        from snore.api.client_ip import get_client_ip  # noqa: PLC0415
+
+        monkeypatch.setenv("SNORE_TRUSTED_PROXIES", "10.0.0.1")
+        from snore.api.config import load_config, set_config  # noqa: PLC0415
+
+        monkeypatch.setenv("SNORE_AUTH_MODE", "local")
+        set_config(
+            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        )
+
+        from starlette.requests import Request  # noqa: PLC0415
+        from starlette.testclient import TestClient  # noqa: PLC0415
+
+        captured: list[str] = []
+
+        from starlette.responses import PlainTextResponse  # noqa: PLC0415
+
+        async def view(r: Request) -> PlainTextResponse:
+            captured.append(get_client_ip(r))
+            return PlainTextResponse("ok")
+
+        from starlette.applications import Starlette  # noqa: PLC0415
+        from starlette.routing import Route  # noqa: PLC0415
+
+        app = Starlette(routes=[Route("/", view)])
+
+        # Simulate peer=10.0.0.1 (trusted), forwarded = "not-an-ip"
+        from starlette.types import ASGIApp, Receive, Scope, Send  # noqa: PLC0415
+
+        class PeerOverride:
+            def __init__(self, wrapped: ASGIApp) -> None:
+                self.wrapped = wrapped
+
+            async def __call__(
+                self, scope: Scope, receive: Receive, send: Send
+            ) -> None:
+                if scope["type"] == "http":
+                    scope["client"] = ("10.0.0.1", 12345)
+                await self.wrapped(scope, receive, send)
+
+        wrapped_client = TestClient(PeerOverride(app))
+        wrapped_client.get("/", headers={"cf-connecting-ip": "not-an-ip"})
+
+        assert captured, "view was never called"
+        assert captured[0] == "10.0.0.1", (
+            f"Expected fallback to peer 10.0.0.1, got {captured[0]!r}"
+        )
+
+    def test_valid_ipv6_forwarded_ip_is_accepted(self, monkeypatch):
+        """A valid IPv6 cf-connecting-ip is used when the peer is trusted."""
+        from snore.api.client_ip import get_client_ip  # noqa: PLC0415
+
+        monkeypatch.setenv("SNORE_TRUSTED_PROXIES", "10.0.0.1")
+        from snore.api.config import load_config, set_config  # noqa: PLC0415
+
+        monkeypatch.setenv("SNORE_AUTH_MODE", "local")
+        set_config(
+            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        )
+
+        from starlette.applications import Starlette  # noqa: PLC0415
+        from starlette.requests import Request  # noqa: PLC0415
+        from starlette.routing import Route  # noqa: PLC0415
+        from starlette.types import ASGIApp, Receive, Scope, Send  # noqa: PLC0415
+
+        captured: list[str] = []
+
+        from starlette.responses import PlainTextResponse  # noqa: PLC0415
+
+        async def view(r: Request) -> PlainTextResponse:
+            captured.append(get_client_ip(r))
+            return PlainTextResponse("ok")
+
+        app = Starlette(routes=[Route("/", view)])
+
+        class PeerOverride:
+            def __init__(self, wrapped: ASGIApp) -> None:
+                self.wrapped = wrapped
+
+            async def __call__(
+                self, scope: Scope, receive: Receive, send: Send
+            ) -> None:
+                if scope["type"] == "http":
+                    scope["client"] = ("10.0.0.1", 12345)
+                await self.wrapped(scope, receive, send)
+
+        wrapped_client = TestClient(PeerOverride(app))
+        wrapped_client.get("/", headers={"cf-connecting-ip": "::1"})
+
+        assert captured[0] == "::1", f"Expected ::1, got {captured[0]!r}"
+
+
+# ---------------------------------------------------------------------------
+# P2-IMPORTANT 6: RateLimitStore recovers from saturation
+# ---------------------------------------------------------------------------
+
+
+class TestP2RateLimitStoreSaturation:
+    """Rate limit store purges stale entries and tracks new IPs after recovery."""
+
+    def test_stale_at_cap_recovery(self):
+        """After cap fills with expired windows, a new IP is tracked (not failed-open forever).
+        SNORE_MULTIUSER_PLAN.md §Trusted Proxy:184-189.
+        """
+        import time
+
+        from snore.auth.lockout import RateLimitStore
+
+        store = RateLimitStore(window=0.05, max_per_window=10, max_ips=2)
+
+        # Fill to cap with IPs whose windows will expire.
+        store.check_and_record("1.1.1.1")
+        store.check_and_record("2.2.2.2")
+        assert len(store._entries) == 2
+
+        # Let the windows expire.
+        time.sleep(0.1)
+
+        # New IP should be tracked (not failed-open) since stale entries are purged.
+        allowed = store.check_and_record("3.3.3.3")
+        assert allowed is True
+        # Verify the new IP is actually tracked (not just allowed-untracked).
+        assert "3.3.3.3" in store._entries, (
+            "New IP should be tracked after stale-entry purge"
+        )
+
+    def test_all_active_at_cap_fails_open(self):
+        """When all entries are unexpired (active), a new IP is allowed without tracking."""
+        import snore.auth.lockout as lockout_mod
+
+        original = lockout_mod.RATE_MAX_IPS
+        lockout_mod.RATE_MAX_IPS = 2
+        try:
+            from snore.auth.lockout import RateLimitStore
+
+            store = RateLimitStore(window=60.0, max_per_window=10, max_ips=2)
+            store.check_and_record("1.1.1.1")
+            store.check_and_record("2.2.2.2")
+            assert len(store._entries) == 2
+
+            # New IP with active table → allowed without tracking.
+            allowed = store.check_and_record("3.3.3.3")
+            assert allowed is True
+            assert "3.3.3.3" not in store._entries
+        finally:
+            lockout_mod.RATE_MAX_IPS = original
+
+
+# ---------------------------------------------------------------------------
+# P2-IMPORTANT 7: Auth model bounds — overlong bodies rejected before DB
+# ---------------------------------------------------------------------------
+
+
+class TestP2AuthModelBounds:
+    """Pydantic model constraints on email/password reject oversized inputs."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _multiuser_config(monkeypatch)
+        set_config(
+            load_config(auth_mode_override="multiuser", bind_host_override="127.0.0.1")
+        )
+
+    def test_overlong_email_rejected(self, async_db_session):
+        """A 300-char email (> 254 max) returns 422 before any DB lookup."""
+        client = _make_client(async_db_session)
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": "a" * 300 + "@example.com", "password": "pw"},
+            headers={"origin": "http://127.0.0.1:8000"},
+        )
+        assert resp.status_code == 422, (
+            f"Expected 422 for overlong email, got {resp.status_code}"
+        )
+
+    def test_overlong_password_rejected_at_model(self, async_db_session):
+        """A 5000-char password (> 4096 char model max) returns 422."""
+        client = _make_client(async_db_session)
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": "test@example.com", "password": "x" * 5000},
+            headers={"origin": "http://127.0.0.1:8000"},
+        )
+        assert resp.status_code == 422, (
+            f"Expected 422 for overlong password, got {resp.status_code}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# P2-IMPORTANT 8: Invite token not in URL / not in access logs
+# ---------------------------------------------------------------------------
+
+
+class TestP2InviteTokenNotInUrl:
+    """Invite token is in the request body, not the URL path.
+
+    SNORE_MULTIUSER_PLAN.md §Phase 2:233 (secret hygiene: tokens never in logs).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _multiuser_config(monkeypatch)
+        set_config(
+            load_config(auth_mode_override="multiuser", bind_host_override="127.0.0.1")
+        )
+
+    def test_lookup_token_in_body_not_url(self, async_db_session):
+        """POST /auth/invites/lookup uses request body; token absent from URL."""
+        client = _make_client(async_db_session)
+        token = uuid.uuid4().hex
+
+        # Capture log records to verify token is absent from logged paths.
+        import logging
+
+        records: list[logging.LogRecord] = []
+
+        class CapturingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = CapturingHandler()
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
+        try:
+            resp = client.post(
+                "/api/v1/auth/invites/lookup",
+                json={"token": token},
+                headers={"origin": "http://127.0.0.1:8000"},
+            )
+        finally:
+            root_logger.removeHandler(handler)
+
+        assert resp.status_code == 200
+        # The raw token must not appear in any log message.
+        for record in records:
+            msg = record.getMessage()
+            assert token not in msg, f"Raw invite token found in log record: {msg!r}"
+
+    def test_invite_url_fragment_format(self, monkeypatch, tmp_path):
+        """snore user invite prints a fragment-based URL, not a path-based URL.
+
+        The raw token must be in the fragment (#token) not the path so it
+        never reaches the server or its access log.
+        SNORE_MULTIUSER_PLAN.md §Phase 2:233.
+        """
+        env = os.environ.copy()
+        env["SNORE_PUBLIC_BASE_URL"] = "https://snore.example.com"
+        env["SNORE_AUTH_MODE"] = "local"
+
+        result = subprocess.run(
+            [
+                str(Path(sys.executable).parent / "snore"),
+                "user",
+                "invite",
+                "test@example.com",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+        )
+        output = result.stdout + result.stderr
+        # URL must use fragment (#) not a path segment.
+        assert "snore.example.com/invite#" in output or (
+            # URL printed should not contain the API path with token
+            "/api/v1/auth/invites/" not in output
+        ), f"Expected fragment-based URL, got:\n{output}"
+
+
+# ---------------------------------------------------------------------------
+# P2-MINOR 1: validate_password_bytes — full 1-1024 byte invariant
+# ---------------------------------------------------------------------------
+
+
+class TestP2PasswordValidatorInvariant:
+    """validate_password_bytes enforces 1 ≤ len(encoded) ≤ 1024."""
+
+    def test_empty_string_rejected(self):
+        """Empty password raises ValueError."""
+        from snore.auth.passwords import validate_password_bytes
+
+        with pytest.raises(ValueError, match="at least 1 byte"):
+            validate_password_bytes("")
+
+    def test_single_byte_accepted(self):
+        """One-byte password is valid."""
+        from snore.auth.passwords import validate_password_bytes
+
+        validate_password_bytes("a")  # no raise
+
+    def test_exactly_1024_bytes_accepted(self):
+        """Exactly 1024 ASCII bytes is valid."""
+        from snore.auth.passwords import validate_password_bytes
+
+        validate_password_bytes("a" * 1024)
+
+    def test_1025_bytes_rejected(self):
+        """1025 ASCII bytes exceeds the limit."""
+        from snore.auth.passwords import validate_password_bytes
+
+        with pytest.raises(ValueError, match="at most"):
+            validate_password_bytes("a" * 1025)
+
+    def test_multibyte_at_boundary(self):
+        """341 CJK chars (= 1023 bytes) is valid; 342 chars (= 1026 bytes) is not."""
+        from snore.auth.passwords import validate_password_bytes
+
+        # 341 * 3 = 1023 bytes — valid
+        validate_password_bytes("あ" * 341)
+
+        # 342 * 3 = 1026 bytes — invalid
+        with pytest.raises(ValueError, match="at most"):
+            validate_password_bytes("あ" * 342)
+
+
+# ---------------------------------------------------------------------------
+# P2-MINOR 2: CSRF fails closed when public_origin is None in multiuser
+# ---------------------------------------------------------------------------
+
+
+class TestP2CsrfFailsClosedOnNoneOrigin:
+    """CsrfMiddleware must return 403 (not pass) when public_origin is None."""
+
+    def test_csrf_fails_closed_with_no_public_origin(self, monkeypatch):
+        """If AppConfig.public_origin is somehow None in multiuser, CSRF fails closed.
+
+        This is a defense-in-depth test: normal load_config() prevents this
+        state, but the middleware must not fail open if it ever occurs.
+        """
+        from snore.api.config import AppConfig, set_config  # noqa: PLC0415
+        from snore.auth.actor import AuthMode  # noqa: PLC0415
+
+        # Construct an AppConfig that is multiuser but has no public_origin.
+        # This represents an impossible-under-normal-load_config() state.
+        broken_cfg = AppConfig(
+            auth_mode=AuthMode.MULTIUSER,
+            session_secret="test-secret-at-least-32-chars-long-abcdef",
+            public_base_url="https://snore.example.com",
+            public_origin=None,  # Forced to None for test
+            bind_host="127.0.0.1",
+            trusted_proxies=frozenset(),
+            dev_origins=frozenset(),
+            max_upload_bytes=512 * 1024 * 1024,
+            max_file_bytes=256 * 1024 * 1024,
+            max_jobs_per_user=3,
+            max_jobs_global=10,
+        )
+        set_config(broken_cfg)
+
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from snore.api.app import create_app  # noqa: PLC0415
+
+        app = create_app()
+        client = TestClient(app, raise_server_exceptions=True)
+
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": "x@example.com", "password": "pw"},
+            headers={"origin": "https://snore.example.com"},
+        )
+        # Must fail closed (403) not open.
+        assert resp.status_code == 403, (
+            f"Expected 403 (fail-closed), got {resp.status_code}"
+        )

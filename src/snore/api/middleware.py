@@ -1,41 +1,41 @@
-"""HTTP middleware: authentication, CSRF, and rate limiting.
+"""HTTP middleware: authentication, CSRF, rate limiting, and body ceilings.
 
 ``AuthMiddleware``
-    - Local mode: bootstraps the single local admin user + profile, sets
-      ``request.state.actor`` to the ``ActorContext``.
-    - Multiuser mode: reads the signed session cookie, DB-validates the
-      actor (session_version bump, stale-profile fallback), sets
-      ``request.state.actor``; unauthenticated requests get ``None``.
-
-    The middleware never raises 401/403 itself — route dependencies
-    (``require_auth``, ``require_writable``, ``require_admin``) enforce those
-    boundaries so that auth-free endpoints (``/health``, ``/api/v1/auth/*``)
-    always pass through.
+    Resolves ``request.state.actor`` on every request.  Local mode auto-
+    provisions; multiuser mode validates the signed session cookie.
 
 ``CsrfMiddleware``
     In multiuser mode, all unsafe-method (POST/PUT/PATCH/DELETE) requests must
     carry an ``Origin`` or ``Referer`` header whose parsed origin exactly
-    matches the configured ``SNORE_PUBLIC_BASE_URL`` (or ``SNORE_DEV_ORIGINS``
-    for local development).  The comparison is on canonical
-    ``(scheme, host, effective_port)`` tuples; ``startswith`` string matching
-    is explicitly NOT used.  A ``null`` origin is always rejected.
+    matches ``AppConfig.public_origin`` or a pre-parsed ``dev_origins`` entry.
+    Comparison is on canonical ``(scheme, host, effective_port)`` tuples —
+    ``startswith`` matching is explicitly NOT used.  A ``"null"`` origin is
+    always rejected.  When ``public_origin`` is ``None`` in multiuser mode the
+    check fails closed (403) rather than open.
 
-    Also adds ``Cache-Control: no-store`` to all responses on
-    ``/api/v1/auth/`` paths so 4xx and framework error responses are covered.
+    Also:
+    - Applies a small body-size ceiling to all ``/api/v1/auth/`` requests so
+      Pydantic materialisation is not the first resource boundary for auth
+      endpoints.
+    - Adds ``Cache-Control: no-store`` to all ``/api/v1/auth/`` responses,
+      covering 2xx, 4xx, and framework error responses.
 
 ``RateLimitMiddleware``
-    Per-IP sliding-window rate limiter applied to all ``/api/v1/auth/``
-    requests in multiuser mode.  Default: 30 requests per 60-second window per
-    IP.  Trusts the same ``SNORE_TRUSTED_PROXIES`` forwarded-IP chain as
-    ``AuthMiddleware``.
+    Per-IP sliding-window rate limiter (30 req/60 s) on ``/api/v1/auth/``
+    in multiuser mode.  Uses the canonical trusted-client-IP helper.
+
+``_ByteCeilingReceive``
+    ASGI receive wrapper that raises 413 once a cumulative byte ceiling is
+    crossed.  Used for the ingress ceiling on upload bodies and the conservative
+    auth-endpoint body limit.
 """
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 
-from urllib.parse import urlparse
+from collections.abc import Awaitable, Callable, MutableMapping
+from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -48,46 +48,52 @@ logger = logging.getLogger(__name__)
 _AUTH_PATH_PREFIX = "/api/v1/auth"
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+# Conservative body ceiling for all /api/v1/auth/ endpoints.  Prevents
+# Pydantic from materialising arbitrarily large bodies before model validation.
+_AUTH_BODY_LIMIT = 16 * 1024  # 16 KiB
 
-def _trusted_client_ip(request: Request) -> str:
-    """Return the trusted client IP, honouring ``SNORE_TRUSTED_PROXIES``.
 
-    The forwarded header value is validated as a well-formed IP address before
-    use.  An invalid or missing forwarded value falls back to the peer address.
+# ---------------------------------------------------------------------------
+# Shared ASGI receive wrapper
+# ---------------------------------------------------------------------------
+
+
+class _ByteCeilingReceive:
+    """ASGI receive wrapper that raises 413 once a cumulative byte ceiling is hit.
+
+    Counts bytes as multipart/body chunks arrive — before any parser spools
+    them.  Used both for upload ingress ceilings and the auth-endpoint body
+    ceiling.
     """
-    from snore.api.config import get_config  # noqa: PLC0415
 
-    peer = request.client.host if request.client else "unknown"
-    cfg = get_config()
-    if peer in cfg.trusted_proxies:
-        forwarded = request.headers.get("cf-connecting-ip", "").strip()
-        if forwarded:
-            try:
-                ipaddress.ip_address(forwarded)
-                return forwarded
-            except ValueError:
-                logger.warning(
-                    "cf-connecting-ip %r is not a valid IP address; using peer %r",
-                    forwarded,
-                    peer,
-                )
-    return peer
+    def __init__(
+        self,
+        inner: Callable[[], Awaitable[MutableMapping[str, Any]]],
+        max_bytes: int,
+        detail: str | None = None,
+    ) -> None:
+        self._inner = inner
+        self._max = max_bytes
+        self._detail = (
+            detail or f"Request body exceeds the {max_bytes // 1024} KiB limit"
+        )
+        self._seen = 0
+
+    async def __call__(self) -> MutableMapping[str, Any]:
+        from fastapi import HTTPException  # noqa: PLC0415
+
+        msg = await self._inner()
+        if msg.get("type") == "http.request":
+            chunk: bytes = msg.get("body", b"")
+            self._seen += len(chunk)
+            if self._seen > self._max:
+                raise HTTPException(status_code=413, detail=self._detail)
+        return msg
 
 
-def _parse_origin(url: str) -> tuple[str, str, int] | None:
-    """Parse ``url`` to ``(scheme, host, effective_port)`` or ``None`` on failure."""
-    try:
-        p = urlparse(url)
-        scheme = p.scheme.lower()
-        host = (p.hostname or "").lower()
-        if not scheme or not host:
-            return None
-        port = p.port
-        if port is None:
-            port = 443 if scheme == "https" else 80
-        return (scheme, host, port)
-    except Exception:
-        return None
+# ---------------------------------------------------------------------------
+# AuthMiddleware
+# ---------------------------------------------------------------------------
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -106,8 +112,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         cfg = get_config()
 
         if cfg.auth_mode is AuthMode.LOCAL:
-            # Local mode: resolve (or auto-provision) the single admin profile.
-            # Done inside a short-lived DB scope that is committed on exit.
             try:
                 actor = await _resolve_local_actor()
             except Exception as exc:
@@ -115,8 +119,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 actor = None
             request.state.actor = actor
         else:
-            # Multiuser mode: read and validate the signed session cookie.
-            request.state.actor = None  # Default — routes enforce auth.
+            request.state.actor = None
             actor = await _resolve_multiuser_actor(request)
             if actor is not None:
                 request.state.actor = actor
@@ -125,7 +128,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 
 async def _resolve_local_actor() -> ActorContext | None:
-    """Resolve (or auto-provision) the local admin ActorContext."""
     from snore.auth.actor import AuthMode  # noqa: PLC0415
     from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
     from snore.database.session import session_scope  # noqa: PLC0415
@@ -136,7 +138,6 @@ async def _resolve_local_actor() -> ActorContext | None:
 
 
 async def _resolve_multiuser_actor(request: Request) -> ActorContext | None:
-    """Validate the session cookie and return an ``ActorContext`` or ``None``."""
     from snore.api.config import get_config  # noqa: PLC0415
     from snore.auth.actor import AuthMode  # noqa: PLC0415
     from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
@@ -161,17 +162,15 @@ async def _resolve_multiuser_actor(request: Request) -> ActorContext | None:
         async with session_scope() as db:
             from snore.database import models  # noqa: PLC0415
 
-            # Load user — check disabled and session_version.
             user = await db.get(models.User, user_id)
             if user is None or user.disabled_at is not None:
                 return None
             if user.session_version != cookie_version:
-                # Password changed / user disabled / role changed — cookie invalidated.
                 return None
 
+            from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
+
             factory = ActorContextFactory(db)
-            # Pass the cookie's active_profile_id; factory falls back gracefully
-            # if it is stale/foreign/deleted.
             return await factory.make(
                 user_id=user_id,
                 active_profile_id=active_profile_id,
@@ -182,18 +181,21 @@ async def _resolve_multiuser_actor(request: Request) -> ActorContext | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# CsrfMiddleware
+# ---------------------------------------------------------------------------
+
+
 class CsrfMiddleware(BaseHTTPMiddleware):
-    """CSRF origin check for all unsafe methods in multiuser mode.
+    """CSRF origin check + auth-path no-store + auth-body ceiling.
 
-    In multiuser mode rejects any unsafe-method request whose Origin header
-    does not exactly match the configured public origin (scheme + host + port).
-    Compares canonical ``(scheme, host, effective_port)`` tuples — never
-    ``startswith``.  A literal ``"null"`` origin or a missing Origin/Referer
-    is rejected.  Falls back to ``Referer`` (parsed to its origin) when
-    ``Origin`` is absent.
+    In multiuser mode, rejects any unsafe-method request whose parsed origin
+    does not exactly match ``AppConfig.public_origin`` or a ``dev_origins``
+    entry.  Fails closed when ``public_origin`` is ``None`` (which is
+    unreachable under correct config, but defensive).
 
-    Also adds ``Cache-Control: no-store`` to all responses on
-    ``/api/v1/auth/`` paths, covering 2xx and 4xx alike.
+    Also applies a 16 KiB body ceiling to all ``/api/v1/auth/`` requests and
+    adds ``Cache-Control: no-store`` to all ``/api/v1/auth/`` responses.
     """
 
     async def dispatch(
@@ -203,24 +205,26 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         from snore.auth.actor import AuthMode  # noqa: PLC0415
 
         cfg = get_config()
+        is_auth_path = request.url.path.startswith(_AUTH_PATH_PREFIX)
+
+        # Apply conservative body ceiling to all auth-endpoint requests.
+        if is_auth_path:
+            request._receive = _ByteCeilingReceive(request.receive, _AUTH_BODY_LIMIT)  # noqa: SLF001
 
         if cfg.auth_mode is AuthMode.MULTIUSER and request.method in _UNSAFE_METHODS:
             error = self._check_origin(request, cfg)
             if error is not None:
                 from starlette.responses import JSONResponse  # noqa: PLC0415
 
-                response = JSONResponse(
+                return JSONResponse(
                     {"detail": error},
                     status_code=403,
                     headers={"Cache-Control": "no-store"},
                 )
-                return response
 
         inner_response: Response = await call_next(request)
 
-        # Add Cache-Control: no-store to all /api/v1/auth/ responses so
-        # 4xx, 422, and framework error responses are also covered.
-        if request.url.path.startswith(_AUTH_PATH_PREFIX):
+        if is_auth_path:
             inner_response.headers["Cache-Control"] = "no-store"
 
         return inner_response
@@ -228,58 +232,57 @@ class CsrfMiddleware(BaseHTTPMiddleware):
     @staticmethod
     def _check_origin(request: Request, cfg: object) -> str | None:
         """Return an error string if the origin fails the check, or None if OK."""
-        from snore.api.config import AppConfig  # noqa: PLC0415
+        from snore.api.config import AppConfig, parse_origin  # noqa: PLC0415
 
         assert isinstance(cfg, AppConfig)
         public_origin = cfg.public_origin
+
         if public_origin is None:
-            # No public origin configured — allow (shouldn't happen in multiuser).
-            return None
+            # multiuser with no public origin: fail closed.
+            logger.warning(
+                "CSRF check: public_origin is None in multiuser mode — failing closed"
+            )
+            return "Origin not allowed"
 
         raw = (request.headers.get("origin") or "").strip()
 
-        # Browsers send the literal string "null" for file:// or sandboxed iframes.
         if raw.lower() == "null":
             logger.warning("CSRF check: rejected null origin")
             return "Origin not allowed"
 
         if not raw:
-            # Origin absent — fall back to Referer.
             raw = (request.headers.get("referer") or "").strip()
 
         if not raw:
             logger.warning("CSRF check: no Origin or Referer present")
             return "Origin not allowed"
 
-        incoming = _parse_origin(raw)
+        incoming = parse_origin(raw)
         if incoming is None:
             logger.warning("CSRF check: could not parse origin %r", raw)
             return "Origin not allowed"
 
-        # Check against the primary public origin.
         if incoming == public_origin:
             return None
 
-        # Check against dev-only extra origins (empty frozenset in production).
-        for extra in cfg.dev_origins:
-            extra_origin = _parse_origin(extra)
-            if extra_origin is not None and incoming == extra_origin:
-                return None
+        if incoming in cfg.dev_origins:
+            return None
 
-        logger.warning(
-            "CSRF check: %r (%s) not in allowed origins",
-            raw,
-            incoming,
-        )
+        logger.warning("CSRF check: %r (%s) not in allowed origins", raw, incoming)
         return "Origin not allowed"
+
+
+# ---------------------------------------------------------------------------
+# RateLimitMiddleware
+# ---------------------------------------------------------------------------
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Per-IP sliding-window rate limiter for public auth endpoints.
 
     Applies to all requests under ``/api/v1/auth/`` in multiuser mode.
-    Default limits: 30 requests per 60-second window per IP.  Uses the same
-    trusted-proxy forwarding logic as ``AuthMiddleware``.
+    Uses the canonical ``get_client_ip()`` helper so the IP key matches
+    what the credential lockout store keys on.
     """
 
     async def dispatch(
@@ -293,7 +296,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if cfg.auth_mode is AuthMode.MULTIUSER and request.url.path.startswith(
             _AUTH_PATH_PREFIX
         ):
-            ip = _trusted_client_ip(request)
+            from snore.api.client_ip import get_client_ip  # noqa: PLC0415
+
+            ip = get_client_ip(request)
             store = get_rate_limit_store()
             if not store.check_and_record(ip):
                 from starlette.responses import JSONResponse  # noqa: PLC0415
