@@ -451,6 +451,13 @@ class Session(Base):
         cascade="all, delete-orphan",
         lazy="raise",
     )
+    breaths = relationship(
+        "Breath",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        lazy="raise",
+        overlaps="analysis_result",
+    )
 
     __table_args__ = (
         UniqueConstraint("device_id", "device_session_id", name="uq_device_session"),
@@ -653,9 +660,127 @@ class AnalysisResult(Base):
         cascade="all, delete-orphan",
         lazy="raise",
     )
+    breaths = relationship(
+        "Breath",
+        back_populates="analysis_result",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
 
     def __repr__(self) -> str:
         return f"<AnalysisResult(id={self.id}, session_id={self.session_id})>"
+
+
+class Breath(Base):
+    """Immutable per-breath metrics persisted at analysis time.
+
+    Breaths are immutable children of a specific AnalysisResult (analysis run).
+    Re-analysis appends a new AnalysisResult + new Breath children; prior runs
+    and their breaths are never deleted except via the explicit deletion API
+    (cascade handles children).
+
+    **No Alembic migration** (ruling #4): this model ships model-only; fresh DBs
+    get the schema via Base.metadata.create_all; pre-existing DBs receive a
+    capability-honest error → drop + reimport.
+
+    Denormalised session_id is permitted for query efficiency; uniqueness is on
+    (analysis_result_id, breath_number).
+    """
+
+    __tablename__ = "breaths"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    analysis_result_id: Mapped[int] = mapped_column(
+        ForeignKey("analysis_results.id", ondelete="CASCADE"), nullable=False
+    )
+    # Denormalised for efficient per-session queries.
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    breath_number: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Timing (session-relative offsets in seconds)
+    start_offset_s: Mapped[float] = mapped_column(Float, nullable=False)
+    end_offset_s: Mapped[float] = mapped_column(Float, nullable=False)
+    inspiration_time_s: Mapped[float | None] = mapped_column(Float)  # Ti
+    expiration_time_s: Mapped[float | None] = mapped_column(Float)  # Te
+    total_time_s: Mapped[float | None] = mapped_column(Float)  # Ttot
+    i_e_ratio: Mapped[float | None] = mapped_column(Float)
+    duty_cycle: Mapped[float | None] = mapped_column(Float)  # Ti/Ttot
+
+    # Amplitude
+    peak_flow_lpm: Mapped[float | None] = mapped_column(Float)
+    tidal_volume_ml: Mapped[float | None] = mapped_column(Float)
+    respiratory_rate_rolling: Mapped[float | None] = mapped_column(
+        Float
+    )  # RR from rolling window
+
+    # Flow shape — time-above-80%-peak (existing ShapeFeatures.flatness_index)
+    flatness_index: Mapped[float | None] = mapped_column(Float)
+    # NEW: mid-inspiratory flattening = mid-insp flow ÷ peak (different metric)
+    mid_insp_flattening: Mapped[float | None] = mapped_column(Float)
+
+    # Flow classification (FlowLimitationClassifier 7-class taxonomy)
+    flow_class: Mapped[int | None] = mapped_column(Integer)
+    flow_confidence: Mapped[float | None] = mapped_column(Float)
+
+    # Recovery-breath flag (from primary mode's RERA detector)
+    is_recovery_breath: Mapped[bool | None] = mapped_column(Boolean)
+
+    # Trigger/cycle inference (experimental, heuristic — non-ResMed → null)
+    inferred_trigger_type: Mapped[str | None] = mapped_column(String)
+    trigger_confidence: Mapped[float | None] = mapped_column(Float)
+    inferred_cycle_type: Mapped[str | None] = mapped_column(String)
+    cycle_confidence: Mapped[float | None] = mapped_column(Float)
+    # Per-device applicability: null + reason for unvalidated devices
+    trigger_cycle_applicable: Mapped[bool | None] = mapped_column(Boolean)
+    trigger_cycle_reason: Mapped[str | None] = mapped_column(String)
+
+    # Quality flags (all nullable + reason; see plan step 3)
+    leak_valid: Mapped[bool | None] = mapped_column(Boolean)
+    leak_valid_reason: Mapped[str | None] = mapped_column(String)
+    ramp_active: Mapped[bool | None] = mapped_column(Boolean)
+    ramp_active_reason: Mapped[str | None] = mapped_column(
+        String, default="not_available"
+    )
+    mask_off: Mapped[bool | None] = mapped_column(Boolean)
+    mask_off_reason: Mapped[str | None] = mapped_column(String, default="not_available")
+
+    analysis_result = relationship(
+        "AnalysisResult",
+        back_populates="breaths",
+        lazy="raise",
+    )
+    session = relationship(
+        "Session",
+        back_populates="breaths",
+        lazy="raise",
+        overlaps="analysis_result",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_result_id",
+            "breath_number",
+            name="uq_breath_run_number",
+        ),
+        Index("ix_breath_analysis_start", "analysis_result_id", "start_offset_s"),
+        Index("ix_breath_session_id", "session_id"),
+        CheckConstraint(
+            "flow_class IS NULL OR (flow_class >= 1 AND flow_class <= 7)",
+            name="chk_breath_flow_class",
+        ),
+        CheckConstraint(
+            "flow_confidence IS NULL OR (flow_confidence >= 0 AND flow_confidence <= 1)",
+            name="chk_breath_flow_confidence",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Breath(id={self.id}, analysis_result_id={self.analysis_result_id}, "
+            f"breath_number={self.breath_number})>"
+        )
 
 
 class DetectedPattern(Base):

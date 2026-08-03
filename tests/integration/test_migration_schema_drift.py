@@ -31,6 +31,11 @@ _STRUCTURAL_DIFF_TYPES = frozenset(
     {"add_table", "remove_table", "add_column", "remove_column"}
 )
 
+# Tables intentionally excluded from Alembic migrations (model-only, per locked
+# ruling #4 in the implementation plan).  Fresh DBs get these tables via
+# Base.metadata.create_all; existing DBs must drop and reimport.
+_NO_MIGRATION_TABLES: frozenset[str] = frozenset({"breaths"})
+
 # Naming convention from migrations/env.py — must match so constraint name
 # comparisons use the same pattern alembic used when creating the tables.
 _NAMING_CONVENTION = {
@@ -69,6 +74,13 @@ def _structural_diffs(engine: Engine) -> list[tuple[Any, ...]]:
         ops = diff if isinstance(diff, list) else [diff]
         for op in ops:
             if isinstance(op, tuple) and op[0] in _STRUCTURAL_DIFF_TYPES:
+                # Skip diffs for tables that deliberately have no migration.
+                table_obj = op[1] if len(op) > 1 else None
+                table_name = getattr(table_obj, "name", None) or getattr(
+                    table_obj, "parent", {}
+                )
+                if isinstance(table_name, str) and table_name in _NO_MIGRATION_TABLES:
+                    continue
                 structural.append(op)
     return structural
 
