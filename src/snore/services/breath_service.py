@@ -515,25 +515,31 @@ class WaveformWindowRequest(BaseModel):
 async def fetch_waveform_window_raw(
     db: AsyncSession,
     request: WaveformWindowRequest,
-    profile_id: int | None = None,
+    profile_id: int,
 ) -> RawWaveformWindow:
     """DB I/O ONLY — fetch waveform blobs for the requested channels.
 
     Never closes db: the scope owner opens and closes the scope around this call.
 
-    If ``profile_id`` is supplied, enforces session ownership.  When the
-    resolved session does not belong to ``profile_id``, raises ``ValueError``.
+    ``profile_id`` is required and enforced in the first resolution query via
+    ``Device.profile_id``, so foreign sessions never appear in resolution or
+    ambiguity payloads.
     """
 
     from sqlalchemy import select  # noqa: PLC0415
 
     from snore.database import models  # noqa: PLC0415
 
-    # Resolve session_id from therapy_date + device_id
+    # Resolve session_id from therapy_date + device_id, profile-scoped in
+    # the first query so foreign rows never enter resolution or ambiguity.
     stmt = (
         select(models.Session, models.Day)
         .join(models.Day, models.Session.day_id == models.Day.id)
-        .where(models.Day.date == request.therapy_date)
+        .join(models.Device, models.Session.device_id == models.Device.id)
+        .where(
+            models.Day.date == request.therapy_date,
+            models.Device.profile_id == profile_id,
+        )
     )
     if request.device_id is not None:
         stmt = stmt.where(models.Session.device_id == request.device_id)
@@ -545,8 +551,9 @@ async def fetch_waveform_window_raw(
         if request.session_id is not None:
             raise ValueError(
                 f"Session {request.session_id} not found for date {request.therapy_date}"
+                f" on profile {profile_id}"
             )
-        # Return empty window (no sessions on this date/device)
+        # Return empty window (no sessions on this date/device for this profile)
         return RawWaveformWindow(
             request=request,
             session_id=request.session_id or 0,
@@ -572,21 +579,6 @@ async def fetch_waveform_window_raw(
 
     session_row = rows[0].Session
     session_id = session_row.id
-
-    # Enforce profile ownership if requested
-    if profile_id is not None:
-        owned = (
-            await db.execute(
-                select(models.Device.id).where(
-                    models.Device.id == session_row.device_id,
-                    models.Device.profile_id == profile_id,
-                )
-            )
-        ).scalar_one_or_none()
-        if owned is None:
-            raise ValueError(
-                f"Session {session_id} is not owned by profile {profile_id}"
-            )
 
     # Fetch waveform blobs
     requested_types = [ch.value for ch in request.channels]
@@ -2620,6 +2612,7 @@ class BreathService:
                         offset_start=window_start,
                         offset_end=window_end,
                     ),
+                    self._profile_id,
                 )
                 ctx_window = compute_waveform_window(raw_ctx)
                 for ch in ctx_window.channels:
@@ -2646,6 +2639,7 @@ class BreathService:
                         offset_start=mv_window_start,
                         offset_end=offset_s,
                     ),
+                    self._profile_id,
                 )
                 mv_window = compute_waveform_window(raw_mv)
                 for ch in mv_window.channels:
@@ -2839,6 +2833,7 @@ class BreathService:
                     offset_start=0.0,
                     offset_end=session_row.duration_seconds or 86400.0,
                 ),
+                self._profile_id,
             )
             mv_full = compute_waveform_window(raw_mv_full)
             for ch in mv_full.channels:

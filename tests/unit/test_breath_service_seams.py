@@ -720,6 +720,7 @@ class TestGetWaveformWindow:
 class TestFetchWaveformWindowRaw:
     async def test_missing_session_raises_value_error(self, async_db_session):
         """fetch_waveform_window_raw raises ValueError for an unknown session_id."""
+        _, profile_id = await _make_profile(async_db_session)
         req = WaveformWindowRequest(
             therapy_date=date(2025, 1, 1),
             session_id=99999,
@@ -727,7 +728,7 @@ class TestFetchWaveformWindowRaw:
             offset_end=120.0,
         )
         with pytest.raises(ValueError, match="Session"):
-            await fetch_waveform_window_raw(async_db_session, req)
+            await fetch_waveform_window_raw(async_db_session, req, profile_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1452,7 +1453,7 @@ class TestTwoProfileIsolation:
             session_b,
         ) = await self._setup_two_profiles(async_db_session)
 
-        with pytest.raises(ValueError, match="profile"):
+        with pytest.raises(ValueError, match="Session"):
             await fetch_waveform_window_raw(
                 async_db_session,
                 WaveformWindowRequest(
@@ -1463,8 +1464,233 @@ class TestTwoProfileIsolation:
                     offset_start=0.0,
                     offset_end=60.0,
                 ),
-                profile_id=profile_a_id,
+                profile_a_id,
             )
+
+    async def test_ambiguity_payload_excludes_foreign_profile_session(
+        self, async_db_session
+    ):
+        """Ambiguity error when A has 2 sessions lists only A's sessions, not B's.
+
+        Before the Item-1 fix, the resolution query had no profile predicate, so
+        the payload could include profile B's session IDs.  This test fails if
+        the profile predicate is removed from fetch_waveform_window_raw.
+        """
+        therapy_date = date(2025, 6, 15)
+        _, profile_a_id = await _make_profile(async_db_session)
+        dev_a = await _make_device(async_db_session, profile_a_id)
+
+        # Profile A: two sessions on the same date (share one Day row)
+        day_a = models.Day(device_id=dev_a.id, date=therapy_date, session_count=2)
+        async_db_session.add(day_a)
+        await async_db_session.flush()
+        session_a1 = models.Session(
+            device_id=dev_a.id,
+            day_id=day_a.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+            ),
+            end_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 23, 0
+            ),
+            duration_seconds=7200.0,
+        )
+        session_a2 = models.Session(
+            device_id=dev_a.id,
+            day_id=day_a.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 23, 30
+            ),
+            end_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day + 1, 1, 0
+            ),
+            duration_seconds=5400.0,
+        )
+        async_db_session.add_all([session_a1, session_a2])
+        await async_db_session.flush()
+
+        # Profile B: one session on the same date
+        _, profile_b_id = await _make_profile(async_db_session)
+        dev_b = await _make_device(async_db_session, profile_b_id)
+        _, session_b = await _make_day_and_session(
+            async_db_session, dev_b.id, therapy_date
+        )
+
+        from snore.services.breath_service import (  # noqa: PLC0415
+            MultiSessionAmbiguityError,
+        )
+
+        with pytest.raises(MultiSessionAmbiguityError) as exc_info:
+            await fetch_waveform_window_raw(
+                async_db_session,
+                WaveformWindowRequest(
+                    therapy_date=therapy_date,
+                    channels=[WaveformChannelName.FLOW],
+                    offset_start=0.0,
+                    offset_end=60.0,
+                ),
+                profile_a_id,
+            )
+        err = exc_info.value
+        session_ids_in_payload = {s.session_id for s in err.sessions}
+        assert session_b.id not in session_ids_in_payload, (
+            "foreign profile B session must not appear in ambiguity payload"
+        )
+        assert {session_a1.id, session_a2.id} == session_ids_in_payload
+
+    async def test_foreign_session_on_same_date_does_not_cause_ambiguity(
+        self, async_db_session
+    ):
+        """Profile A (1 session) + profile B (1 session) on same date → no ambiguity.
+
+        This is the direct regression test for Item 1: without the profile predicate
+        in fetch_waveform_window_raw's resolution query, both sessions are visible
+        and the call raises MultiSessionAmbiguityError instead of resolving cleanly.
+        """
+        therapy_date = date(2025, 6, 15)
+        (
+            profile_a_id,
+            dev_a_id,
+            session_a,
+            _profile_b_id,
+            _dev_b_id,
+            _session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        # Should resolve cleanly to profile A's session with no ambiguity
+        raw = await fetch_waveform_window_raw(
+            async_db_session,
+            WaveformWindowRequest(
+                therapy_date=therapy_date,
+                channels=[WaveformChannelName.FLOW],
+                offset_start=0.0,
+                offset_end=60.0,
+            ),
+            profile_a_id,
+        )
+        # Returns empty channels (no waveform data stored) but resolves to A's session
+        assert raw.session_id == session_a.id
+
+    async def test_foreign_analysis_result_not_returned_via_breath_table_by_date(
+        self, async_db_session
+    ):
+        """get_breath_table by date returns only profile A's breath rows, not B's.
+
+        Profile B has a larger analysis (10 breaths) on the same date as A (3 breaths).
+        Profile A's breath table resolved by date must return exactly 3 rows.
+        """
+        therapy_date = date(2025, 6, 15)
+        (
+            profile_a_id,
+            dev_a_id,
+            session_a,
+            profile_b_id,
+            _dev_b_id,
+            session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        await _store_analysis_with_breaths(
+            async_db_session, session_a, profile_a_id, n_breaths=3
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, session_b, profile_b_id, n_breaths=10
+        )
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        page = await svc_a.get_breath_table(
+            BreathQueryRange(
+                therapy_date=therapy_date,
+                device_id=dev_a_id,
+                offset_start=0.0,
+                offset_end=900.0,
+            )
+        )
+        assert len(page.rows) == 3, "must return only profile A's 3 breath rows"
+
+    async def test_get_contextual_events_foreign_session_not_returned(
+        self, async_db_session
+    ):
+        """get_contextual_events for profile A's session returns A's events, not B's."""
+        therapy_date = date(2025, 6, 15)
+        (
+            profile_a_id,
+            dev_a_id,
+            session_a,
+            _profile_b_id,
+            _dev_b_id,
+            session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        # Profile A: one OA event
+        ev_a = models.Event(
+            session_id=session_a.id,
+            event_type="OA",
+            start_time=session_a.start_time + timedelta(minutes=30),
+            duration_seconds=12.0,
+        )
+        # Profile B: two CA events (must not appear in A's results)
+        ev_b1 = models.Event(
+            session_id=session_b.id,
+            event_type="CA",
+            start_time=session_b.start_time + timedelta(minutes=10),
+            duration_seconds=8.0,
+        )
+        ev_b2 = models.Event(
+            session_id=session_b.id,
+            event_type="CA",
+            start_time=session_b.start_time + timedelta(minutes=20),
+            duration_seconds=6.0,
+        )
+        async_db_session.add_all([ev_a, ev_b1, ev_b2])
+        await async_db_session.flush()
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        events = await svc_a.get_contextual_events(
+            therapy_date=therapy_date, device_id=dev_a_id
+        )
+
+        event_types = {e.event_type for e in events}
+        assert "CA" not in event_types, "profile B's CA events must not appear"
+        assert len(events) == 1
+        assert events[0].event_type == "OA"
+
+    async def test_get_ca_analysis_foreign_session_ca_events_not_returned(
+        self, async_db_session
+    ):
+        """get_ca_analysis for profile A's session returns A's CA events, not B's."""
+        therapy_date = date(2025, 6, 15)
+        (
+            profile_a_id,
+            dev_a_id,
+            session_a,
+            _profile_b_id,
+            _dev_b_id,
+            session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        # Profile A: no CA events
+        # Profile B: two CA events
+        for i in range(2):
+            async_db_session.add(
+                models.Event(
+                    session_id=session_b.id,
+                    event_type="CA",
+                    start_time=session_b.start_time + timedelta(minutes=10 + i * 15),
+                    duration_seconds=10.0,
+                )
+            )
+        await async_db_session.flush()
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        result = await svc_a.get_ca_analysis(
+            therapy_date=therapy_date, device_id=dev_a_id
+        )
+
+        assert result.ca_events == [], (
+            "profile B's CA events must not appear in profile A's get_ca_analysis"
+        )
 
 
 # ---------------------------------------------------------------------------
