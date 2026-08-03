@@ -35,6 +35,7 @@ from snore.api.routers import (
     validation,
     waveforms,
 )
+from snore.api.routers import auth as auth_router
 from snore.database.session import init_database, init_database_from_url
 
 API_V1_PREFIX = "/api/v1"
@@ -49,6 +50,13 @@ except PackageNotFoundError:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Load and validate config first — fail fast on misconfiguration.
+    from snore.api.config import load_config, set_config  # noqa: PLC0415
+
+    bind_host = os.environ.get("SNORE_BIND_HOST", "127.0.0.1")
+    cfg = load_config(bind_host_override=bind_host)
+    set_config(cfg)
+
     # Honour the canonical URL exported by `snore serve` first; fall back to
     # SNORE_DB_PATH for direct uvicorn invocations and the e2e test harness.
     database_url = os.environ.get("SNORE_DATABASE_URL")
@@ -59,11 +67,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await init_database(db_path)
 
     # Startup recovery + acquire lifetime shared writer lease.
-    # 1. Acquire exclusive briefly for startup recovery (finish any interrupted
-    #    deletion sagas from a previous run).
-    # 2. Run recovery synchronously (it uses asyncio.run internally, but we're
-    #    in the lifespan which has its own event loop — call it via to_thread).
-    # 3. Release exclusive, then acquire shared for the process lifetime.
     import asyncio  # noqa: PLC0415
 
     from snore.services.profile_service import DeletionSaga  # noqa: PLC0415
@@ -71,12 +74,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     lease = get_writer_lease()
 
-    # Acquire the lifetime shared lease exactly once on every branch:
-    #   - Exclusive available: acquire exclusive → run recovery (log on failure) →
-    #     release exclusive → acquire shared.
-    #   - Exclusive unavailable: log warning → acquire shared directly.
-    # The outer try/except only wraps the exclusive-acquire attempt so that a
-    # recovery failure inside does not trigger a second shared acquire.
     exclusive_held = False
     try:
         lease.acquire_exclusive()
@@ -93,31 +90,70 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.warning("Startup recovery failed: %s", exc)
         finally:
-            # Downgrade: release exclusive, then acquire shared exactly once below.
             lease.release_exclusive()
 
     lease.acquire_shared()
+
+    # Purge expired/consumed oauth_attempts at startup.
+    await _purge_expired_oauth_attempts()
 
     # Start a single lifespan-owned TTL reaper.
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
     try:
         yield
     finally:
-        # Stop the reaper first.
         reaper_stop.set()
         reaper_thread.join(timeout=5.0)
-        # Cancel all in-flight import jobs and await their threads.
         still_alive = _shutdown_import_jobs()
         if still_alive:
             raise RuntimeError(
                 f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
                 f"after timeout: {still_alive}. Active import writes may be interrupted."
             )
-        # Release the lifetime shared writer lease.
         lease.release()
 
 
+async def _purge_expired_oauth_attempts() -> None:
+    """Delete expired and consumed oauth_attempts rows at startup."""
+    try:
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        from sqlalchemy import delete  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
+
+        now = datetime.now(UTC)
+        async with session_scope() as db:
+            result = await db.execute(
+                delete(models.OauthAttempt).where(
+                    (models.OauthAttempt.expires_at <= now)
+                    | (models.OauthAttempt.consumed_at.is_not(None))
+                )
+            )
+            purged = result.rowcount  # type: ignore[attr-defined]
+        if purged:
+            logger.info("Purged %d expired/consumed oauth_attempts rows", purged)
+    except Exception as exc:
+        logger.warning("oauth_attempts purge failed: %s", exc)
+
+
 def create_app() -> FastAPI:
+    import os  # noqa: PLC0415
+
+    from snore.api.config import get_config, load_config, set_config  # noqa: PLC0415
+
+    # Ensure config is loaded.  In tests, callers set it via set_config() before
+    # calling create_app(); in production, lifespan sets it.  Fall back to loading
+    # from env here so ``create_app()`` is always safe to call standalone.
+    try:
+        cfg = get_config()
+    except Exception:
+        cfg = load_config()
+        set_config(cfg)
+
+    is_multiuser = cfg.is_multiuser
+
     app = FastAPI(
         title="SNORE API",
         version=__version__,
@@ -141,6 +177,11 @@ def create_app() -> FastAPI:
     app.add_exception_handler(NotFoundError, not_found_handler)
     app.add_exception_handler(Exception, server_error_handler)
 
+    # Auth router — always registered (public endpoints + mode-aware).
+    app.include_router(
+        auth_router.router, prefix=f"{API_V1_PREFIX}/auth", tags=["auth"]
+    )
+
     app.include_router(
         devices.router, prefix=f"{API_V1_PREFIX}/devices", tags=["devices"]
     )
@@ -160,14 +201,36 @@ def create_app() -> FastAPI:
     app.include_router(days.router, prefix=f"{API_V1_PREFIX}/days", tags=["days"])
     app.include_router(rx.router, prefix=f"{API_V1_PREFIX}/rx", tags=["rx"])
 
+    # /import/detect and /import/path are local-mode-only (server-path import).
+    # In multiuser mode these routes are NOT registered — the loopback-peer
+    # check is worthless behind Cloudflare; uploads-only is the contract.
     app.include_router(
-        import_data.router, prefix=f"{API_V1_PREFIX}/import", tags=["import"]
+        import_data.router,
+        prefix=f"{API_V1_PREFIX}/import",
+        tags=["import"],
     )
+    if not is_multiuser:
+        app.include_router(
+            import_data.local_only_router,
+            prefix=f"{API_V1_PREFIX}/import",
+            tags=["import"],
+        )
+
     app.include_router(
         reports.router, prefix=f"{API_V1_PREFIX}/reports", tags=["reports"]
     )
     app.include_router(export.router, prefix=f"{API_V1_PREFIX}/export", tags=["export"])
+
+    # /db router: /db/reset is removed from the web API in multiuser mode.
+    # In multiuser, register a restricted db router that excludes /reset.
     app.include_router(db.router, prefix=f"{API_V1_PREFIX}/db", tags=["database"])
+    if not is_multiuser:
+        app.include_router(
+            db.local_only_router,
+            prefix=f"{API_V1_PREFIX}/db",
+            tags=["database"],
+        )
+
     app.include_router(
         validation.router, prefix=f"{API_V1_PREFIX}/validate", tags=["validation"]
     )

@@ -1,5 +1,6 @@
 """Pytest configuration and fixtures for SNORE tests."""
 
+import os
 import sqlite3
 import tempfile  # noqa: F401 — kept for backwards compat with any external imports
 
@@ -11,6 +12,26 @@ import pytest
 
 sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
 sqlite3.register_converter("DATETIME", lambda s: datetime.fromisoformat(s.decode()))
+
+# Default to local auth mode for all tests so create_app() works without
+# SNORE_SESSION_SECRET.  Phase 2 auth tests override this per-test via
+# monkeypatch + the reset_auth_config fixture.
+os.environ.setdefault("SNORE_AUTH_MODE", "local")
+
+
+@pytest.fixture(autouse=True)
+def reset_auth_config():
+    """Reset the cached AppConfig between tests.
+
+    Ensures each test starts with a fresh config derived from its own env.
+    Tests that need multiuser mode use ``monkeypatch.setenv`` together with
+    this fixture (always active) to get a clean multiuser config.
+    """
+    from snore.api.config import reset_config
+
+    reset_config()
+    yield
+    reset_config()
 
 
 def pytest_configure(config):

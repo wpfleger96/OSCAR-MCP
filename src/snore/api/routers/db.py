@@ -15,6 +15,10 @@ router = APIRouter()
 
 DatabaseServiceDep = Annotated[DatabaseService, Depends(service_dep(DatabaseService))]
 
+# Separate router for local-mode-only operations.
+# ``/reset`` is removed from the web API in multiuser mode — it is CLI-only.
+local_only_router = APIRouter()
+
 
 class DatabaseStatsPublic(DatabaseStats):
     # Exclude server filesystem path from API responses
@@ -59,7 +63,7 @@ def vacuum_db(
     return service.vacuum_sqlite(target.sqlite_path)
 
 
-@router.post("/reset", response_model=ResetResult)
+@local_only_router.post("/reset", response_model=ResetResult)
 async def reset_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],

@@ -1,36 +1,21 @@
-# SNORE-local recipes — not managed by github-config.
+# Local development overrides for SNORE.
+# Imported by the main justfile via `import? 'local.just'`.
 
-# Dev servers
+# Start the API in LOCAL auth mode (single-user, no login, identical to pre-multiuser UX).
+dev:
+    SNORE_AUTH_MODE=local uv run uvicorn snore.api.app:create_app --factory --reload --host 127.0.0.1 --port 8000
 
-# Start the API dev server with hot-reload
-dev-api:
-    uv run snore serve --reload
+# Start the API in MULTIUSER auth mode with a throwaway secret and a seeded invite.
+# Prints the signup URL to stdout so you can paste it into a browser.
+dev-auth: _dev-auth-seed
+    SNORE_AUTH_MODE=multiuser \
+    SNORE_SESSION_SECRET=dev-throwaway-secret-not-for-production-1234567890ab \
+    SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
+    SNORE_BIND_HOST=127.0.0.1 \
+    uv run uvicorn snore.api.app:create_app --factory --reload --host 127.0.0.1 --port 8000
 
-# Start the UI dev server with hot-reload
-dev-ui:
-    cd ui && pnpm run dev
-
-# Build UI and start the server
-serve: web-build
-    uv run snore serve
-
-# Build frontend + backend package
-build-all: web-build build
-
-# Screenshots
-
-# Install Playwright Chromium browser for screenshot tests
-ui-playwright-install:
-    cd ui && pnpm exec playwright install chromium
-
-# Build UI and capture the screenshot regression battery (local eyeballing — never post to PRs)
-screenshot:
-    just web-build
-    cd ui && pnpm exec playwright test screenshot.spec.ts
-
-# Generated API types
-
-# Export OpenAPI schema and regenerate TypeScript types
-ui-generate-types:
-    uv run python scripts/export_openapi.py ui/openapi.json
-    cd ui && pnpm run generate:types
+# Seed an invite for dev-auth; print the signup URL.
+_dev-auth-seed:
+    @echo "--- Dev-auth invite ---"
+    uv run snore invite create --email dev@localhost --role admin 2>/dev/null || true
+    @echo "Open: http://127.0.0.1:8000/invite (check snore invite list for the token)"

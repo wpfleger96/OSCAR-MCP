@@ -28,17 +28,18 @@ async def get_actor(
     """Return the actor for this request.
 
     In local mode: auto-provision a single admin user+profile on first call,
-    then resolve from the DB on every request.  In multiuser mode: this will
-    be replaced by JWT/session validation that populates ``request.state.actor``.
+    then resolve from the DB on every request.  In multiuser mode: the
+    AuthMiddleware populates ``request.state.actor`` from the session cookie;
+    this dependency returns it.
 
-    Phase 1 implementation: always local mode, first admin profile found.
+    Phase 2: actor resolution is now fully mode-aware via AuthMiddleware.
     """
-    # Multiuser mode will set request.state.actor from middleware.
+    # AuthMiddleware (both local and multiuser) sets request.state.actor.
     actor: ActorContext | None = getattr(request.state, "actor", None)
     if actor is not None:
         return actor
 
-    # Local mode: resolve (or auto-provision) first admin profile.
+    # Fallback for test environments where middleware may not run.
     from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
 
     factory = ActorContextFactory(db)

@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Routes that accept server-local filesystem paths.  These are registered
+# ONLY in local auth mode — in multiuser the loopback-peer check is
+# worthless behind Cloudflare, so we structurally exclude them.
+local_only_router = APIRouter()
+
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB per upload (configurable via env)
 MAX_UPLOAD_FILES = 500  # sane default; 20k was unreasonably high
 
@@ -65,7 +70,7 @@ def _require_localhost(request: Request) -> None:
         )
 
 
-@router.post("/detect", response_model=list[ImportSource])
+@local_only_router.post("/detect", response_model=list[ImportSource])
 def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     _require_localhost(request)
     service = ImportService()
@@ -262,7 +267,7 @@ async def import_files(request: Request, actor: ActorDep) -> JobResponse:
     return JobResponse(job_id=job.job_id)
 
 
-@router.post("/path", response_model=JobResponse, status_code=202)
+@local_only_router.post("/path", response_model=JobResponse, status_code=202)
 async def import_from_path(
     body: ImportPathRequest, request: Request, actor: ActorDep
 ) -> JobResponse:
