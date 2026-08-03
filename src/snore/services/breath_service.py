@@ -9,9 +9,10 @@ src/snore/services/breath_service.py").
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -777,6 +778,102 @@ class BreathService:
     def __init__(self, db_session: AsyncSession) -> None:
         self._db = db_session
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _resolve_session_for_date(
+        self, therapy_date: date, device_id: int | None
+    ) -> tuple[int, int]:
+        """Return (session_id, device_id) for a single-session therapy day.
+
+        Raises MultiSessionAmbiguityError when the day has >1 session and
+        device_id didn't uniquely identify one.  Raises ValueError when
+        no session exists for the date.
+        """
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        stmt = (
+            select(models.Session, models.Day)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(models.Day.date == therapy_date)
+        )
+        if device_id is not None:
+            stmt = stmt.where(models.Session.device_id == device_id)
+        rows = (await self._db.execute(stmt)).all()
+        if not rows:
+            raise ValueError(
+                f"No session found for date {therapy_date}"
+                + (f" device_id={device_id}" if device_id is not None else "")
+            )
+        if len(rows) > 1:
+            sessions_list = [
+                SessionSummary(
+                    session_id=r.Session.id,
+                    start_wall_clock=r.Session.start_time,
+                    duration_seconds=r.Session.duration_seconds or 0.0,
+                )
+                for r in rows
+            ]
+            raise MultiSessionAmbiguityError(
+                therapy_date=therapy_date,
+                device_id=device_id or rows[0].Session.device_id,
+                sessions=sessions_list,
+            )
+        row = rows[0]
+        return row.Session.id, row.Session.device_id
+
+    async def _latest_analysis_for_session(
+        self, session_id: int
+    ) -> tuple[AnalysisStatus, AlgoVersions | None, int | None]:
+        """Return (status, algo_versions, analysis_result_id) for latest run.
+
+        Returns (NOT_RUN, None, None) when no run exists.
+        Returns (STALE_VERSION, algo|None, id) when engine_versions_json is stale.
+        """
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        row = (
+            (
+                await self._db.execute(
+                    select(models.AnalysisResult)
+                    .where(models.AnalysisResult.session_id == session_id)
+                    .order_by(
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    )
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            return AnalysisStatus.NOT_RUN, None, None
+
+        stored = row.engine_versions_json
+        if not stored or "identity" not in stored:
+            return AnalysisStatus.STALE_VERSION, None, row.id
+
+        try:
+            algo = AlgoVersions.model_validate(stored)
+        except Exception:
+            return AnalysisStatus.STALE_VERSION, None, row.id
+
+        current = self._current_algorithm_identity()
+        if algo.identity.model_dump() != current.model_dump():
+            return AnalysisStatus.STALE_VERSION, algo, row.id
+
+        return AnalysisStatus.OK, algo, row.id
+
+    # ------------------------------------------------------------------
+    # §13 — Public seam methods
+    # ------------------------------------------------------------------
+
     async def get_breath_table(self, query: BreathQueryRange) -> BreathPage:
         """Raw or binned breath fetch.
 
@@ -784,10 +881,257 @@ class BreathService:
         analysis_status=NOT_RUN when no AnalysisResult exists;
         STALE_VERSION when engine_versions_json differs from current identity.
         """
-        raise NotImplementedError(
-            "get_breath_table is a PR-A seam defined here; "
-            "full implementation ships with this PR"
+        from sqlalchemy import func, select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        # Resolve session_id
+        if query.session_id is not None:
+            session_id = query.session_id
+            session_stmt = select(models.Session).where(
+                models.Session.id == session_id,
+                models.Session.day_id.in_(
+                    select(models.Day.id).where(models.Day.date == query.therapy_date)
+                ),
+            )
+            session_row = (await self._db.execute(session_stmt)).scalars().first()
+            if session_row is None:
+                raise ValueError(
+                    f"session_id {session_id} does not belong to date {query.therapy_date}"
+                )
+            device_id = session_row.device_id
+        else:
+            session_id, device_id = await self._resolve_session_for_date(
+                query.therapy_date, query.device_id
+            )
+
+        (
+            analysis_status,
+            algo_versions,
+            analysis_result_id,
+        ) = await self._latest_analysis_for_session(session_id)
+
+        # Get session start for wall-clock anchoring
+        sess_row = (
+            (
+                await self._db.execute(
+                    select(models.Session).where(models.Session.id == session_id)
+                )
+            )
+            .scalars()
+            .first()
         )
+        session_start: datetime = sess_row.start_time if sess_row else datetime.min
+
+        # No analysis run
+        if analysis_result_id is None or analysis_status == AnalysisStatus.NOT_RUN:
+            return BreathPage(
+                query=query,
+                analysis_status=AnalysisStatus.NOT_RUN,
+                algo_versions=None,
+                null_reason=NullReason.ANALYSIS_NOT_RUN,
+                is_binned=query.bin_minutes is not None,
+                total_breaths=0,
+                page=query.page,
+                page_size=query.page_size,
+            )
+
+        # Stale version — return empty page with status
+        if analysis_status == AnalysisStatus.STALE_VERSION:
+            return BreathPage(
+                query=query,
+                analysis_status=AnalysisStatus.STALE_VERSION,
+                algo_versions=algo_versions,
+                null_reason=NullReason.ANALYSIS_STALE,
+                is_binned=query.bin_minutes is not None,
+                total_breaths=0,
+                page=query.page,
+                page_size=query.page_size,
+            )
+
+        # Fetch matching breaths
+        base_stmt = (
+            select(models.Breath)
+            .where(
+                models.Breath.analysis_result_id == analysis_result_id,
+                models.Breath.start_offset_s >= query.offset_start,
+                models.Breath.end_offset_s <= query.offset_end,
+            )
+            .order_by(models.Breath.session_id, models.Breath.breath_number)
+        )
+
+        total_result = await self._db.execute(
+            select(func.count()).select_from(base_stmt.subquery())
+        )
+        total_breaths = total_result.scalar_one()
+
+        if query.bin_minutes is None:
+            # Raw fetch with pagination
+            offset_rows = (query.page - 1) * query.page_size
+            paginated = base_stmt.offset(offset_rows).limit(query.page_size)
+            breath_rows = (await self._db.execute(paginated)).scalars().all()
+
+            rows = [
+                BreathRow(
+                    analysis_result_id=b.analysis_result_id,
+                    session_id=b.session_id,
+                    breath_number=b.breath_number,
+                    session_start_wall_clock=session_start,
+                    start_offset_seconds=b.start_offset_s,
+                    end_offset_seconds=b.end_offset_s,
+                    ti=b.inspiration_time_s or 0.0,
+                    te=b.expiration_time_s or 0.0,
+                    ttot=b.total_time_s or 0.0,
+                    ie_ratio=b.i_e_ratio or 0.0,
+                    duty_cycle=b.duty_cycle or 0.0,
+                    peak_insp_flow=b.peak_flow_lpm or 0.0,
+                    peak_exp_flow=0.0,  # not stored separately
+                    tidal_volume=b.tidal_volume_ml or 0.0,
+                    flatness_index=b.flatness_index or 0.0,
+                    mid_insp_flattening=b.mid_insp_flattening or 0.0,
+                    flow_class=b.flow_class or 1,
+                    flow_class_confidence=b.flow_confidence or 0.0,
+                    is_recovery_breath=b.is_recovery_breath or False,
+                    trigger_type=(
+                        TriggerType(b.inferred_trigger_type)
+                        if b.inferred_trigger_type
+                        else None
+                    ),
+                    cycle_type=(
+                        CycleType(b.inferred_cycle_type)
+                        if b.inferred_cycle_type
+                        else None
+                    ),
+                    trigger_cycle_confidence=b.trigger_confidence,
+                    trigger_cycle_applicability=(
+                        TriggerCycleApplicability.VALIDATED
+                        if b.trigger_cycle_applicable is True
+                        else (
+                            TriggerCycleApplicability.UNVALIDATED_DEVICE
+                            if b.trigger_cycle_applicable is False
+                            else None
+                        )
+                    ),
+                    trigger_cycle_reason=(
+                        NullReason(b.trigger_cycle_reason)
+                        if b.trigger_cycle_reason
+                        else None
+                    ),
+                    leak_valid=b.leak_valid,
+                    leak_valid_reason=(
+                        NullReason(b.leak_valid_reason) if b.leak_valid_reason else None
+                    ),
+                    ramp_active=b.ramp_active,
+                    ramp_active_reason=(
+                        NullReason(b.ramp_active_reason)
+                        if b.ramp_active_reason
+                        else None
+                    ),
+                    mask_off=b.mask_off,
+                    mask_off_reason=(
+                        NullReason(b.mask_off_reason) if b.mask_off_reason else None
+                    ),
+                )
+                for b in breath_rows
+            ]
+
+            return BreathPage(
+                query=query,
+                analysis_status=analysis_status,
+                algo_versions=algo_versions,
+                null_reason=None,
+                is_binned=False,
+                total_breaths=total_breaths,
+                page=query.page,
+                page_size=query.page_size,
+                rows=rows,
+            )
+        else:
+            # Binned fetch — load all matching breaths then aggregate
+            import statistics  # noqa: PLC0415
+
+            all_breaths = (await self._db.execute(base_stmt)).scalars().all()
+            bin_secs = query.bin_minutes * 60.0
+            bins: list[BreathBin] = []
+
+            # Group breaths into time bins
+            bin_start = query.offset_start
+            while bin_start < query.offset_end:
+                bin_end = min(bin_start + bin_secs, query.offset_end)
+                bin_breaths = [
+                    b
+                    for b in all_breaths
+                    if b.start_offset_s >= bin_start and b.start_offset_s < bin_end
+                ]
+                if bin_breaths:
+                    fi_vals = [
+                        b.flatness_index
+                        for b in bin_breaths
+                        if b.flatness_index is not None
+                    ]
+                    mif_vals = [
+                        b.mid_insp_flattening
+                        for b in bin_breaths
+                        if b.mid_insp_flattening is not None
+                    ]
+                    tv_vals = [
+                        b.tidal_volume_ml
+                        for b in bin_breaths
+                        if b.tidal_volume_ml is not None
+                    ]
+                    ie_vals = [
+                        b.i_e_ratio for b in bin_breaths if b.i_e_ratio is not None
+                    ]
+                    fc_vals = [
+                        b.flow_class for b in bin_breaths if b.flow_class is not None
+                    ]
+                    lv_count = sum(1 for b in bin_breaths if b.leak_valid is True)
+                    lv_eligible = sum(
+                        1 for b in bin_breaths if b.leak_valid is not None
+                    )
+
+                    bins.append(
+                        BreathBin(
+                            session_start_wall_clock=session_start,
+                            bin_start_offset=bin_start,
+                            bin_end_offset=bin_end,
+                            breath_count=len(bin_breaths),
+                            flatness_index_median=(
+                                statistics.median(fi_vals) if fi_vals else None
+                            ),
+                            mid_insp_flattening_median=(
+                                statistics.median(mif_vals) if mif_vals else None
+                            ),
+                            flow_class_mode=(
+                                max(set(fc_vals), key=fc_vals.count)
+                                if fc_vals
+                                else None
+                            ),
+                            tidal_volume_median=(
+                                statistics.median(tv_vals) if tv_vals else None
+                            ),
+                            ie_ratio_median=(
+                                statistics.median(ie_vals) if ie_vals else None
+                            ),
+                            leak_valid_fraction=(
+                                lv_count / lv_eligible if lv_eligible > 0 else None
+                            ),
+                            analysis_status=analysis_status,
+                        )
+                    )
+                bin_start = bin_end
+
+            return BreathPage(
+                query=query,
+                analysis_status=analysis_status,
+                algo_versions=algo_versions,
+                null_reason=None,
+                is_binned=True,
+                total_breaths=total_breaths,
+                page=1,
+                page_size=len(bins),
+                bins=bins,
+            )
 
     async def find_windows(
         self,
@@ -797,16 +1141,838 @@ class BreathService:
         options: WindowCriterionOptions | None = None,
         device_id: int | None = None,
     ) -> FindWindowsResult:
-        """N windows matching criterion, worst first."""
-        raise NotImplementedError("find_windows — PR-A seam; implementation TBD")
+        """N windows matching criterion, worst first.
+
+        See Appendix A §6 for full construction rules and dedup logic.
+        """
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        opts = options or WindowCriterionOptions()
+
+        # Validate criterion-irrelevant options per §6 docstring
+        defaults = WindowCriterionOptions()
+        if criterion == WindowCriterion.WORST_FLATTENING_LEAK_VALID:
+            bad = [
+                f
+                for f in ("context_seconds", "min_fl_run_length", "fl_class_threshold")
+                if getattr(opts, f) != getattr(defaults, f)
+            ]
+            if bad:
+                raise ValueError(
+                    f"Options irrelevant to WORST_FLATTENING_LEAK_VALID: {bad}"
+                )
+        elif criterion == WindowCriterion.CA_CENTERED:
+            bad = [
+                f
+                for f in (
+                    "include_unknown_leak",
+                    "flattening_threshold",
+                    "min_window_breaths",
+                    "context_breaths_before",
+                    "context_breaths_after",
+                    "min_fl_run_length",
+                    "fl_class_threshold",
+                )
+                if getattr(opts, f) != getattr(defaults, f)
+            ]
+            if bad:
+                raise ValueError(f"Options irrelevant to CA_CENTERED: {bad}")
+        elif criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY:
+            bad = [
+                f
+                for f in (
+                    "include_unknown_leak",
+                    "flattening_threshold",
+                    "min_window_breaths",
+                    "context_breaths_before",
+                    "context_breaths_after",
+                    "context_seconds",
+                )
+                if getattr(opts, f) != getattr(defaults, f)
+            ]
+            if bad:
+                raise ValueError(
+                    f"Options irrelevant to FL_RUN_ENDING_IN_RECOVERY: {bad}"
+                )
+
+        # Fetch sessions for the day
+        stmt = (
+            select(models.Session, models.Day)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(models.Day.date == therapy_date)
+        )
+        if device_id is not None:
+            stmt = stmt.where(models.Session.device_id == device_id)
+        day_rows = (await self._db.execute(stmt)).all()
+
+        if not day_rows:
+            return FindWindowsResult(
+                query_date=therapy_date,
+                device_id=device_id or 0,
+                criterion=criterion,
+                day_status=DayAnalysisStatus.NOT_RUN,
+                session_coverage=[],
+                algorithm_identity=None,
+                null_reason=NullReason.ANALYSIS_NOT_RUN,
+                primary_mode=None,
+                windows=[],
+            )
+
+        resolved_device_id = device_id or day_rows[0].Session.device_id
+
+        # Build per-session analysis status
+        session_ids = [r.Session.id for r in day_rows]
+        session_starts = {r.Session.id: r.Session.start_time for r in day_rows}
+
+        coverage: list[SessionCoverage] = []
+        identities: list[AlgorithmIdentity] = []
+        primary_modes: list[str] = []
+        for sid in session_ids:
+            status, algo, _ = await self._latest_analysis_for_session(sid)
+            coverage.append(
+                SessionCoverage(
+                    session_id=sid, analysis_status=status, algo_versions=algo
+                )
+            )
+            if status == AnalysisStatus.OK and algo is not None:
+                identities.append(algo.identity)
+                primary_modes.append(algo.run.primary_mode)
+
+        # Determine day_status
+        statuses = {c.analysis_status for c in coverage}
+        if statuses == {AnalysisStatus.OK}:
+            day_status = DayAnalysisStatus.OK
+        elif AnalysisStatus.OK not in statuses:
+            day_status = (
+                DayAnalysisStatus.NOT_RUN
+                if statuses == {AnalysisStatus.NOT_RUN}
+                else DayAnalysisStatus.STALE
+            )
+        else:
+            # Mix of OK and stale/not-run
+            identity_dicts = [id_.model_dump() for id_ in identities]
+            if len({str(d) for d in identity_dicts}) > 1:
+                day_status = DayAnalysisStatus.MIXED_VERSION
+            else:
+                day_status = DayAnalysisStatus.PARTIAL
+
+        # Check identity uniformity for CROSS_VERSION_REFUSAL_KEYS
+        uniform_identity: AlgorithmIdentity | None = None
+        if identities:
+            first_id = identities[0].model_dump()
+            cross_keys = CROSS_VERSION_REFUSAL_KEYS
+            all_same = all(
+                {k: id_.model_dump()[k] for k in cross_keys}
+                == {k: first_id[k] for k in cross_keys}
+                for id_ in identities[1:]
+            )
+            if all_same:
+                uniform_identity = identities[0]
+            else:
+                # MIXED_VERSION for FL-ranked criteria
+                if criterion != WindowCriterion.CA_CENTERED:
+                    return FindWindowsResult(
+                        query_date=therapy_date,
+                        device_id=resolved_device_id,
+                        criterion=criterion,
+                        day_status=DayAnalysisStatus.MIXED_VERSION,
+                        session_coverage=coverage,
+                        algorithm_identity=None,
+                        null_reason=NullReason.ALGO_VERSION_MISMATCH,
+                        primary_mode=None,
+                        windows=[],
+                    )
+
+        # FL_RUN_ENDING_IN_RECOVERY: also requires uniform primary_mode
+        uniform_primary_mode: str | None = None
+        if primary_modes:
+            if len(set(primary_modes)) == 1:
+                uniform_primary_mode = primary_modes[0]
+            elif criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY:
+                return FindWindowsResult(
+                    query_date=therapy_date,
+                    device_id=resolved_device_id,
+                    criterion=criterion,
+                    day_status=day_status,
+                    session_coverage=coverage,
+                    algorithm_identity=uniform_identity,
+                    null_reason=NullReason.PRIMARY_MODE_MISMATCH,
+                    primary_mode=None,
+                    windows=[],
+                )
+
+        # Only pass primary_mode when criterion uses recovery markers
+        result_primary_mode = (
+            uniform_primary_mode
+            if criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY
+            else None
+        )
+
+        # Collect analysis_result_ids per session (for per-window provenance)
+        ar_by_session: dict[int, int | None] = {}
+        for cov in coverage:
+            _, _, ar_id = await self._latest_analysis_for_session(cov.session_id)
+            ar_by_session[cov.session_id] = ar_id
+        ar_status_by_session: dict[int, AnalysisStatus] = {
+            c.session_id: c.analysis_status for c in coverage
+        }
+
+        # Build windows per criterion
+        windows: list[WindowResult] = []
+
+        if criterion == WindowCriterion.WORST_FLATTENING_LEAK_VALID:
+            windows = await self._find_worst_flattening_windows(
+                session_ids=session_ids,
+                session_starts=session_starts,
+                ar_by_session=ar_by_session,
+                ar_status_by_session=ar_status_by_session,
+                n=n,
+                opts=opts,
+            )
+
+        elif criterion == WindowCriterion.CA_CENTERED:
+            windows = await self._find_ca_centered_windows(
+                therapy_date=therapy_date,
+                device_id=resolved_device_id,
+                session_starts=session_starts,
+                ar_by_session=ar_by_session,
+                ar_status_by_session=ar_status_by_session,
+                n=n,
+                opts=opts,
+            )
+
+        elif criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY:
+            windows = await self._find_fl_run_windows(
+                session_ids=session_ids,
+                session_starts=session_starts,
+                ar_by_session=ar_by_session,
+                ar_status_by_session=ar_status_by_session,
+                n=n,
+                opts=opts,
+            )
+
+        return FindWindowsResult(
+            query_date=therapy_date,
+            device_id=resolved_device_id,
+            criterion=criterion,
+            day_status=day_status,
+            session_coverage=coverage,
+            algorithm_identity=uniform_identity,
+            null_reason=None,
+            primary_mode=result_primary_mode,
+            windows=windows,
+        )
+
+    async def _find_worst_flattening_windows(
+        self,
+        session_ids: list[int],
+        session_starts: dict[int, datetime],
+        ar_by_session: dict[int, int | None],
+        ar_status_by_session: dict[int, AnalysisStatus],
+        n: int,
+        opts: WindowCriterionOptions,
+    ) -> list[WindowResult]:
+        """Build WORST_FLATTENING_LEAK_VALID windows per §6 construction rule."""
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        candidates: list[WindowResult] = []
+        for sid in session_ids:
+            ar_id = ar_by_session.get(sid)
+            ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
+            if ar_id is None:
+                continue
+
+            # Fetch all breaths for this session ordered by breath_number
+            breath_rows = (
+                (
+                    await self._db.execute(
+                        select(models.Breath)
+                        .where(models.Breath.analysis_result_id == ar_id)
+                        .order_by(models.Breath.breath_number)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not breath_rows:
+                continue
+
+            # Filter eligible anchors per §6 step 1
+            eligible_indices: list[int] = []
+            for i, b in enumerate(breath_rows):
+                if b.leak_valid is True or (
+                    opts.include_unknown_leak and b.leak_valid is None
+                ):
+                    if opts.flattening_threshold is None or (
+                        b.mid_insp_flattening is not None
+                        and b.mid_insp_flattening >= opts.flattening_threshold
+                    ):
+                        eligible_indices.append(i)
+
+            # Sort by mid_insp_flattening descending (§6 step 2)
+            eligible_indices.sort(
+                key=lambda i: breath_rows[i].mid_insp_flattening or 0.0, reverse=True
+            )
+
+            session_start = session_starts[sid]
+            for anchor_idx in eligible_indices:
+                # §6 step 3: form candidate window
+                start_idx = max(0, anchor_idx - opts.context_breaths_before)
+                end_idx = min(
+                    len(breath_rows) - 1, anchor_idx + opts.context_breaths_after
+                )
+                window_breaths = breath_rows[start_idx : end_idx + 1]
+
+                if len(window_breaths) < opts.min_window_breaths:
+                    continue
+
+                anchor_b = breath_rows[anchor_idx]
+                candidates.append(
+                    WindowResult(
+                        criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+                        session_id=sid,
+                        session_start_wall_clock=session_start,
+                        window_start_offset=window_breaths[0].start_offset_s,
+                        window_end_offset=window_breaths[-1].end_offset_s,
+                        reason_summary=(
+                            f"fl_index={anchor_b.mid_insp_flattening:.3f}, "
+                            f"{len(window_breaths)} breaths"
+                        ),
+                        worst_mid_insp_flattening=anchor_b.mid_insp_flattening,
+                        fl_run_length=None,
+                        anchor_event_offset=None,
+                        analysis_result_id=ar_id,
+                        analysis_status=ar_status,
+                        analysis_reason=None,
+                    )
+                )
+
+        return self._dedup_and_top_n(
+            candidates, n, key=lambda w: w.worst_mid_insp_flattening or 0.0
+        )
+
+    async def _find_ca_centered_windows(
+        self,
+        therapy_date: date,
+        device_id: int,
+        session_starts: dict[int, datetime],
+        ar_by_session: dict[int, int | None],
+        ar_status_by_session: dict[int, AnalysisStatus],
+        n: int,
+        opts: WindowCriterionOptions,
+    ) -> list[WindowResult]:
+        """Build CA_CENTERED windows — anchored on Event rows (CA_CENTERED proceeds
+        on any day_status including NOT_RUN, per §6 pass-3 IMPORTANT-5)."""
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        stmt = (
+            select(models.Event, models.Session)
+            .join(models.Session, models.Event.session_id == models.Session.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(
+                models.Day.date == therapy_date,
+                models.Session.device_id == device_id,
+                models.Event.event_type == "CA",
+            )
+            .order_by(models.Event.start_time)
+        )
+        event_rows = (await self._db.execute(stmt)).all()
+
+        candidates: list[WindowResult] = []
+        for ev_row in event_rows:
+            ev = ev_row.Event
+            sess = ev_row.Session
+            sid = sess.id
+            session_start = session_starts.get(sid, sess.start_time)
+            # offset from session start
+            ev_offset = (ev.start_time - session_start).total_seconds()
+            win_start = max(0.0, ev_offset - opts.context_seconds)
+            win_end = ev_offset + opts.context_seconds
+
+            ar_id = ar_by_session.get(sid)
+            ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
+
+            candidates.append(
+                WindowResult(
+                    criterion=WindowCriterion.CA_CENTERED,
+                    session_id=sid,
+                    session_start_wall_clock=session_start,
+                    window_start_offset=win_start,
+                    window_end_offset=win_end,
+                    reason_summary=f"CA event at offset {ev_offset:.1f}s",
+                    worst_mid_insp_flattening=None,
+                    fl_run_length=None,
+                    anchor_event_offset=ev_offset,
+                    analysis_result_id=ar_id,
+                    analysis_status=ar_status,
+                    analysis_reason=(
+                        NullReason.ANALYSIS_NOT_RUN if ar_id is None else None
+                    ),
+                )
+            )
+
+        return self._dedup_and_top_n(
+            candidates, n, key=lambda w: -(w.anchor_event_offset or 0.0)
+        )
+
+    async def _find_fl_run_windows(
+        self,
+        session_ids: list[int],
+        session_starts: dict[int, datetime],
+        ar_by_session: dict[int, int | None],
+        ar_status_by_session: dict[int, AnalysisStatus],
+        n: int,
+        opts: WindowCriterionOptions,
+    ) -> list[WindowResult]:
+        """Build FL_RUN_ENDING_IN_RECOVERY windows — RERA-proxy: runs of ≥N consecutive
+        FL breaths ending with is_recovery_breath=True."""
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        candidates: list[WindowResult] = []
+        for sid in session_ids:
+            ar_id = ar_by_session.get(sid)
+            ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
+            if ar_id is None:
+                continue
+
+            breath_rows = (
+                (
+                    await self._db.execute(
+                        select(models.Breath)
+                        .where(models.Breath.analysis_result_id == ar_id)
+                        .order_by(models.Breath.breath_number)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not breath_rows:
+                continue
+
+            session_start = session_starts[sid]
+            # Scan for FL runs ending in recovery breath
+            i = 0
+            while i < len(breath_rows):
+                b = breath_rows[i]
+                if b.flow_class is not None and b.flow_class >= opts.fl_class_threshold:
+                    # Start of a potential FL run
+                    run_start = i
+                    j = i
+                    while j < len(breath_rows) and (
+                        breath_rows[j].flow_class is not None
+                        and (breath_rows[j].flow_class or 0) >= opts.fl_class_threshold
+                    ):
+                        j += 1
+                    fl_run = breath_rows[run_start:j]
+                    # Check if followed by a recovery breath
+                    if j < len(breath_rows) and breath_rows[j].is_recovery_breath:
+                        run_end_idx = j  # recovery breath
+                        full_run = breath_rows[run_start : run_end_idx + 1]
+                        fl_length = len(fl_run)
+                        if fl_length >= opts.min_fl_run_length:
+                            candidates.append(
+                                WindowResult(
+                                    criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
+                                    session_id=sid,
+                                    session_start_wall_clock=session_start,
+                                    window_start_offset=full_run[0].start_offset_s,
+                                    window_end_offset=full_run[-1].end_offset_s,
+                                    reason_summary=(
+                                        f"fl_run={fl_length} breaths, ends in recovery"
+                                    ),
+                                    worst_mid_insp_flattening=max(
+                                        (
+                                            b.mid_insp_flattening
+                                            for b in fl_run
+                                            if b.mid_insp_flattening is not None
+                                        ),
+                                        default=None,
+                                    ),
+                                    fl_run_length=fl_length,
+                                    anchor_event_offset=None,
+                                    analysis_result_id=ar_id,
+                                    analysis_status=ar_status,
+                                    analysis_reason=None,
+                                )
+                            )
+                        i = run_end_idx + 1
+                        continue
+                    i = j
+                else:
+                    i += 1
+
+        return self._dedup_and_top_n(candidates, n, key=lambda w: w.fl_run_length or 0)
+
+    @staticmethod
+    def _dedup_and_top_n(
+        candidates: list[WindowResult],
+        n: int,
+        key: Callable[[WindowResult], Any],
+    ) -> list[WindowResult]:
+        """Deduplicate overlapping windows (>50% of shorter), keep worst; return top-N."""
+        # Sort by severity descending (largest key first)
+        sorted_cands = sorted(candidates, key=key, reverse=True)
+        kept: list[WindowResult] = []
+        for cand in sorted_cands:
+            overlaps = False
+            for existing in kept:
+                if existing.session_id != cand.session_id:
+                    continue
+                overlap_start = max(
+                    existing.window_start_offset, cand.window_start_offset
+                )
+                overlap_end = min(existing.window_end_offset, cand.window_end_offset)
+                if overlap_end <= overlap_start:
+                    continue
+                overlap_len = overlap_end - overlap_start
+                shorter = min(
+                    existing.window_end_offset - existing.window_start_offset,
+                    cand.window_end_offset - cand.window_start_offset,
+                )
+                if shorter > 0 and overlap_len / shorter > 0.5:
+                    overlaps = True
+                    break
+            if not overlaps:
+                kept.append(cand)
+            if len(kept) >= n:
+                break
+        return kept
 
     async def compare_epochs(
         self,
         epochs: list[EpochRequest],
         metrics: list[DistributionMetric] | None = None,
     ) -> CompareEpochsResult:
-        """Distributions across RxTracker epochs."""
-        raise NotImplementedError("compare_epochs — PR-A seam; implementation TBD")
+        """Distributions across RxTracker epochs.
+
+        Refuses on CROSS_VERSION_REFUSAL_KEYS mismatch (ALGO_VERSION_MISMATCH)
+        or mid-epoch RX change (RX_CHANGED_WITHIN_EPOCH).  Mixed primary modes
+        degrade RERA fields only (PRIMARY_MODE_MISMATCH).
+        """
+        import statistics  # noqa: PLC0415
+
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.analysis.rx_tracker import RX_KEYS  # noqa: PLC0415
+        from snore.database import models  # noqa: PLC0415
+
+        epoch_stats: list[EpochBreathStats] = []
+        rx_violations: list[EpochRxViolation] = []
+
+        for epoch in epochs:
+            # Fetch all days in range for this epoch's device
+            day_stmt = (
+                select(models.Day, models.Session)
+                .join(models.Session, models.Day.id == models.Session.day_id)
+                .where(
+                    models.Day.date >= epoch.date_start,
+                    models.Day.date <= epoch.date_end,
+                )
+                .order_by(models.Day.date)
+            )
+            if epoch.device_id is not None:
+                day_stmt = day_stmt.where(models.Session.device_id == epoch.device_id)
+
+            day_rows = (await self._db.execute(day_stmt)).all()
+
+            # Gather contributing sessions (analyzed_session_count > 0)
+            # and check RX uniformity
+            contributing_sessions: list[
+                tuple[int, AlgoVersions]
+            ] = []  # (session_id, algo)
+            all_rx: list[dict[str, str]] = []
+            nights_with_data = 0
+            nights_missing_analysis = 0
+
+            # Group by date
+            by_date: dict[date, list[int]] = {}
+            for row in day_rows:
+                d = row.Day.date
+                if d not in by_date:
+                    by_date[d] = []
+                by_date[d].append(row.Session.id)
+
+            for _day_date, sids in by_date.items():
+                ok_sessions: list[tuple[int, AlgoVersions]] = []
+                for sid in sids:
+                    status, algo, _ = await self._latest_analysis_for_session(sid)
+                    if status == AnalysisStatus.OK and algo is not None:
+                        ok_sessions.append((sid, algo))
+
+                if ok_sessions:
+                    nights_with_data += 1
+                    contributing_sessions.extend(ok_sessions)
+
+                    # Collect RX settings for this day (from first session)
+                    sess_row = (
+                        (
+                            await self._db.execute(
+                                select(models.Setting).where(
+                                    models.Setting.session_id == sids[0],
+                                    models.Setting.key.in_(RX_KEYS),
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    rx = {s.key: s.value for s in sess_row if s.value is not None}
+                    all_rx.append(rx)
+                else:
+                    nights_missing_analysis += 1
+
+            # Check RX uniformity within epoch
+            if all_rx:
+                first_rx = all_rx[0]
+                rx_changed = any(rx != first_rx for rx in all_rx[1:])
+                if rx_changed:
+                    # Find change dates
+                    change_dates = []
+                    changed_keys = set()
+                    for i in range(1, len(all_rx)):
+                        diffs = {
+                            k
+                            for k in set(all_rx[i - 1]) | set(all_rx[i])
+                            if all_rx[i - 1].get(k) != all_rx[i].get(k)
+                        }
+                        if diffs:
+                            changed_keys |= diffs
+                            d = list(by_date.keys())[i]
+                            change_dates.append(d)
+                    rx_violations.append(
+                        EpochRxViolation(
+                            epoch_label=epoch.label,
+                            changed_keys=sorted(changed_keys),
+                            change_dates=change_dates,
+                        )
+                    )
+
+            if not contributing_sessions:
+                epoch_stats.append(
+                    EpochBreathStats(
+                        label=epoch.label,
+                        date_start=epoch.date_start,
+                        date_end=epoch.date_end,
+                        nights_with_data=0,
+                        nights_missing_analysis=nights_missing_analysis,
+                        algorithm_identity=None,
+                        null_reason=NullReason.NO_DATA_IN_RANGE,
+                        primary_mode=None,
+                        mid_insp_flattening=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        flatness_index=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        flow_class_distribution={},
+                        tidal_volume_ml=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        ie_ratio=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        rera_proxy_count=None,
+                        rera_reason=NullReason.ANALYSIS_NOT_RUN,
+                        rx_settings=first_rx if all_rx else {},
+                    )
+                )
+                continue
+
+            # Check algorithm identity uniformity (CROSS_VERSION_REFUSAL_KEYS)
+            all_identities = [algo.identity for _, algo in contributing_sessions]
+            first_id = all_identities[0].model_dump()
+            cross_keys = CROSS_VERSION_REFUSAL_KEYS
+            identity_uniform = all(
+                {k: id_.model_dump()[k] for k in cross_keys}
+                == {k: first_id[k] for k in cross_keys}
+                for id_ in all_identities[1:]
+            )
+            if not identity_uniform:
+                epoch_stats.append(
+                    EpochBreathStats(
+                        label=epoch.label,
+                        date_start=epoch.date_start,
+                        date_end=epoch.date_end,
+                        nights_with_data=nights_with_data,
+                        nights_missing_analysis=nights_missing_analysis,
+                        algorithm_identity=None,
+                        null_reason=NullReason.ALGO_VERSION_MISMATCH,
+                        primary_mode=None,
+                        mid_insp_flattening=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        flatness_index=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        flow_class_distribution={},
+                        tidal_volume_ml=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        ie_ratio=DistributionStats(
+                            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+                        ),
+                        rera_proxy_count=None,
+                        rera_reason=NullReason.ANALYSIS_NOT_RUN,
+                        rx_settings=all_rx[0] if all_rx else {},
+                    )
+                )
+                continue
+
+            # Check primary_mode uniformity for RERA
+            all_modes_str = [algo.run.primary_mode for _, algo in contributing_sessions]
+            if len(set(all_modes_str)) == 1:
+                uniform_primary_mode: str | None = all_modes_str[0]
+                rera_reason: NullReason | None = None
+            else:
+                uniform_primary_mode = None
+                rera_reason = NullReason.PRIMARY_MODE_MISMATCH
+
+            # Fetch all leak-valid breaths for contributing sessions
+            contributing_ar_ids = []
+            for sid, _ in contributing_sessions:
+                _, _, ar_id = await self._latest_analysis_for_session(sid)
+                if ar_id is not None:
+                    contributing_ar_ids.append((sid, ar_id))
+
+            all_breath_rows: list[Any] = []
+            for _sid, ar_id in contributing_ar_ids:
+                brows = (
+                    (
+                        await self._db.execute(
+                            select(models.Breath).where(
+                                models.Breath.analysis_result_id == ar_id,
+                                models.Breath.leak_valid.is_(True),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                all_breath_rows.extend(brows)
+
+            def _distrib(
+                vals: list[float], n_breaths: int, n_nights: int
+            ) -> DistributionStats:
+                if not vals:
+                    return DistributionStats(
+                        median=None,
+                        iqr=None,
+                        p95=None,
+                        n_breaths=n_breaths,
+                        n_nights=n_nights,
+                    )
+                sorted_v = sorted(vals)
+                p25 = sorted_v[len(sorted_v) // 4]
+                p75 = sorted_v[min(len(sorted_v) * 3 // 4, len(sorted_v) - 1)]
+                p95 = sorted_v[min(int(len(sorted_v) * 0.95), len(sorted_v) - 1)]
+                return DistributionStats(
+                    median=statistics.median(vals),
+                    iqr=p75 - p25,
+                    p95=p95,
+                    n_breaths=n_breaths,
+                    n_nights=n_nights,
+                )
+
+            n_lv = len(all_breath_rows)
+            n_nights_contrib = nights_with_data
+
+            mif_vals = [
+                b.mid_insp_flattening
+                for b in all_breath_rows
+                if b.mid_insp_flattening is not None
+            ]
+            fi_vals = [
+                b.flatness_index
+                for b in all_breath_rows
+                if b.flatness_index is not None
+            ]
+            tv_vals = [
+                b.tidal_volume_ml
+                for b in all_breath_rows
+                if b.tidal_volume_ml is not None
+            ]
+            ie_vals = [b.i_e_ratio for b in all_breath_rows if b.i_e_ratio is not None]
+            fc_dist: dict[int, int] = {}
+            for b in all_breath_rows:
+                if b.flow_class is not None:
+                    fc_dist[b.flow_class] = fc_dist.get(b.flow_class, 0) + 1
+
+            # RERA proxy: FL runs ending in recovery breath in each contributing session
+            rera_count: int | None = None
+            if uniform_primary_mode is not None:
+                rera_count = 0
+                for _sid, ar_id in contributing_ar_ids:
+                    brows_all = (
+                        (
+                            await self._db.execute(
+                                select(models.Breath)
+                                .where(models.Breath.analysis_result_id == ar_id)
+                                .order_by(models.Breath.breath_number)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    # Count FL-run-ending-in-recovery occurrences
+                    i = 0
+                    while i < len(brows_all):
+                        b = brows_all[i]
+                        if b.flow_class is not None and b.flow_class >= 4:
+                            j = i
+                            while j < len(brows_all) and (
+                                brows_all[j].flow_class is not None
+                                and (brows_all[j].flow_class or 0) >= 4
+                            ):
+                                j += 1
+                            fl_len = j - i
+                            if (
+                                j < len(brows_all)
+                                and brows_all[j].is_recovery_breath
+                                and fl_len >= 2
+                            ):
+                                rera_count += 1
+                            i = j
+                        else:
+                            i += 1
+
+            epoch_stats.append(
+                EpochBreathStats(
+                    label=epoch.label,
+                    date_start=epoch.date_start,
+                    date_end=epoch.date_end,
+                    nights_with_data=nights_with_data,
+                    nights_missing_analysis=nights_missing_analysis,
+                    algorithm_identity=all_identities[0],
+                    null_reason=None,
+                    primary_mode=uniform_primary_mode,
+                    mid_insp_flattening=_distrib(mif_vals, n_lv, n_nights_contrib),
+                    flatness_index=_distrib(fi_vals, n_lv, n_nights_contrib),
+                    flow_class_distribution=fc_dist,
+                    tidal_volume_ml=_distrib(tv_vals, n_lv, n_nights_contrib),
+                    ie_ratio=_distrib(ie_vals, n_lv, n_nights_contrib),
+                    rera_proxy_count=rera_count,
+                    rera_reason=rera_reason,
+                    rx_settings=all_rx[0] if all_rx else {},
+                )
+            )
+
+        null_reason: NullReason | None = None
+        if rx_violations:
+            null_reason = NullReason.RX_CHANGED_WITHIN_EPOCH
+
+        return CompareEpochsResult(
+            epochs=epoch_stats,
+            null_reason=null_reason,
+            rx_violations=rx_violations,
+        )
 
     async def get_analysis_status(
         self,
