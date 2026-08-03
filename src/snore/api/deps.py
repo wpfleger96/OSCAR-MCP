@@ -27,19 +27,28 @@ async def get_actor(
 ) -> ActorContext:
     """Return the actor for this request.
 
-    In local mode: auto-provision a single admin user+profile on first call,
-    then resolve from the DB on every request.  In multiuser mode: the
-    AuthMiddleware populates ``request.state.actor`` from the session cookie;
-    this dependency returns it.
+    In local mode: AuthMiddleware auto-provisions and sets request.state.actor.
+    In multiuser mode: AuthMiddleware validates the session cookie and sets it.
 
-    Phase 2: actor resolution is now fully mode-aware via AuthMiddleware.
+    Raises 401 if no actor is present (unauthenticated in multiuser or
+    middleware provisioning failed in local mode).
     """
-    # AuthMiddleware (both local and multiuser) sets request.state.actor.
     actor: ActorContext | None = getattr(request.state, "actor", None)
     if actor is not None:
         return actor
 
-    # Fallback for test environments where middleware may not run.
+    # Fallback for test environments where middleware may not run (e.g. unit
+    # tests that create a TestClient without lifespan and don't set state.actor).
+    # In production multiuser mode the middleware always runs; this path is only
+    # reached in test setups that bypass middleware.
+    from snore.api.config import get_config  # noqa: PLC0415
+
+    cfg = get_config()
+    if cfg.is_multiuser:
+        from fastapi import HTTPException  # noqa: PLC0415
+
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
 
     factory = ActorContextFactory(db)

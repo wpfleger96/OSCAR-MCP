@@ -7,6 +7,7 @@ from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db, service_dep
+from snore.api.guards import RequireAdmin, RequireAuth
 from snore.database.target import DatabaseTarget
 from snore.services.database_service import DatabaseService
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
@@ -35,6 +36,7 @@ def _get_target() -> DatabaseTarget:
 async def get_stats(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
+    _actor: RequireAuth,
 ) -> DatabaseStats:
     db_path = target.sqlite_path if target.dialect == "sqlite" else ""
     return await service.get_stats(db_path)
@@ -44,6 +46,7 @@ async def get_stats(
 def vacuum_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
+    _actor: RequireAdmin,
 ) -> VacuumResult:
     """Vacuum the SQLite database to reclaim space after deletions.
 

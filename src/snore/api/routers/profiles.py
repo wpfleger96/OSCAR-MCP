@@ -14,7 +14,8 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.api.deps import ActorDep, get_db
+from snore.api.deps import get_db
+from snore.api.guards import RequireAuth, RequireWritable
 from snore.services.profile_service import ProfileNotFoundError, ProfileService
 
 router = APIRouter()
@@ -40,7 +41,7 @@ class RenameProfileRequest(BaseModel):
 
 
 @router.get("/", response_model=list[ProfileResponse])
-async def list_profiles(actor: ActorDep, db: DbDep) -> list[ProfileResponse]:
+async def list_profiles(actor: RequireAuth, db: DbDep) -> list[ProfileResponse]:
     """List all live profiles for the current user."""
     svc = ProfileService(db)
     profiles = await svc.list_profiles(actor.user_id)
@@ -49,11 +50,8 @@ async def list_profiles(actor: ActorDep, db: DbDep) -> list[ProfileResponse]:
 
 @router.post("/", response_model=ProfileResponse, status_code=201)
 async def create_profile(
-    body: CreateProfileRequest, actor: ActorDep, db: DbDep
+    body: CreateProfileRequest, actor: RequireWritable, db: DbDep
 ) -> ProfileResponse:
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
-
     svc = ProfileService(db)
     try:
         profile = await svc.create_profile(actor.user_id, body.name)
@@ -66,11 +64,8 @@ async def create_profile(
 
 @router.patch("/{profile_id}", response_model=ProfileResponse)
 async def update_profile(
-    profile_id: int, body: RenameProfileRequest, actor: ActorDep, db: DbDep
+    profile_id: int, body: RenameProfileRequest, actor: RequireWritable, db: DbDep
 ) -> ProfileResponse:
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
-
     svc = ProfileService(db)
     try:
         if body.name is not None:

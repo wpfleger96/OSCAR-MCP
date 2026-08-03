@@ -27,18 +27,11 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
 
+from snore.api.deps import get_actor
 from snore.auth.actor import ActorContext, AuthMode
 
 
-def _get_actor(request: Request) -> ActorContext:
-    """Dependency that returns the actor or raises 401."""
-    actor: ActorContext | None = getattr(request.state, "actor", None)
-    if actor is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return actor
-
-
-def require_auth(actor: Annotated[ActorContext, Depends(_get_actor)]) -> ActorContext:
+def require_auth(actor: Annotated[ActorContext, Depends(get_actor)]) -> ActorContext:
     """Require an authenticated actor; return it.
 
     Raises 401 if unauthenticated.
