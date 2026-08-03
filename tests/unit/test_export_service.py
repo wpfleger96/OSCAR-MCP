@@ -28,7 +28,7 @@ def backup_root(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def export_service(backup_root: Path) -> ExportService:
-    return ExportService(backup_root=backup_root)
+    return ExportService(1, backup_root=backup_root)
 
 
 @pytest.fixture()
@@ -167,7 +167,7 @@ class TestExportRaw:
             export_service.export_raw(Path("/tmp/out"))
 
     def test_no_backup_raises(self, tmp_path: Path) -> None:
-        svc = ExportService(backup_root=tmp_path / "nonexistent")
+        svc = ExportService(1, backup_root=tmp_path / "nonexistent")
         with pytest.raises(FileNotFoundError):
             svc.export_raw(Path("/tmp/out"), device_serial="NOPE")
 
@@ -266,7 +266,7 @@ class TestExportCsv:
     async def test_creates_csv_files(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "csv_export"
         result = await svc.export_csv(db_session, out)
 
@@ -279,7 +279,7 @@ class TestExportCsv:
     async def test_sessions_csv_content(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "csv_export"
         await svc.export_csv(db_session, out)
 
@@ -297,7 +297,7 @@ class TestExportCsv:
     async def test_events_csv_content(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "csv_export"
         await svc.export_csv(db_session, out)
 
@@ -312,7 +312,7 @@ class TestExportCsv:
     async def test_settings_csv_content(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "csv_export"
         await svc.export_csv(db_session, out)
 
@@ -328,7 +328,7 @@ class TestExportCsv:
     async def test_date_filter_excludes(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "csv_export"
         result = await svc.export_csv(db_session, out, date_from=date(2026, 1, 1))
         assert result.nights_exported == 0
@@ -336,7 +336,7 @@ class TestExportCsv:
     async def test_no_sessions_warns(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "csv_export"
         result = await svc.export_csv(db_session, out, date_from=date(2099, 1, 1))
         assert any("No sessions" in w for w in result.warnings)
@@ -346,7 +346,7 @@ class TestExportJson:
     async def test_creates_json_file(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "export.json"
         result = await svc.export_json(db_session, out)
 
@@ -357,7 +357,7 @@ class TestExportJson:
     async def test_json_structure(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "export.json"
         await svc.export_json(db_session, out)
 
@@ -378,7 +378,7 @@ class TestExportJson:
         assert s["settings"]["mode"] == "APAP"
 
     async def test_date_filter(self, db_session: AsyncSession, tmp_path: Path) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "export.json"
         await svc.export_json(db_session, out, date_from=date(2099, 1, 1))
 
@@ -389,7 +389,7 @@ class TestExportJson:
     async def test_device_filter(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        svc = ExportService()
+        svc = ExportService(1)
         out = tmp_path / "export.json"
         await svc.export_json(db_session, out, device_serial="NONEXISTENT")
 

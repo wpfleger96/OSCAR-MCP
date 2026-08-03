@@ -377,73 +377,153 @@ class TestConcurrentAdmission:
 
 @pytest.mark.asyncio
 class TestRunTxnIdempotency:
-    """run_txn must not duplicate rows for invite redemption or import chunk writes."""
+    """run_txn must replay on SQLite contention and produce exactly one row.
 
-    async def test_no_duplicate_invite_on_retry(self, async_db_session):
-        """Simulated retry of invite redemption does not duplicate the invite redemption.
+    These tests use a real temporary database (via init_database) so
+    run_txn's own session_scope() calls land in the same file as the
+    assertions.
+    """
 
-        We test the uniqueness property directly: insert a row with a unique constraint,
-        then insert the same row again via an idempotent unit_of_work — the second call
-        returns the existing row without creating a duplicate.
+    async def test_no_duplicate_session_on_import_chunk_retry(self, temp_db):
+        """Fault-injected contention on import chunk write: run_txn retries and
+        exactly one Session row is persisted (UNIQUE guard prevents duplication).
+
+        Strategy: the unit_of_work raises on the first call (simulating SQLite
+        contention), _is_sqlite_contention is patched to return True, so run_txn
+        retries.  The second call succeeds.  After two attempts exactly one row
+        exists — the UNIQUE(device_id, device_session_id) constraint makes the
+        write idempotent.
         """
-        import hashlib
-        import secrets
+        import uuid
+
+        from unittest.mock import patch
 
         from sqlalchemy import select
 
-        from snore.database.models import Invite, User
-
-        # Note: we use the session-scope path (run_txn opens its own sessions).
-        # The async_db_session fixture ensures the schema is created and the
-        # global engine is pointed at a temp DB.
-        # We need init_database() so session_scope() works inside run_txn.
-        # Use the temp_db engine URL that async_db_session already set up.
-        # Since async_db_session creates an engine without setting the global state,
-        # we run the test directly against the async_db_session.
-
-        raw = secrets.token_urlsafe(16)
-        token_hash = hashlib.sha256(raw.encode()).hexdigest()
-
-        from datetime import UTC, datetime, timedelta
-
-        # First insert — directly via async_db_session (simulates first attempt).
-        user = User(
-            canonical_email=f"invite_retry_{raw[:8]}@example.com", role="member"
+        from snore.database.models import Device, Profile, Session, User
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
         )
-        async_db_session.add(user)
-        await async_db_session.flush()
+        from snore.database.txn import run_txn
 
-        inv = Invite(
-            email=f"invite_retry_{raw[:8]}@example.com",
-            token_hash=token_hash,
-            role="member",
-            expires_at=datetime.now(UTC) + timedelta(days=7),
-        )
-        async_db_session.add(inv)
-        await async_db_session.flush()
+        db_path = str(temp_db)
+        await init_database(db_path)
 
-        # Second insert attempt — idempotent: check-before-insert pattern.
-        existing = (
-            (
-                await async_db_session.execute(
-                    select(Invite).where(Invite.token_hash == token_hash)
-                )
+        # Seed: user → profile → device.
+        async with session_scope() as db:
+            user = User(
+                canonical_email=f"runtxn_{uuid.uuid4().hex[:8]}@test", role="admin"
             )
-            .scalars()
-            .first()
-        )
-        assert existing is not None, "Invite must exist after first insert"
-
-        # The idempotent pattern returns early — no second row created.
-        rows = (
-            (
-                await async_db_session.execute(
-                    select(Invite).where(Invite.token_hash == token_hash)
-                )
+            db.add(user)
+            await db.flush()
+            profile = Profile(user_id=user.id, name="Default")
+            db.add(profile)
+            await db.flush()
+            device = Device(
+                profile_id=profile.id,
+                manufacturer="Test",
+                model="CPAP",
+                serial_number=f"SN_{uuid.uuid4().hex[:6]}",
             )
-            .scalars()
-            .all()
+            db.add(device)
+            await db.flush()
+            device_id = device.id
+
+        # unit_of_work: raises on attempt 1 (contention), succeeds on attempt 2.
+        device_session_id = f"txn_test_{uuid.uuid4().hex[:8]}"
+        attempt_count = 0
+
+        async def _insert_session(db):
+            nonlocal attempt_count
+            attempt_count += 1
+            # Simulate SQLite contention on the first attempt.
+            if attempt_count == 1:
+                raise RuntimeError("SQLITE_BUSY simulated")
+
+            from datetime import UTC, datetime
+
+            sess = Session(
+                device_id=device_id,
+                device_session_id=device_session_id,
+                start_time=datetime(2025, 1, 1, 22, 0, 0, tzinfo=UTC),
+                end_time=datetime(2025, 1, 2, 6, 0, 0, tzinfo=UTC),
+                duration_seconds=28800.0,
+            )
+            db.add(sess)
+            await db.flush()
+            return True
+
+        # _is_sqlite_contention always returns True; asyncio.sleep patched out.
+        with (
+            patch("snore.database.txn._is_sqlite_contention", return_value=True),
+            patch("snore.database.txn.asyncio.sleep"),
+        ):
+            await run_txn(_insert_session)
+
+        assert attempt_count == 2, (
+            f"Expected 2 attempts (1 contention + 1 success); got {attempt_count}"
         )
-        assert len(rows) == 1, (
-            f"Expected 1 invite row, got {len(rows)} — duplicate on retry"
-        )
+
+        # Exactly one row persisted.
+        async with session_scope() as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(Session).where(
+                            Session.device_session_id == device_session_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1, f"Expected 1 Session row after retry; got {len(rows)}"
+
+        await cleanup_database()
+
+    async def test_non_contention_exception_propagates_immediately(self, temp_db):
+        """run_txn does not retry on non-contention errors; the error propagates."""
+        from snore.database.session import cleanup_database, init_database
+        from snore.database.txn import run_txn
+
+        await init_database(str(temp_db))
+
+        call_count = 0
+
+        async def _failing(db):
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("not a contention error")
+
+        with pytest.raises(ValueError, match="not a contention error"):
+            await run_txn(_failing)
+
+        assert call_count == 1, "Non-contention error must not be retried"
+
+        await cleanup_database()
+
+    async def test_exhausted_contention_raises_last_error(self, temp_db):
+        """run_txn raises after max_attempts of contention; no infinite loop."""
+        from unittest.mock import patch
+
+        from snore.database.session import cleanup_database, init_database
+        from snore.database.txn import run_txn
+
+        await init_database(str(temp_db))
+
+        call_count = 0
+
+        async def _always_contention(db):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("SQLITE_BUSY simulated")
+
+        with patch("snore.database.txn._is_sqlite_contention", return_value=True):
+            with pytest.raises(RuntimeError, match="SQLITE_BUSY simulated"):
+                await run_txn(_always_contention, max_attempts=3)
+
+        assert call_count == 3, f"Expected exactly 3 attempts; got {call_count}"
+
+        await cleanup_database()

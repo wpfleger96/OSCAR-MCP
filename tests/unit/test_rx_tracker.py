@@ -83,7 +83,7 @@ RX_SETTINGS = {
 class TestRxTrackerHistory:
     async def test_history_empty_db(self, async_db_session):
         """Empty database returns empty list."""
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
         assert result == []
 
@@ -100,7 +100,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
 
         assert len(result) == 1
@@ -137,7 +137,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
 
         assert len(result) == 2
@@ -158,7 +158,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
 
         assert len(result) == 1
@@ -195,7 +195,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 2
         device_ids = {r.device_id for r in result}
@@ -231,7 +231,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 2
         assert result[0].settings["ps"] == "4.0"
@@ -286,7 +286,7 @@ class TestRxTrackerHistory:
 
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 1
         assert result[0].settings == settings_enabled
@@ -328,7 +328,7 @@ class TestRxTrackerHistory:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 1
         assert result[0].start_date == base + timedelta(days=1)
@@ -359,7 +359,7 @@ class TestRxTrackerCurrent:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
 
         assert result is not None
@@ -372,7 +372,7 @@ class TestRxTrackerCurrentTailWalk:
         self, async_db_session: AsyncSession
     ) -> None:
         """Empty database returns None."""
-        assert await RxTracker().get_current(async_db_session) is None
+        assert await RxTracker(1).get_current(async_db_session) is None
 
     async def test_current_equals_history_last_single_device(
         self, async_db_session: AsyncSession, async_test_device: Device
@@ -397,7 +397,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         assert (
             await tracker.get_current(async_db_session)
             == (await tracker.get_history(async_db_session))[-1]
@@ -440,7 +440,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         assert (
             await tracker.get_current(async_db_session)
             == (await tracker.get_history(async_db_session))[-1]
@@ -485,7 +485,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_current(async_db_session)
+        result = await RxTracker(1).get_current(async_db_session)
         assert result is not None
         assert result.device_id == device_low.id
         assert result.start_date == base + timedelta(days=10)
@@ -516,7 +516,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result == (await tracker.get_history(async_db_session))[-1]
@@ -559,7 +559,7 @@ class TestRxTrackerCurrentTailWalk:
         )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result == (await tracker.get_history(async_db_session))[-1]
@@ -579,7 +579,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result.days_count == 30
@@ -612,7 +612,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result.start_date == new_start
@@ -623,7 +623,7 @@ class TestRxTrackerCurrentTailWalk:
 class TestRxTrackerComparison:
     async def test_comparison_empty_db(self, async_db_session):
         """Empty database returns empty comparison."""
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_comparison(async_db_session)
         assert result.periods == []
         assert result.best_index is None
@@ -644,7 +644,7 @@ class TestRxTrackerComparison:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_comparison(async_db_session, min_days=7)
 
         assert len(result.periods) == 1
@@ -687,7 +687,7 @@ class TestRxTrackerComparison:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_comparison(async_db_session, min_days=7)
 
         assert len(result.periods) == 3
@@ -730,7 +730,7 @@ class TestDiffSettings:
 class TestRxTrackerChanges:
     async def test_changes_empty_db(self, async_db_session):
         """Empty database returns empty changes list."""
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         assert result.changes == []
 
     async def test_single_day_emits_no_changes(
@@ -745,7 +745,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         assert result.changes == []
 
     async def test_multi_key_change_emits_one_entry_per_key(
@@ -767,7 +767,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         keys = {c.key for c in result.changes}
         assert "mode" in keys
         assert len(result.changes) >= 2
@@ -817,7 +817,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         # Only day 2 triggers diffs (day 1 is skipped), so changes happen at day 2
         assert all(c.date == base + timedelta(days=2) for c in result.changes)
         assert len(result.changes) >= 1
@@ -868,7 +868,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         # All changes should be from device_a only
         assert all(c.device_id == device_a.id for c in result.changes)
         assert len(result.changes) >= 1
@@ -903,7 +903,7 @@ class TestRxTrackerChanges:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         changes = result.changes
         for i in range(len(changes) - 1):
             a, b = changes[i], changes[i + 1]
@@ -928,7 +928,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
 
         humidity_changes = [c for c in result.changes if c.key == "humidity_level"]
         assert len(humidity_changes) == 1

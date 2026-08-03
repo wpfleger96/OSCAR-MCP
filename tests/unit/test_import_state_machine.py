@@ -997,12 +997,28 @@ class TestRouteHTTPBoundary:
 
     @staticmethod
     def _make_app() -> object:
-        """Create a minimal app with the import router mounted, no lifespan."""
+        """Create a minimal app with the import router mounted, no lifespan.
+
+        Overrides ``get_actor`` with a no-DB stub that returns a test admin actor so
+        the cancel and progress routes (which now require ActorDep) work without a
+        real database.  The stub actor's user_id matches the owner_user_id used by
+        ``_upload_and_get_job`` when seeding jobs.
+        """
         from fastapi import FastAPI  # noqa: PLC0415
 
+        from snore.api.deps import get_actor  # noqa: PLC0415
         from snore.api.routers import import_data  # noqa: PLC0415
+        from snore.auth.actor import ActorContext, AuthMode, Role  # noqa: PLC0415
+
+        _test_actor = ActorContext(
+            user_id=1, profile_id=1, role=Role.ADMIN, mode=AuthMode.LOCAL
+        )
+
+        async def _override_get_actor() -> ActorContext:
+            return _test_actor
 
         app = FastAPI()
+        app.dependency_overrides[get_actor] = _override_get_actor
         app.include_router(import_data.router, prefix="/api/v1/import")
         return app
 
