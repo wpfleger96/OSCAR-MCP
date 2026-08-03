@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.api.deps import get_db
+from snore.api.deps import ActorDep, get_db
 from snore.services.profile_service import ProfileNotFoundError, ProfileService
 
 router = APIRouter()
@@ -40,17 +40,8 @@ class RenameProfileRequest(BaseModel):
 
 
 @router.get("/", response_model=list[ProfileResponse])
-async def list_profiles(request: object, db: DbDep) -> list[ProfileResponse]:
+async def list_profiles(actor: ActorDep, db: DbDep) -> list[ProfileResponse]:
     """List all live profiles for the current user."""
-
-    # Get user_id from request state (set by AuthMiddleware in Phase 2).
-    # For Phase 1, fall back to a placeholder so the route is wirable.
-    actor = getattr(request, "state", None)
-    if actor is not None:
-        actor = getattr(actor, "actor", None)
-    if actor is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
     svc = ProfileService(db)
     profiles = await svc.list_profiles(actor.user_id)
     return [ProfileResponse.model_validate(p) for p in profiles]
@@ -58,11 +49,8 @@ async def list_profiles(request: object, db: DbDep) -> list[ProfileResponse]:
 
 @router.post("/", response_model=ProfileResponse, status_code=201)
 async def create_profile(
-    body: CreateProfileRequest, request: object, db: DbDep
+    body: CreateProfileRequest, actor: ActorDep, db: DbDep
 ) -> ProfileResponse:
-    actor = getattr(getattr(request, "state", None), "actor", None)
-    if actor is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
     if not actor.can_write:
         raise HTTPException(status_code=403, detail="Write access required")
 
@@ -78,11 +66,8 @@ async def create_profile(
 
 @router.patch("/{profile_id}", response_model=ProfileResponse)
 async def update_profile(
-    profile_id: int, body: RenameProfileRequest, request: object, db: DbDep
+    profile_id: int, body: RenameProfileRequest, actor: ActorDep, db: DbDep
 ) -> ProfileResponse:
-    actor = getattr(getattr(request, "state", None), "actor", None)
-    if actor is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
     if not actor.can_write:
         raise HTTPException(status_code=403, detail="Write access required")
 

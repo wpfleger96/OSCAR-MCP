@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from snore.api.deps import ActorDep
 from snore.api.import_jobs import (
     ImportJob,
     JobType,
@@ -84,6 +85,10 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
 
     try:
         service = ImportService()
+        # Consume the snapshotted target_profile_id so DB writes land in the
+        # correct profile even if the default profile changes between job creation
+        # and worker execution.
+        target_profile_id = job.target_profile_id
         if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
             job.report_progress("Detecting data sources...")
             if job.cancel_requested:
@@ -99,6 +104,7 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                     sources,
                     backup=True,
                     backup_root=profile_raw_root,
+                    profile_id=target_profile_id,
                     progress_callback=lambda msg: job.report_progress(msg),
                     cancel_predicate=lambda: job.cancel_requested,
                 )
@@ -109,6 +115,7 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                     job.sources,
                     backup=True,
                     backup_root=profile_raw_root,
+                    profile_id=target_profile_id,
                     progress_callback=lambda msg: job.report_progress(msg),
                     cancel_predicate=lambda: job.cancel_requested,
                 )
@@ -286,8 +293,22 @@ def import_from_path(body: ImportPathRequest, request: Request) -> JobResponse:
 
 
 @router.delete("/{job_id}", status_code=204)
-def cancel_import(job_id: str) -> None:
-    """Cancel an import job. Idempotent — returns 204 whether or not the job existed."""
+def cancel_import(job_id: str, actor: ActorDep) -> None:
+    """Cancel an import job.
+
+    Requires write access and ownership of the job. Returns 404 for foreign jobs
+    (no information leak about other users' job IDs).
+
+    Jobs without an owner (owner_user_id=None) are accessible in local mode.
+    """
+    job = get_job(job_id)
+    if job is None or (
+        job.owner_user_id is not None and job.owner_user_id != actor.user_id
+    ):
+        # 404 instead of 403 — no information about foreign job IDs.
+        raise HTTPException(status_code=404, detail="Import job not found")
+    if not actor.can_write:
+        raise HTTPException(status_code=403, detail="Write access required")
     cancel_job(job_id)
 
 
@@ -332,10 +353,16 @@ async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
 
 
 @router.get("/{job_id}/progress")
-async def import_progress(job_id: str) -> StreamingResponse:
-    """Attach an SSE observer to an existing job. Never starts/restarts the worker."""
+async def import_progress(job_id: str, actor: ActorDep) -> StreamingResponse:
+    """Attach an SSE observer to an existing job. Never starts/restarts the worker.
+
+    Returns 404 for foreign jobs (no information leak about other users' job IDs).
+    Jobs without an owner (owner_user_id=None) are accessible in local mode.
+    """
     job = get_job(job_id)
-    if job is None:
+    if job is None or (
+        job.owner_user_id is not None and job.owner_user_id != actor.user_id
+    ):
         raise HTTPException(status_code=404, detail="Import job not found")
 
     return StreamingResponse(

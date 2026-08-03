@@ -26,16 +26,16 @@ logger = logging.getLogger(__name__)
 class BatchValidator:
     """Runs validation across multiple sessions."""
 
-    def __init__(self, db_session: AsyncSession, profile: str | None = None):
+    def __init__(self, db_session: AsyncSession, profile_id: int):
         """
         Initialize batch validator.
 
         Args:
             db_session: Async database session
-            profile: Device serial number to filter sessions via Device → Day join (optional)
+            profile_id: Profile ID to scope all queries — required, never global.
         """
         self.db_session = db_session
-        self.profile = profile
+        self.profile_id = profile_id
         self.analysis_service = AnalysisService(db_session)
 
     async def validate_date_range(
@@ -55,24 +55,16 @@ class BatchValidator:
         Returns:
             ValidationReport with aggregate and per-session metrics
         """
-        stmt = select(models.Session).where(
-            models.Session.start_time >= datetime.fromisoformat(date_from),
-            models.Session.start_time <= datetime.fromisoformat(f"{date_to} 23:59:59"),
-        )
-
-        if self.profile:
-            device_ids = (
-                (
-                    await self.db_session.execute(
-                        select(models.Device.id)
-                        .join(models.Day, models.Day.device_id == models.Device.id)
-                        .where(models.Device.serial_number == self.profile)
-                    )
-                )
-                .scalars()
-                .all()
+        stmt = (
+            select(models.Session)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Device.profile_id == self.profile_id,
+                models.Session.start_time >= datetime.fromisoformat(date_from),
+                models.Session.start_time
+                <= datetime.fromisoformat(f"{date_to} 23:59:59"),
             )
-            stmt = stmt.where(models.Session.device_id.in_(device_ids))
+        )
 
         sessions = (
             (await self.db_session.execute(stmt.order_by(models.Session.start_time)))

@@ -50,17 +50,15 @@ class ExportResult:
 class ExportService:
     """Unified export service for CPAP data."""
 
-    def __init__(
-        self, backup_root: Path | None = None, profile_id: int | None = None
-    ) -> None:
-        self.backup_root = backup_root or DEFAULT_RAW_BACKUP_DIR
+    def __init__(self, profile_id: int, backup_root: Path | None = None) -> None:
         self.profile_id = profile_id
+        # Default backup root is namespaced by profile so raw files from
+        # different profiles never share the same directory.
+        self.backup_root = backup_root or DEFAULT_RAW_BACKUP_DIR / str(profile_id)
 
     def _profile_filters(self) -> list[ColumnElement[bool]]:
-        """Return profile isolation predicate(s) if a profile is set."""
-        if self.profile_id is not None:
-            return [models.Device.profile_id == self.profile_id]
-        return []
+        """Return profile isolation predicates (always applied — never global)."""
+        return [models.Device.profile_id == self.profile_id]
 
     # ------------------------------------------------------------------
     # Raw export (filesystem only, no DB)

@@ -139,8 +139,13 @@ class SessionImporter:
         Returns:
             Tuple of (was_imported, day_id)
         """
-        stmt = select(models.Device).filter_by(
-            serial_number=session_data.device_info.serial_number
+        stmt = select(models.Device).where(
+            models.Device.serial_number == session_data.device_info.serial_number,
+            *(
+                [models.Device.profile_id == profile_id]
+                if profile_id is not None
+                else []
+            ),
         )
         device = (await db.execute(stmt)).scalars().first()
 

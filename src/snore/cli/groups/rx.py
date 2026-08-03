@@ -6,7 +6,7 @@ import asyncio
 
 import click
 
-from snore.cli.decorators import db_option
+from snore.cli.decorators import actor_options, db_option
 from snore.cli.decorators import db_session as open_db_session
 from snore.cli.display import (
     console,
@@ -48,7 +48,10 @@ def rx() -> None:
 
 @rx.command("history")
 @db_option
-def rx_history(db: str | None) -> None:
+@actor_options
+def rx_history(
+    db: str | None, actor_user: str | None, actor_profile: str | None
+) -> None:
     """
     Show RX settings history with average outcomes.
 
@@ -59,10 +62,14 @@ def rx_history(db: str | None) -> None:
         snore rx history
     """
     from snore.analysis.rx_tracker import RxTracker
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            stats_periods = await RxTracker().get_history(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            stats_periods = await RxTracker(profile_id).get_history(db_session)
 
             if not stats_periods:
                 console.print("No RX periods found")
@@ -118,7 +125,10 @@ def rx_history(db: str | None) -> None:
 
 @rx.command("current")
 @db_option
-def rx_current(db: str | None) -> None:
+@actor_options
+def rx_current(
+    db: str | None, actor_user: str | None, actor_profile: str | None
+) -> None:
     """
     Show current RX settings period.
 
@@ -128,10 +138,14 @@ def rx_current(db: str | None) -> None:
         snore rx current
     """
     from snore.analysis.rx_tracker import RxTracker
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            current = await RxTracker().get_current(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            current = await RxTracker(profile_id).get_current(db_session)
 
             if current is None:
                 console.print("No RX periods found")
@@ -186,7 +200,10 @@ def rx_current(db: str | None) -> None:
     default=7,
     help="Minimum days for period to be included (default: 7)",
 )
-def rx_compare(db: str | None, min_days: int) -> None:
+@actor_options
+def rx_compare(
+    db: str | None, min_days: int, actor_user: str | None, actor_profile: str | None
+) -> None:
     """
     Compare RX periods and identify best/worst settings.
 
@@ -198,10 +215,16 @@ def rx_compare(db: str | None, min_days: int) -> None:
         snore rx compare --min-days 14
     """
     from snore.analysis.rx_tracker import RxTracker
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            comparison = await RxTracker().get_comparison(db_session, min_days=min_days)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            comparison = await RxTracker(profile_id).get_comparison(
+                db_session, min_days=min_days
+            )
             stats_periods = comparison.periods
 
             if not stats_periods:
@@ -289,7 +312,10 @@ def rx_compare(db: str | None, min_days: int) -> None:
 
 @rx.command("changes")
 @db_option
-def rx_changes(db: str | None) -> None:
+@actor_options
+def rx_changes(
+    db: str | None, actor_user: str | None, actor_profile: str | None
+) -> None:
     """
     Show day-level prescription settings changes across all devices.
 
@@ -301,10 +327,14 @@ def rx_changes(db: str | None) -> None:
         snore rx changes
     """
     from snore.analysis.rx_tracker import RxTracker
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            response = await RxTracker().get_changes(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            response = await RxTracker(profile_id).get_changes(db_session)
             # Stable sort preserves the service's within-date ordering (ascending by device_id, key).
             changes = sorted(response.changes, key=lambda c: c.date, reverse=True)
 

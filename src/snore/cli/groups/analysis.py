@@ -194,6 +194,7 @@ def list_cmd(
     help="Show analysis for session on date (YYYY-MM-DD)",
 )
 @db_option
+@actor_options
 @click.option(
     "--plain",
     is_flag=True,
@@ -203,6 +204,8 @@ def show(
     session_id: int | None,
     date: datetime | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
     plain: bool,
 ) -> None:
     """Display stored analysis results."""
@@ -216,15 +219,28 @@ def show(
         raise click.ClickException("--session-id and --date are mutually exclusive")
 
     async def _run() -> None:
+        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
         sid = session_id
         async with open_db_session(db) as session:
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
+
             if date is not None:
                 db_session_row = (
                     (
                         await session.execute(
                             select(models.Session)
                             .join(models.Day)
-                            .where(models.Day.date == date.date())
+                            .join(
+                                models.Device,
+                                models.Session.device_id == models.Device.id,
+                            )
+                            .where(
+                                models.Day.date == date.date(),
+                                models.Device.profile_id == profile_id,
+                            )
                         )
                     )
                     .scalars()
@@ -242,7 +258,14 @@ def show(
                 (
                     await session.execute(
                         select(models.Session)
-                        .filter_by(id=sid)
+                        .join(
+                            models.Device,
+                            models.Session.device_id == models.Device.id,
+                        )
+                        .where(
+                            models.Session.id == sid,
+                            models.Device.profile_id == profile_id,
+                        )
                         .options(joinedload(models.Session.day))
                     )
                 )

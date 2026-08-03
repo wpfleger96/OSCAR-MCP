@@ -7,11 +7,15 @@ import logging
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from snore.auth.factory import resolve_local_profile_id
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
+from snore.database.txn import run_txn
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
+from snore.parsers.unified import UnifiedSession
 from snore.services.schemas import ImportResult, ImportSource, ImportSourceResult
 
 logger = logging.getLogger(__name__)
@@ -98,6 +102,7 @@ class ImportService:
         cancel_predicate: Callable[[], bool] | None = None,
         user_ref: str | None = None,
         profile_ref: str | None = None,
+        profile_id: int | None = None,
     ) -> ImportResult:
         """Run the import pipeline for the selected sources.
 
@@ -108,8 +113,11 @@ class ImportService:
             cancel_predicate: Optional callable that returns True when the caller
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
-            user_ref:   Value of --user / SNORE_USER for profile resolution.
+            user_ref:    Value of --user / SNORE_USER for profile resolution.
             profile_ref: Value of --profile / SNORE_PROFILE for profile resolution.
+            profile_id:  Pre-resolved profile ID (skips user_ref/profile_ref resolution
+                         when provided — used by the import worker to consume its
+                         snapshotted job.target_profile_id).
         """
         return await self._import_sources_async(
             sources,
@@ -127,6 +135,7 @@ class ImportService:
             cancel_predicate=cancel_predicate,
             user_ref=user_ref,
             profile_ref=profile_ref,
+            profile_id=profile_id,
         )
 
     async def _import_sources_async(
@@ -147,6 +156,7 @@ class ImportService:
         cancel_predicate: Callable[[], bool] | None = None,
         user_ref: str | None = None,
         profile_ref: str | None = None,
+        profile_id: int | None = None,
     ) -> ImportResult:
 
         def emit(msg: str) -> None:
@@ -164,15 +174,21 @@ class ImportService:
         # Resolve the active profile once — all devices created during this import
         # are owned by this profile.  In local mode this auto-provisions the first
         # admin user + profile on first run.
-        async with session_scope() as _profile_db:
-            if user_ref is not None or profile_ref is not None:
-                from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+        #
+        # If profile_id is already resolved (e.g. from a snapshotted job), skip
+        # user_ref/profile_ref resolution entirely.
+        if profile_id is None:
+            async with session_scope() as _profile_db:
+                if user_ref is not None or profile_ref is not None:
+                    from snore.auth.factory import (
+                        resolve_cli_profile_id,  # noqa: PLC0415
+                    )
 
-                profile_id = await resolve_cli_profile_id(
-                    _profile_db, user_ref, profile_ref
-                )
-            else:
-                profile_id = await resolve_local_profile_id(_profile_db)
+                    profile_id = await resolve_cli_profile_id(
+                        _profile_db, user_ref, profile_ref
+                    )
+                else:
+                    profile_id = await resolve_local_profile_id(_profile_db)
 
         if not dry_run:
             async with session_scope() as db_session:
@@ -283,16 +299,29 @@ class ImportService:
                 chunk = list(_itertools.islice(session_iter_internal, batch_size))
                 if not chunk:
                     break
-                async with session_scope() as chunk_db:
-                    ci, cs, cf = await importer.import_sessions_batch(
-                        iter(chunk),
+
+                # run_txn opens a fresh session per attempt and retries on
+                # SQLite contention.  UNIQUE(device_id, device_session_id)
+                # makes this idempotent: a replay of the same chunk produces
+                # the same rows and skips duplicates.
+                async def _import_chunk(
+                    db: AsyncSession,
+                    *,
+                    _chunk: list[UnifiedSession] = chunk,
+                    _profile_id: int | None = profile_id,
+                    _importer: SessionImporter = importer,
+                ) -> tuple[int, int, int]:
+                    return await _importer.import_sessions_batch(
+                        iter(_chunk),
                         force=force,
                         batch_size=batch_size,
                         progress_callback=progress_callback,
                         cancel_predicate=cancel_predicate,
-                        db=chunk_db,
-                        profile_id=profile_id,
+                        db=db,
+                        profile_id=_profile_id,
                     )
+
+                ci, cs, cf = await run_txn(_import_chunk)
                 imported += ci
                 skipped += cs
                 failed += cf
