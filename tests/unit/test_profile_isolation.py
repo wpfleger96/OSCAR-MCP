@@ -599,3 +599,100 @@ class TestBulkDeleteIsolation:
         # Own AnalysisResult must be gone.
         gone = await async_db_session.get(models.AnalysisResult, own_ar.id)
         assert gone is None, "Own AnalysisResult must be deleted"
+
+
+class TestAnalysisServiceStoreResultIsolation:
+    """AnalysisService.store_result() must enforce profile ownership at the write seam.
+
+    A direct service call with profile A writing an AnalysisResult whose
+    session belongs to profile B must raise NotFoundError and persist no row.
+    """
+
+    async def test_store_result_foreign_session_raises_not_found_and_persists_no_row(
+        self, async_db_session
+    ):
+        """AnalysisService(db, profile_id=A).store_result(result_for_B) raises
+        NotFoundError and leaves zero AnalysisResult rows for the foreign session."""
+        from datetime import datetime
+
+        from sqlalchemy import func, select
+
+        from snore.analysis.service import AnalysisService
+        from snore.analysis.types import AnalysisResult as AnalysisResultDTO
+        from snore.database import models
+        from snore.exceptions import NotFoundError
+
+        profile_a = await _make_profile(async_db_session)
+        profile_b = await _make_profile(async_db_session)
+
+        dev_b = await _make_device(async_db_session, profile_b.id)
+        foreign_sess = await _make_session(async_db_session, dev_b.id)
+
+        # A minimal AnalysisResultDTO targeting profile B's session.
+        result_dto = AnalysisResultDTO(
+            session_id=foreign_sess.id,
+            session_duration_hours=8.0,
+            total_breaths=0,
+            machine_events=[],
+            mode_results={},
+            timestamp_start=datetime(2025, 1, 1, 22, 0, 0).timestamp(),
+            timestamp_end=datetime(2025, 1, 2, 6, 0, 0).timestamp(),
+        )
+
+        svc_a = AnalysisService(async_db_session, profile_id=profile_a.id)
+
+        with pytest.raises(NotFoundError):
+            await svc_a.store_result(result_dto, processing_time_ms=1)
+
+        # No row must have been inserted for the foreign session.
+        row_count = (
+            await async_db_session.execute(
+                select(func.count()).where(
+                    models.AnalysisResult.session_id == foreign_sess.id
+                )
+            )
+        ).scalar_one()
+        assert row_count == 0, (
+            f"Expected 0 AnalysisResult rows for foreign session {foreign_sess.id}, "
+            f"got {row_count}"
+        )
+
+    async def test_store_result_own_session_succeeds(self, async_db_session):
+        """AnalysisService.store_result() on an owned session writes exactly one row."""
+        from datetime import datetime
+
+        from sqlalchemy import func, select
+
+        from snore.analysis.service import AnalysisService
+        from snore.analysis.types import AnalysisResult as AnalysisResultDTO
+        from snore.database import models
+
+        profile_a = await _make_profile(async_db_session)
+        dev_a = await _make_device(async_db_session, profile_a.id)
+        own_sess = await _make_session(async_db_session, dev_a.id)
+
+        result_dto = AnalysisResultDTO(
+            session_id=own_sess.id,
+            session_duration_hours=8.0,
+            total_breaths=0,
+            machine_events=[],
+            mode_results={},
+            timestamp_start=datetime(2025, 1, 1, 22, 0, 0).timestamp(),
+            timestamp_end=datetime(2025, 1, 2, 6, 0, 0).timestamp(),
+        )
+
+        svc_a = AnalysisService(async_db_session, profile_id=profile_a.id)
+        await svc_a.store_result(result_dto, processing_time_ms=1)
+        await async_db_session.flush()
+
+        # After flush, the inserted row has a real PK.
+        row_count = (
+            await async_db_session.execute(
+                select(func.count()).where(
+                    models.AnalysisResult.session_id == own_sess.id
+                )
+            )
+        ).scalar_one()
+        assert row_count == 1, f"Expected 1 AnalysisResult row, got {row_count}"
+        # ar_id is None pre-flush (server-default PK); post-flush it is an int.
+        # We verify the row exists via rowcount rather than the returned ID.

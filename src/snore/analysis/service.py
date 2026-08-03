@@ -634,14 +634,40 @@ class AnalysisService:
         Public write seam — callers (including ``BatchAnalysisCoordinator``) use
         this method so the write phase is not tied to a private implementation detail.
 
+        Enforces profile ownership: raises ``NotFoundError`` when the target
+        session does not belong to ``self.profile_id``, preventing cross-profile
+        writes.
+
         Args:
             result: Analysis result to store
             processing_time_ms: Processing time in milliseconds
 
         Returns:
             Database analysis result ID
+
+        Raises:
+            NotFoundError: If ``result.session_id`` does not belong to this profile.
         """
+        from snore.exceptions import NotFoundError as _NotFoundError  # noqa: PLC0415
+
         assert self.db_session is not None, "store_result requires a DB session"
+
+        # Verify the target session is owned by this profile before writing.
+        owned = (
+            await self.db_session.execute(
+                select(models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id == result.session_id,
+                    models.Device.profile_id == self.profile_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if owned is None:
+            raise _NotFoundError(
+                f"Session {result.session_id} not found or not owned by profile {self.profile_id}"
+            )
+
         analysis = models.AnalysisResult(
             session_id=result.session_id,
             timestamp_start=datetime.fromtimestamp(result.timestamp_start),
