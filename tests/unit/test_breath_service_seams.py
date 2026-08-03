@@ -2235,3 +2235,328 @@ class TestNightlyRangeDateValidation:
                 date_start=date(2025, 4, 10),
                 date_end=date(2025, 4, 1),  # reversed
             )
+
+
+# ---------------------------------------------------------------------------
+# Waveform blob builder helpers (shared with numeric provenance tests)
+# ---------------------------------------------------------------------------
+
+
+def _make_waveform_blob_from_arrays(
+    timestamps: np.ndarray, values: np.ndarray
+) -> bytes:
+    """Build a valid waveform blob from caller-supplied timestamp/value arrays."""
+    data = np.column_stack([timestamps.astype(np.float32), values.astype(np.float32)])
+    return data.tobytes()
+
+
+def _make_corrupt_waveform_blob() -> bytes:
+    """Return a byte string that cannot be parsed as float32 pairs."""
+    return b"\x00" * 3  # 3 bytes is not divisible by 8 (2×float32)
+
+
+# ---------------------------------------------------------------------------
+# Corrupt-blob propagation through public seams (Thufir pass-2 IMPORTANT-8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCorruptBlobThroughPublicSeams:
+    """Corrupt waveform blobs must propagate as ValueError, not silently become
+    NOT_AVAILABLE, through the get_contextual_events and get_ca_analysis seams."""
+
+    async def test_corrupt_pressure_blob_raises_in_contextual_events(
+        self, async_db_session
+    ):
+        """get_contextual_events re-raises ValueError when pressure blob is corrupt.
+
+        plan IMPORTANT-8: sanitized invalid-waveform errors must propagate through
+        public seams, not be swallowed as NOT_AVAILABLE.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 7, 1)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="pressure",
+                sample_rate=1.0,
+                sample_count=100,
+                data_blob=_make_corrupt_waveform_blob(),
+            )
+        )
+        # OA event at 120s → triggers ±5 s pressure waveform fetch
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="OA",
+                start_time=session.start_time + timedelta(seconds=120),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(ValueError):
+            await svc.get_contextual_events(therapy_date=therapy_date, device_id=dev.id)
+
+    async def test_corrupt_mv_blob_raises_in_ca_analysis(self, async_db_session):
+        """get_ca_analysis re-raises ValueError when MV blob is corrupt.
+
+        plan IMPORTANT-8: same propagation requirement for CA analysis.
+        CA event at offset > 0 triggers the per-event MV slope fetch.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 7, 2)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=100,
+                data_blob=_make_corrupt_waveform_blob(),
+            )
+        )
+        # CA at 300s offset → code enters `if offset_s > 0` and fetches MV
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=12.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(ValueError):
+            await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+
+# ---------------------------------------------------------------------------
+# Numeric provenance: CA fields must be nonzero when real data is present
+# (Thufir pass-2 IMPORTANT-2: "test numeric fixtures whose expected values are nonzero")
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCaNumericProvenance:
+    """CA per-event and night-level fields must be numerically correct, not just
+    structurally non-null, when real waveform/analysis data is present."""
+
+    async def test_ca_pb_pct_nonzero_from_known_episodes(self, async_db_session):
+        """periodic_breathing_pct is nonzero when analysis has persisted PB episodes.
+
+        Session = 3600 s.  One episode: start_time=600 s, end_time=960 s (360 s).
+        Expected: pb_pct = 360 / 3600 * 100 = 10.0 %.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 7, 10)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        episodes = [
+            {
+                "start_time": 600.0,
+                "end_time": 960.0,
+                "cycle_length": 30.0,
+                "regularity_score": 0.9,
+                "confidence": 0.95,
+                "has_apneas": False,
+            }
+        ]
+        result_dto = AnalysisResultDTO(
+            session_id=session.id,
+            session_duration_hours=1.0,
+            total_breaths=0,
+            machine_events=[],
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
+            timestamp_start=session.start_time.timestamp(),
+            timestamp_end=(session.start_time + timedelta(hours=1)).timestamp(),
+            periodic_breathing_episodes=episodes,
+        )
+        from snore.analysis.service import AnalysisService as _AS  # noqa: PLC0415
+
+        await _AS(async_db_session, profile_id=profile_id).store_result(
+            AnalysisComputation(summary=result_dto, breaths=[], primary_mode="aasm"),
+            processing_time_ms=10,
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=100),
+                duration_seconds=8.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert result.periodic_breathing_pct is not None
+        assert result.periodic_breathing_pct > 0.0
+        # 360 / 3600 * 100 = 10.0 %  (±0.1 for float rounding)
+        assert abs(result.periodic_breathing_pct - 10.0) < 0.1
+
+    async def test_ca_mv_slope_nonzero_from_linear_ramp(self, async_db_session):
+        """preceding_mv_slope ≈ 1.0 when MV = t (unit ramp, values == timestamps).
+
+        CA at offset 300 s.  MV window = [180, 300] s (120 samples).
+        Linear regression of y=t on x=t → slope = 1.0 exactly.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 7, 11)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        n = 3600
+        ts = np.arange(n, dtype=np.float32)
+        vals = np.arange(n, dtype=np.float32)  # y = x → slope = 1.0
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(ts, vals),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=12.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert len(result.ca_events) == 1
+        ev = result.ca_events[0]
+        assert ev.preceding_mv_slope is not None
+        assert ev.preceding_mv_slope > 0.0
+        assert abs(ev.preceding_mv_slope - 1.0) < 0.05
+
+    async def test_ca_ps_nonzero_from_known_pressures(self, async_db_session):
+        """ps_delivered_cmh2o ≈ 12.0 when THERAPY_PRESSURE=20.0, EPAP=8.0.
+
+        PS = mean(THERAPY_PRESSURE − EPAP) over ±5 s window = 20.0 − 8.0 = 12.0.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 7, 12)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        n = 3600
+        ts = np.arange(n, dtype=np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="therapy_pressure",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(
+                    ts, np.full(n, 20.0, dtype=np.float32)
+                ),
+            )
+        )
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="epap",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(
+                    ts, np.full(n, 8.0, dtype=np.float32)
+                ),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=12.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert len(result.ca_events) == 1
+        ev = result.ca_events[0]
+        assert ev.ps_delivered_cmh2o is not None
+        assert abs(ev.ps_delivered_cmh2o - 12.0) < 0.5
+
+    async def test_ca_mv_variance_nonzero_from_two_distinct_bins(
+        self, async_db_session
+    ):
+        """mv_rolling_variance is nonzero when MV bins have different means.
+
+        Session = 1200 s (exactly two 600-s bins, no tail bin).
+        Bin 1 [0-600 s]: MV = 5.0.  Bin 2 [600-1200 s): MV = 15.0.
+        variance([5.0, 15.0]) = 50.0.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 7, 13)
+        _, session = await _make_day_and_session(
+            async_db_session,
+            dev.id,
+            therapy_date,
+            duration_hours=1200.0 / 3600.0,
+        )
+
+        n = 1200
+        ts = np.arange(n, dtype=np.float32)
+        vals = np.where(ts < 600.0, 5.0, 15.0).astype(np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(ts, vals),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=100),
+                duration_seconds=8.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert result.mv_rolling_variance is not None
+        assert result.mv_rolling_variance > 0.0
+        # variance([5.0, 15.0]) = 50.0  (±1.0 tolerance for bin boundary effects)
+        assert abs(result.mv_rolling_variance - 50.0) < 1.0
