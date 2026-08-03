@@ -190,6 +190,13 @@ class ImportService:
                 else:
                     profile_id = await resolve_local_profile_id(_profile_db)
 
+        # Default backup root is namespaced by profile so raw files from
+        # different profiles never share a directory — mirrors ExportService.
+        if backup_root is None and profile_id is not None:
+            from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+            backup_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
+
         if not dry_run:
             async with session_scope() as db_session:
                 orphaned = await SessionImporter.cleanup_orphaned_records(db_session)

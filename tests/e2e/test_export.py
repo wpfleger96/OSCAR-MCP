@@ -28,16 +28,15 @@ def test_raw_export_reconstructs_from_backup(snore, resmed_sd, tmp_path):
     """`export raw` rebuilds an OSCAR-shaped tree from the raw backup dir.
 
     Raw export reads the backup created at import time (not the DB), so this
-    imports *with* backup into an isolated backup dir, then exports from it.
+    imports *with* backup (default: profile-scoped under HOME/.snore/raw/),
+    then exports raw against the same DB so both sides resolve the same
+    profile_id and agree on the backup root.
     """
-    backup_dir = tmp_path / "backup"
     db = tmp_path / "raw.db"
     imported = snore(
         "import",
         str(resmed_sd),
         "--all",
-        "--backup-dir",
-        str(backup_dir),
         db=db,
     )
     assert imported.returncode == 0, imported.stderr or imported.stdout
@@ -48,8 +47,7 @@ def test_raw_export_reconstructs_from_backup(snore, resmed_sd, tmp_path):
         "raw",
         "--output",
         str(export_dir),
-        "--backup-dir",
-        str(backup_dir),
+        db=db,
     )
     assert result.returncode == 0, result.stderr or result.stdout
     # Something was reconstructed on disk.
