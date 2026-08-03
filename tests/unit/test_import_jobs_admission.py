@@ -19,12 +19,15 @@ import pytest
 import snore.api.import_jobs as ij
 
 from snore.api.import_jobs import (
-    MAX_ACTIVE_GLOBAL,
-    MAX_ACTIVE_PER_USER,
     ImportJob,
     JobState,
     reserve_slot,
 )
+
+# Use the module-level defaults (same values _get_caps() falls back to when
+# config is not loaded in unit-test context).
+MAX_ACTIVE_PER_USER = ij._DEFAULT_MAX_ACTIVE_PER_USER
+MAX_ACTIVE_GLOBAL = ij._DEFAULT_MAX_ACTIVE_GLOBAL
 
 # ---------------------------------------------------------------------------
 # Helpers

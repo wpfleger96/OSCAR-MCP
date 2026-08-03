@@ -8,8 +8,9 @@ import shutil
 import tempfile
 import threading
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from snore.api.deps import ActorDep
+from snore.api.guards import RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
     JobType,
@@ -38,8 +40,8 @@ router = APIRouter()
 # worthless behind Cloudflare, so we structurally exclude them.
 local_only_router = APIRouter()
 
-MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB per upload (configurable via env)
-MAX_UPLOAD_FILES = 500  # sane default; 20k was unreasonably high
+# Default file-count ceiling — read at import time, overridden via SNORE config.
+_DEFAULT_MAX_UPLOAD_FILES = 500
 
 
 class DetectRequest(BaseModel):
@@ -52,6 +54,17 @@ class ImportPathRequest(BaseModel):
 
 class JobResponse(BaseModel):
     job_id: str
+
+
+def _get_upload_limits() -> tuple[int, int]:
+    """Return (max_upload_bytes, max_upload_files) from config with safe fallbacks."""
+    try:
+        from snore.api.config import get_config  # noqa: PLC0415
+
+        cfg = get_config()
+        return cfg.max_upload_bytes, _DEFAULT_MAX_UPLOAD_FILES
+    except Exception:
+        return 512 * 1024 * 1024, _DEFAULT_MAX_UPLOAD_FILES
 
 
 def _require_localhost(request: Request) -> None:
@@ -75,6 +88,40 @@ def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     _require_localhost(request)
     service = ImportService()
     return service.detect_sources(Path(body.path))
+
+
+class _ByteCeilingReceive:
+    """ASGI receive wrapper that raises 413 once the cumulative byte ceiling is hit.
+
+    Wraps ``request.receive`` so bytes are counted as multipart body chunks
+    arrive — before Starlette's form parser spools anything to temp files.
+    This is the authoritative control; the post-spool ``f.size`` sum is
+    defense-in-depth only (handles lying or absent Content-Length).
+    """
+
+    def __init__(
+        self,
+        inner: Callable[[], Awaitable[MutableMapping[str, Any]]],
+        max_bytes: int,
+    ) -> None:
+        self._inner = inner
+        self._max = max_bytes
+        self._seen = 0
+
+    async def __call__(self) -> MutableMapping[str, Any]:
+        msg = await self._inner()
+        if msg.get("type") == "http.request":
+            chunk: bytes = msg.get("body", b"")
+            self._seen += len(chunk)
+            if self._seen > self._max:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"Upload exceeds the {self._max // (1024**2)} MiB "
+                        "per-upload limit"
+                    ),
+                )
+        return msg
 
 
 def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
@@ -196,9 +243,8 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         }
     },
 )
-async def import_files(request: Request, actor: ActorDep) -> JobResponse:
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
+async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
+    max_upload_bytes, max_upload_files = _get_upload_limits()
 
     # Step 1: Reserve admission slot BEFORE reading any body bytes.
     job = reserve_slot(actor.user_id)
@@ -208,19 +254,26 @@ async def import_files(request: Request, actor: ActorDep) -> JobResponse:
             detail="Too many active imports. Please wait for existing imports to complete.",
         )
 
+    # Wrap the ASGI receive callable with the ingress byte ceiling.
+    # This raises 413 as soon as the cumulative chunk stream exceeds the
+    # limit — before Starlette's multipart parser spools to temp files.
+    ceiling_receive = _ByteCeilingReceive(request.receive, max_upload_bytes)
+    request._receive = ceiling_receive  # noqa: SLF001
+
     tmp: str | None = None
     try:
-        async with request.form(max_files=MAX_UPLOAD_FILES) as form:
+        async with request.form(max_files=max_upload_files) as form:
             uploads = [
                 f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
             ]
             if not uploads:
                 raise HTTPException(status_code=422, detail="No files provided")
+            # Defense-in-depth: also check post-spool size (catches absent/lying CL).
             total_size = sum(f.size or 0 for f in uploads)
-            if total_size > MAX_UPLOAD_BYTES:
+            if total_size > max_upload_bytes:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"Total upload size exceeds {MAX_UPLOAD_BYTES // (1024**2)} MiB limit",
+                    detail=f"Total upload size exceeds {max_upload_bytes // (1024**2)} MiB limit",
                 )
 
             tmp = tempfile.mkdtemp()
@@ -269,11 +322,9 @@ async def import_files(request: Request, actor: ActorDep) -> JobResponse:
 
 @local_only_router.post("/path", response_model=JobResponse, status_code=202)
 async def import_from_path(
-    body: ImportPathRequest, request: Request, actor: ActorDep
+    body: ImportPathRequest, request: Request, actor: RequireWritable
 ) -> JobResponse:
     _require_localhost(request)
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
 
     try:
         job = create_job(
@@ -293,7 +344,7 @@ async def import_from_path(
 
 
 @router.delete("/{job_id}", status_code=204)
-def cancel_import(job_id: str, actor: ActorDep) -> None:
+def cancel_import(job_id: str, actor: RequireWritable) -> None:
     """Cancel an import job.
 
     Requires write access and ownership of the job. Returns 404 for foreign jobs
@@ -307,8 +358,6 @@ def cancel_import(job_id: str, actor: ActorDep) -> None:
     ):
         # 404 instead of 403 — no information about foreign job IDs.
         raise HTTPException(status_code=404, detail="Import job not found")
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
     cancel_job(job_id)
 
 

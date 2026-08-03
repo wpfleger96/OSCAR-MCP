@@ -148,7 +148,10 @@ class TestImportUpload:
 
     def test_upload_size_limit_exceeded(self, api_client, monkeypatch):
         """Cumulative upload size exceeding limit returns 413."""
-        monkeypatch.setattr("snore.api.routers.import_data.MAX_UPLOAD_BYTES", 10)
+        monkeypatch.setattr(
+            "snore.api.routers.import_data._get_upload_limits",
+            lambda: (10, 500),
+        )
         response = api_client.post(
             "/api/v1/import",
             files=[("files", ("big.edf", b"x" * 20, "application/octet-stream"))],

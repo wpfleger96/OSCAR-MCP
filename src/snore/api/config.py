@@ -27,6 +27,17 @@ Environment variables
 ``SNORE_TRUSTED_PROXIES``
     Comma-separated list of trusted proxy IP addresses.  ``cf-connecting-ip``
     is honoured only when the immediate peer is in this list.
+
+``SNORE_MAX_UPLOAD_BYTES``
+    Per-upload ingress byte ceiling, enforced in the ASGI receive stream before
+    any parser spooling begins.  Default: 512 MiB.  Accepts integer bytes.
+
+``SNORE_MAX_JOBS_PER_USER``
+    Maximum active (PENDING_UPLOAD + PENDING + RUNNING) jobs per user.
+    Default: 3.
+
+``SNORE_MAX_JOBS_GLOBAL``
+    Maximum active jobs across all users.  Default: 10.
 """
 
 from __future__ import annotations
@@ -53,6 +64,10 @@ class AppConfig:
     public_base_url: str  # Validated URL or empty string in local mode.
     bind_host: str
     trusted_proxies: frozenset[str]
+    # Upload / job resource bounds
+    max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
+    max_jobs_per_user: int  # Per-user active-job cap; default 3.
+    max_jobs_global: int  # Global active-job cap; default 10.
 
     @property
     def is_multiuser(self) -> bool:
@@ -119,6 +134,32 @@ def load_config(
     raw_proxies = os.environ.get("SNORE_TRUSTED_PROXIES", "")
     trusted_proxies = frozenset(p.strip() for p in raw_proxies.split(",") if p.strip())
 
+    # Resource bounds — read with safe int parsing.
+    try:
+        max_upload_bytes = int(
+            os.environ.get("SNORE_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))
+        )
+    except ValueError as exc:
+        raise ConfigError(
+            "SNORE_MAX_UPLOAD_BYTES must be a positive integer (bytes)"
+        ) from exc
+    if max_upload_bytes <= 0:
+        raise ConfigError("SNORE_MAX_UPLOAD_BYTES must be a positive integer (bytes)")
+
+    try:
+        max_jobs_per_user = int(os.environ.get("SNORE_MAX_JOBS_PER_USER", "3"))
+    except ValueError as exc:
+        raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer") from exc
+    if max_jobs_per_user <= 0:
+        raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer")
+
+    try:
+        max_jobs_global = int(os.environ.get("SNORE_MAX_JOBS_GLOBAL", "10"))
+    except ValueError as exc:
+        raise ConfigError("SNORE_MAX_JOBS_GLOBAL must be a positive integer") from exc
+    if max_jobs_global <= 0:
+        raise ConfigError("SNORE_MAX_JOBS_GLOBAL must be a positive integer")
+
     if auth_mode is AuthMode.MULTIUSER:
         if not session_secret:
             raise ConfigError(
@@ -161,6 +202,9 @@ def load_config(
         public_base_url=public_base_url,
         bind_host=bind_host,
         trusted_proxies=trusted_proxies,
+        max_upload_bytes=max_upload_bytes,
+        max_jobs_per_user=max_jobs_per_user,
+        max_jobs_global=max_jobs_global,
     )
 
 

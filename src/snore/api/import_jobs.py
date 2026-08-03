@@ -57,8 +57,21 @@ logger = logging.getLogger(__name__)
 JOB_TTL_SECONDS: float = 600.0
 
 # Per-user and global admission caps.
-MAX_ACTIVE_PER_USER: int = 3
-MAX_ACTIVE_GLOBAL: int = 10
+# These are read from the app config at call time so tests can override via env.
+# The module-level defaults are kept as fallbacks when config is not yet loaded.
+_DEFAULT_MAX_ACTIVE_PER_USER: int = 3
+_DEFAULT_MAX_ACTIVE_GLOBAL: int = 10
+
+
+def _get_caps() -> tuple[int, int]:
+    """Return (max_per_user, max_global) from config, falling back to defaults."""
+    try:
+        from snore.api.config import get_config  # noqa: PLC0415
+
+        cfg = get_config()
+        return cfg.max_jobs_per_user, cfg.max_jobs_global
+    except Exception:
+        return _DEFAULT_MAX_ACTIVE_PER_USER, _DEFAULT_MAX_ACTIVE_GLOBAL
 
 
 class JobState(Enum):
@@ -365,11 +378,12 @@ def _check_and_reserve(owner_user_id: int | None) -> bool:
     Returns True if the reservation was taken (within caps), False if over-limit.
     """
     global _global_count
+    max_per_user, max_global = _get_caps()
     with _counts_lock:
         user_count = _per_user_count.get(owner_user_id, 0)
-        if user_count >= MAX_ACTIVE_PER_USER:
+        if user_count >= max_per_user:
             return False
-        if _global_count >= MAX_ACTIVE_GLOBAL:
+        if _global_count >= max_global:
             return False
         _per_user_count[owner_user_id] = user_count + 1
         _global_count += 1
