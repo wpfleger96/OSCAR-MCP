@@ -96,7 +96,8 @@ class ComputedBreath:
     duty_cycle: float | None
 
     # Amplitude
-    peak_flow_lpm: float | None
+    peak_flow_lpm: float | None  # peak inspiratory flow L/min
+    peak_exp_flow_lpm: float | None  # peak expiratory flow L/min
     tidal_volume_ml: float | None
     respiratory_rate_rolling: float | None
 

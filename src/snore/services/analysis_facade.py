@@ -94,7 +94,10 @@ class AnalysisFacade:
                 func.row_number()
                 .over(
                     partition_by=models.AnalysisResult.session_id,
-                    order_by=models.AnalysisResult.created_at.desc(),
+                    order_by=[
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    ],
                 )
                 .label("recency_rank"),
             )
@@ -359,14 +362,17 @@ class AnalysisFacade:
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
-            # Delete only the latest (highest created_at) result per owned session.
+            # Delete only the latest (highest created_at, then id) result per owned session.
             ranked = (
                 select(
                     models.AnalysisResult.id,
                     func.row_number()
                     .over(
                         partition_by=models.AnalysisResult.session_id,
-                        order_by=models.AnalysisResult.created_at.desc(),
+                        order_by=[
+                            models.AnalysisResult.created_at.desc(),
+                            models.AnalysisResult.id.desc(),
+                        ],
                     )
                     .label("rn"),
                 )
@@ -514,7 +520,10 @@ class AnalysisFacade:
                 await self.db_session.execute(
                     select(models.AnalysisResult)
                     .filter_by(session_id=session_id)
-                    .order_by(models.AnalysisResult.created_at.desc())
+                    .order_by(
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    )
                 )
             )
             .scalars()

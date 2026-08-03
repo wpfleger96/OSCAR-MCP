@@ -175,7 +175,12 @@ class BreathQueryRange(BaseModel):
 
 
 class BreathRow(BaseModel):
-    """One row from the breaths table."""
+    """One row from the breaths table.
+
+    Nullable fields reflect absent measurements — never coerced to zero or
+    a default class.  Consumers must check for ``None`` before using
+    timing/amplitude/shape values.
+    """
 
     analysis_result_id: int
     session_id: int
@@ -186,26 +191,26 @@ class BreathRow(BaseModel):
     start_offset_seconds: float
     end_offset_seconds: float
 
-    # Timing
-    ti: float
-    te: float
-    ttot: float
-    ie_ratio: float
-    duty_cycle: float
+    # Timing (None when the segmenter could not resolve them)
+    ti: float | None  # inspiration time s
+    te: float | None  # expiration time s
+    ttot: float | None  # total time s
+    ie_ratio: float | None
+    duty_cycle: float | None
 
-    # Amplitude
-    peak_insp_flow: float  # L/min
-    peak_exp_flow: float  # L/min
-    tidal_volume: float  # mL
+    # Amplitude (None when channel absent or computation failed)
+    peak_insp_flow: float | None  # L/min
+    peak_exp_flow: float | None  # L/min
+    tidal_volume: float | None  # mL
 
-    # Flow limitation features
-    flatness_index: float
-    mid_insp_flattening: float
+    # Flow limitation features (None when channel absent)
+    flatness_index: float | None
+    mid_insp_flattening: float | None
 
-    # Classification
-    flow_class: int
-    flow_class_confidence: float
-    is_recovery_breath: bool
+    # Classification (None when not computed)
+    flow_class: int | None
+    flow_class_confidence: float | None
+    is_recovery_breath: bool | None
 
     # Trigger/cycle heuristic (experimental)
     trigger_type: TriggerType | None
@@ -510,10 +515,14 @@ class WaveformWindowRequest(BaseModel):
 async def fetch_waveform_window_raw(
     db: AsyncSession,
     request: WaveformWindowRequest,
+    profile_id: int | None = None,
 ) -> RawWaveformWindow:
     """DB I/O ONLY — fetch waveform blobs for the requested channels.
 
     Never closes db: the scope owner opens and closes the scope around this call.
+
+    If ``profile_id`` is supplied, enforces session ownership.  When the
+    resolved session does not belong to ``profile_id``, raises ``ValueError``.
     """
 
     from sqlalchemy import select  # noqa: PLC0415
@@ -563,6 +572,21 @@ async def fetch_waveform_window_raw(
 
     session_row = rows[0].Session
     session_id = session_row.id
+
+    # Enforce profile ownership if requested
+    if profile_id is not None:
+        owned = (
+            await db.execute(
+                select(models.Device.id).where(
+                    models.Device.id == session_row.device_id,
+                    models.Device.profile_id == profile_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if owned is None:
+            raise ValueError(
+                f"Session {session_id} is not owned by profile {profile_id}"
+            )
 
     # Fetch waveform blobs
     requested_types = [ch.value for ch in request.channels]
@@ -647,8 +671,13 @@ def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
                     is_downsampled=is_downsampled,
                 )
             )
+        except ValueError:
+            # Corrupt blob / sample-count mismatch: let sanitized ValueError
+            # propagate.  Only genuinely absent channels are silently moved to
+            # missing_channels.
+            raise
         except Exception:
-            # Missing/corrupt channel → move to missing list
+            # Other unexpected error → treat as absent
             missing_channels.append(raw_ch.waveform_type)
 
     missing_reason: NullReason | None = (
@@ -777,10 +806,16 @@ class CaAnalysisResult(BaseModel):
 
 
 class BreathService:
-    """Query layer over the breaths table. All methods are async."""
+    """Query layer over the breaths table. All methods are async.
 
-    def __init__(self, db_session: AsyncSession) -> None:
+    Every public method enforces profile ownership: all Session/Device/Day
+    queries join through ``Device.profile_id == self._profile_id`` so that
+    foreign-profile data is never returned.
+    """
+
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self._db = db_session
+        self._profile_id = profile_id
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -791,9 +826,10 @@ class BreathService:
     ) -> tuple[int, int]:
         """Return (session_id, device_id) for a single-session therapy day.
 
-        Raises MultiSessionAmbiguityError when the day has >1 session and
-        device_id didn't uniquely identify one.  Raises ValueError when
-        no session exists for the date.
+        Enforces profile ownership: only sessions belonging to devices owned by
+        ``self._profile_id`` are visible.  Raises MultiSessionAmbiguityError
+        when the day has >1 session and device_id didn't uniquely identify one.
+        Raises ValueError when no session exists for the date.
         """
         from sqlalchemy import select  # noqa: PLC0415
 
@@ -802,7 +838,11 @@ class BreathService:
         stmt = (
             select(models.Session, models.Day)
             .join(models.Day, models.Session.day_id == models.Day.id)
-            .where(models.Day.date == therapy_date)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Day.date == therapy_date,
+                models.Device.profile_id == self._profile_id,
+            )
         )
         if device_id is not None:
             stmt = stmt.where(models.Session.device_id == device_id)
@@ -833,6 +873,10 @@ class BreathService:
         self, session_id: int
     ) -> tuple[AnalysisStatus, AlgoVersions | None, int | None]:
         """Return (status, algo_versions, analysis_result_id) for latest run.
+
+        Ownership is assumed: callers are responsible for verifying the
+        session belongs to ``self._profile_id`` via ``_resolve_session_for_date``
+        or an explicit profile-scoped query before calling this helper.
 
         Returns (NOT_RUN, None, None) when no run exists.
         Returns (STALE_VERSION, algo|None, id) when engine_versions_json is stale.
@@ -892,16 +936,25 @@ class BreathService:
         # Resolve session_id
         if query.session_id is not None:
             session_id = query.session_id
-            session_stmt = select(models.Session).where(
-                models.Session.id == session_id,
-                models.Session.day_id.in_(
-                    select(models.Day.id).where(models.Day.date == query.therapy_date)
-                ),
+            # Verify ownership: session must belong to this profile
+            session_stmt = (
+                select(models.Session)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id == session_id,
+                    models.Device.profile_id == self._profile_id,
+                    models.Session.day_id.in_(
+                        select(models.Day.id).where(
+                            models.Day.date == query.therapy_date
+                        )
+                    ),
+                )
             )
             session_row = (await self._db.execute(session_stmt)).scalars().first()
             if session_row is None:
                 raise ValueError(
                     f"session_id {session_id} does not belong to date {query.therapy_date}"
+                    " or is not owned by this profile"
                 )
             device_id = session_row.device_id
         else:
@@ -983,19 +1036,19 @@ class BreathService:
                     session_start_wall_clock=session_start,
                     start_offset_seconds=b.start_offset_s,
                     end_offset_seconds=b.end_offset_s,
-                    ti=b.inspiration_time_s or 0.0,
-                    te=b.expiration_time_s or 0.0,
-                    ttot=b.total_time_s or 0.0,
-                    ie_ratio=b.i_e_ratio or 0.0,
-                    duty_cycle=b.duty_cycle or 0.0,
-                    peak_insp_flow=b.peak_flow_lpm or 0.0,
-                    peak_exp_flow=0.0,  # not stored separately
-                    tidal_volume=b.tidal_volume_ml or 0.0,
-                    flatness_index=b.flatness_index or 0.0,
-                    mid_insp_flattening=b.mid_insp_flattening or 0.0,
-                    flow_class=b.flow_class or 1,
-                    flow_class_confidence=b.flow_confidence or 0.0,
-                    is_recovery_breath=b.is_recovery_breath or False,
+                    ti=b.inspiration_time_s,
+                    te=b.expiration_time_s,
+                    ttot=b.total_time_s,
+                    ie_ratio=b.i_e_ratio,
+                    duty_cycle=b.duty_cycle,
+                    peak_insp_flow=b.peak_flow_lpm,
+                    peak_exp_flow=b.peak_exp_flow_lpm,
+                    tidal_volume=b.tidal_volume_ml,
+                    flatness_index=b.flatness_index,
+                    mid_insp_flattening=b.mid_insp_flattening,
+                    flow_class=b.flow_class,
+                    flow_class_confidence=b.flow_confidence,
+                    is_recovery_breath=b.is_recovery_breath,
                     trigger_type=(
                         TriggerType(b.inferred_trigger_type)
                         if b.inferred_trigger_type
@@ -1201,11 +1254,15 @@ class BreathService:
                     f"Options irrelevant to FL_RUN_ENDING_IN_RECOVERY: {bad}"
                 )
 
-        # Fetch sessions for the day
+        # Fetch sessions for the day (profile-scoped)
         stmt = (
             select(models.Session, models.Day)
             .join(models.Day, models.Session.day_id == models.Day.id)
-            .where(models.Day.date == therapy_date)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Day.date == therapy_date,
+                models.Device.profile_id == self._profile_id,
+            )
         )
         if device_id is not None:
             stmt = stmt.where(models.Session.device_id == device_id)
@@ -1672,13 +1729,15 @@ class BreathService:
         rx_violations: list[EpochRxViolation] = []
 
         for epoch in epochs:
-            # Fetch all days in range for this epoch's device
+            # Fetch all days in range for this epoch's device (profile-scoped)
             day_stmt = (
                 select(models.Day, models.Session)
                 .join(models.Session, models.Day.id == models.Session.day_id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
                 .where(
                     models.Day.date >= epoch.date_start,
                     models.Day.date <= epoch.date_end,
+                    models.Device.profile_id == self._profile_id,
                 )
                 .order_by(models.Day.date)
             )
@@ -1947,6 +2006,11 @@ class BreathService:
                         else:
                             i += 1
 
+            # Apply metrics filter: null out unrequested distributions.
+            _null_dist = DistributionStats(
+                median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+            )
+            requested = set(metrics) if metrics is not None else set(DistributionMetric)
             epoch_stats.append(
                 EpochBreathStats(
                     label=epoch.label,
@@ -1957,11 +2021,19 @@ class BreathService:
                     algorithm_identity=all_identities[0],
                     null_reason=None,
                     primary_mode=uniform_primary_mode,
-                    mid_insp_flattening=_distrib(mif_vals, n_lv, n_nights_contrib),
-                    flatness_index=_distrib(fi_vals, n_lv, n_nights_contrib),
+                    mid_insp_flattening=_distrib(mif_vals, n_lv, n_nights_contrib)
+                    if DistributionMetric.MID_INSP_FLATTENING in requested
+                    else _null_dist,
+                    flatness_index=_distrib(fi_vals, n_lv, n_nights_contrib)
+                    if DistributionMetric.FLATNESS_INDEX in requested
+                    else _null_dist,
                     flow_class_distribution=fc_dist,
-                    tidal_volume_ml=_distrib(tv_vals, n_lv, n_nights_contrib),
-                    ie_ratio=_distrib(ie_vals, n_lv, n_nights_contrib),
+                    tidal_volume_ml=_distrib(tv_vals, n_lv, n_nights_contrib)
+                    if DistributionMetric.TIDAL_VOLUME_ML in requested
+                    else _null_dist,
+                    ie_ratio=_distrib(ie_vals, n_lv, n_nights_contrib)
+                    if DistributionMetric.IE_RATIO in requested
+                    else _null_dist,
                     rera_proxy_count=rera_count,
                     rera_reason=rera_reason,
                     rx_settings=all_rx[0] if all_rx else {},
@@ -1971,6 +2043,24 @@ class BreathService:
         null_reason: NullReason | None = None
         if rx_violations:
             null_reason = NullReason.RX_CHANGED_WITHIN_EPOCH
+
+        # Cross-epoch identity check: if any two epochs have different algorithm
+        # identities on CROSS_VERSION_REFUSAL_KEYS, the comparison is refused.
+        non_null_identities = [
+            es.algorithm_identity
+            for es in epoch_stats
+            if es.algorithm_identity is not None
+        ]
+        if len(non_null_identities) > 1:
+            cross_keys = CROSS_VERSION_REFUSAL_KEYS
+            first_cross = {
+                k: non_null_identities[0].model_dump()[k] for k in cross_keys
+            }
+            if any(
+                {k: id_.model_dump()[k] for k in cross_keys} != first_cross
+                for id_ in non_null_identities[1:]
+            ):
+                null_reason = NullReason.ALGO_VERSION_MISMATCH
 
         return CompareEpochsResult(
             epochs=epoch_stats,
@@ -1982,10 +2072,27 @@ class BreathService:
         self,
         session_id: int,
     ) -> tuple[AnalysisStatus, AlgoVersions | None]:
-        """(status, versions) for a session's latest AnalysisResult."""
+        """(status, versions) for a session's latest AnalysisResult.
+
+        Returns (NOT_RUN, None) if the session is not owned by this profile.
+        """
         from sqlalchemy import select  # noqa: PLC0415
 
         from snore.database import models  # noqa: PLC0415
+
+        # Verify profile ownership before querying analysis result
+        owned = (
+            await self._db.execute(
+                select(models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id == session_id,
+                    models.Device.profile_id == self._profile_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if owned is None:
+            return AnalysisStatus.NOT_RUN, None
 
         row = (
             (
@@ -2031,11 +2138,15 @@ class BreathService:
 
         from snore.database import models  # noqa: PLC0415
 
-        # Find all sessions for this day/device
+        # Find all sessions for this day/device (profile-scoped)
         stmt = (
             select(models.Session, models.Day)
             .join(models.Day, models.Session.day_id == models.Day.id)
-            .where(models.Day.date == therapy_date)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Day.date == therapy_date,
+                models.Device.profile_id == self._profile_id,
+            )
         )
         if device_id is not None:
             stmt = stmt.where(models.Session.device_id == device_id)
@@ -2251,7 +2362,9 @@ class BreathService:
 
         resolved_device_id = device_id or (nights[0].device_id if nights else 0)
         n_nights = len(nights)
-        compliance_pct = (days_compliant / n_nights * 100.0) if n_nights > 0 else 0.0
+        compliance_pct = (
+            (days_compliant / n_calendar * 100.0) if n_calendar > 0 else 0.0
+        )
         return NightlyRangeSummary(
             date_start=date_start,
             date_end=date_end,
@@ -2280,6 +2393,34 @@ class BreathService:
         )
 
         ensure_registered_parsers()
+
+        # Verify device ownership before querying
+        from sqlalchemy import select as _select  # noqa: PLC0415
+
+        owned_device = (
+            await self._db.execute(
+                _select(models.Device.id).where(
+                    models.Device.id == device_id,
+                    models.Device.profile_id == self._profile_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if owned_device is None:
+            return DeviceCapabilities(
+                device_id=device_id,
+                requested_date_start=date_start,
+                requested_date_end=date_end,
+                actual_date_start=None,
+                actual_date_end=None,
+                null_reason=NullReason.NOT_AVAILABLE,
+                channels_present=[],
+                all_setting_keys_present=[],
+                rx_keys_present=[],
+                event_types_present=[],
+                session_count=0,
+                nights_with_data=0,
+                supported_vendor_models=[],
+            )
 
         # Date range of actual data
         day_stmt = select(models.Day).where(models.Day.device_id == device_id)
@@ -2404,7 +2545,13 @@ class BreathService:
         min_duration: float | None = None,
         device_id: int | None = None,
     ) -> list[ContextualEvent]:
-        """Machine events enriched with waveform context."""
+        """Machine events enriched with waveform context.
+
+        Pressure and leak values are sampled at the event start using the
+        waveform window seam (±5 s window).  MV is the mean over the 120 s
+        preceding the event.  All values are ``null`` + ``NOT_AVAILABLE`` when
+        the relevant channel is absent from the stored waveforms.
+        """
         from sqlalchemy import select  # noqa: PLC0415
 
         from snore.database import models  # noqa: PLC0415
@@ -2436,26 +2583,73 @@ class BreathService:
         ev_stmt = ev_stmt.order_by(models.Event.start_time)
         events = (await self._db.execute(ev_stmt)).scalars().all()
 
-        # Fetch pressure and leak waveform stats from Statistics (if available)
-        stats_row = (
-            (
-                await self._db.execute(
-                    select(models.Statistics).where(
-                        models.Statistics.session_id == session_id
-                    )
-                )
-            )
-            .scalars()
-            .first()
-        )
-        pressure_mean: float | None = stats_row.pressure_mean if stats_row else None
-        leak_mean: float | None = stats_row.leak_mean if stats_row else None
-
         results: list[ContextualEvent] = []
         for ev in events:
             ev_start_f = ev.start_time.timestamp()
             offset_s = ev_start_f - session_start_f
             minutes_since = offset_s / 60.0
+
+            # Sample pressure + leak at event start (±5 s window).
+            # Sample MV over the 120 s preceding the event.
+            pressure_at: float | None = None
+            pressure_reason: NullReason | None = NullReason.NOT_AVAILABLE
+            leak_at: float | None = None
+            leak_reason: NullReason | None = NullReason.NOT_AVAILABLE
+            mv_prior: float | None = None
+            mv_reason: NullReason | None = NullReason.NOT_AVAILABLE
+
+            window_start = max(0.0, offset_s - 5.0)
+            window_end = offset_s + 5.0
+            mv_window_start = max(0.0, offset_s - 120.0)
+
+            try:
+                raw_ctx = await fetch_waveform_window_raw(
+                    self._db,
+                    WaveformWindowRequest(
+                        therapy_date=therapy_date,
+                        session_id=session_id,
+                        device_id=resolved_device_id,
+                        channels=[
+                            WaveformChannelName.PRESSURE,
+                            WaveformChannelName.LEAK,
+                        ],
+                        offset_start=window_start,
+                        offset_end=window_end,
+                    ),
+                )
+                ctx_window = compute_waveform_window(raw_ctx)
+                for ch in ctx_window.channels:
+                    if ch.values:
+                        mean_val = sum(ch.values) / len(ch.values)
+                        if ch.channel_type == WaveformChannelName.PRESSURE:
+                            pressure_at = mean_val
+                            pressure_reason = None
+                        elif ch.channel_type == WaveformChannelName.LEAK:
+                            leak_at = mean_val
+                            leak_reason = None
+            except Exception:  # noqa: BLE001
+                pass  # channel absent or waveform unavailable
+
+            # MV window (separate fetch — wider range)
+            try:
+                raw_mv = await fetch_waveform_window_raw(
+                    self._db,
+                    WaveformWindowRequest(
+                        therapy_date=therapy_date,
+                        session_id=session_id,
+                        device_id=resolved_device_id,
+                        channels=[WaveformChannelName.MV],
+                        offset_start=mv_window_start,
+                        offset_end=offset_s,
+                    ),
+                )
+                mv_window = compute_waveform_window(raw_mv)
+                for ch in mv_window.channels:
+                    if ch.channel_type == WaveformChannelName.MV and ch.values:
+                        mv_prior = sum(ch.values) / len(ch.values)
+                        mv_reason = None
+            except Exception:  # noqa: BLE001
+                pass
 
             results.append(
                 ContextualEvent(
@@ -2466,16 +2660,12 @@ class BreathService:
                     timezone_status=TimezoneStatus.UNKNOWN,
                     offset_seconds=offset_s,
                     duration_seconds=ev.duration_seconds,
-                    pressure_at_event_cmh2o=pressure_mean,
-                    pressure_reason=None
-                    if pressure_mean is not None
-                    else NullReason.NOT_AVAILABLE,
-                    leak_at_event_lpm=leak_mean,
-                    leak_reason=None
-                    if leak_mean is not None
-                    else NullReason.NOT_AVAILABLE,
-                    mv_prior_120s_lpm=None,
-                    mv_reason=NullReason.NOT_AVAILABLE,
+                    pressure_at_event_cmh2o=pressure_at,
+                    pressure_reason=pressure_reason,
+                    leak_at_event_lpm=leak_at,
+                    leak_reason=leak_reason,
+                    mv_prior_120s_lpm=mv_prior,
+                    mv_reason=mv_reason,
                     minutes_since_session_start=minutes_since,
                 )
             )
@@ -2485,7 +2675,9 @@ class BreathService:
         self, request: WaveformWindowRequest
     ) -> WaveformWindow:
         """Convenience orchestrator: fetch then compute. Never closes self._db."""
-        raw = await fetch_waveform_window_raw(self._db, request)
+        raw = await fetch_waveform_window_raw(
+            self._db, request, profile_id=self._profile_id
+        )
         return compute_waveform_window(raw)
 
     async def get_ca_analysis(
@@ -2585,34 +2777,91 @@ class BreathService:
                 )
             )
 
-        # Periodic breathing proxy: fraction of breaths that are CA-adjacent
-        # (within 60s of a CA event) as a rough estimate
-        breath_rows = (
+        # Periodic breathing percentage from persisted programmatic_result_json.
+        # The pattern_detector records periodic_breathing_episodes with durations.
+        # MV rolling variance from MV waveform bins (10-min windows).
+        pb_pct: float | None = None
+        pb_reason: NullReason | None = None
+        mv_rolling_var: float | None = None
+        mv_var_reason: NullReason | None = None
+
+        # Fetch the analysis result row for persisted data
+        ar_row = (
             (
                 await self._db.execute(
-                    select(models.Breath)
-                    .where(models.Breath.analysis_result_id == ar_id)
-                    .order_by(models.Breath.start_offset_s)
+                    select(models.AnalysisResult).where(
+                        models.AnalysisResult.id == ar_id
+                    )
                 )
             )
             .scalars()
-            .all()
+            .first()
         )
+        if ar_row is not None and ar_row.programmatic_result_json:
+            from snore.analysis.types import (
+                AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+            )
 
-        pb_pct: float | None = None
-        pb_reason: NullReason | None = None
-        if breath_rows and ca_rows:
-            ca_offsets = [
-                (ev.start_time.timestamp() - session_start_f) for ev in ca_rows
-            ]
-            ca_adjacent = 0
-            for b in breath_rows:
-                b_mid = (b.start_offset_s + b.end_offset_s) / 2.0
-                if any(abs(b_mid - ca_off) <= 60.0 for ca_off in ca_offsets):
-                    ca_adjacent += 1
-            pb_pct = ca_adjacent / len(breath_rows) * 100.0
-        elif not ca_rows:
-            pb_reason = NullReason.NOT_AVAILABLE
+            try:
+                dto = AnalysisResultDTO.model_validate(ar_row.programmatic_result_json)
+                episodes = dto.periodic_breathing_episodes or []
+                if episodes:
+                    # pb_pct = total episode duration / session duration * 100
+                    session_duration_s = session_row.duration_seconds or 0.0
+                    total_pb_s = sum(float(ep.get("duration", 0)) for ep in episodes)
+                    if session_duration_s > 0:
+                        pb_pct = total_pb_s / session_duration_s * 100.0
+                    else:
+                        pb_pct = 0.0
+                elif dto.periodic_breathing is not None:
+                    # Summary-only: no episode list, return 0 (not null)
+                    pb_pct = 0.0
+                else:
+                    pb_reason = NullReason.NOT_AVAILABLE
+            except Exception:  # noqa: BLE001
+                pb_reason = NullReason.NOT_AVAILABLE
+
+        # MV rolling variance: compute from MV waveform in 10-min bins
+        try:
+            raw_mv_full = await fetch_waveform_window_raw(
+                self._db,
+                WaveformWindowRequest(
+                    therapy_date=therapy_date,
+                    session_id=session_id,
+                    device_id=resolved_device_id,
+                    channels=[WaveformChannelName.MV],
+                    offset_start=0.0,
+                    offset_end=session_row.duration_seconds or 86400.0,
+                ),
+            )
+            mv_full = compute_waveform_window(raw_mv_full)
+            for ch in mv_full.channels:
+                if ch.channel_type == WaveformChannelName.MV and len(ch.values) >= 6:
+                    import statistics  # noqa: PLC0415
+
+                    bin_size = 600.0  # 10 minutes
+                    offsets = ch.offset_seconds
+                    vals = ch.values
+                    # Bin means
+                    bin_start = 0.0
+                    bin_means: list[float] = []
+                    while bin_start < max(offsets):
+                        bin_end = bin_start + bin_size
+                        bin_vals = [
+                            v
+                            for t, v in zip(offsets, vals, strict=True)
+                            if bin_start <= t < bin_end
+                        ]
+                        if bin_vals:
+                            bin_means.append(sum(bin_vals) / len(bin_vals))
+                        bin_start = bin_end
+                    if len(bin_means) >= 2:
+                        mv_rolling_var = statistics.variance(bin_means)
+                        mv_var_reason = None
+                    else:
+                        mv_var_reason = NullReason.NOT_AVAILABLE
+        except Exception:  # noqa: BLE001
+            mv_var_reason = NullReason.NOT_AVAILABLE
 
         return CaAnalysisResult(
             query_date=therapy_date,
@@ -2624,8 +2873,8 @@ class BreathService:
             ca_events=ca_details,
             periodic_breathing_pct=pb_pct,
             pb_reason=pb_reason,
-            mv_rolling_variance=None,
-            mv_variance_reason=NullReason.NOT_AVAILABLE,
+            mv_rolling_variance=mv_rolling_var,
+            mv_variance_reason=mv_var_reason,
         )
 
     @staticmethod

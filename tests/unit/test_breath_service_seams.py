@@ -49,7 +49,9 @@ from snore.database import models
 from snore.services.breath_service import (
     BreathQueryRange,
     BreathService,
+    DayAnalysisStatus,
     EpochRequest,
+    WaveformChannelName,
     WaveformWindowRequest,
     WindowCriterion,
     compute_waveform_window,
@@ -162,6 +164,7 @@ async def _store_analysis_with_breaths(
             i_e_ratio=0.67,
             duty_cycle=0.4,
             peak_flow_lpm=30.0,
+            peak_exp_flow_lpm=20.0,
             tidal_volume_ml=400.0,
             respiratory_rate_rolling=15.0,
             flatness_index=0.2,
@@ -223,7 +226,7 @@ class TestGetAnalysisStatus:
             async_db_session, dev.id, date(2025, 1, 10)
         )
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         status, algo = await svc.get_analysis_status(session.id)
 
         assert status == AnalysisStatus.NOT_RUN
@@ -238,7 +241,7 @@ class TestGetAnalysisStatus:
         )
         await _store_analysis_with_breaths(async_db_session, session, profile_id)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         status, algo = await svc.get_analysis_status(session.id)
 
         assert status == AnalysisStatus.OK
@@ -264,7 +267,7 @@ class TestGetAnalysisStatus:
         async_db_session.add(ar)
         await async_db_session.flush()
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         status, algo = await svc.get_analysis_status(session.id)
 
         assert status == AnalysisStatus.STALE_VERSION
@@ -284,7 +287,7 @@ class TestGetBreathTable:
         therapy_date = date(2025, 1, 10)
         await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         query = BreathQueryRange(
             therapy_date=therapy_date,
             device_id=dev.id,
@@ -309,7 +312,7 @@ class TestGetBreathTable:
             async_db_session, session, profile_id, n_breaths=10
         )
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         # Window spanning first ~15s of session — under 15-min raw cap
         query = BreathQueryRange(
             therapy_date=therapy_date,
@@ -335,7 +338,7 @@ class TestGetBreathTable:
             async_db_session, session, profile_id, n_breaths=3
         )
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         # Window far beyond session end — use bin_minutes to bypass 15-min raw cap
         query = BreathQueryRange(
             therapy_date=therapy_date,
@@ -364,7 +367,7 @@ class TestFindWindows:
         therapy_date = date(2025, 1, 10)
         await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.find_windows(
             therapy_date=therapy_date,
             criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
@@ -387,7 +390,7 @@ class TestFindWindows:
             async_db_session, session, profile_id, n_breaths=20, flow_class=3
         )
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.find_windows(
             therapy_date=therapy_date,
             criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
@@ -413,7 +416,8 @@ class TestCompareEpochs:
         self, async_db_session
     ):
         """compare_epochs with no sessions → null algorithm_identity + NO_DATA_IN_RANGE."""
-        svc = BreathService(async_db_session)
+        _, profile_id = await _make_profile(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.compare_epochs(
             epochs=[
                 EpochRequest(
@@ -440,7 +444,7 @@ class TestCompareEpochs:
         _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
         await _store_analysis_with_breaths(async_db_session, session, profile_id)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.compare_epochs(
             epochs=[
                 EpochRequest(
@@ -468,7 +472,8 @@ class TestCompareEpochs:
 class TestGetNightlySummary:
     async def test_not_run_when_no_sessions_for_date(self, async_db_session):
         """get_nightly_summary raises ValueError when no sessions exist for date."""
-        svc = BreathService(async_db_session)
+        _, profile_id = await _make_profile(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         with pytest.raises(ValueError, match="No sessions found"):
             await svc.get_nightly_summary(date(2025, 3, 1))
 
@@ -484,7 +489,7 @@ class TestGetNightlySummary:
             async_db_session, session, profile_id, n_breaths=10
         )
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         summary = await svc.get_nightly_summary(therapy_date, device_id=dev.id)
 
         assert summary.therapy_date == therapy_date
@@ -505,7 +510,7 @@ class TestGetNightlySummary:
         therapy_date = date(2025, 3, 6)
         await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         summary = await svc.get_nightly_summary(therapy_date, device_id=dev.id)
 
         assert summary.day_status == DayAnalysisStatus.NOT_RUN
@@ -522,7 +527,8 @@ class TestGetNightlySummary:
 class TestGetNightlyRangeSummary:
     async def test_empty_range_returns_zero_nights(self, async_db_session):
         """get_nightly_range_summary over a range with no sessions returns n_nights=0."""
-        svc = BreathService(async_db_session)
+        _, profile_id = await _make_profile(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         summary = await svc.get_nightly_range_summary(
             date_start=date(2025, 4, 1),
             date_end=date(2025, 4, 3),
@@ -538,7 +544,7 @@ class TestGetNightlyRangeSummary:
         therapy_date = date(2025, 4, 2)
         await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         summary = await svc.get_nightly_range_summary(
             date_start=date(2025, 4, 1),
             date_end=date(2025, 4, 3),
@@ -560,7 +566,7 @@ class TestGetDeviceCapabilities:
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         caps = await svc.get_device_capabilities(device_id=dev.id)
 
         assert caps.device_id == dev.id
@@ -573,7 +579,7 @@ class TestGetDeviceCapabilities:
         therapy_date = date(2025, 5, 1)
         await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         caps = await svc.get_device_capabilities(device_id=dev.id)
 
         assert caps.device_id == dev.id
@@ -595,7 +601,7 @@ class TestGetContextualEvents:
         therapy_date = date(2025, 5, 10)
         await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         events = await svc.get_contextual_events(
             therapy_date=therapy_date, device_id=dev.id
         )
@@ -618,7 +624,7 @@ class TestGetContextualEvents:
         async_db_session.add(event)
         await async_db_session.flush()
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         events = await svc.get_contextual_events(
             therapy_date=therapy_date, device_id=dev.id
         )
@@ -644,7 +650,7 @@ class TestGetCaAnalysis:
         _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
         await _store_analysis_with_breaths(async_db_session, session, profile_id)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
 
         assert result.ca_events == []
@@ -666,7 +672,7 @@ class TestGetCaAnalysis:
         async_db_session.add(ca_event)
         await async_db_session.flush()
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
 
         assert len(result.ca_events) == 1
@@ -692,7 +698,7 @@ class TestGetWaveformWindow:
         therapy_date = date(2025, 6, 10)
         _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         req = WaveformWindowRequest(
             therapy_date=therapy_date,
             session_id=session.id,
@@ -872,7 +878,7 @@ class TestAsuiteViaStoreResult:
         ar_new_id = ar_new.id
 
         # Call the production selector
-        svc = BreathService(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
         _status, _algo, ar_id = await svc._latest_analysis_for_session(session.id)
 
         assert ar_id == ar_new_id, (
@@ -916,6 +922,7 @@ class TestAsuiteViaStoreResult:
             i_e_ratio=0.67,
             duty_cycle=0.4,
             peak_flow_lpm=30.0,
+            peak_exp_flow_lpm=20.0,
             tidal_volume_ml=400.0,
             respiratory_rate_rolling=15.0,
             flatness_index=0.2,
@@ -1212,6 +1219,7 @@ class TestMissingBreathsTable:
             i_e_ratio=0.67,
             duty_cycle=0.4,
             peak_flow_lpm=30.0,
+            peak_exp_flow_lpm=20.0,
             tidal_volume_ml=400.0,
             respiratory_rate_rolling=15.0,
             flatness_index=0.2,
@@ -1246,3 +1254,214 @@ class TestMissingBreathsTable:
                     await svc.store_result(computation, processing_time_ms=1)
         finally:
             await engine2.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Two-profile adversarial matrix
+# ---------------------------------------------------------------------------
+#
+# Every seam category is tested for profile isolation: a session/device owned
+# by profile B is invisible to a BreathService scoped to profile A.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTwoProfileIsolation:
+    """Two-profile adversarial matrix per Thufir review finding (pass 1).
+
+    Profile A owns device_a/session_a; profile B owns device_b/session_b.
+    BreathService scoped to profile A must never return data owned by B.
+    """
+
+    async def _setup_two_profiles(
+        self, db: AsyncSession
+    ) -> tuple[int, int, models.Session, int, int, models.Session]:
+        """Create two profiles with independent devices and sessions.
+
+        Returns (profile_a_id, device_a_id, session_a, profile_b_id, device_b_id, session_b).
+        """
+        therapy_date = date(2025, 6, 15)
+        _, profile_a_id = await _make_profile(db)
+        dev_a = await _make_device(db, profile_a_id)
+        _, session_a = await _make_day_and_session(db, dev_a.id, therapy_date)
+
+        _, profile_b_id = await _make_profile(db)
+        dev_b = await _make_device(db, profile_b_id, manufacturer="Other")
+        _, session_b = await _make_day_and_session(db, dev_b.id, therapy_date)
+
+        return profile_a_id, dev_a.id, session_a, profile_b_id, dev_b.id, session_b
+
+    async def test_get_analysis_status_foreign_session_returns_not_run(
+        self, async_db_session
+    ):
+        """get_analysis_status for a session owned by B returns NOT_RUN for profile A."""
+        (
+            profile_a_id,
+            _dev_a_id,
+            _session_a,
+            _profile_b_id,
+            _dev_b_id,
+            session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        # Populate an analysis result for session_b
+        await _store_analysis_with_breaths(
+            async_db_session, session_b, _profile_b_id, n_breaths=5
+        )
+
+        # Profile A must not see session_b's analysis
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        status, algo = await svc_a.get_analysis_status(session_b.id)
+        assert status == AnalysisStatus.NOT_RUN
+        assert algo is None
+
+    async def test_get_breath_table_foreign_explicit_session_raises(
+        self, async_db_session
+    ):
+        """get_breath_table with an explicit session_id owned by B raises ValueError."""
+        (
+            profile_a_id,
+            _,
+            _,
+            profile_b_id,
+            _dev_b_id,
+            session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+        await _store_analysis_with_breaths(
+            async_db_session, session_b, profile_b_id, n_breaths=3
+        )
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        with pytest.raises(ValueError, match="profile|not owned|not found"):
+            await svc_a.get_breath_table(
+                BreathQueryRange(
+                    therapy_date=date(2025, 6, 15),
+                    session_id=session_b.id,
+                    offset_start=0.0,
+                    offset_end=300.0,  # 5-min window within cap
+                )
+            )
+
+    async def test_resolve_session_for_date_foreign_device_invisible(
+        self, async_db_session
+    ):
+        """_resolve_session_for_date does not find sessions from B when scoped to A.
+
+        When two profiles each have a session on the same date, profile A's
+        resolver only finds A's session; profile B's session is invisible.
+        """
+        (
+            profile_a_id,
+            dev_a_id,
+            session_a,
+            _profile_b_id,
+            dev_b_id,
+            session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        # Should resolve to A's session without ambiguity error
+        resolved_sid, resolved_did = await svc_a._resolve_session_for_date(
+            date(2025, 6, 15), None
+        )
+        assert resolved_sid == session_a.id
+        assert resolved_did == dev_a_id
+        # B's session_id must not be returned
+        assert resolved_sid != session_b.id
+
+    async def test_get_device_capabilities_foreign_device_returns_empty(
+        self, async_db_session
+    ):
+        """get_device_capabilities for device_b returns null_reason for profile A."""
+        (
+            profile_a_id,
+            _dev_a_id,
+            _session_a,
+            _profile_b_id,
+            dev_b_id,
+            _session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        caps = await svc_a.get_device_capabilities(device_id=dev_b_id)
+        assert caps.null_reason is not None
+        assert caps.session_count == 0
+        assert caps.nights_with_data == 0
+
+    async def test_find_windows_foreign_date_returns_not_run(self, async_db_session):
+        """find_windows on a date only populated by profile B returns NOT_RUN for A."""
+        therapy_date = date(2025, 7, 20)
+        _, profile_a_id = await _make_profile(async_db_session)
+        # A has no session on this date
+
+        _, profile_b_id = await _make_profile(async_db_session)
+        dev_b = await _make_device(async_db_session, profile_b_id, manufacturer="Other")
+        _, session_b = await _make_day_and_session(
+            async_db_session, dev_b.id, therapy_date
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, session_b, profile_b_id, n_breaths=5
+        )
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        result = await svc_a.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=5,
+        )
+        assert result.day_status == DayAnalysisStatus.NOT_RUN
+        assert result.windows == []
+
+    async def test_compare_epochs_foreign_device_contributes_zero_sessions(
+        self, async_db_session
+    ):
+        """compare_epochs with device_b returns NO_DATA_IN_RANGE for profile A."""
+        (
+            profile_a_id,
+            _dev_a_id,
+            _session_a,
+            _profile_b_id,
+            dev_b_id,
+            _session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        result = await svc_a.compare_epochs(
+            epochs=[
+                EpochRequest(
+                    label="b_epoch",
+                    date_start=date(2025, 6, 15),
+                    date_end=date(2025, 6, 15),
+                    device_id=dev_b_id,
+                )
+            ]
+        )
+        assert len(result.epochs) == 1
+        assert result.epochs[0].null_reason == NullReason.NO_DATA_IN_RANGE
+
+    async def test_fetch_waveform_window_raw_foreign_session_raises(
+        self, async_db_session
+    ):
+        """fetch_waveform_window_raw with profile_id raises ValueError for B's session."""
+        (
+            profile_a_id,
+            _,
+            _,
+            _profile_b_id,
+            dev_b_id,
+            session_b,
+        ) = await self._setup_two_profiles(async_db_session)
+
+        with pytest.raises(ValueError, match="profile"):
+            await fetch_waveform_window_raw(
+                async_db_session,
+                WaveformWindowRequest(
+                    therapy_date=date(2025, 6, 15),
+                    session_id=session_b.id,
+                    device_id=dev_b_id,
+                    channels=[WaveformChannelName.FLOW],
+                    offset_start=0.0,
+                    offset_end=60.0,
+                ),
+                profile_id=profile_a_id,
+            )

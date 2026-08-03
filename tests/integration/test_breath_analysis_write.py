@@ -426,7 +426,9 @@ class TestNonUtcHostDeterminism:
 
         # 2024-01-19 02:00:00 UTC — wall-clock is 2024-01-18 21:00:00 in UTC-5.
         epoch = 1705622400.0
-        expected_naive_utc = datetime.utcfromtimestamp(epoch)  # 2024-01-19 02:00:00
+        expected_naive_utc = datetime.fromtimestamp(epoch, tz=UTC).replace(
+            tzinfo=None
+        )  # 2024-01-19 02:00:00
 
         await init_database(str(temp_db))
 

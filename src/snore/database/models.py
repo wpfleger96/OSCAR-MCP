@@ -709,7 +709,8 @@ class Breath(Base):
     duty_cycle: Mapped[float | None] = mapped_column(Float)  # Ti/Ttot
 
     # Amplitude
-    peak_flow_lpm: Mapped[float | None] = mapped_column(Float)
+    peak_flow_lpm: Mapped[float | None] = mapped_column(Float)  # peak inspiratory
+    peak_exp_flow_lpm: Mapped[float | None] = mapped_column(Float)  # peak expiratory
     tidal_volume_ml: Mapped[float | None] = mapped_column(Float)
     respiratory_rate_rolling: Mapped[float | None] = mapped_column(
         Float
