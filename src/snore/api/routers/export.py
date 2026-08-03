@@ -12,7 +12,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from snore.api.deps import get_db
+from snore.api.deps import ActorDep, get_db
+from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.services.export_service import ExportService
 
 router = APIRouter()
@@ -40,13 +41,14 @@ def _streaming_export(
 
 @router.get("/csv")
 async def export_csv(
+    actor: ActorDep,
     db: AsyncSession = Depends(get_db),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     device: str | None = Query(default=None),
     include_waveforms: bool = Query(default=False),
 ) -> StreamingResponse:
-    svc = ExportService()
+    svc = ExportService(actor.profile_id)
     tmpdir = tempfile.mkdtemp()
     output = Path(tmpdir) / "export.csv"
     await svc.export_csv(
@@ -62,12 +64,13 @@ async def export_csv(
 
 @router.get("/json")
 async def export_json(
+    actor: ActorDep,
     db: AsyncSession = Depends(get_db),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     device: str | None = Query(default=None),
 ) -> StreamingResponse:
-    svc = ExportService()
+    svc = ExportService(actor.profile_id)
     tmpdir = tempfile.mkdtemp()
     output = Path(tmpdir) / "export.json"
     await svc.export_json(
@@ -82,13 +85,17 @@ async def export_json(
 
 @router.get("/raw")
 def export_raw(
+    actor: ActorDep,
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     device: str | None = Query(default=None),
     trim_str: bool = Query(default=False),
     as_zip: bool = Query(default=True),
 ) -> StreamingResponse:
-    svc = ExportService()
+    # Backup root is always the actor's profile-scoped directory — never
+    # client-supplied, to prevent cross-profile file access.
+    backup_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+    svc = ExportService(actor.profile_id, backup_root=backup_root)
     tmpdir = tempfile.mkdtemp()
     output = Path(tmpdir) / "snore_export_raw.zip"
     result = svc.export_raw(

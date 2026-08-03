@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.calculations import (
@@ -24,8 +24,13 @@ __all__ = ["StatsService"]
 class StatsService:
     """Service for therapy statistics computation and analysis."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
+        self.profile_id = profile_id
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit Day rows to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
 
     async def _query_days(
         self,
@@ -33,8 +38,12 @@ class StatsService:
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> list[models.Day]:
-        """Query Day records, optionally filtered by date range or rolling window."""
-        query = select(models.Day)
+        """Query Day records filtered to this profile, optionally by date range."""
+        query = (
+            select(models.Day)
+            .join(models.Device, models.Day.device_id == models.Device.id)
+            .where(self._profile_filter())
+        )
         if days_limit:
             cutoff_date = date.today() - timedelta(days=days_limit)
             query = query.where(models.Day.date >= cutoff_date)

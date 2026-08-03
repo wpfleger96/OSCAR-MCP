@@ -3,6 +3,7 @@
 import uuid
 
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -13,10 +14,14 @@ from snore.database.models import Day, Device, Session, Setting
 
 
 async def _create_device(
-    db_session: AsyncSession, manufacturer: str = "ResMed", model: str = "AirSense 10"
+    db_session: AsyncSession,
+    profile_id: int,
+    manufacturer: str = "ResMed",
+    model: str = "AirSense 10",
 ) -> Device:
     """Create a device with a unique serial number."""
     device = Device(
+        profile_id=profile_id,
         manufacturer=manufacturer,
         model=model,
         serial_number=f"SN_{uuid.uuid4().hex[:8]}",
@@ -78,7 +83,7 @@ RX_SETTINGS = {
 class TestRxTrackerHistory:
     async def test_history_empty_db(self, async_db_session):
         """Empty database returns empty list."""
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
         assert result == []
 
@@ -95,7 +100,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
 
         assert len(result) == 1
@@ -132,7 +137,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
 
         assert len(result) == 2
@@ -153,7 +158,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_history(async_db_session)
 
         assert len(result) == 1
@@ -163,14 +168,20 @@ class TestRxTrackerHistory:
         assert result[0].total_hours == pytest.approx(7.5 * 7)
 
     async def test_history_two_devices_same_settings_produce_separate_periods(
-        self, async_db_session
+        self, async_db_session, async_test_profile
     ):
         """Two devices with identical settings on the same dates yield two separate periods."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 6, 1)
         settings = {"mode": "CPAP", "pressure_fixed": "10.0"}
@@ -184,7 +195,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 2
         device_ids = {r.device_id for r in result}
@@ -220,7 +231,7 @@ class TestRxTrackerHistory:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 2
         assert result[0].settings["ps"] == "4.0"
@@ -275,7 +286,7 @@ class TestRxTrackerHistory:
 
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 1
         assert result[0].settings == settings_enabled
@@ -317,7 +328,7 @@ class TestRxTrackerHistory:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_history(async_db_session)
+        result = await RxTracker(1).get_history(async_db_session)
 
         assert len(result) == 1
         assert result[0].start_date == base + timedelta(days=1)
@@ -348,7 +359,7 @@ class TestRxTrackerCurrent:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
 
         assert result is not None
@@ -361,7 +372,7 @@ class TestRxTrackerCurrentTailWalk:
         self, async_db_session: AsyncSession
     ) -> None:
         """Empty database returns None."""
-        assert await RxTracker().get_current(async_db_session) is None
+        assert await RxTracker(1).get_current(async_db_session) is None
 
     async def test_current_equals_history_last_single_device(
         self, async_db_session: AsyncSession, async_test_device: Device
@@ -386,21 +397,27 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         assert (
             await tracker.get_current(async_db_session)
             == (await tracker.get_history(async_db_session))[-1]
         )
 
     async def test_current_equals_history_last_multi_device(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """Two devices with interleaved dates: get_current equals get_history()[-1]."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 3, 1)
         settings_a = {"mode": "CPAP", "pressure_fixed": "10.0"}
@@ -423,21 +440,27 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         assert (
             await tracker.get_current(async_db_session)
             == (await tracker.get_history(async_db_session))[-1]
         )
 
     async def test_current_later_start_on_lower_device_id_wins(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """A later start_date wins over a higher device_id with an earlier start."""
         device_low = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_high = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         assert device_low.id < device_high.id
 
@@ -462,7 +485,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_current(async_db_session)
+        result = await RxTracker(1).get_current(async_db_session)
         assert result is not None
         assert result.device_id == device_low.id
         assert result.start_date == base + timedelta(days=10)
@@ -493,7 +516,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result == (await tracker.get_history(async_db_session))[-1]
@@ -536,7 +559,7 @@ class TestRxTrackerCurrentTailWalk:
         )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result == (await tracker.get_history(async_db_session))[-1]
@@ -556,7 +579,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result.days_count == 30
@@ -589,7 +612,7 @@ class TestRxTrackerCurrentTailWalk:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_current(async_db_session)
         assert result is not None
         assert result.start_date == new_start
@@ -600,7 +623,7 @@ class TestRxTrackerCurrentTailWalk:
 class TestRxTrackerComparison:
     async def test_comparison_empty_db(self, async_db_session):
         """Empty database returns empty comparison."""
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_comparison(async_db_session)
         assert result.periods == []
         assert result.best_index is None
@@ -621,7 +644,7 @@ class TestRxTrackerComparison:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_comparison(async_db_session, min_days=7)
 
         assert len(result.periods) == 1
@@ -664,7 +687,7 @@ class TestRxTrackerComparison:
             )
         await async_db_session.flush()
 
-        tracker = RxTracker()
+        tracker = RxTracker(1)
         result = await tracker.get_comparison(async_db_session, min_days=7)
 
         assert len(result.periods) == 3
@@ -707,7 +730,7 @@ class TestDiffSettings:
 class TestRxTrackerChanges:
     async def test_changes_empty_db(self, async_db_session):
         """Empty database returns empty changes list."""
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         assert result.changes == []
 
     async def test_single_day_emits_no_changes(
@@ -722,7 +745,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         assert result.changes == []
 
     async def test_multi_key_change_emits_one_entry_per_key(
@@ -744,7 +767,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         keys = {c.key for c in result.changes}
         assert "mode" in keys
         assert len(result.changes) >= 2
@@ -794,18 +817,26 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         # Only day 2 triggers diffs (day 1 is skipped), so changes happen at day 2
         assert all(c.date == base + timedelta(days=2) for c in result.changes)
         assert len(result.changes) >= 1
 
-    async def test_changes_across_two_devices_are_independent(self, async_db_session):
+    async def test_changes_across_two_devices_are_independent(
+        self, async_db_session, async_test_profile
+    ):
         """Changes from different devices are not cross-diffed."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 4, 1)
 
@@ -837,18 +868,26 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         # All changes should be from device_a only
         assert all(c.device_id == device_a.id for c in result.changes)
         assert len(result.changes) >= 1
 
-    async def test_changes_sorted_by_date_device_key(self, async_db_session):
+    async def test_changes_sorted_by_date_device_key(
+        self, async_db_session, async_test_profile
+    ):
         """Changes are sorted (date, device_id, key) ascending."""
         device_a = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirSense 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirSense 10",
         )
         device_b = await _create_device(
-            async_db_session, manufacturer="ResMed", model="AirCurve 10"
+            async_db_session,
+            async_test_profile.id,
+            manufacturer="ResMed",
+            model="AirCurve 10",
         )
         base = date(2025, 5, 1)
 
@@ -864,7 +903,7 @@ class TestRxTrackerChanges:
             )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
         changes = result.changes
         for i in range(len(changes) - 1):
             a, b = changes[i], changes[i + 1]
@@ -889,7 +928,7 @@ class TestRxTrackerChanges:
         )
         await async_db_session.flush()
 
-        result = await RxTracker().get_changes(async_db_session)
+        result = await RxTracker(1).get_changes(async_db_session)
 
         humidity_changes = [c for c in result.changes if c.key == "humidity_level"]
         assert len(humidity_changes) == 1

@@ -31,13 +31,34 @@ def cli_runner():
     return CliRunner()
 
 
+async def _create_test_user_and_profile(
+    session: AsyncSession, email: str = "cli_test@example.com"
+) -> models.Profile:
+    """Helper: create a User+Profile in a session and return the Profile.
+
+    Required so Device() rows satisfy the NOT NULL profile_id constraint.
+    """
+    import uuid
+
+    _user = models.User(canonical_email=f"{uuid.uuid4().hex[:8]}_{email}", role="admin")
+    session.add(_user)
+    await session.flush()
+    _profile = models.Profile(user_id=_user.id, name="Test Profile")
+    session.add(_profile)
+    await session.flush()
+    return _profile
+
+
 @pytest.fixture
 async def populated_test_db(temp_db):
     """Create a database populated with realistic test data."""
     await init_database(str(temp_db))
 
     async with session_scope() as session:
+        _profile = await _create_test_user_and_profile(session)
+
         device = models.Device(
+            profile_id=_profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="TEST12345",
@@ -90,7 +111,10 @@ async def populated_test_db_full(temp_db):
     await init_database(str(temp_db))
 
     async with session_scope() as session:
+        _profile = await _create_test_user_and_profile(session)
+
         device = models.Device(
+            profile_id=_profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="TEST12345",
@@ -377,7 +401,9 @@ class TestSessionListCommand:
 
         async def _setup() -> None:
             async with session_scope() as session:
+                _profile = await _create_test_user_and_profile(session)
                 device = models.Device(
+                    profile_id=_profile.id,
                     manufacturer="Test",
                     model="Test",
                     serial_number="TEST",
@@ -409,7 +435,9 @@ async def db_with_analysis(temp_db):
     await init_database(str(temp_db))
 
     async with session_scope() as session:
+        _profile = await _create_test_user_and_profile(session)
         device = models.Device(
+            profile_id=_profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="TEST12345",
@@ -686,7 +714,9 @@ class TestAnalysisDeleteCommand:
 
         async def _setup() -> None:
             async with session_scope() as session:
+                _profile = await _create_test_user_and_profile(session)
                 device = models.Device(
+                    profile_id=_profile.id,
                     manufacturer="Test",
                     model="Test",
                     serial_number="TEST",
@@ -888,7 +918,9 @@ class TestAnalysisCommand:
 
         async def _setup() -> None:
             async with session_scope() as session:
+                _profile = await _create_test_user_and_profile(session)
                 device = models.Device(
+                    profile_id=_profile.id,
                     manufacturer="Test",
                     model="Test",
                     serial_number="TEST",
@@ -984,13 +1016,30 @@ class TestSessionShowCommand:
     ):
         """Test --settings flag displays settings."""
         import asyncio
+        import uuid
 
         from snore.database.importers import import_session
 
         asyncio.run(init_database(str(temp_db)))
 
+        # Create a User+Profile for the device to satisfy the NOT NULL FK constraint.
+        async def _setup_profile() -> int:
+            async with session_scope() as db:
+                _u = models.User(
+                    canonical_email=f"sshow_{uuid.uuid4().hex[:8]}@example.com",
+                    role="admin",
+                )
+                db.add(_u)
+                await db.flush()
+                _p = models.Profile(user_id=_u.id, name="Test Profile")
+                db.add(_p)
+                await db.flush()
+                return _p.id
+
+        profile_id = asyncio.run(_setup_profile())
+
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path, limit=1))
-        asyncio.run(import_session(sessions[0]))
+        asyncio.run(import_session(sessions[0], profile_id=profile_id))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -1129,7 +1178,9 @@ async def db_with_rx_settings_changes(temp_db):
     await init_database(str(temp_db))
 
     async with session_scope() as session:
+        _profile = await _create_test_user_and_profile(session)
         device = models.Device(
+            profile_id=_profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="RX_CHG_TEST",
@@ -1287,7 +1338,9 @@ async def db_with_apap_rx(temp_db):
     await init_database(str(temp_db))
 
     async with session_scope() as session:
+        _profile = await _create_test_user_and_profile(session)
         device = models.Device(
+            profile_id=_profile.id,
             manufacturer="ResMed",
             model="AirSense 10",
             serial_number="APAP_RX_TEST",
@@ -1324,7 +1377,9 @@ async def db_with_bipap_rx(temp_db):
     await init_database(str(temp_db))
 
     async with session_scope() as session:
+        _profile = await _create_test_user_and_profile(session)
         device = models.Device(
+            profile_id=_profile.id,
             manufacturer="ResMed",
             model="AirCurve 10 VAuto",
             serial_number="BIPAP_RX_TEST",

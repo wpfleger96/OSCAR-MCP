@@ -4,31 +4,38 @@ State machine
 -------------
 ::
 
-    POST /            → pending (worker starts immediately)
-    GET /{id}/progress → attaches an SSE observer; never starts or restarts the worker
-    DELETE /{id}      → cancelled (idempotent after any terminal state)
-    worker finishes   → succeeded | failed
-    reaper            → removes terminal jobs after TTL
+    reserve()             → PENDING_UPLOAD (admission slot taken *before* body is read)
+    convert_to_job()      → PENDING       (reservation becomes a real job after parsing)
+    GET /{id}/progress    → attaches an SSE observer; never starts or restarts the worker
+    DELETE /{id}          → cancelled (idempotent after any terminal state)
+    worker finishes       → succeeded | failed
+    reaper                → removes terminal jobs after TTL
 
 Terminal states: succeeded, failed, cancelled.
-Active states:   pending, running.
+Active states:   pending_upload, pending, running.
+
+Admission
+---------
+Per-user and global caps include PENDING_UPLOAD reservations + PENDING + RUNNING jobs
+(one counter, one state machine).  An over-limit request gets 429 *before* any body
+bytes are consumed.  The reservation converts atomically to the job after parsing.
+At no instant does the pair double-count (both reservation + job) or drop the slot.
+
+Resource ownership
+------------------
+The slot owns the disk it admitted.  Capacity is released **only after** temp/spool
+cleanup completes on every terminal and error path.  The terminal job record is
+retained for SSE observation independently of capacity.
 
 Guarantees
 ----------
-- Start-once: the worker starts exactly once at POST; /progress GETs are observer-only.
+- Start-once: the worker starts exactly once at convert_to_job/POST; /progress GETs
+  are observer-only.
 - Fan-out: each observer has its own capacity-one/coalescing channel backed by the
-  latest-progress snapshot; a stalled observer never accumulates unbounded messages.
-  Terminal delivery is never dropped (capacity-one channels are upgraded to terminal
-  on arrival regardless of current fill).
-- Late observers: connecting after the job has reached a terminal state immediately
-  receive the terminal event; no 404 after completion.
+  latest-progress snapshot.  Terminal delivery is never dropped.
+- Late observers: connecting after terminal state immediately receive the terminal event.
 - Reaper: removes terminal jobs only; active jobs are never reaped regardless of age.
-- POST failure: if temp-dir creation succeeds but job registration fails, the caller is
-  responsible for cleanup; the job store never holds a reference to an incomplete job.
-- Shutdown: `shutdown()` cancels all non-terminal jobs and awaits worker threads.
-  Returns a list of job IDs still alive after the timeout; the lifespan raises
-  `RuntimeError` on a non-empty list so the process does not exit cleanly while
-  active import writes are in flight.
+- Shutdown: ``shutdown()`` cancels all non-terminal jobs and awaits worker threads.
 """
 
 from __future__ import annotations
@@ -49,11 +56,16 @@ logger = logging.getLogger(__name__)
 # How long to retain terminal jobs before the reaper removes them.
 JOB_TTL_SECONDS: float = 600.0
 
+# Per-user and global admission caps.
+MAX_ACTIVE_PER_USER: int = 3
+MAX_ACTIVE_GLOBAL: int = 10
+
 
 class JobState(Enum):
     """All states a job can occupy."""
 
-    PENDING = "pending"
+    PENDING_UPLOAD = "pending_upload"  # Admission slot reserved; body not yet parsed.
+    PENDING = "pending"  # Files received; worker not yet started.
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -61,7 +73,7 @@ class JobState(Enum):
 
 
 TERMINAL_STATES = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED})
-ACTIVE_STATES = frozenset({JobState.PENDING, JobState.RUNNING})
+ACTIVE_STATES = frozenset({JobState.PENDING_UPLOAD, JobState.PENDING, JobState.RUNNING})
 
 
 class JobType(Enum):
@@ -80,12 +92,6 @@ class ObserverChannel:
     Each observer holds exactly one pending message slot.  A new message
     overwrites an un-consumed one (coalescing), *except* when the pending
     message is already a terminal event — terminal events are never dropped.
-
-    Usage::
-
-        ch = ObserverChannel()
-        ch.put({"event": "progress", "data": {"message": "..."}})  # writer
-        msg = ch.get(timeout=1.0)  # blocking poll; None on timeout
     """
 
     def __init__(self) -> None:
@@ -101,7 +107,6 @@ class ObserverChannel:
                 "complete",
                 "error",
             ):
-                # A terminal event is already waiting; do not overwrite.
                 return
             self._slot = msg
             self._cond.notify_all()
@@ -139,6 +144,8 @@ class ImportJob:
 
     job_id: str
     job_type: JobType
+    owner_user_id: int | None = None  # The user who owns this job.
+    target_profile_id: int | None = None  # The profile data lands in.
     created_at: float = field(default_factory=time.monotonic)
 
     # UPLOAD jobs: temp dir with written files.
@@ -147,7 +154,7 @@ class ImportJob:
     sources: list[Any] | None = None
 
     # State machine fields — protected by _lock.
-    _state: JobState = field(default=JobState.PENDING, init=False, repr=False)
+    _state: JobState = field(default=JobState.PENDING_UPLOAD, init=False, repr=False)
     _terminal_msg: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _latest_progress: dict[str, Any] | None = field(
         default=None, init=False, repr=False
@@ -160,6 +167,8 @@ class ImportJob:
         default_factory=list, init=False, repr=False
     )
     _terminal_at: float | None = field(default=None, init=False, repr=False)
+    # True while the slot still counts against admission caps.
+    _capacity_held: bool = field(default=True, init=False, repr=False)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )
@@ -180,28 +189,37 @@ class ImportJob:
         with self._lock:
             return self._cancel_flag
 
+    def convert_to_pending(self) -> bool:
+        """Transition PENDING_UPLOAD → PENDING (files received, body parsed).
+
+        This is the atomic reservation→job conversion: at no instant does the
+        counter both double-count (reservation + job) or drop the slot.
+        """
+        with self._lock:
+            if self._state != JobState.PENDING_UPLOAD:
+                return False
+            self._state = JobState.PENDING
+            return True
+
     def attach_observer(self) -> ObserverChannel:
         """Register a new SSE observer.
 
         If the job is already terminal, the channel is pre-loaded with the
-        terminal event so the observer receives it immediately.  If the job
-        has a latest-progress snapshot, that is also pre-loaded first.
+        terminal event so the observer receives it immediately.
         """
         ch = ObserverChannel()
         with self._lock:
             if self._state in TERMINAL_STATES:
-                # Late observer: deliver terminal state immediately.
                 if self._terminal_msg is not None:
                     ch.put(self._terminal_msg)
             else:
-                # Deliver latest progress snapshot so observer has context.
                 if self._latest_progress is not None:
                     ch.put(self._latest_progress)
                 self._observers.append(ch)
         return ch
 
     def detach_observer(self, ch: ObserverChannel) -> None:
-        """Remove an observer (SSE connection closed).  Does not affect the job."""
+        """Remove an observer (SSE connection closed)."""
         with self._lock:
             try:
                 self._observers.remove(ch)
@@ -210,7 +228,7 @@ class ImportJob:
         ch.close()
 
     def _broadcast(self, msg: dict[str, Any]) -> None:
-        """Deliver msg to all attached observers.  Must be called without _lock."""
+        """Deliver msg to all attached observers. Must be called without _lock."""
         with self._lock:
             observers = list(self._observers)
         for ch in observers:
@@ -224,11 +242,7 @@ class ImportJob:
         self._broadcast(msg)
 
     def try_start(self) -> bool:
-        """Transition pending → running.
-
-        Returns True if the transition succeeded (caller should start the worker).
-        Returns False if the job is already running/terminal (start-once guarantee).
-        """
+        """Transition pending → running."""
         with self._lock:
             if self._state != JobState.PENDING:
                 return False
@@ -238,44 +252,35 @@ class ImportJob:
     def try_cancel(self) -> bool:
         """Request cancellation.
 
-        Allowed from any state.  Idempotent after terminal.  Returns True if
-        the job was in a non-terminal state (the caller may need to await the
-        worker).
+        Allowed from any state.  Idempotent after terminal.
+        Returns True if the job was in a non-terminal state.
         """
         with self._lock:
             if self._state in TERMINAL_STATES:
-                return False  # Already done; no-op.
+                return False
             self._cancel_flag = True
-            if self._state == JobState.PENDING:
-                # Cancel before worker starts: transition directly to CANCELLED.
+            if self._state in (JobState.PENDING_UPLOAD, JobState.PENDING):
                 self._state = JobState.CANCELLED
                 terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
                 self._terminal_msg = terminal_msg
                 self._terminal_at = time.monotonic()
                 observers = list(self._observers)
             else:
-                # Running: set the flag; worker's finally block will call _finish.
                 observers = []
-        # Notify observers outside the lock for cancel-before-start.
-        for ch in observers:
-            ch.put(terminal_msg)
+        if observers:
+            for ch in observers:
+                ch.put(terminal_msg)
         return True
 
     def _finish(self, *, succeeded: bool, terminal_msg: dict[str, Any]) -> bool:
-        """Transition running → succeeded/failed/cancelled.  Called by the worker thread.
+        """Transition running → succeeded/failed/cancelled. Called by the worker.
 
-        Returns True if this call won the transition; False if cancellation already
-        claimed the terminal slot (cancel() won the race).
-
-        If ``_cancel_flag`` was set before this call wins the lock, the terminal
-        state is ``CANCELLED`` (not ``SUCCEEDED`` / ``FAILED``) — the cancel
-        predicate won the race, so the worker honours the caller's intent.
+        NOTE: The caller must call release_capacity() AFTER cleanup_files()
+        completes to ensure the slot owns the disk it admitted.
         """
         with self._lock:
             if self._state in TERMINAL_STATES:
-                # cancel() already won the race; honour it.
                 return False
-            # Honour a pending cancellation even if completion won the lock.
             if self._cancel_flag:
                 self._state = JobState.CANCELLED
                 terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
@@ -290,12 +295,7 @@ class ImportJob:
         return True
 
     def _finish_cancelled(self) -> bool:
-        """Transition running → CANCELLED.  Called by the worker thread when it sees
-        the cancel flag.
-
-        Returns True if this call won the transition; False if another terminal
-        (succeeded/failed) already claimed the slot.
-        """
+        """Transition running → CANCELLED. Called by the worker thread."""
         terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
         with self._lock:
             if self._state in TERMINAL_STATES:
@@ -308,6 +308,20 @@ class ImportJob:
         for ch in observers:
             ch.put(terminal_msg)
         return True
+
+    def release_capacity(self) -> None:
+        """Release the admission slot AFTER cleanup completes.
+
+        Must be called AFTER cleanup_files() on every terminal/error path.
+        The slot owns the disk it admitted; releasing early would allow a new
+        request to reserve and spool while the prior job's temp tree still exists.
+        """
+        with self._lock:
+            if not self._capacity_held:
+                return
+            self._capacity_held = False
+        # Decrement the store counter outside the job lock to avoid lock ordering issues.
+        _decrement_capacity(self.owner_user_id)
 
     def wait_for_worker(self, timeout: float = 5.0) -> None:
         """Block until the worker thread exits (used during shutdown)."""
@@ -323,21 +337,87 @@ class ImportJob:
 
 
 # ---------------------------------------------------------------------------
-# Job store
+# Job store and admission counters
 # ---------------------------------------------------------------------------
 
 _jobs: dict[str, ImportJob] = {}
 _lock = threading.Lock()
 
+# Admission counters: per-user active count and global active count.
+# "Active" = PENDING_UPLOAD + PENDING + RUNNING (capacity_held=True).
+_per_user_count: dict[int | None, int] = {}
+_global_count: int = 0
+_counts_lock = threading.Lock()
 
-def create_job(job_type: JobType, **kwargs: Any) -> ImportJob:
-    """Create a new job in PENDING state and register it in the store.
 
-    The caller must start the worker thread immediately after this call.
-    If registration fails, the caller is responsible for any cleanup.
+def _decrement_capacity(owner_user_id: int | None) -> None:
+    """Decrement both per-user and global counts for one released slot."""
+    global _global_count
+    with _counts_lock:
+        current = _per_user_count.get(owner_user_id, 0)
+        _per_user_count[owner_user_id] = max(0, current - 1)
+        _global_count = max(0, _global_count - 1)
+
+
+def _check_and_reserve(owner_user_id: int | None) -> bool:
+    """Atomically check caps and increment counters.
+
+    Returns True if the reservation was taken (within caps), False if over-limit.
     """
+    global _global_count
+    with _counts_lock:
+        user_count = _per_user_count.get(owner_user_id, 0)
+        if user_count >= MAX_ACTIVE_PER_USER:
+            return False
+        if _global_count >= MAX_ACTIVE_GLOBAL:
+            return False
+        _per_user_count[owner_user_id] = user_count + 1
+        _global_count += 1
+        return True
+
+
+def reserve_slot(owner_user_id: int | None) -> ImportJob | None:
+    """Atomically check caps and create a PENDING_UPLOAD reservation.
+
+    Must be called BEFORE reading any body bytes.
+
+    Returns:
+        A new ImportJob in PENDING_UPLOAD state, or None if over-limit (429).
+    """
+    if not _check_and_reserve(owner_user_id):
+        return None
     _reap_terminal()
-    job = ImportJob(job_id=uuid.uuid4().hex, job_type=job_type, **kwargs)
+    job = ImportJob(
+        job_id=uuid.uuid4().hex,
+        job_type=JobType.UPLOAD,
+        owner_user_id=owner_user_id,
+    )
+    with _lock:
+        _jobs[job.job_id] = job
+    logger.debug(
+        "admission: reserved slot for user %s (job %s)", owner_user_id, job.job_id
+    )
+    return job
+
+
+def create_job(
+    job_type: JobType, owner_user_id: int | None = None, **kwargs: Any
+) -> ImportJob:
+    """Create a job directly in PENDING state (for PATH jobs which have no upload phase).
+
+    Also increments caps.  If over-limit, raises RuntimeError.
+    """
+    if not _check_and_reserve(owner_user_id):
+        raise RuntimeError("Admission caps exceeded")
+    _reap_terminal()
+    job = ImportJob(
+        job_id=uuid.uuid4().hex,
+        job_type=job_type,
+        owner_user_id=owner_user_id,
+        **kwargs,
+    )
+    # PATH jobs start directly in PENDING (no upload phase).
+    job._state = JobState.PENDING
     with _lock:
         _jobs[job.job_id] = job
     return job
@@ -355,7 +435,7 @@ def remove_job(job_id: str) -> None:
 
 
 def cancel_job(job_id: str) -> bool:
-    """Cancel a job.  Returns True if the job existed and was not already terminal."""
+    """Cancel a job. Returns True if the job existed and was not already terminal."""
     job = get_job(job_id)
     if job is None:
         return False
@@ -363,19 +443,7 @@ def cancel_job(job_id: str) -> bool:
 
 
 def shutdown(timeout: float = 10.0) -> list[str]:
-    """Cancel all non-terminal jobs and wait for worker threads to exit.
-
-    Cancels all active jobs, then joins each worker thread.  Any worker still
-    alive after the per-worker timeout is logged as a warning AND collected in
-    the returned list so the caller (lifespan) can surface the failure rather
-    than swallowing it.
-
-    Returns:
-        List of job IDs whose workers were still alive after the timeout.
-        An empty list means clean shutdown.
-
-    Called during application shutdown to ensure clean teardown.
-    """
+    """Cancel all non-terminal jobs and wait for worker threads to exit."""
     with _lock:
         active = [j for j in _jobs.values() if not j.is_terminal]
     for job in active:
@@ -395,18 +463,7 @@ def shutdown(timeout: float = 10.0) -> list[str]:
 
 
 def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Event]:
-    """Start a background daemon thread that reaps terminal jobs every *interval* seconds.
-
-    Returns ``(thread, stop_event)``.  The caller must set the stop event and
-    join the thread on shutdown to avoid leaking a daemon per lifespan entry.
-
-    Usage::
-
-        reaper_thread, reaper_stop = start_reaper(interval=60.0)
-        # ... serve requests ...
-        reaper_stop.set()
-        reaper_thread.join(timeout=5.0)
-    """
+    """Start a background daemon thread that reaps terminal jobs every *interval* seconds."""
     stop_event = threading.Event()
 
     def _reap_loop() -> None:
@@ -422,16 +479,14 @@ def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Ev
 
 
 def _reap_terminal() -> None:
-    """Remove terminal jobs older than JOB_TTL_SECONDS.
-
-    Active jobs (PENDING/RUNNING) are NEVER reaped regardless of age.
-    """
+    """Remove terminal jobs older than JOB_TTL_SECONDS. Active jobs are NEVER reaped."""
     now = time.monotonic()
     with _lock:
         to_remove = [
             jid
             for jid, job in _jobs.items()
             if job.is_terminal
+            and not job._capacity_held
             and job._terminal_at is not None
             and now - job._terminal_at > JOB_TTL_SECONDS
         ]
@@ -439,5 +494,4 @@ def _reap_terminal() -> None:
         with _lock:
             job = _jobs.pop(jid, None)
         if job is not None:
-            job.cleanup_files()
             logger.debug("Reaped terminal job %s", jid)

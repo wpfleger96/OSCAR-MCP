@@ -157,6 +157,11 @@ class TestAnalyzeBatch:
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
+            patch(
+                "snore.auth.factory.resolve_cli_profile_id",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
         ):
             result = runner.invoke(
                 analysis,
@@ -217,6 +222,11 @@ class TestAnalyzeBatch:
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.display.err_console", stderr_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
+            patch(
+                "snore.auth.factory.resolve_cli_profile_id",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
         ):
             result = runner.invoke(
                 analysis,
@@ -245,6 +255,11 @@ class TestAnalyzeBatch:
             patch("snore.database.session.session_scope", scope),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
+            patch(
+                "snore.auth.factory.resolve_cli_profile_id",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
         ):
             result = runner.invoke(
                 analysis,
@@ -286,6 +301,11 @@ class TestAnalyzeBatch:
             ),
             patch("snore.cli.display.console", stdout_console),
             patch("snore.cli.groups.analysis.console", stdout_console),
+            patch(
+                "snore.auth.factory.resolve_cli_profile_id",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
         ):
             result = runner.invoke(
                 analysis,
@@ -347,7 +367,7 @@ class TestBatchCoordinatorHandle:
             lambda *a, **kw: mock_result,
         )
 
-        facade = AnalysisFacade(async_db_session)
+        facade = AnalysisFacade(async_db_session, profile_id=1)
         assert facade.batch_coordinator is None, "No coordinator before run"
 
         await facade.run_batch_analysis(
@@ -386,6 +406,7 @@ class TestBatchCoordinatorHandle:
         result = await coord.submit(
             matched_total=3,
             session_stream=_pairs_as_stream([(1, None), (2, None), (3, None)]),
+            profile_id=1,
             store_results=False,
             max_workers=1,
         )
@@ -482,6 +503,7 @@ class TestBatchCoordinatorHandle:
             result = await coord.submit(
                 matched_total=n_total,
                 session_stream=_pairs_as_stream(pairs),
+                profile_id=1,
                 store_results=False,
                 max_workers=max_workers,
                 progress_callback=on_progress,
@@ -572,6 +594,7 @@ class TestBatchCoordinatorHandle:
             result = await coord.submit(
                 matched_total=n_total,
                 session_stream=_pairs_as_stream(pairs),
+                profile_id=1,
                 store_results=False,
                 max_workers=max_workers,
             )

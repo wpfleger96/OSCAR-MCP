@@ -73,6 +73,14 @@ class RxPeriodStats(RxPeriod):
 class RxTracker:
     """Track and analyze therapy prescription changes."""
 
+    def __init__(self, profile_id: int) -> None:
+        """Initialize the tracker scoped to a single profile.
+
+        Args:
+            profile_id: Profile to scope all device and day queries — required.
+        """
+        self.profile_id = profile_id
+
     async def get_history(self, db_session: AsyncSession) -> list[RxPeriodResponse]:
         """Return all RX periods with stats."""
         periods = await self._compute_periods(db_session)
@@ -219,6 +227,8 @@ class RxTracker:
             (
                 await db_session.execute(
                     select(Day)
+                    .join(Device, Day.device_id == Device.id)
+                    .where(Device.profile_id == self.profile_id)
                     .order_by(Day.device_id, Day.date)
                     .options(
                         joinedload(Day.sessions).joinedload(SessionModel.settings),
@@ -416,6 +426,7 @@ class RxTracker:
             await db_session.execute(
                 select(Day.device_id, Device.manufacturer, Device.model)
                 .join(Device, Day.device_id == Device.id)
+                .where(Device.profile_id == self.profile_id)
                 .distinct()
             )
         ).all()

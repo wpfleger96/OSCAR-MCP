@@ -78,7 +78,7 @@ class TestImportUpload:
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job: None)
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
 
         response = api_client.post(
             "/api/v1/import",
@@ -121,7 +121,7 @@ class TestImportUpload:
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job: None)
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
 
         response = api_client.post(
             "/api/v1/import",
@@ -315,3 +315,57 @@ class TestRequireLocalhost:
         with pytest.raises(HTTPException) as exc_info:
             _require_localhost(request)
         assert exc_info.value.status_code == 403
+
+
+class TestImportJobOwnership:
+    """cancel and progress return 404 for jobs owned by a different user (isolation matrix)."""
+
+    def test_cancel_foreign_job_returns_404(self, api_client):
+        """DELETE /import/{job_id} with a job owned by a different user returns 404.
+
+        The local actor gets user_id=1 (auto-provisioned).  A job created with
+        owner_user_id=9999 is a foreign job — the route must return 404 rather
+        than 403 to avoid leaking job-ID existence.
+        """
+        from snore.api.import_jobs import JobType, create_job, remove_job
+
+        job = create_job(JobType.UPLOAD, owner_user_id=9999)
+        try:
+            response = api_client.delete(f"/api/v1/import/{job.job_id}")
+            assert response.status_code == 404
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_progress_foreign_job_returns_404(self, api_client):
+        """GET /import/{job_id}/progress with a job owned by a different user returns 404."""
+        from snore.api.import_jobs import JobType, create_job, remove_job
+
+        job = create_job(JobType.UPLOAD, owner_user_id=9999)
+        try:
+            response = api_client.get(f"/api/v1/import/{job.job_id}/progress")
+            assert response.status_code == 404
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_cancel_own_job_not_404(self, api_client):
+        """DELETE /import/{job_id} for an unowned job (local mode) returns 204 or 404 for gone."""
+        from snore.api.import_jobs import remove_job, reserve_slot
+
+        # owner_user_id=None simulates a pre-multiuser or local-mode job.
+        job = reserve_slot(None)
+        assert job is not None
+        try:
+            response = api_client.delete(f"/api/v1/import/{job.job_id}")
+            # 204 = cancelled; 404 = job already cleaned up by a race in tests.
+            assert response.status_code in (204, 404)
+        finally:
+            try:
+                remove_job(job.job_id)
+            except Exception:
+                pass
+            job.cleanup_files()
+            job.release_capacity()

@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.data.waveform_loader import (
@@ -28,9 +28,29 @@ __all__ = ["WaveformService"]
 class WaveformService:
     """Service for waveform listing and loading operations."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
+        self.profile_id = profile_id
         self._loader = WaveformLoader(db_session)
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit sessions to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
+
+    async def _assert_session_owned(self, session_id: int) -> None:
+        """Raise NotFoundError if session_id doesn't belong to this profile."""
+        row = (
+            await self.db_session.execute(
+                select(models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id == session_id,
+                    self._profile_filter(),
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise NotFoundError(f"Session {session_id} not found")
 
     async def list_waveforms(self, session_id: int) -> list[WaveformInfo]:
         """
@@ -44,6 +64,7 @@ class WaveformService:
         Returns:
             List of WaveformInfo objects with metadata
         """
+        await self._assert_session_owned(session_id)
         waveforms = (
             (
                 await self.db_session.execute(
@@ -105,6 +126,7 @@ class WaveformService:
             ValueError: If waveform not found
         """
         # --- I/O phase: DB access only ---
+        await self._assert_session_owned(session_id)
         try:
             data_blob, sample_count, metadata = await fetch_waveform_blob(
                 self.db_session, session_id, waveform_type
@@ -112,10 +134,10 @@ class WaveformService:
         except ValueError as e:
             raise NotFoundError(str(e)) from e
 
-        # Close the session now — deserialization and LTTB are pure compute.
-        await self.db_session.close()
-
         # --- Compute phase: no DB session needed after this point ---
+        # The blob and metadata are plain Python objects — no ORM references held.
+        # Do NOT close self.db_session here: the caller may hold it open for
+        # subsequent queries (e.g. loading analysis overlays in waveform show).
         timestamps, values = deserialize_waveform_blob(data_blob, sample_count)
 
         if start_seconds is not None or end_seconds is not None:
@@ -177,6 +199,7 @@ class WaveformService:
         """
         from snore.analysis.utils import convert_machine_events
 
+        await self._assert_session_owned(session_id)
         result = await self._load_analysis_result(session_id)
 
         if result is None:

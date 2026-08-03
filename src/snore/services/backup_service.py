@@ -3,6 +3,15 @@
 Delegates all file-layout knowledge to the DeviceParser. This service
 handles path construction, serial validation, import-from-backup detection,
 and error reporting — it never knows about manufacturer-specific files.
+
+Writer lease
+------------
+``backup_via_parser`` is the single production path to ``parser.backup_raw_data()``.
+It acquires the process-singleton shared writer lease for the entire file-copy
+operation so that ``snore profile delete`` (which requires the exclusive lease)
+is structurally unable to rename or delete the raw tree while a backup is in
+progress.  The lease is held shared, so multiple concurrent backups in the same
+process share one descriptor and never block each other.
 """
 
 from __future__ import annotations
@@ -14,13 +23,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from snore.constants import DEFAULT_RAW_BACKUP_DIR
-from snore.parsers.base import RawFileManifest
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from snore.parsers.base import DeviceParser
+
+from snore.parsers.base import RawFileManifest
+from snore.services.writer_lease import get_writer_lease
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +41,7 @@ class BackupResult:
     """Result of a backup operation."""
 
     backup_root: Path
-    """Device backup root path (e.g., ~/.snore/raw/<serial>/)."""
+    """Device backup root path (e.g., ~/.snore/raw/<profile_id>/<serial>/)."""
 
     manifest: RawFileManifest | None = None
     """Manifest of files that were backed up. None if backup was skipped."""
@@ -48,9 +57,17 @@ class BackupResult:
 
 
 class BackupService:
-    """Generic backup orchestrator. Delegates file operations to parsers."""
+    """Generic backup orchestrator. Delegates file operations to parsers.
+
+    The ``backup_root`` should be the profile-scoped directory
+    (e.g. ``~/.snore/raw/<profile_id>/``).  The ``DEFAULT_RAW_BACKUP_DIR``
+    constant is kept as the fallback for legacy single-user usage; multiuser
+    callers must pass the profile-scoped root explicitly.
+    """
 
     def __init__(self, backup_root: Path | None = None) -> None:
+        from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
         self.backup_root = backup_root or DEFAULT_RAW_BACKUP_DIR
 
     def backup_via_parser(
@@ -62,9 +79,8 @@ class BackupService:
     ) -> BackupResult:
         """Orchestrate backup for any parser that supports it.
 
-        Handles serial validation, path construction, import-from-backup
-        detection, and error reporting. Delegates actual file copying to
-        parser.backup_raw_data().
+        Acquires the shared writer lease for the entire operation.
+        This is the ONLY production path to ``parser.backup_raw_data()``.
 
         Args:
             parser: The device parser for this data source.
@@ -97,9 +113,14 @@ class BackupService:
         if progress_callback:
             progress_callback(f"Backing up raw files to {dest_root}")
 
-        manifest = parser.backup_raw_data(
-            source_root, dest_root, progress_callback=progress_callback
-        )
+        # Acquire the shared writer lease for the duration of the file copy.
+        # The API server holds a lifetime shared lease; re-acquiring on the same
+        # fd is idempotent and does not block.
+        lease = get_writer_lease()
+        with lease.shared():
+            manifest = parser.backup_raw_data(
+                source_root, dest_root, progress_callback=progress_callback
+            )
 
         logger.debug(
             f"Backup complete: {manifest.files_copied} copied, "

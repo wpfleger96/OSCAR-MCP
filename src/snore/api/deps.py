@@ -2,9 +2,10 @@ from collections.abc import AsyncGenerator, Callable
 from datetime import date, datetime, time
 from typing import Annotated
 
-from fastapi import Depends, Query
+from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.auth.actor import ActorContext, AuthMode
 from snore.database.session import get_session
 
 
@@ -20,13 +21,43 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         await session.close()
 
 
-def service_dep[T](cls: Callable[[AsyncSession], T]) -> Callable[..., T]:
-    """Return a FastAPI dependency that constructs ``cls(db)``."""
+async def get_actor(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ActorContext:
+    """Return the actor for this request.
 
-    async def _dep(db: Annotated[AsyncSession, Depends(get_db)]) -> T:
-        return cls(db)
+    In local mode: auto-provision a single admin user+profile on first call,
+    then resolve from the DB on every request.  In multiuser mode: this will
+    be replaced by JWT/session validation that populates ``request.state.actor``.
 
-    return _dep  # type: ignore[return-value]  # FastAPI resolves async deps; Callable[..., T] matches
+    Phase 1 implementation: always local mode, first admin profile found.
+    """
+    # Multiuser mode will set request.state.actor from middleware.
+    actor: ActorContext | None = getattr(request.state, "actor", None)
+    if actor is not None:
+        return actor
+
+    # Local mode: resolve (or auto-provision) first admin profile.
+    from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
+
+    factory = ActorContextFactory(db)
+    return await factory.make_local(mode=AuthMode.LOCAL)
+
+
+ActorDep = Annotated[ActorContext, Depends(get_actor)]
+
+
+def service_dep[T](cls: Callable[[AsyncSession, int], T]) -> Callable[..., T]:
+    """Return a FastAPI dependency that constructs ``cls(db, profile_id)``."""
+
+    async def _dep(
+        db: Annotated[AsyncSession, Depends(get_db)],
+        actor: ActorDep,
+    ) -> T:
+        return cls(db, actor.profile_id)
+
+    return _dep  # type: ignore[return-value]
 
 
 class PaginationParams:

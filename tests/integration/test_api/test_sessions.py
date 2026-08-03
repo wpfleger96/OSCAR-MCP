@@ -49,12 +49,15 @@ class TestSessionsList:
         assert data["offset"] == 3
 
     def test_list_filter_by_device(
-        self, api_client, db_session, test_device, test_session_factory
+        self, api_client, db_session, test_device, test_profile, test_session_factory
     ):
         from snore.database.models import Device
 
         other_device = Device(
-            manufacturer="Other", model="Model", serial_number="OTHER_001"
+            profile_id=test_profile.id,
+            manufacturer="Other",
+            model="Model",
+            serial_number="OTHER_001",
         )
         db_session.add(other_device)
         db_session.flush()
@@ -247,3 +250,183 @@ class TestBulkDeletePreview:
         data = response.json()
         assert len(data["sessions"]) == 1
         assert data["sessions"][0]["id"] == session.id
+
+
+# ---------------------------------------------------------------------------
+# Route-level two-profile isolation: DELETE /sessions/ must 404 on foreign IDs
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSessionsCrossProfileIsolation:
+    """Route-level proof that DELETE /api/v1/sessions/ returns 404 when any
+    requested ID belongs to a different profile — foreign rows must survive.
+
+    The actor is overridden directly so the test runs at the HTTP boundary,
+    exercising the full route→service→DB stack for both the 404 branch and the
+    survival assertion.
+    """
+
+    def _make_client_as_profile(
+        self, async_db_session: object, db_session: object, profile_id: int
+    ) -> object:
+        """Return a TestClient whose actor is locked to *profile_id*."""
+        from fastapi.testclient import TestClient
+
+        from snore.api.app import create_app
+        from snore.api.deps import get_actor, get_db
+        from snore.auth.actor import ActorContext, AuthMode, Role
+
+        actor = ActorContext(
+            user_id=1,
+            profile_id=profile_id,
+            role=Role.ADMIN,
+            mode=AuthMode.LOCAL,
+        )
+
+        app = create_app()
+
+        async def override_get_db():
+            async with async_db_session.begin():
+                yield async_db_session
+
+        async def override_get_actor():
+            return actor
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_actor] = override_get_actor
+        client = TestClient(app, raise_server_exceptions=True)
+        return client
+
+    def test_delete_foreign_session_ids_returns_404(self, async_db_session, db_session):
+        """Profile A requesting deletion of profile B's session IDs -> 404.
+
+        The foreign session must survive -- no rows are deleted.
+        """
+        from snore.database.models import Device, Profile, Session, User
+
+        # --- Seed two profiles ---
+        user_a = User(canonical_email="prof_iso_a@test", role="admin")
+        user_b = User(canonical_email="prof_iso_b@test", role="admin")
+        db_session.add(user_a)
+        db_session.add(user_b)
+        db_session.flush()
+
+        profile_a = Profile(user_id=user_a.id, name="A")
+        profile_b = Profile(user_id=user_b.id, name="B")
+        db_session.add(profile_a)
+        db_session.add(profile_b)
+        db_session.flush()
+
+        dev_b = Device(
+            profile_id=profile_b.id,
+            manufacturer="Mfr",
+            model="Model",
+            serial_number="ISO_DEV_B",
+        )
+        db_session.add(dev_b)
+        db_session.flush()
+
+        foreign_session = Session(
+            device_id=dev_b.id,
+            device_session_id="iso_foreign_session",
+            start_time=datetime(2025, 1, 1, 22, 0),
+            end_time=datetime(2025, 1, 2, 6, 0),
+            duration_seconds=28800.0,
+        )
+        db_session.add(foreign_session)
+        db_session.flush()
+        foreign_id = foreign_session.id
+
+        # --- Make request as profile A with profile B's session ID ---
+        client = self._make_client_as_profile(
+            async_db_session, db_session, profile_a.id
+        )
+        response = client.request(
+            "DELETE",
+            "/api/v1/sessions/",
+            json={"session_ids": [foreign_id]},
+        )
+
+        assert response.status_code == 404, (
+            f"Expected 404 for foreign session ID; got {response.status_code}: "
+            f"{response.text}"
+        )
+
+        # Foreign session must still exist.
+        surviving = db_session.get(Session, foreign_id)
+        assert surviving is not None, (
+            "Foreign session must survive a cross-profile DELETE attempt"
+        )
+
+    def test_delete_mixed_own_and_foreign_returns_404_nothing_deleted(
+        self, async_db_session, db_session
+    ):
+        """Mixed list of own + foreign IDs -> 404; neither own nor foreign is deleted."""
+        from snore.database.models import Device, Profile, Session, User
+
+        user_a = User(canonical_email="mix_iso_a@test", role="admin")
+        user_b = User(canonical_email="mix_iso_b@test", role="admin")
+        db_session.add(user_a)
+        db_session.add(user_b)
+        db_session.flush()
+
+        profile_a = Profile(user_id=user_a.id, name="A")
+        profile_b = Profile(user_id=user_b.id, name="B")
+        db_session.add(profile_a)
+        db_session.add(profile_b)
+        db_session.flush()
+
+        dev_a = Device(
+            profile_id=profile_a.id,
+            manufacturer="Mfr",
+            model="Model",
+            serial_number="MIX_DEV_A",
+        )
+        dev_b = Device(
+            profile_id=profile_b.id,
+            manufacturer="Mfr",
+            model="Model",
+            serial_number="MIX_DEV_B",
+        )
+        db_session.add(dev_a)
+        db_session.add(dev_b)
+        db_session.flush()
+
+        own_session = Session(
+            device_id=dev_a.id,
+            device_session_id="mix_own_session",
+            start_time=datetime(2025, 2, 1, 22, 0),
+            end_time=datetime(2025, 2, 2, 6, 0),
+            duration_seconds=28800.0,
+        )
+        foreign_session = Session(
+            device_id=dev_b.id,
+            device_session_id="mix_foreign_session",
+            start_time=datetime(2025, 2, 1, 22, 0),
+            end_time=datetime(2025, 2, 2, 6, 0),
+            duration_seconds=28800.0,
+        )
+        db_session.add(own_session)
+        db_session.add(foreign_session)
+        db_session.flush()
+        own_id = own_session.id
+        foreign_id = foreign_session.id
+
+        client = self._make_client_as_profile(
+            async_db_session, db_session, profile_a.id
+        )
+        response = client.request(
+            "DELETE",
+            "/api/v1/sessions/",
+            json={"session_ids": [own_id, foreign_id]},
+        )
+
+        assert response.status_code == 404, (
+            f"Expected 404 for mixed list; got {response.status_code}: {response.text}"
+        )
+
+        # Both rows must survive -- no partial delete on 404.
+        assert db_session.get(Session, own_id) is not None, "Own session must survive"
+        assert db_session.get(Session, foreign_id) is not None, (
+            "Foreign session must survive"
+        )

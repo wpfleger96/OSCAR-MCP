@@ -4,6 +4,8 @@ Integration tests for the complete import pipeline.
 Tests the full flow from parsing → database storage → retrieval.
 """
 
+import uuid
+
 import pytest
 
 from sqlalchemy import func, select, text
@@ -11,6 +13,21 @@ from sqlalchemy import func, select, text
 from snore.database import models
 from snore.database.importers import import_session
 from snore.database.session import init_database, session_scope
+
+
+async def _create_profile_id() -> int:
+    """Create a User + Profile in the current session_scope DB and return the profile id."""
+    async with session_scope() as db:
+        user = models.User(
+            canonical_email=f"pipeline_{uuid.uuid4().hex[:8]}@example.com",
+            role="admin",
+        )
+        db.add(user)
+        await db.flush()
+        profile = models.Profile(user_id=user.id, name="Test Pipeline Profile")
+        db.add(profile)
+        await db.flush()
+        return profile.id
 
 
 class TestImportPipeline:
@@ -50,7 +67,8 @@ class TestImportPipeline:
         assert len(sessions) > 0
 
         session_data = sessions[0]
-        result = await import_session(session_data)
+        profile_id = await _create_profile_id()
+        result = await import_session(session_data, profile_id=profile_id)
         assert result is True, "Session should be imported"
 
         async with session_scope() as session:
@@ -74,10 +92,11 @@ class TestImportPipeline:
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
 
-        result1 = await import_session(session_data)
+        profile_id = await _create_profile_id()
+        result1 = await import_session(session_data, profile_id=profile_id)
         assert result1 is True
 
-        result2 = await import_session(session_data)
+        result2 = await import_session(session_data, profile_id=profile_id)
         assert result2 is False
 
         async with session_scope() as session:
@@ -93,9 +112,10 @@ class TestImportPipeline:
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
 
-        await import_session(session_data)
+        profile_id = await _create_profile_id()
+        await import_session(session_data, profile_id=profile_id)
 
-        result = await import_session(session_data, force=True)
+        result = await import_session(session_data, force=True, profile_id=profile_id)
         assert result is True
 
         async with session_scope() as session:
@@ -110,7 +130,8 @@ class TestImportPipeline:
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
-        await import_session(session_data)
+        profile_id = await _create_profile_id()
+        await import_session(session_data, profile_id=profile_id)
 
         async with session_scope() as session:
             waveforms = (await session.execute(select(models.Waveform))).scalars().all()
@@ -132,7 +153,8 @@ class TestImportPipeline:
 
         if not session_data.has_event_data or len(session_data.events) == 0:
             pytest.skip("Test session has no events")
-        await import_session(session_data)
+        profile_id = await _create_profile_id()
+        await import_session(session_data, profile_id=profile_id)
 
         async with session_scope() as session:
             event_count = (
@@ -149,7 +171,8 @@ class TestImportPipeline:
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
         session_data = sessions[0]
-        await import_session(session_data)
+        profile_id = await _create_profile_id()
+        await import_session(session_data, profile_id=profile_id)
 
         async with session_scope() as session:
             stats = (await session.execute(select(models.Statistics))).scalars().first()
@@ -169,7 +192,8 @@ class TestImportPipeline:
             pytest.skip("fixture session has no settings")
 
         session_data.settings.other_settings["unexpected_none"] = None
-        await import_session(session_data)
+        profile_id = await _create_profile_id()
+        await import_session(session_data, profile_id=profile_id)
 
         async with session_scope() as session:
             values = [
@@ -185,8 +209,9 @@ class TestImportPipeline:
 
         sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
 
+        profile_id = await _create_profile_id()
         for session_data in sessions:
-            await import_session(session_data)
+            await import_session(session_data, profile_id=profile_id)
 
         async with session_scope() as session:
             device_count = (

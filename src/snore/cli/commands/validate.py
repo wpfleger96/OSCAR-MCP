@@ -11,6 +11,7 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import (
+    actor_options,
     date_range_options_required,
     db_option,
 )
@@ -35,12 +36,15 @@ from snore.cli.display import console, err_console, print_footer, print_header
     help="Export report to file (.json or .csv)",
 )
 @db_option
+@actor_options
 def validate(
     date_from: datetime,
     date_to: datetime,
     mode: str,
     export: str | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """
     Run batch validation across multiple sessions.
@@ -55,6 +59,7 @@ def validate(
         raise click.ClickException(f"Database not found: {db}")
 
     async def _run() -> None:
+        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
         from snore.validation import (
             BatchValidator,
             export_report_csv,
@@ -63,7 +68,10 @@ def validate(
 
         async with open_db_session(db) as async_db:
             try:
-                validator = BatchValidator(async_db, None)
+                profile_id = await resolve_cli_profile_id(
+                    async_db, actor_user, actor_profile
+                )
+                validator = BatchValidator(async_db, profile_id)
 
                 console.print(
                     f"Running validation from {date_from.date()} to {date_to.date()}..."

@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import (
+    actor_options,
     date_range_options,
     db_option,
     device_option,
@@ -41,9 +42,8 @@ def export() -> None:
     is_flag=True,
     help="Trim STR.edf to only include the exported date range",
 )
-@click.option(
-    "--backup-dir", type=click.Path(file_okay=False), help="Raw backup directory"
-)
+@db_option
+@actor_options
 def export_raw(
     output: str | None,
     date_from: datetime | None,
@@ -52,17 +52,23 @@ def export_raw(
     as_zip: bool,
     dry_run: bool,
     trim_str: bool,
-    backup_dir: str | None,
+    db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Export raw SD card files for import into OSCAR.
 
     Reconstructs an OSCAR-compatible directory structure from backed-up
     raw files. Requires raw backup to have been performed during import.
+    The backup source root is always derived from the active profile — it
+    cannot be overridden to prevent cross-profile file access.
 
     Examples:
         snore export raw --from 2025-08-01 --to 2025-08-14
         snore export raw -o ~/Desktop/export.zip --zip
     """
+    from snore.database.session import session_scope  # noqa: PLC0415
+
     if trim_str and not (date_from and date_to):
         raise click.ClickException("--trim-str requires both --from and --to")
 
@@ -72,9 +78,18 @@ def export_raw(
     if output is None:
         output = "snore_export_raw.zip" if as_zip else "snore_export_raw"
 
-    svc = ExportService(
-        backup_root=Path(backup_dir).expanduser() if backup_dir else None
-    )
+    init_db(db)
+
+    async def _resolve_profile_id() -> int:
+        async with session_scope() as db_session:
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+            return await resolve_cli_profile_id(db_session, actor_user, actor_profile)
+
+    import asyncio  # noqa: PLC0415
+
+    profile_id = asyncio.run(_resolve_profile_id())
+    svc = ExportService(profile_id)
 
     try:
         result = svc.export_raw(
@@ -118,6 +133,7 @@ def export_raw(
     help="Include per-session waveform CSV files (large!)",
 )
 @db_option
+@actor_options
 def export_csv(
     output: str | None,
     date_from: datetime | None,
@@ -125,6 +141,8 @@ def export_csv(
     device: str | None,
     include_waveforms: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Export parsed data as CSV files (sessions, events, settings).
 
@@ -140,7 +158,12 @@ def export_csv(
 
     async def _run() -> None:
         async with session_scope() as db_session:
-            svc = ExportService()
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            svc = ExportService(profile_id=profile_id)
             try:
                 result = await svc.export_csv(
                     db_session=db_session,
@@ -173,12 +196,15 @@ def export_csv(
 @date_range_options
 @device_option
 @db_option
+@actor_options
 def export_json(
     output: str | None,
     date_from: datetime | None,
     date_to: datetime | None,
     device: str | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Export parsed data as a JSON document.
 
@@ -193,7 +219,12 @@ def export_json(
 
     async def _run() -> None:
         async with session_scope() as db_session:
-            svc = ExportService()
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            svc = ExportService(profile_id=profile_id)
             try:
                 result = await svc.export_json(
                     db_session=db_session,

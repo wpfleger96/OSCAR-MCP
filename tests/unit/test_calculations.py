@@ -358,16 +358,17 @@ class TestDayGranularity:
         assert len(result) == 2
 
     async def test_day_multidevice_same_date_merges(
-        self, async_db_session, async_test_session_factory
+        self, async_db_session, async_test_session_factory, async_test_profile
     ):
         """Multiple Day rows sharing a date (one per device) merge into one bucket."""
         import uuid
 
         from snore.database.models import Device
 
-        # Create two distinct devices
+        # Create two distinct devices (both owned by the same test profile)
         for _ in range(2):
             dev = Device(
+                profile_id=async_test_profile.id,
                 manufacturer="Mfr",
                 model="M1",
                 serial_number=f"SN_{uuid.uuid4().hex[:8]}",

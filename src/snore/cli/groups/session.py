@@ -8,7 +8,9 @@ from datetime import datetime
 
 import click
 
+from snore.auth.factory import resolve_cli_profile_id
 from snore.cli.decorators import (
+    actor_options,
     date_range_options,
     db_option,
     parse_id_list,
@@ -54,6 +56,7 @@ def session() -> None:
 )
 @click.option("--all", "show_all", is_flag=True, help="Include disabled sessions")
 @db_option
+@actor_options
 def session_list(
     device: str | None,
     date_from: datetime | None,
@@ -62,13 +65,18 @@ def session_list(
     sort_by: str,
     show_all: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """List imported sessions."""
     from snore.services.session_service import SessionService
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            service = SessionService(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            service = SessionService(db_session, profile_id)
             result = await service.list_sessions(
                 device=device,
                 from_date=date_from,
@@ -129,14 +137,24 @@ def session_list(
 @click.argument("session_id", type=int)
 @click.option("--settings", "show_settings", is_flag=True, help="Show device settings")
 @db_option
-def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
+@actor_options
+def session_show(
+    session_id: int,
+    show_settings: bool,
+    db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
+) -> None:
     """Show details for a specific session."""
     from snore.cli.display.analysis import display_session_detail
     from snore.services.session_service import SessionService
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            service = SessionService(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            service = SessionService(db_session, profile_id)
 
             try:
                 detail = await service.get_session_detail(
@@ -165,6 +183,7 @@ def session_show(session_id: int, show_settings: bool, db: str | None) -> None:
 )
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
 @db_option
+@actor_options
 def session_delete(
     device: str | None,
     session_ids: str | None,
@@ -174,6 +193,8 @@ def session_delete(
     dry_run: bool,
     force: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Delete sessions from the database."""
     from snore.services.session_service import SessionService
@@ -184,7 +205,10 @@ def session_delete(
 
     async def _run() -> None:
         async with open_db_session(db) as db_session:
-            service = SessionService(db_session)
+            profile_id = await resolve_cli_profile_id(
+                db_session, actor_user, actor_profile
+            )
+            service = SessionService(db_session, profile_id)
 
             try:
                 preview = await service.get_delete_preview(
@@ -262,12 +286,19 @@ def session_delete(
     asyncio.run(_run())
 
 
-async def _toggle_session_async(session_id: int, enabled: bool, db: str | None) -> None:
+async def _toggle_session_async(
+    session_id: int,
+    enabled: bool,
+    db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
+) -> None:
     """Enable or disable a session and recalculate day statistics."""
     from snore.services.session_service import SessionService
 
     async with open_db_session(db) as db_session:
-        service = SessionService(db_session)
+        profile_id = await resolve_cli_profile_id(db_session, actor_user, actor_profile)
+        service = SessionService(db_session, profile_id)
 
         try:
             detail = await service.get_session_detail(session_id)
@@ -289,14 +320,36 @@ async def _toggle_session_async(session_id: int, enabled: bool, db: str | None) 
 @session.command("enable")
 @click.argument("session_id", type=int)
 @db_option
-def session_enable(session_id: int, db: str | None) -> None:
+@actor_options
+def session_enable(
+    session_id: int, db: str | None, actor_user: str | None, actor_profile: str | None
+) -> None:
     """Enable a session and recalculate day statistics."""
-    asyncio.run(_toggle_session_async(session_id, enabled=True, db=db))
+    asyncio.run(
+        _toggle_session_async(
+            session_id,
+            enabled=True,
+            db=db,
+            actor_user=actor_user,
+            actor_profile=actor_profile,
+        )
+    )
 
 
 @session.command("disable")
 @click.argument("session_id", type=int)
 @db_option
-def session_disable(session_id: int, db: str | None) -> None:
+@actor_options
+def session_disable(
+    session_id: int, db: str | None, actor_user: str | None, actor_profile: str | None
+) -> None:
     """Disable a session and recalculate day statistics."""
-    asyncio.run(_toggle_session_async(session_id, enabled=False, db=db))
+    asyncio.run(
+        _toggle_session_async(
+            session_id,
+            enabled=False,
+            db=db,
+            actor_user=actor_user,
+            actor_profile=actor_profile,
+        )
+    )

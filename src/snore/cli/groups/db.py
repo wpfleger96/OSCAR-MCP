@@ -8,10 +8,12 @@ from pathlib import Path
 
 import click
 
-from snore.cli.decorators import db_option, db_session
+from snore.auth.factory import resolve_cli_profile_id, resolve_local_profile_id
+from snore.cli.decorators import actor_options, db_option, db_session
 from snore.cli.display import (
     ICON_STATS,
     console,
+    print_error,
     print_footer,
     print_header,
     print_kv,
@@ -58,13 +60,17 @@ def init(db: str | None) -> None:
 
 @db.command("stats")
 @db_option
-def db_stats(db: str | None) -> None:
+@actor_options
+def db_stats(db: str | None, actor_user: str | None, actor_profile: str | None) -> None:
     """Show database statistics."""
     db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
 
     async def _run() -> None:
         async with db_session(db) as session:
-            service = DatabaseService(session)
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
+            service = DatabaseService(session, profile_id)
             stats = await service.get_stats(str(db_path))
 
             print_header("Database Statistics", ICON_STATS)
@@ -116,7 +122,7 @@ def vacuum(db: str | None) -> None:
 
     async def _run() -> None:
         async with db_session(db) as session:
-            service = DatabaseService(session)
+            service = DatabaseService(session, await resolve_local_profile_id(session))
             result = service.vacuum_sqlite(str(db_path))
             print_success(
                 f"Database vacuumed successfully ({result.size_before_mb:.1f} MB → {result.size_after_mb:.1f} MB)"
@@ -141,7 +147,8 @@ def drop(db: str | None, force: bool) -> None:
 
         async def _show_stats() -> None:
             async with session_scope() as session:
-                service = DatabaseService(session)
+                profile_id = await resolve_local_profile_id(session)
+                service = DatabaseService(session, profile_id)
                 stats = await service.get_stats(str(db_path))
 
                 console.print(f"\nDatabase: {db_path}")
@@ -188,3 +195,32 @@ def drop(db: str | None, force: bool) -> None:
 
     except Exception as e:
         raise click.ClickException(f"Error dropping database: {e}") from e
+
+
+@db.command("purge-quarantine")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt")
+def db_purge_quarantine(yes: bool) -> None:
+    """Purge all quarantined profile raw data (offline operator command).
+
+    Quarantined directories are left behind when a profile deletion saga is
+    interrupted (e.g. crash after rename but before cascade-delete).  This
+    command removes them permanently.
+
+    The API server must not be running when this command is used.
+    """
+    if not yes:
+        click.confirm(
+            "Purge all quarantined profile raw data? This cannot be undone. "
+            "Ensure the API server is not running.",
+            abort=True,
+        )
+
+    from snore.services.profile_service import DeletionSaga  # noqa: PLC0415
+    from snore.services.writer_lease import WriterLeaseError  # noqa: PLC0415
+
+    saga = DeletionSaga()
+    try:
+        saga.purge_quarantine()
+        print_success("Quarantine purged successfully")
+    except WriterLeaseError as e:
+        print_error(str(e))

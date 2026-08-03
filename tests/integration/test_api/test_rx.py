@@ -8,9 +8,13 @@ from snore.database.models import Day, Device, Session, Setting
 
 
 def _create_device(
-    db_session: DbSession, manufacturer: str = "ResMed", model: str = "AirSense 10"
+    db_session: DbSession,
+    profile_id: int,
+    manufacturer: str = "ResMed",
+    model: str = "AirSense 10",
 ) -> Device:
     device = Device(
+        profile_id=profile_id,
         manufacturer=manufacturer,
         model=model,
         serial_number=f"SN_{uuid.uuid4().hex[:8]}",
@@ -77,9 +81,9 @@ class TestRxRouter:
         assert response.status_code == 200
         assert response.json() == {"changes": []}
 
-    def test_get_rx_changes_ps_change(self, api_client, db_session):
+    def test_get_rx_changes_ps_change(self, api_client, db_session, test_profile):
         """Two days with different 'ps' values produce a change entry."""
-        device = _create_device(db_session)
+        device = _create_device(db_session, test_profile.id)
         base = date(2025, 6, 1)
         _create_day_with_session(
             db_session,
@@ -108,9 +112,13 @@ class TestRxRouter:
         assert ps_change["device_id"] == device.id
         assert "AirSense 10" in ps_change["device_name"]
 
-    def test_get_rx_history_carries_device_fields(self, api_client, db_session):
+    def test_get_rx_history_carries_device_fields(
+        self, api_client, db_session, test_profile
+    ):
         """History response includes device_id and device_name on each period."""
-        device = _create_device(db_session, manufacturer="ResMed", model="AirSense 10")
+        device = _create_device(
+            db_session, test_profile.id, manufacturer="ResMed", model="AirSense 10"
+        )
         base = date(2025, 7, 1)
         for i in range(3):
             _create_day_with_session(
@@ -141,9 +149,9 @@ class TestRxAllRouter:
         assert data["worst_index"] is None
         assert data["changes"] == {"changes": []}
 
-    def test_get_rx_all_with_data(self, api_client, db_session):
+    def test_get_rx_all_with_data(self, api_client, db_session, test_profile):
         """Combined response contains history, current, best/worst, and changes."""
-        device = _create_device(db_session)
+        device = _create_device(db_session, test_profile.id)
         base = date(2025, 6, 1)
 
         for i in range(10):
@@ -181,9 +189,9 @@ class TestRxAllRouter:
         changed_keys = {c["key"] for c in changes}
         assert "mode" in changed_keys
 
-    def test_get_rx_all_min_days_propagates(self, api_client, db_session):
+    def test_get_rx_all_min_days_propagates(self, api_client, db_session, test_profile):
         """min_days parameter affects best/worst index selection."""
-        device = _create_device(db_session)
+        device = _create_device(db_session, test_profile.id)
         base = date(2025, 6, 1)
 
         for i in range(3):

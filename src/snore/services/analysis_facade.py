@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.types import AnalysisResult
@@ -28,15 +28,21 @@ logger = logging.getLogger(__name__)
 class AnalysisFacade:
     """Facade for analysis listing and deletion operations."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         """
         Initialize analysis facade.
 
         Args:
             db_session: SQLAlchemy database session
+            profile_id: Active profile — all queries are scoped to this profile.
         """
         self.db_session = db_session
+        self.profile_id = profile_id
         self._batch_coordinator: BatchAnalysisCoordinator | None = None
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit sessions to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
 
     @property
     def batch_coordinator(self) -> "BatchAnalysisCoordinator | None":
@@ -55,8 +61,11 @@ class AnalysisFacade:
         analyzed_only: bool,
     ) -> Any:
         """Build the shared 2.0-style select for list/count of analysis status."""
-        stmt = select(models.Session).join(
-            models.Day, models.Session.day_id == models.Day.id
+        stmt = (
+            select(models.Session)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(self._profile_filter())
         )
 
         if start:
@@ -231,6 +240,7 @@ class AnalysisFacade:
                 models.AnalysisResult,
                 models.Session.id == models.AnalysisResult.session_id,
             )
+            .where(self._profile_filter())
             .distinct()
         )
 
@@ -313,6 +323,10 @@ class AnalysisFacade:
     ) -> int:
         """Delete analysis results for given sessions.
 
+        All requested session IDs must belong to this profile — callers should
+        validate via ``get_owned_session_ids`` and return 404 before calling
+        this method.  The scoped subquery is retained as defence-in-depth.
+
         Args:
             session_ids: Session IDs to delete analysis for
             all_versions: If True, delete all versions. If False, only latest.
@@ -320,17 +334,32 @@ class AnalysisFacade:
         Returns:
             Number of analysis records deleted
         """
+        if not session_ids:
+            return 0
+
+        # Scope session_ids to this profile to prevent cross-profile deletion.
+        owned_sessions_subq = (
+            select(models.Session.id)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Session.id.in_(session_ids),
+                self._profile_filter(),
+            )
+            .subquery()
+        )
+
         if all_versions:
-            # Delete all analysis results for these sessions.
+            # Delete all analysis results for owned sessions.
             result = await self.db_session.execute(
                 delete(models.AnalysisResult).where(
-                    models.AnalysisResult.session_id.in_(session_ids)
+                    models.AnalysisResult.session_id.in_(
+                        select(owned_sessions_subq.c.id)
+                    )
                 )
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
-            # Delete only the latest (highest created_at) result per session.
-            # Identify the latest result IDs first, then delete by PK.
+            # Delete only the latest (highest created_at) result per owned session.
             ranked = (
                 select(
                     models.AnalysisResult.id,
@@ -341,7 +370,11 @@ class AnalysisFacade:
                     )
                     .label("rn"),
                 )
-                .where(models.AnalysisResult.session_id.in_(session_ids))
+                .where(
+                    models.AnalysisResult.session_id.in_(
+                        select(owned_sessions_subq.c.id)
+                    )
+                )
                 .subquery()
             )
             latest_ids = (
@@ -362,6 +395,30 @@ class AnalysisFacade:
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
 
+    async def get_owned_session_ids(self, session_ids: list[int]) -> set[int]:
+        """Return the subset of session_ids that belong to this profile.
+
+        Used by routes to validate ownership before mutation: any ID absent from
+        the returned set is either missing or owned by a different profile.
+        """
+        if not session_ids:
+            return set()
+        rows = (
+            (
+                await self.db_session.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id.in_(session_ids),
+                        self._profile_filter(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return set(rows)
+
     async def run_analysis(
         self,
         session_id: int,
@@ -369,6 +426,9 @@ class AnalysisFacade:
         store_results: bool = True,
     ) -> AnalysisResult:
         """Run analysis on a session.  Returns AnalysisResult (Pydantic model).
+
+        Validates session ownership before running.  Raises NotFoundError for
+        foreign or missing session IDs.
 
         Owns a short read scope for the I/O phase and closes it before compute,
         so the injected request session is never held across NumPy/scipy work.
@@ -378,12 +438,28 @@ class AnalysisFacade:
 
         from snore.analysis.service import AnalysisService  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.exceptions import NotFoundError as _NotFoundError  # noqa: PLC0415
 
         t_start = time.monotonic()
 
         # I/O phase: open a dedicated short async scope — close it before compute.
+        # Ownership check runs inside this scope so self.db_session is never used
+        # (it may already be closed by the CLI before this method is called).
         async with session_scope() as read_db:
-            read_svc = AnalysisService(read_db)
+            owned = (
+                await read_db.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        models.Device.profile_id == self.profile_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if owned is None:
+                raise _NotFoundError(f"Session {session_id} not found")
+
+            read_svc = AnalysisService(read_db, profile_id=self.profile_id)
             raw = await read_svc.load_session_inputs_raw(session_id, modes=modes)
         # Session closed; prepare DTO (NumPy deserialization) — still sync/fast.
         inputs = AnalysisService.prepare_inputs(raw)
@@ -397,7 +473,7 @@ class AnalysisFacade:
         if store_results:
             # Write phase: short INSERT-only scope.
             async with session_scope() as write_db:
-                write_svc = AnalysisService(write_db)
+                write_svc = AnalysisService(write_db, profile_id=self.profile_id)
                 await write_svc.store_result(result, processing_time_ms)
 
         return result
@@ -405,13 +481,22 @@ class AnalysisFacade:
     async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
 
-        Intentionally returns None (rather than raising NotFoundError like the
-        resource lookups elsewhere): "not yet analyzed" is a normal state that
-        callers branch on, not a 404 condition.
+        Validates session ownership — returns None for foreign IDs (treating
+        "not yet analyzed" and "not found" the same to avoid oracle attacks).
         """
-        from sqlalchemy import select
-
-        from snore.database import models
+        # Ownership check: confirm session belongs to this profile.
+        owned = (
+            await self.db_session.execute(
+                select(models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id == session_id,
+                    self._profile_filter(),
+                )
+            )
+        ).scalar_one_or_none()
+        if owned is None:
+            return None
 
         analysis_row = (
             (
@@ -454,10 +539,15 @@ class AnalysisFacade:
         Returns:
             BatchAnalysisResult with per-session outcomes and aggregate counts
         """
-        stmt = select(
-            models.Session.id.label("session_id"),
-            models.Day.date.label("day_date"),
-        ).join(models.Day, models.Session.day_id == models.Day.id)
+        stmt = (
+            select(
+                models.Session.id.label("session_id"),
+                models.Day.date.label("day_date"),
+            )
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(self._profile_filter())
+        )
         if from_date:
             stmt = stmt.where(models.Day.date >= from_date.date())
         if to_date:
@@ -481,6 +571,7 @@ class AnalysisFacade:
         return await coordinator.submit(
             matched_total=matched_total,
             session_stream=async_result,
+            profile_id=self.profile_id,
             modes=modes,
             store_results=store_results,
             max_workers=max_workers,
@@ -523,6 +614,7 @@ class BatchAnalysisCoordinator:
         *,
         matched_total: int,
         session_stream: Any,  # AsyncResult from session.stream(); yields rows lazily
+        profile_id: int,
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
@@ -542,6 +634,8 @@ class BatchAnalysisCoordinator:
                 ``total`` in the result so cancelled sessions are never silently dropped.
             session_stream: Async stream from ``session.stream(stmt)``; yields rows lazily.
                 Scalars only — no ORM objects passed to workers.
+            profile_id: Profile that owns the sessions — threaded into each
+                ``AnalysisService`` read/write scope so all I/O is scoped.
             modes: Detection modes to run (``None`` = default).
             store_results: If True, write each result to the DB.
             max_workers: Concurrency cap (number of simultaneous coroutines).
@@ -591,6 +685,7 @@ class BatchAnalysisCoordinator:
                     async with session_scope() as read_session:
                         svc = AnalysisService(
                             read_session,
+                            profile_id=profile_id,
                             # Reuse modes_list from outer scope (snapshot).
                         )
                         raw = await svc.load_session_inputs_raw(
@@ -605,7 +700,9 @@ class BatchAnalysisCoordinator:
                     # --- Write phase: persist result on the event loop ---
                     if store_results and result is not None:
                         async with session_scope() as write_session:
-                            write_svc = AnalysisService(write_session)
+                            write_svc = AnalysisService(
+                                write_session, profile_id=profile_id
+                            )
                             await write_svc.store_result(result, processing_time_ms)
 
                     return "success"

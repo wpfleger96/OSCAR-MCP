@@ -9,8 +9,10 @@ These tests verify:
 """
 
 import sqlite3
+import uuid
 
 from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -19,6 +21,24 @@ from sqlalchemy import select, text
 from snore.database import models
 from snore.database.importers import SessionImporter
 from snore.database.session import init_database, session_scope
+
+
+async def _create_profile(session: Any) -> models.Profile:
+    """Create a User + Profile in *session* and return the Profile.
+
+    Needed because devices.profile_id is NOT NULL after the multiuser migration.
+    """
+    user = models.User(
+        canonical_email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+        role="admin",
+    )
+    session.add(user)
+    await session.flush()
+
+    profile = models.Profile(user_id=user.id, name="Test Profile")
+    session.add(profile)
+    await session.flush()
+    return profile
 
 
 class TestForeignKeyConstraints:
@@ -37,7 +57,9 @@ class TestForeignKeyConstraints:
         await init_database(str(temp_db))
 
         async with session_scope() as session:
+            profile = await _create_profile(session)
             device = models.Device(
+                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -94,7 +116,9 @@ class TestForeignKeyConstraints:
         await init_database(str(temp_db))
 
         async with session_scope() as session:
+            profile = await _create_profile(session)
             device = models.Device(
+                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -147,7 +171,9 @@ class TestForeignKeyConstraints:
         await init_database(str(temp_db))
 
         async with session_scope() as session:
+            profile = await _create_profile(session)
             device = models.Device(
+                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -201,7 +227,9 @@ class TestForeignKeyConstraints:
         await init_database(str(temp_db))
 
         async with session_scope() as session:
+            profile = await _create_profile(session)
             device = models.Device(
+                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -461,7 +489,9 @@ class TestDataIntegrity:
         await init_database(str(temp_db))
 
         async with session_scope() as session:
+            profile = await _create_profile(session)
             device = models.Device(
+                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",
@@ -502,7 +532,9 @@ class TestDataIntegrity:
         await init_database(str(temp_db))
 
         async with session_scope() as session:
+            profile = await _create_profile(session)
             device = models.Device(
+                profile_id=profile.id,
                 manufacturer="Test",
                 model="Test",
                 serial_number="TEST123",

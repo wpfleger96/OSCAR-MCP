@@ -4,7 +4,7 @@ import os
 
 from datetime import datetime
 
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import ColumnElement, create_engine, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
@@ -17,14 +17,20 @@ __all__ = ["DatabaseService"]
 class DatabaseService:
     """Service for database statistics and metadata operations."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int):
         """
         Initialize database service.
 
         Args:
             db_session: SQLAlchemy database session
+            profile_id: Active profile — CPAP data counts are scoped to this profile.
         """
         self.db_session = db_session
+        self.profile_id = profile_id
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit CPAP data to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
 
     async def get_stats(self, db_path: str) -> DatabaseStats:
         """
@@ -43,35 +49,72 @@ class DatabaseService:
         ).scalar() or 0
         device_count = (
             await self.db_session.execute(
-                select(func.count()).select_from(models.Device)
+                select(func.count())
+                .select_from(models.Device)
+                .where(self._profile_filter())
             )
         ).scalar() or 0
         session_count = (
             await self.db_session.execute(
-                select(func.count()).select_from(models.Session)
+                select(func.count())
+                .select_from(models.Session)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
             )
         ).scalar() or 0
         day_count = (
-            await self.db_session.execute(select(func.count()).select_from(models.Day))
+            await self.db_session.execute(
+                select(func.count())
+                .select_from(models.Day)
+                .join(models.Device, models.Day.device_id == models.Device.id)
+                .where(self._profile_filter())
+            )
         ).scalar() or 0
         event_count = (
             await self.db_session.execute(
-                select(func.count()).select_from(models.Event)
+                select(func.count())
+                .select_from(models.Event)
+                .join(models.Session, models.Event.session_id == models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
             )
         ).scalar() or 0
         waveform_count = (
             await self.db_session.execute(
-                select(func.count()).select_from(models.Waveform)
+                select(func.count())
+                .select_from(models.Waveform)
+                .join(models.Session, models.Waveform.session_id == models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
             )
         ).scalar() or 0
         analysis_count = (
             await self.db_session.execute(
-                select(func.count()).select_from(models.AnalysisResult)
+                select(func.count())
+                .select_from(models.AnalysisResult)
+                .join(
+                    models.Session,
+                    models.AnalysisResult.session_id == models.Session.id,
+                )
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
             )
         ).scalar() or 0
         pattern_count = (
             await self.db_session.execute(
-                select(func.count()).select_from(models.DetectedPattern)
+                select(func.count())
+                .select_from(models.DetectedPattern)
+                .join(
+                    models.AnalysisResult,
+                    models.DetectedPattern.analysis_result_id
+                    == models.AnalysisResult.id,
+                )
+                .join(
+                    models.Session,
+                    models.AnalysisResult.session_id == models.Session.id,
+                )
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
             )
         ).scalar() or 0
 
@@ -79,23 +122,41 @@ class DatabaseService:
             await self.db_session.execute(
                 select(func.count())
                 .select_from(models.Session)
-                .where(models.Session.has_waveform_data.is_(True))
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    self._profile_filter(),
+                    models.Session.has_waveform_data.is_(True),
+                )
             )
         ).scalar() or 0
         sessions_with_events = (
             await self.db_session.execute(
                 select(func.count())
                 .select_from(models.Session)
-                .where(models.Session.has_event_data.is_(True))
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    self._profile_filter(),
+                    models.Session.has_event_data.is_(True),
+                )
             )
         ).scalar() or 0
 
         first_session_raw = (
-            await self.db_session.execute(select(func.min(models.Session.start_time)))
+            await self.db_session.execute(
+                select(func.min(models.Session.start_time))
+                .select_from(models.Session)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
+            )
         ).scalar()
 
         last_session_raw = (
-            await self.db_session.execute(select(func.max(models.Session.start_time)))
+            await self.db_session.execute(
+                select(func.max(models.Session.start_time))
+                .select_from(models.Session)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
+            )
         ).scalar()
 
         first_session = None

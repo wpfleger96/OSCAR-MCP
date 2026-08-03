@@ -26,8 +26,13 @@ __all__ = ["SessionService"]
 class SessionService:
     """Service for session listing, detail, deletion, and management."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self.db_session = db_session
+        self.profile_id = profile_id
+
+    def _profile_filter(self) -> ColumnElement[bool]:
+        """WHERE predicate: limit sessions to this profile via device ownership."""
+        return models.Device.profile_id == self.profile_id
 
     @staticmethod
     def _session_filters(
@@ -78,7 +83,7 @@ class SessionService:
             select(func.count())
             .select_from(models.Session)
             .join(models.Device, models.Session.device_id == models.Device.id)
-            .where(*filters)
+            .where(self._profile_filter(), *filters)
         )
         total_count = (await self.db_session.execute(count_query)).scalar() or 0
 
@@ -88,7 +93,7 @@ class SessionService:
             .outerjoin(
                 models.Statistics, models.Session.id == models.Statistics.session_id
             )
-            .where(*filters)
+            .where(self._profile_filter(), *filters)
             .order_by(order_by)
         )
 
@@ -120,11 +125,20 @@ class SessionService:
     async def get_session_detail(
         self, session_id: int, include_settings: bool = False
     ) -> SessionDetail:
-        """Get detailed information for a single session."""
+        """Get detailed information for a single session.
+
+        Raises NotFoundError if the session doesn't exist or belongs to a
+        different profile (foreign ID → 404, not 403, to avoid oracle attacks).
+        """
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session).where(models.Session.id == session_id)
+                    select(models.Session)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()
@@ -266,7 +280,7 @@ class SessionService:
         query = (
             select(models.Session, models.Device)
             .join(models.Device, models.Session.device_id == models.Device.id)
-            .where(*filters)
+            .where(self._profile_filter(), *filters)
             .order_by(models.Session.start_time.desc())
         )
 
@@ -318,21 +332,68 @@ class SessionService:
         )
 
     async def delete_sessions(self, session_ids: list[int]) -> int:
-        """Delete sessions by ID list."""
+        """Delete sessions by ID list.
+
+        All requested IDs must belong to this profile.  If any are foreign the
+        caller should have validated first (via ``get_owned_ids``) and returned
+        404 before calling this method.  The DELETE itself carries the predicate
+        as a defence-in-depth measure.
+        """
         if not session_ids:
             return 0
 
+        # Ownership predicate inside the DELETE — foreign IDs cannot be deleted
+        # even if the caller skips the pre-validation.
         cursor: CursorResult[Any] = await self.db_session.execute(  # type: ignore[assignment]
-            delete(models.Session).where(models.Session.id.in_(session_ids))
+            delete(models.Session)
+            .where(models.Session.id.in_(session_ids))
+            .where(
+                models.Session.device_id.in_(
+                    select(models.Device.id).where(self._profile_filter())
+                )
+            )
         )
         return cursor.rowcount or 0
 
+    async def get_owned_ids(self, session_ids: list[int]) -> set[int]:
+        """Return the subset of session_ids that belong to this profile.
+
+        Used by routes to validate ownership before mutation: any ID absent from
+        the returned set is either missing or owned by a different profile.
+        """
+        if not session_ids:
+            return set()
+        rows = (
+            (
+                await self.db_session.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id.in_(session_ids),
+                        self._profile_filter(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return set(rows)
+
     async def set_session_enabled(self, session_id: int, enabled: bool) -> None:
-        """Toggle session enabled/disabled status."""
+        """Toggle session enabled/disabled status.
+
+        Raises NotFoundError if the session doesn't exist or belongs to a
+        different profile (foreign ID → 404 to avoid oracle attacks).
+        """
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session).where(models.Session.id == session_id)
+                    select(models.Session)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()
@@ -363,8 +424,26 @@ class SessionService:
     async def resolve_session_id(
         self, session_id: int | None, date: datetime | None
     ) -> int:
-        """Resolve session ID from either explicit ID or date."""
+        """Resolve session ID from either explicit ID or date.
+
+        When ``session_id`` is supplied, it is validated against the profile
+        predicate so a foreign ID is treated as not found rather than echoed
+        back to the caller.
+        """
         if session_id is not None:
+            # Validate ownership — foreign session → not found.
+            owned = (
+                await self.db_session.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        self._profile_filter(),
+                    )
+                )
+            ).scalar_one_or_none()
+            if owned is None:
+                raise ValueError(f"Session {session_id} not found")
             return session_id
 
         if date is None:
@@ -374,8 +453,12 @@ class SessionService:
             (
                 await self.db_session.execute(
                     select(models.Session)
-                    .join(models.Day)
-                    .where(models.Day.date == date.date())
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .join(models.Day, models.Session.day_id == models.Day.id)
+                    .where(
+                        models.Day.date == date.date(),
+                        self._profile_filter(),
+                    )
                 )
             )
             .scalars()

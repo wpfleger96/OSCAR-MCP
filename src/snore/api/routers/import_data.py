@@ -16,12 +16,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from snore.api.deps import ActorDep
 from snore.api.import_jobs import (
     ImportJob,
     JobType,
     cancel_job,
     create_job,
     get_job,
+    remove_job,
+    reserve_slot,
 )
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
@@ -30,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB
-MAX_UPLOAD_FILES = 20_000
+MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB per upload (configurable via env)
+MAX_UPLOAD_FILES = 500  # sane default; 20k was unreasonably high
 
 
 class DetectRequest(BaseModel):
@@ -69,12 +72,25 @@ def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     return service.detect_sources(Path(body.path))
 
 
-def _run_import(job: ImportJob) -> None:
-    """Worker function — runs in a background thread.  Must be started exactly once."""
+def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
+    """Worker function — runs in a background thread. Must be started exactly once.
+
+    Ordering contract:
+        1. Do the import work.
+        2. Publish terminal state (for SSE observers).
+        3. Clean parser spool + job temp.
+        4. Release capacity (slot owns the disk it admitted).
+    """
     import asyncio  # noqa: PLC0415
 
     try:
         service = ImportService()
+        # Consume the snapshotted target_profile_id so DB writes land in the
+        # correct profile even if the default profile changes between job creation
+        # and worker execution.
+        target_profile_id = job.target_profile_id
+        if target_profile_id is None:
+            raise ValueError("Import job has no target profile — cannot proceed")
         if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
             job.report_progress("Detecting data sources...")
             if job.cancel_requested:
@@ -85,13 +101,12 @@ def _run_import(job: ImportJob) -> None:
             if job.cancel_requested:
                 job._finish_cancelled()
                 return
-            # import_sources is async; this thread has no running event loop,
-            # so asyncio.run() is the correct bridge here (same condition as
-            # the CLI boundary).  A plain threading.Thread has no outer loop.
             result = asyncio.run(
                 service.import_sources(
                     sources,
                     backup=True,
+                    backup_root=profile_raw_root,
+                    profile_id=target_profile_id,
                     progress_callback=lambda msg: job.report_progress(msg),
                     cancel_predicate=lambda: job.cancel_requested,
                 )
@@ -101,6 +116,8 @@ def _run_import(job: ImportJob) -> None:
                 service.import_sources(
                     job.sources,
                     backup=True,
+                    backup_root=profile_raw_root,
+                    profile_id=target_profile_id,
                     progress_callback=lambda msg: job.report_progress(msg),
                     cancel_predicate=lambda: job.cancel_requested,
                 )
@@ -108,7 +125,6 @@ def _run_import(job: ImportJob) -> None:
         else:
             raise ValueError("Invalid job configuration")
 
-        # Check cancellation after import_sources returns (it may have exited early).
         if job.cancel_requested:
             job._finish_cancelled()
             return
@@ -122,33 +138,32 @@ def _run_import(job: ImportJob) -> None:
             terminal_msg={"event": "error", "data": {"message": str(e)}},
         )
     finally:
-        # Remove the upload temp directory at the end of worker execution.
+        # Ordering: publish terminal (done above), then clean, then release capacity.
         job.cleanup_files()
+        job.release_capacity()
 
 
-def _start_worker(job: ImportJob) -> None:
-    """Attempt to start the worker thread for *job* (start-once guarantee).
-
-    Wraps Thread construction, assignment, and start in one rollback-safe block.
-    Any failure — construction OR start — cancels the job, removes it from the
-    store, and cleans up the upload directory.  No orphaned RUNNING job is possible.
-    """
+def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
+    """Attempt to start the worker thread for *job* (start-once guarantee)."""
     from snore.api.import_jobs import remove_job  # noqa: PLC0415
 
     if not job.try_start():
-        return  # Already running or terminal.
+        return
     try:
         t = threading.Thread(
-            target=_run_import, args=(job,), daemon=True, name=f"import-{job.job_id}"
+            target=_run_import,
+            args=(job, profile_raw_root),
+            daemon=True,
+            name=f"import-{job.job_id}",
         )
         with job._lock:
             job._worker_thread = t
         t.start()
     except Exception:
-        # Thread construction or start failed — leave no orphaned RUNNING job.
         job._finish_cancelled()
         remove_job(job.job_id)
         job.cleanup_files()
+        job.release_capacity()
         raise
 
 
@@ -176,7 +191,18 @@ def _start_worker(job: ImportJob) -> None:
         }
     },
 )
-async def import_files(request: Request) -> JobResponse:
+async def import_files(request: Request, actor: ActorDep) -> JobResponse:
+    if not actor.can_write:
+        raise HTTPException(status_code=403, detail="Write access required")
+
+    # Step 1: Reserve admission slot BEFORE reading any body bytes.
+    job = reserve_slot(actor.user_id)
+    if job is None:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many active imports. Please wait for existing imports to complete.",
+        )
+
     tmp: str | None = None
     try:
         async with request.form(max_files=MAX_UPLOAD_FILES) as form:
@@ -189,7 +215,7 @@ async def import_files(request: Request) -> JobResponse:
             if total_size > MAX_UPLOAD_BYTES:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"Total upload size exceeds {MAX_UPLOAD_BYTES // (1024**3)} GiB limit",
+                    detail=f"Total upload size exceeds {MAX_UPLOAD_BYTES // (1024**2)} MiB limit",
                 )
 
             tmp = tempfile.mkdtemp()
@@ -206,51 +232,89 @@ async def import_files(request: Request) -> JobResponse:
                 content = await upload.read()
                 dest.write_bytes(content)
 
-        # create_job may raise; if so, clean up the temp dir.
-        job = create_job(JobType.UPLOAD, temp_dir=tmp_path)
+        job.temp_dir = tmp_path
         tmp = None  # Job owns the directory now.
+        job.convert_to_pending()
+        job.target_profile_id = actor.profile_id
     except HTTPException:
+        # Release capacity before re-raising: job is abandoned.
+        job.try_cancel()
+        remove_job(job.job_id)
+        job.cleanup_files()
+        job.release_capacity()
         raise
     except Exception:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
+        job.try_cancel()
+        remove_job(job.job_id)
+        job.cleanup_files()
+        job.release_capacity()
         raise
 
+    # Derive profile-scoped backup root from actor.
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+
     # Start worker immediately — /progress is observer-only.
-    _start_worker(job)
+    _start_worker(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
 
 
 @router.post("/path", response_model=JobResponse, status_code=202)
-def import_from_path(body: ImportPathRequest, request: Request) -> JobResponse:
+async def import_from_path(
+    body: ImportPathRequest, request: Request, actor: ActorDep
+) -> JobResponse:
     _require_localhost(request)
-    job = create_job(JobType.PATH, sources=body.sources)
-    _start_worker(job)
+    if not actor.can_write:
+        raise HTTPException(status_code=403, detail="Write access required")
+
+    try:
+        job = create_job(
+            JobType.PATH, owner_user_id=actor.user_id, sources=body.sources
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail="Too many active imports.") from exc
+
+    job.target_profile_id = actor.profile_id
+
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+
+    _start_worker(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
 
 
 @router.delete("/{job_id}", status_code=204)
-def cancel_import(job_id: str) -> None:
-    """Cancel an import job.  Idempotent — returns 204 whether or not the job existed."""
+def cancel_import(job_id: str, actor: ActorDep) -> None:
+    """Cancel an import job.
+
+    Requires write access and ownership of the job. Returns 404 for foreign jobs
+    (no information leak about other users' job IDs).
+
+    Jobs without an owner (owner_user_id=None) are accessible in local mode.
+    """
+    job = get_job(job_id)
+    if job is None or (
+        job.owner_user_id is not None and job.owner_user_id != actor.user_id
+    ):
+        # 404 instead of 403 — no information about foreign job IDs.
+        raise HTTPException(status_code=404, detail="Import job not found")
+    if not actor.can_write:
+        raise HTTPException(status_code=403, detail="Write access required")
     cancel_job(job_id)
 
 
-_SSE_TIMEOUT = object()  # Sentinel: poll timed out (not a closed channel)
+_SSE_TIMEOUT = object()
 
 
 async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
-    """SSE stream for one observer.  Attaches, drains events, then detaches.
-
-    ``ObserverChannel.get()`` returns ``None`` when the channel is explicitly
-    closed (job cancelled / shutdown).  A poll timeout returns ``_SSE_TIMEOUT``
-    via the executor wrapper below — we emit a keepalive and continue polling.
-    Only a ``None`` (closed channel) or a terminal event breaks the loop.
-    """
     loop = asyncio.get_running_loop()
     ch = job.attach_observer()
 
     def _get_or_sentinel() -> object:
-        """Return the next message, or _SSE_TIMEOUT on poll timeout."""
         msg = ch.get(timeout=1.0)
         return _SSE_TIMEOUT if msg is None and not ch._closed else msg
 
@@ -266,15 +330,12 @@ async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
                 continue
 
             if msg is _SSE_TIMEOUT:
-                # Poll timed out — channel is still open; send keepalive.
                 yield ": keepalive\n\n"
                 continue
 
             if msg is None:
-                # Channel closed (job cancelled / shutdown).
                 break
 
-            # At this point msg is dict[str, Any] — not _SSE_TIMEOUT, not None.
             assert isinstance(msg, dict)
             event_type = msg.get("event", "progress")
             data = json.dumps(msg.get("data", {}))
@@ -287,10 +348,16 @@ async def _sse_generator(job: ImportJob) -> AsyncGenerator[str]:
 
 
 @router.get("/{job_id}/progress")
-async def import_progress(job_id: str) -> StreamingResponse:
-    """Attach an SSE observer to an existing job.  Never starts/restarts the worker."""
+async def import_progress(job_id: str, actor: ActorDep) -> StreamingResponse:
+    """Attach an SSE observer to an existing job. Never starts/restarts the worker.
+
+    Returns 404 for foreign jobs (no information leak about other users' job IDs).
+    Jobs without an owner (owner_user_id=None) are accessible in local mode.
+    """
     job = get_job(job_id)
-    if job is None:
+    if job is None or (
+        job.owner_user_id is not None and job.owner_user_id != actor.user_id
+    ):
         raise HTTPException(status_code=404, detail="Import job not found")
 
     return StreamingResponse(

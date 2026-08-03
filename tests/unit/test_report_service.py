@@ -70,7 +70,7 @@ class TestReportService:
         from_date = today - timedelta(days=30)
         to_date = today
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert html.startswith("<!DOCTYPE html>")
@@ -83,7 +83,7 @@ class TestReportService:
         from_date = today - timedelta(days=30)
         to_date = today
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert html.startswith("<!DOCTYPE html>")
@@ -101,7 +101,7 @@ class TestReportService:
             async_db_session, async_test_device, from_date, to_date, step_days=7
         )
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert async_test_device.model in html
@@ -124,7 +124,7 @@ class TestReportService:
             async_db_session, async_test_device, range_b[0], range_b[1], step_days=7
         )
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_comparison_report(range_a, range_b)
 
         assert str(range_a[0]) in html
@@ -143,19 +143,20 @@ class TestReportService:
             async_db_session, async_test_device, range_a[0], range_a[1], step_days=7
         )
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_comparison_report(range_a, range_b)
 
         assert html.startswith("<!DOCTYPE html>")
         assert "No therapy data" in html
 
     async def test_summary_autoescape_escapes_device_model_script_tag(
-        self, async_db_session
+        self, async_db_session, async_test_profile
     ):
         """Device model containing <script> arrives HTML-escaped in the report."""
         import uuid
 
         device = Device(
+            profile_id=async_test_profile.id,
             manufacturer="ACME",
             model="<script>alert(1)</script>",
             serial_number=f"XSS_{uuid.uuid4().hex[:8]}",
@@ -167,7 +168,7 @@ class TestReportService:
         from_date = today - timedelta(days=7)
         to_date = today
 
-        service = ReportService(async_db_session)
+        service = ReportService(async_db_session, profile_id=1)
         html = await service.generate_summary_report(from_date, to_date)
 
         assert "<script>" not in html
@@ -196,7 +197,7 @@ class TestReportService:
             ahi=10.0,
         )
 
-        service = StatsService(async_db_session)
+        service = StatsService(async_db_session, profile_id=1)
         summary = await service.get_summary(
             from_date=today - timedelta(days=7), to_date=today
         )
@@ -204,3 +205,55 @@ class TestReportService:
         assert summary is not None
         assert summary.days_with_data == 1
         assert summary.avg_ahi == pytest.approx(2.0, rel=1e-3)
+
+
+class TestReportServiceSessionOwnership:
+    """ReportService must not close its injected (caller-owned) session.
+
+    The session lifecycle is owned by get_db()/db_session()/session_scope();
+    closing it inside a service method silently rolls back any provisioning
+    done in the same transaction and breaks subsequent queries on the same
+    session.
+    """
+
+    async def test_generate_summary_report_leaves_session_valid_for_subsequent_query(
+        self, async_db_session, async_test_device
+    ):
+        """A query on the same session after generate_summary_report must not raise.
+
+        Regression for the defect where ReportService closed its injected
+        session after the fetch phase, causing ``InvalidRequestError`` on any
+        subsequent use of the same session.
+        """
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database.models import Device  # noqa: PLC0415
+
+        service = ReportService(async_db_session, profile_id=1)
+        await service.generate_summary_report(
+            date.today() - timedelta(days=7), date.today()
+        )
+
+        # Any query on the same session must succeed without raising
+        # InvalidRequestError or similar closed-transaction errors.
+        result = (await async_db_session.execute(select(Device))).scalars().all()
+        # The exact rows don't matter — what matters is the query completed.
+        assert isinstance(result, list)
+
+    async def test_generate_comparison_report_leaves_session_valid_for_subsequent_query(
+        self, async_db_session, async_test_device
+    ):
+        """A query on the same session after generate_comparison_report must not raise."""
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database.models import Device  # noqa: PLC0415
+
+        service = ReportService(async_db_session, profile_id=1)
+        today = date.today()
+        await service.generate_comparison_report(
+            range_a=(today - timedelta(days=30), today - timedelta(days=15)),
+            range_b=(today - timedelta(days=14), today),
+        )
+
+        result = (await async_db_session.execute(select(Device))).scalars().all()
+        assert isinstance(result, list)

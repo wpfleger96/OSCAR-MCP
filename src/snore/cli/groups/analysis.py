@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from snore.cli.decorators import (
+    actor_options,
     date_range_options,
     db_option,
     parse_id_list,
@@ -56,6 +57,7 @@ def analysis() -> None:
 )
 @date_range_options
 @db_option
+@actor_options
 @click.option("--no-store", is_flag=True, help="Don't store results in database")
 @click.option(
     "--mode",
@@ -80,6 +82,8 @@ def run(
     date_from: datetime | None,
     date_to: datetime | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
     no_store: bool,
     mode: tuple[str, ...],
     all_modes: bool,
@@ -107,6 +111,11 @@ def run(
 
     async def _run() -> int | None:
         async with open_db_session(db) as session:
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
             if single_count > 0:
                 await _analyze_single_session(
                     session,
@@ -116,6 +125,7 @@ def run(
                     mode,
                     all_modes,
                     plain,
+                    profile_id,
                 )
             else:
                 await _analyze_batch(
@@ -126,6 +136,7 @@ def run(
                     no_store,
                     mode,
                     all_modes,
+                    profile_id,
                 )
         return None
 
@@ -148,6 +159,7 @@ def run(
     help="Sort order for results (default: date-desc)",
 )
 @db_option
+@actor_options
 def list_cmd(
     date_from: datetime | None,
     date_to: datetime | None,
@@ -155,13 +167,20 @@ def list_cmd(
     analyzed_only: bool,
     sort_by: str,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """List sessions with analysis status."""
 
     async def _run() -> None:
         async with open_db_session(db) as session:
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
             await _list_sessions(
-                session, date_from, date_to, limit, analyzed_only, sort_by
+                session, date_from, date_to, limit, analyzed_only, sort_by, profile_id
             )
 
     asyncio.run(_run())
@@ -175,6 +194,7 @@ def list_cmd(
     help="Show analysis for session on date (YYYY-MM-DD)",
 )
 @db_option
+@actor_options
 @click.option(
     "--plain",
     is_flag=True,
@@ -184,6 +204,8 @@ def show(
     session_id: int | None,
     date: datetime | None,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
     plain: bool,
 ) -> None:
     """Display stored analysis results."""
@@ -197,15 +219,28 @@ def show(
         raise click.ClickException("--session-id and --date are mutually exclusive")
 
     async def _run() -> None:
+        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
         sid = session_id
         async with open_db_session(db) as session:
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
+
             if date is not None:
                 db_session_row = (
                     (
                         await session.execute(
                             select(models.Session)
                             .join(models.Day)
-                            .where(models.Day.date == date.date())
+                            .join(
+                                models.Device,
+                                models.Session.device_id == models.Device.id,
+                            )
+                            .where(
+                                models.Day.date == date.date(),
+                                models.Device.profile_id == profile_id,
+                            )
                         )
                     )
                     .scalars()
@@ -223,7 +258,14 @@ def show(
                 (
                     await session.execute(
                         select(models.Session)
-                        .filter_by(id=sid)
+                        .join(
+                            models.Device,
+                            models.Session.device_id == models.Device.id,
+                        )
+                        .where(
+                            models.Session.id == sid,
+                            models.Device.profile_id == profile_id,
+                        )
                         .options(joinedload(models.Session.day))
                     )
                 )
@@ -240,7 +282,7 @@ def show(
             )
             session_date_str = day_date.isoformat()
 
-            svc = AnalysisService(session)
+            svc = AnalysisService(session, profile_id=profile_id)
             result = await svc.get_analysis_result(sid)
 
         if result is None:
@@ -271,6 +313,7 @@ def show(
 )
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
 @db_option
+@actor_options
 def analysis_delete(
     session_ids: str | None,
     date_from: datetime | None,
@@ -280,6 +323,8 @@ def analysis_delete(
     dry_run: bool,
     force: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> int | None:
     """Delete analysis results without deleting the sessions themselves."""
     from snore.services.analysis_facade import AnalysisFacade
@@ -299,7 +344,12 @@ def analysis_delete(
 
     async def _run() -> int:
         async with open_db_session(db) as session:
-            facade = AnalysisFacade(session)
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
+            facade = AnalysisFacade(session, profile_id)
 
             try:
                 preview = await facade.get_delete_preview(
@@ -419,10 +469,11 @@ async def _analyze_single_session(
     mode: tuple[str, ...],
     all_modes: bool,
     plain: bool,
+    profile_id: int,
 ) -> None:
-    from snore.analysis.modes import AVAILABLE_CONFIGS
-    from snore.database import models
-    from snore.services.analysis_facade import AnalysisFacade
+    from snore.analysis.modes import AVAILABLE_CONFIGS  # noqa: PLC0415
+    from snore.database import models  # noqa: PLC0415
+    from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
     # I/O: look up session_id / date while the injected session is open.
     if date:
@@ -431,7 +482,11 @@ async def _analyze_single_session(
                 await session.execute(
                     select(models.Session)
                     .join(models.Day)
-                    .where(models.Day.date == date.date())
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Day.date == date.date(),
+                        models.Device.profile_id == profile_id,
+                    )
                 )
             )
             .scalars()
@@ -446,7 +501,11 @@ async def _analyze_single_session(
             (
                 await session.execute(
                     select(models.Session)
-                    .filter_by(id=session_id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        models.Device.profile_id == profile_id,
+                    )
                     .options(joinedload(models.Session.day))
                 )
             )
@@ -476,9 +535,7 @@ async def _analyze_single_session(
     try:
         # AnalysisFacade.run_analysis owns its own short read/write scopes;
         # the injected session (already closed) is not used here.
-        facade = AnalysisFacade(
-            session
-        )  # session only needed for listing, not analysis
+        facade = AnalysisFacade(session, profile_id)
         result = await facade.run_analysis(
             session_id=session_id,
             modes=modes,
@@ -500,6 +557,7 @@ async def _analyze_batch(
     no_store: bool,
     mode: tuple[str, ...],
     all_modes: bool,
+    profile_id: int,
 ) -> None:
     from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
@@ -515,7 +573,7 @@ async def _analyze_batch(
     from_date = None if analyze_all else start
     to_date = None if analyze_all else end
 
-    facade = AnalysisFacade(session)
+    facade = AnalysisFacade(session, profile_id)
     task_holder: list[Any] = []
 
     with Progress(
@@ -564,10 +622,11 @@ async def _list_sessions(
     limit: int,
     analyzed_only: bool,
     sort_by: str = "date-desc",
+    profile_id: int = 0,
 ) -> None:
-    from snore.services.analysis_facade import AnalysisFacade
+    from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
-    facade = AnalysisFacade(session)
+    facade = AnalysisFacade(session, profile_id)
     results = await facade.list_sessions_with_status(
         start=start, end=end, limit=limit, analyzed_only=analyzed_only, sort_by=sort_by
     )

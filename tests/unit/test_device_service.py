@@ -24,7 +24,7 @@ class TestSettingsHistoryDiffing:
     async def test_no_sessions_returns_empty_history(
         self, async_db_session, async_test_device
     ):
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.settings_history == []
 
@@ -37,7 +37,7 @@ class TestSettingsHistoryDiffing:
         await _add_settings(
             async_db_session, s.id, {"mode": "AutoSet", "pressure_min": "4.0"}
         )
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.settings_history == []
 
@@ -56,7 +56,7 @@ class TestSettingsHistoryDiffing:
         await _add_settings(
             async_db_session, s2.id, {"mode": "AutoSet", "pressure_min": "4.0"}
         )
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.settings_history == []
 
@@ -71,7 +71,7 @@ class TestSettingsHistoryDiffing:
         )
         await _add_settings(async_db_session, s1.id, {"pressure_max": "12.0"})
         await _add_settings(async_db_session, s2.id, {"pressure_max": "10.0"})
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert len(detail.settings_history) == 1
         entry = detail.settings_history[0]
@@ -93,7 +93,7 @@ class TestSettingsHistoryDiffing:
         )
         await _add_settings(async_db_session, s1.id, {"mode": "CPAP"})
         await _add_settings(async_db_session, s2.id, {"mode": "CPAP", "epr_level": "2"})
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert len(detail.settings_history) == 1
         changes = {c.key: c for c in detail.settings_history[0].changes}
@@ -112,7 +112,7 @@ class TestSettingsHistoryDiffing:
         )
         await _add_settings(async_db_session, s1.id, {"mode": "CPAP", "epr_level": "2"})
         await _add_settings(async_db_session, s2.id, {"mode": "CPAP"})
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert len(detail.settings_history) == 1
         changes = {c.key: c for c in detail.settings_history[0].changes}
@@ -135,7 +135,7 @@ class TestSettingsHistoryDiffing:
         )
         await _add_settings(async_db_session, s1.id, {"mode": "AutoSet"})
         await _add_settings(async_db_session, s3.id, {"mode": "CPAP"})
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         # s2 is skipped; diff is s1 vs s3
         assert len(detail.settings_history) == 1
@@ -147,7 +147,7 @@ class TestSettingsHistoryDiffing:
 
 class TestGetDeviceDetail:
     async def test_raises_not_found_for_unknown_id(self, async_db_session):
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         with pytest.raises(NotFoundError):
             await svc.get_device_detail(99999)
 
@@ -162,7 +162,7 @@ class TestGetDeviceDetail:
         )
         disabled.enabled = False
         await async_db_session.flush()
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.usage.session_count == 1
 
@@ -177,7 +177,7 @@ class TestGetDeviceDetail:
         )
         await _add_settings(async_db_session, s1.id, {"mode": "CPAP"})
         await _add_settings(async_db_session, s2.id, {"mode": "AutoSet"})
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.current_settings == {"mode": "AutoSet"}
 
@@ -187,14 +187,14 @@ class TestGetDeviceDetail:
         await async_test_session_factory(
             async_test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
         )
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.current_settings is None
 
     async def test_no_sessions_gives_zero_usage(
         self, async_db_session, async_test_device
     ):
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.usage.session_count == 0
         assert detail.usage.first_session_date is None
@@ -202,7 +202,7 @@ class TestGetDeviceDetail:
         assert detail.usage.total_therapy_hours == 0.0
 
     async def test_identity_fields_included(self, async_db_session, async_test_device):
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         detail = await svc.get_device_detail(async_test_device.id)
         assert detail.id == async_test_device.id
         assert detail.manufacturer == async_test_device.manufacturer
@@ -212,11 +212,11 @@ class TestGetDeviceDetail:
 
 class TestListDevices:
     async def test_list_empty(self, async_db_session):
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         assert await svc.list_devices() == []
 
     async def test_list_returns_device_info(self, async_db_session, async_test_device):
-        svc = DeviceService(async_db_session)
+        svc = DeviceService(async_db_session, profile_id=1)
         devices = await svc.list_devices()
         assert len(devices) == 1
         assert devices[0].id == async_test_device.id

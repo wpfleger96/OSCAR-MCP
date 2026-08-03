@@ -64,8 +64,21 @@ class TestSavepointRollback:
         await init_database(str(temp_db))
 
         # First, create a device to satisfy the FK constraint on sessions.
+        # Also capture the profile_id for reuse in the batch Devices below.
+        test_profile_id: int
         async with session_scope() as setup_session:
+            from snore.database.models import Profile, User
+
+            test_user = User(canonical_email="savepoint@example.com", role="admin")
+            setup_session.add(test_user)
+            await setup_session.flush()
+            test_profile = Profile(user_id=test_user.id, name="Test Profile")
+            setup_session.add(test_profile)
+            await setup_session.flush()
+            test_profile_id = test_profile.id
+
             device = Device(
+                profile_id=test_profile_id,
                 manufacturer="TestMfr",
                 model="TestMdl",
                 serial_number="SAVEPOINT_TEST",
@@ -89,6 +102,7 @@ class TestSavepointRollback:
             async with outer_session as session:
                 # Insert row A: a new device to track.
                 marker_device = Device(
+                    profile_id=test_profile_id,
                     manufacturer="BatchMfr",
                     model="BatchMdl",
                     serial_number="BATCH_DEVICE_OUTER",
@@ -100,6 +114,7 @@ class TestSavepointRollback:
                 # Create a nested savepoint and insert a batch row inside it.
                 async with session.begin_nested():
                     batch_device = Device(
+                        profile_id=test_profile_id,
                         manufacturer="BatchMfr",
                         model="BatchMdl",
                         serial_number="BATCH_DEVICE_INNER",
@@ -293,9 +308,26 @@ class TestImporterForcedFailureContinuation:
                 raise RuntimeError("Forced mid-import failure after partial flush")
             return await original_get_or_create(device_id, day_date, db_session)
 
-        importer = SessionImporter()
         with patch.object(DayManager, "get_or_create_day", patched_day):
             async with session_scope() as batch_db:
+                # Create a profile for devices.
+                import uuid  # noqa: PLC0415
+
+                from snore.database.models import Profile as _P  # noqa: PLC0415
+                from snore.database.models import User as _U
+
+                _u = _U(
+                    canonical_email=f"pf_{uuid.uuid4().hex[:8]}@example.com",
+                    role="admin",
+                )
+                batch_db.add(_u)
+                await batch_db.flush()
+                _p = _P(user_id=_u.id, name="PF Test")
+                batch_db.add(_p)
+                await batch_db.flush()
+                _pid = _p.id
+
+                importer = SessionImporter(_pid)
                 imported, skipped, failed = await importer.import_sessions_batch(
                     iter([good1, bad_session, good2]),
                     batch_size=3,
@@ -389,11 +421,28 @@ class TestImporterForcedFailureContinuation:
                 )
             return result
 
-        importer = SessionImporter()
         with patch.object(
             SessionImporter, "_import_single_session", _raise_after_all_children_flushed
         ):
             async with session_scope() as chunk_db:
+                # Create a profile for devices.
+                import uuid  # noqa: PLC0415
+
+                from snore.database.models import Profile as _P2  # noqa: PLC0415
+                from snore.database.models import User as _U2
+
+                _u2 = _U2(
+                    canonical_email=f"child_{uuid.uuid4().hex[:8]}@example.com",
+                    role="admin",
+                )
+                chunk_db.add(_u2)
+                await chunk_db.flush()
+                _p2 = _P2(user_id=_u2.id, name="Child Test")
+                chunk_db.add(_p2)
+                await chunk_db.flush()
+                _pid2 = _p2.id
+
+                importer = SessionImporter(_pid2)
                 imported, skipped, failed = await importer.import_sessions_batch(
                     iter([good, bad]),
                     batch_size=2,
@@ -629,10 +678,12 @@ class TestTypedBulkInsert:
         - Populates the autoincrement ``id`` column.
         - Stores the correct field values.
         """
+        import uuid  # noqa: PLC0415
+
         from sqlalchemy import select
 
         from snore.database.importers import SessionImporter
-        from snore.database.models import Event, Setting, Waveform
+        from snore.database.models import Event, Profile, Setting, User, Waveform
         from snore.database.session import session_scope
 
         await init_database(str(temp_db))
@@ -641,7 +692,19 @@ class TestTypedBulkInsert:
             "SN_BULK_READ", "SESS_BULK_READ"
         )
 
-        importer = SessionImporter()
+        # Create a profile for the device to satisfy the NOT NULL FK constraint.
+        async with session_scope() as setup_db:
+            user = User(
+                canonical_email=f"bulk_{uuid.uuid4().hex[:8]}@example.com", role="admin"
+            )
+            setup_db.add(user)
+            await setup_db.flush()
+            profile = Profile(user_id=user.id, name="Bulk Test")
+            setup_db.add(profile)
+            await setup_db.flush()
+            profile_id = profile.id
+
+        importer = SessionImporter(profile_id)
         async with session_scope() as db:
             async with db.begin_nested():
                 imported, day_id = await importer._import_single_session(
@@ -829,9 +892,26 @@ class TestTypedBulkInsert:
             sess.events = events
             return sess
 
-        importer = SessionImporter()
         peak_orm_sizes: list[int] = []
 
+        # Create a profile for devices to satisfy the NOT NULL FK constraint.
+        import uuid  # noqa: PLC0415
+
+        from snore.database.models import Profile as _Profile  # noqa: PLC0415
+        from snore.database.models import User as _User
+
+        async with session_scope() as setup_db:
+            _user = _User(
+                canonical_email=f"bnd_{uuid.uuid4().hex[:8]}@example.com", role="admin"
+            )
+            setup_db.add(_user)
+            await setup_db.flush()
+            _profile = _Profile(user_id=_user.id, name="BND Test")
+            setup_db.add(_profile)
+            await setup_db.flush()
+            _profile_id = _profile.id
+
+        importer = SessionImporter(_profile_id)
         async with session_scope() as db:
             for i in range(n_sessions):
                 session_data = _make_heavy_session(i)

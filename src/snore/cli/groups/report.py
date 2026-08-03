@@ -9,7 +9,7 @@ from pathlib import Path
 
 import click
 
-from snore.cli.decorators import db_option
+from snore.cli.decorators import actor_options, db_option
 from snore.cli.decorators import db_session as open_db_session
 from snore.cli.display import ICON_CHART, print_footer, print_header, print_kv
 
@@ -43,11 +43,14 @@ def report() -> None:
     help="Output file path (default: snore-report.html)",
 )
 @db_option
+@actor_options
 def summary(
     from_date: datetime,
     to_date: datetime,
     output: str,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Generate a summary HTML report for a date range.
 
@@ -62,9 +65,13 @@ def summary(
 
     async def _run() -> str:
         async with open_db_session(db) as session:
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
             from snore.services import ReportService
 
-            svc = ReportService(session)
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
+            svc = ReportService(session, profile_id)
             return await svc.generate_summary_report(fd, td)
 
     html = asyncio.run(_run())
@@ -116,6 +123,7 @@ def summary(
     help="Output file path (default: snore-comparison.html)",
 )
 @db_option
+@actor_options
 def comparison(
     from_date: datetime,
     to_date: datetime,
@@ -123,6 +131,8 @@ def comparison(
     compare_to: datetime,
     output: str,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> None:
     """Generate a comparison HTML report across two date ranges.
 
@@ -144,9 +154,13 @@ def comparison(
 
     async def _run() -> str:
         async with open_db_session(db) as session:
+            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
             from snore.services import ReportService
 
-            svc = ReportService(session)
+            profile_id = await resolve_cli_profile_id(
+                session, actor_user, actor_profile
+            )
+            svc = ReportService(session, profile_id)
             return await svc.generate_comparison_report((fd, td), (cfd, ctd))
 
     html = asyncio.run(_run())

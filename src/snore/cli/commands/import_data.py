@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import click
 
 from rich.markup import escape
 
-from snore.cli.decorators import date_range_options, db_option, init_db
+from snore.cli.decorators import actor_options, date_range_options, db_option, init_db
 from snore.cli.display import (
     ICON_BACKUP,
     ICON_FILTERS,
@@ -32,12 +33,52 @@ from snore.cli.display import (
 )
 from snore.parsers.registry import parser_registry
 from snore.services.import_service import ImportService
+from snore.services.schemas import ImportResult, ImportSource
+
+
+async def _resolve_and_import(
+    service: ImportService,
+    sources: list[ImportSource],
+    *,
+    force: bool = False,
+    batch_size: int = 50,
+    backup: bool = True,
+    sort_by: str | None = None,
+    limit: int | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    parallel: bool = True,
+    progress_callback: Callable[[str], None] | None = None,
+    actor_user: str | None = None,
+    actor_profile: str | None = None,
+) -> ImportResult:
+    """Resolve the actor profile then delegate to import_sources with profile_id: int."""
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    async with session_scope() as db:
+        profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
+
+    return await service.import_sources(
+        sources,
+        force=force,
+        batch_size=batch_size,
+        backup=backup,
+        sort_by=sort_by,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+        parallel=parallel,
+        progress_callback=progress_callback,
+        profile_id=profile_id,
+    )
 
 
 @click.command("import")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--force", is_flag=True, help="Re-import existing sessions")
 @db_option
+@actor_options
 @click.option("--limit", "-n", type=int, help="Limit to first N sessions")
 @click.option(
     "--sort-by",
@@ -69,15 +110,12 @@ from snore.services.import_service import ImportService
     is_flag=True,
     help="Skip raw file backup (not recommended — SD card will be needed again)",
 )
-@click.option(
-    "--backup-dir",
-    type=click.Path(file_okay=False),
-    help="Raw backup directory (default: ~/.snore/raw/)",
-)
 def import_data(
     path: str,
     force: bool,
     db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
     limit: int | None,
     sort_by: str,
     date_from: datetime | None,
@@ -87,7 +125,6 @@ def import_data(
     batch_size: int,
     select_all: bool,
     no_backup: bool,
-    backup_dir: str | None,
 ) -> None:
     """Import CPAP data from device SD card or directory."""
     data_path = Path(path)
@@ -97,7 +134,6 @@ def import_data(
 
     console.print(f"{ICON_SCAN} Scanning {data_path}...")
     sources = service.detect_sources(data_path)
-
     if not sources:
         supported = "\n".join(
             f"  - {p.manufacturer}: {p.parser_id}"
@@ -315,18 +351,20 @@ def import_data(
         # Real import — delegate backup + parse + import to service
         try:
             result = asyncio.run(
-                service.import_sources(
+                _resolve_and_import(
+                    service,
                     [source],
                     force=force,
                     batch_size=batch_size,
                     backup=not no_backup,
-                    backup_root=(Path(backup_dir).expanduser() if backup_dir else None),
                     sort_by=sort_by if sort_by != "filesystem" else None,
                     limit=limit,
                     date_from=date_from_str,
                     date_to=date_to_str,
                     parallel=not no_parallel,
                     progress_callback=_progress,
+                    actor_user=actor_user,
+                    actor_profile=actor_profile,
                 )
             )
         except RuntimeError as e:

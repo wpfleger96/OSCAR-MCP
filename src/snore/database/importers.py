@@ -71,9 +71,16 @@ def serialize_waveform(waveform: WaveformData) -> bytes:
 class SessionImporter:
     """Handles importing UnifiedSession objects to database using SQLAlchemy."""
 
-    def __init__(self) -> None:
-        """Initialize importer."""
-        pass
+    def __init__(self, profile_id: int) -> None:
+        """Initialize importer.
+
+        Args:
+            profile_id: Profile that owns the devices and sessions created by this
+                importer — required.  All ``Device`` rows are created with this
+                ``profile_id``; device lookups are scoped to it so foreign devices
+                are never matched.
+        """
+        self.profile_id = profile_id
 
     @staticmethod
     async def cleanup_orphaned_records(db: AsyncSession) -> int:
@@ -117,7 +124,10 @@ class SessionImporter:
         return total_cleaned
 
     async def _import_single_session(
-        self, db: AsyncSession, session_data: UnifiedSession, force: bool = False
+        self,
+        db: AsyncSession,
+        session_data: UnifiedSession,
+        force: bool = False,
     ) -> tuple[bool, int | None]:
         """
         Import a single session. Returns (imported, day_id).
@@ -134,8 +144,10 @@ class SessionImporter:
         Returns:
             Tuple of (was_imported, day_id)
         """
-        stmt = select(models.Device).filter_by(
-            serial_number=session_data.device_info.serial_number
+        profile_id = self.profile_id
+        stmt = select(models.Device).where(
+            models.Device.serial_number == session_data.device_info.serial_number,
+            models.Device.profile_id == profile_id,
         )
         device = (await db.execute(stmt)).scalars().first()
 
@@ -148,6 +160,7 @@ class SessionImporter:
             device.last_import = datetime.now(UTC)
         else:
             device = models.Device(
+                profile_id=profile_id,
                 manufacturer=session_data.device_info.manufacturer,
                 model=session_data.device_info.model,
                 serial_number=session_data.device_info.serial_number,
@@ -223,7 +236,11 @@ class SessionImporter:
         return True, day_id
 
     async def import_session(
-        self, session_data: UnifiedSession, force: bool = False, *, db: AsyncSession
+        self,
+        session_data: UnifiedSession,
+        force: bool = False,
+        *,
+        db: AsyncSession,
     ) -> bool:
         """Import a complete session using a caller-provided async session.
 
@@ -364,6 +381,11 @@ class SessionImporter:
                 else:
                     skipped += 1
             except Exception as e:
+                from snore.database.txn import _is_sqlite_contention  # noqa: PLC0415
+
+                if _is_sqlite_contention(e):
+                    # Re-raise so run_txn's retry loop can attempt a fresh session.
+                    raise
                 logger.error(
                     f"Failed to import session {session_data.device_session_id}: {e}"
                 )
@@ -480,7 +502,9 @@ class SessionImporter:
         logger.debug(f"Imported {len(mappings)} settings")
 
 
-async def import_session(session_data: UnifiedSession, force: bool = False) -> bool:
+async def import_session(
+    session_data: UnifiedSession, force: bool = False, *, profile_id: int
+) -> bool:
     """
     Convenience function to import a session.
 
@@ -491,10 +515,11 @@ async def import_session(session_data: UnifiedSession, force: bool = False) -> b
     Args:
         session_data: UnifiedSession to import
         force: Force re-import if exists
+        profile_id: Profile that owns the device — required.
 
     Returns:
         True if imported, False if skipped
     """
-    importer = SessionImporter()
+    importer = SessionImporter(profile_id)
     async with session_scope() as db:
         return await importer.import_session(session_data, force=force, db=db)

@@ -7,10 +7,14 @@ import logging
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
+from snore.database.txn import run_txn
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
+from snore.parsers.unified import UnifiedSession
 from snore.services.schemas import ImportResult, ImportSource, ImportSourceResult
 
 logger = logging.getLogger(__name__)
@@ -95,6 +99,7 @@ class ImportService:
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
+        profile_id: int,
     ) -> ImportResult:
         """Run the import pipeline for the selected sources.
 
@@ -105,6 +110,8 @@ class ImportService:
             cancel_predicate: Optional callable that returns True when the caller
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
+            profile_id:  Resolved profile ID — required.  All devices and sessions
+                         created during this import are owned by this profile.
         """
         return await self._import_sources_async(
             sources,
@@ -120,6 +127,7 @@ class ImportService:
             dry_run=dry_run,
             progress_callback=progress_callback,
             cancel_predicate=cancel_predicate,
+            profile_id=profile_id,
         )
 
     async def _import_sources_async(
@@ -138,6 +146,7 @@ class ImportService:
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
+        profile_id: int,
     ) -> ImportResult:
 
         def emit(msg: str) -> None:
@@ -151,6 +160,13 @@ class ImportService:
         total_imported = 0
         total_skipped = 0
         total_failed = 0
+
+        # Default backup root is namespaced by profile so raw files from
+        # different profiles never share a directory — mirrors ExportService.
+        if backup_root is None:
+            from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+            backup_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
 
         if not dry_run:
             async with session_scope() as db_session:
@@ -247,7 +263,7 @@ class ImportService:
             # Import — ImportService opens ONE scope per bounded batch chunk.
             # Each chunk is committed separately; a failed chunk does not poison
             # subsequent chunks.
-            importer = SessionImporter()
+            importer = SessionImporter(profile_id)
             emit("Importing sessions...")
             imported = 0
             skipped = 0
@@ -261,15 +277,27 @@ class ImportService:
                 chunk = list(_itertools.islice(session_iter_internal, batch_size))
                 if not chunk:
                     break
-                async with session_scope() as chunk_db:
-                    ci, cs, cf = await importer.import_sessions_batch(
-                        iter(chunk),
+
+                # run_txn opens a fresh session per attempt and retries on
+                # SQLite contention.  UNIQUE(device_id, device_session_id)
+                # makes this idempotent: a replay of the same chunk produces
+                # the same rows and skips duplicates.
+                async def _import_chunk(
+                    db: AsyncSession,
+                    *,
+                    _chunk: list[UnifiedSession] = chunk,
+                    _importer: SessionImporter = importer,
+                ) -> tuple[int, int, int]:
+                    return await _importer.import_sessions_batch(
+                        iter(_chunk),
                         force=force,
                         batch_size=batch_size,
                         progress_callback=progress_callback,
                         cancel_predicate=cancel_predicate,
-                        db=chunk_db,
+                        db=db,
                     )
+
+                ci, cs, cf = await run_txn(_import_chunk)
                 imported += ci
                 skipped += cs
                 failed += cf

@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.modes.config import AASM_CONFIG
 from snore.analysis.modes.detector import EventDetector
-from snore.analysis.service import AnalysisService
 from snore.analysis.utils import convert_machine_events
 from snore.database import models
 from snore.validation.report import (
@@ -26,17 +25,16 @@ logger = logging.getLogger(__name__)
 class BatchValidator:
     """Runs validation across multiple sessions."""
 
-    def __init__(self, db_session: AsyncSession, profile: str | None = None):
+    def __init__(self, db_session: AsyncSession, profile_id: int):
         """
         Initialize batch validator.
 
         Args:
             db_session: Async database session
-            profile: Device serial number to filter sessions via Device → Day join (optional)
+            profile_id: Profile ID to scope all queries — required, never global.
         """
         self.db_session = db_session
-        self.profile = profile
-        self.analysis_service = AnalysisService(db_session)
+        self.profile_id = profile_id
 
     async def validate_date_range(
         self,
@@ -55,24 +53,16 @@ class BatchValidator:
         Returns:
             ValidationReport with aggregate and per-session metrics
         """
-        stmt = select(models.Session).where(
-            models.Session.start_time >= datetime.fromisoformat(date_from),
-            models.Session.start_time <= datetime.fromisoformat(f"{date_to} 23:59:59"),
-        )
-
-        if self.profile:
-            device_ids = (
-                (
-                    await self.db_session.execute(
-                        select(models.Device.id)
-                        .join(models.Day, models.Day.device_id == models.Device.id)
-                        .where(models.Device.serial_number == self.profile)
-                    )
-                )
-                .scalars()
-                .all()
+        stmt = (
+            select(models.Session)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Device.profile_id == self.profile_id,
+                models.Session.start_time >= datetime.fromisoformat(date_from),
+                models.Session.start_time
+                <= datetime.fromisoformat(f"{date_to} 23:59:59"),
             )
-            stmt = stmt.where(models.Session.device_id.in_(device_ids))
+        )
 
         sessions = (
             (await self.db_session.execute(stmt.order_by(models.Session.start_time)))
@@ -116,16 +106,18 @@ class BatchValidator:
         Returns:
             SessionValidation or None if validation fails
         """
+        # Use an already-scoped facade so ownership is enforced on every path.
+        from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
+
+        facade = AnalysisFacade(self.db_session, self.profile_id)
+
         session = await self.db_session.get(models.Session, session_id)
         if not session:
             return None
 
-        analysis_result = await self.analysis_service.get_analysis_result(session_id)
+        analysis_result = await facade.get_analysis_result(session_id)
         if not analysis_result:
             logger.info(f"Running analysis for session {session_id}...")
-            from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
-
-            facade = AnalysisFacade(self.db_session)
             analysis_result = await facade.run_analysis(session_id, modes=[mode])
 
         if mode not in analysis_result.mode_results:

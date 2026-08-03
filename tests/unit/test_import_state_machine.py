@@ -67,10 +67,18 @@ def _complete_job(job: ImportJob) -> None:
 
 @pytest.fixture(autouse=True)
 def clean_job_store():
-    """Reset the job store before and after each test."""
+    """Reset the job store before and after each test.
+
+    Clears both the jobs dict AND the admission counters so successive
+    create_job() calls within the same xdist worker don't overflow caps.
+    """
     job_store._jobs.clear()
+    job_store._per_user_count.clear()
+    job_store._global_count = 0
     yield
     job_store._jobs.clear()
+    job_store._per_user_count.clear()
+    job_store._global_count = 0
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +338,9 @@ class TestReaper:
         """A terminal job with _terminal_at older than TTL is removed."""
         job = _make_upload_job(tmp_path)
         _complete_job(job)
+        # Simulate cleanup completion and capacity release (required before reap).
+        job.cleanup_files()
+        job.release_capacity()
         # Backdate _terminal_at so the job appears expired.
         job._terminal_at = time.monotonic() - (JOB_TTL_SECONDS + 1)
         _reap_terminal()
@@ -339,6 +350,9 @@ class TestReaper:
         """A terminal job within its TTL is retained."""
         job = _make_upload_job(tmp_path)
         _complete_job(job)
+        # Simulate cleanup + capacity release so reaper considers this job.
+        job.cleanup_files()
+        job.release_capacity()
         # _terminal_at is just now — within TTL.
         _reap_terminal()
         assert get_job(job.job_id) is not None
@@ -806,6 +820,7 @@ class TestRouteWorkerBehavior:
         )
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
 
         with (
             patch(
@@ -845,6 +860,7 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
 
         with patch(
             "snore.api.routers.import_data.ImportService.detect_sources",
@@ -890,6 +906,7 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
         ch = job.attach_observer()
 
         # Start the worker but don't let it progress past detect_sources.
@@ -943,6 +960,7 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
 
         with patch(
             "snore.api.routers.import_data.ImportService.detect_sources",
@@ -983,12 +1001,28 @@ class TestRouteHTTPBoundary:
 
     @staticmethod
     def _make_app() -> object:
-        """Create a minimal app with the import router mounted, no lifespan."""
+        """Create a minimal app with the import router mounted, no lifespan.
+
+        Overrides ``get_actor`` with a no-DB stub that returns a test admin actor so
+        the cancel and progress routes (which now require ActorDep) work without a
+        real database.  The stub actor's user_id matches the owner_user_id used by
+        ``_upload_and_get_job`` when seeding jobs.
+        """
         from fastapi import FastAPI  # noqa: PLC0415
 
+        from snore.api.deps import get_actor  # noqa: PLC0415
         from snore.api.routers import import_data  # noqa: PLC0415
+        from snore.auth.actor import ActorContext, AuthMode, Role  # noqa: PLC0415
+
+        _test_actor = ActorContext(
+            user_id=1, profile_id=1, role=Role.ADMIN, mode=AuthMode.LOCAL
+        )
+
+        async def _override_get_actor() -> ActorContext:
+            return _test_actor
 
         app = FastAPI()
+        app.dependency_overrides[get_actor] = _override_get_actor
         app.include_router(import_data.router, prefix="/api/v1/import")
         return app
 
@@ -1034,10 +1068,11 @@ class TestRouteHTTPBoundary:
     def test_post_upload_registration_failure_cleans_temp_dir(
         self, tmp_path, monkeypatch
     ):
-        """POST /import: if create_job raises, the uploaded temp dir is removed.
+        """POST /import: if an error occurs after mkdtemp, the uploaded temp dir is removed.
 
-        Patches tempfile.mkdtemp to return a known path, patches create_job at
-        the router's import site to raise, then asserts the temp dir is gone.
+        Patches tempfile.mkdtemp to return a known path, patches convert_to_pending
+        at the router's import site to raise (simulating a failure after files are
+        written), then asserts the temp dir is gone.
         """
 
         from unittest.mock import patch  # noqa: PLC0415
@@ -1053,13 +1088,27 @@ class TestRouteHTTPBoundary:
             os.makedirs(known_tmp, exist_ok=True)
             return known_tmp
 
-        # Patch mkdtemp so we know the exact directory; patch create_job to raise
-        # after mkdtemp has been called (simulating registration failure).
+        # Patch mkdtemp so we know the exact directory; patch convert_to_pending
+        # to raise after files are written (simulating a registration failure in the
+        # try/except block that owns cleanup).
+        import snore.api.import_jobs as _job_mod  # noqa: PLC0415
+
+        original_reserve = _job_mod.reserve_slot
+
+        def _raising_reserve(owner_user_id=None):
+            """Reserve the slot normally, then poison convert_to_pending."""
+            job = original_reserve(owner_user_id)
+            if job is not None:
+                job.convert_to_pending = lambda: (_ for _ in ()).throw(
+                    RuntimeError("Simulated registration failure")
+                )
+            return job
+
         with (
             patch("snore.api.routers.import_data.tempfile.mkdtemp", _known_mkdtemp),
             patch(
-                "snore.api.routers.import_data.create_job",
-                side_effect=RuntimeError("Simulated registration failure"),
+                "snore.api.routers.import_data.reserve_slot",
+                side_effect=_raising_reserve,
             ),
             TestClient(app, raise_server_exceptions=False) as client,
         ):
@@ -1067,9 +1116,9 @@ class TestRouteHTTPBoundary:
                 "/api/v1/import/",
                 files=[("files", ("test.edf", b"fake", "application/octet-stream"))],
             )
-        # Route returns 500 when create_job raises.
+        # Route returns 500 when an unexpected exception occurs in the try block.
         assert resp.status_code == 500, (
-            f"Expected 500 when create_job fails; got {resp.status_code}"
+            f"Expected 500 when registration fails; got {resp.status_code}"
         )
         # The temp directory must have been removed by the route's cleanup.
         import os  # noqa: PLC0415
