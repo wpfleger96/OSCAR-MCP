@@ -443,9 +443,20 @@ def import_data(
             async with session_scope() as db:
                 facade = AnalysisFacade(db, profile_id=profile_id)
 
+                import time as _time  # noqa: PLC0415
+
+                _phase_start = _time.monotonic()
+                _prev_elapsed: list[float] = [0.0]
+
                 def _on_progress(completed: int, total: int | None) -> None:
+                    now = _time.monotonic()
+                    elapsed = now - _phase_start
+                    session_elapsed = elapsed - _prev_elapsed[0]
+                    _prev_elapsed[0] = elapsed
                     print_info(
-                        f"Analyzed {completed}/{total or '?'} sessions...", indent=1
+                        f"Analyzed {completed}/{total or '?'} sessions "
+                        f"(session: {session_elapsed:.1f}s, total: {elapsed:.1f}s)",
+                        indent=1,
                     )
 
                 batch_result = await facade.run_batch_analysis(

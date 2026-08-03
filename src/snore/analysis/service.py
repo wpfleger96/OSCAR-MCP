@@ -106,6 +106,9 @@ class RawSessionBlobs:
     modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
     # Primary mode for RERA/recovery-marker storage (plan step 4).
     primary_mode: str = DEFAULT_MODE
+    # Device manufacturer string from the Device row — used to gate
+    # vendor-specific heuristics (e.g. trigger/cycle inference).
+    device_manufacturer: str = "ResMed"
 
 
 @dataclass
@@ -131,6 +134,8 @@ class AnalysisInputs:
     modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
     # Primary mode for RERA/recovery-marker storage (plan step 4).
     primary_mode: str = DEFAULT_MODE
+    # Device manufacturer string — gates vendor-specific heuristics.
+    device_manufacturer: str = "ResMed"
 
 
 def _resolve_primary_mode(modes: list[str], primary_mode: str | None) -> str:
@@ -338,6 +343,18 @@ class AnalysisService:
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
+        # Fetch device manufacturer for vendor-applicability gating.
+        device_row = (
+            (
+                await self.db_session.execute(
+                    select(models.Device).where(models.Device.id == session.device_id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        device_manufacturer: str = device_row.manufacturer if device_row else "unknown"
+
         try:
             flow_blob, flow_sample_count, flow_metadata = await fetch_waveform_blob(
                 self.db_session, session_id, "flow"
@@ -401,6 +418,7 @@ class AnalysisService:
             leak_metadata=leak_metadata,
             modes=modes_list,
             primary_mode=resolved_primary,
+            device_manufacturer=device_manufacturer,
         )
 
     @staticmethod
@@ -478,6 +496,7 @@ class AnalysisService:
             leak_values=leak_values,
             modes=raw.modes,
             primary_mode=raw.primary_mode,
+            device_manufacturer=raw.device_manufacturer,
         )
 
     def compute_analysis(self, inputs: AnalysisInputs) -> AnalysisComputation:
@@ -649,6 +668,7 @@ class AnalysisService:
             recovery_breath_indices=recovery_breath_indices,
             leak_timestamps=inputs.leak_timestamps,
             leak_values=inputs.leak_values,
+            device_manufacturer=inputs.device_manufacturer,
         )
 
         return AnalysisComputation(
@@ -862,7 +882,18 @@ class AnalysisService:
                 )
                 for cb in computation.breaths
             ]
-            self.db_session.add_all(breath_rows)
+            try:
+                self.db_session.add_all(breath_rows)
+            except Exception as exc:
+                exc_msg = str(exc).lower()
+                if "no such table" in exc_msg and "breath" in exc_msg:
+                    raise RuntimeError(
+                        "The 'breaths' table is missing from the database. "
+                        "This happens when connecting to a database created before "
+                        "breath-feature support was added. Drop the database and "
+                        "re-import to populate it with the current schema."
+                    ) from exc
+                raise
 
         logger.info(
             f"Stored analysis result {analysis.id} with {len(computation.breaths)} breath rows"
@@ -903,6 +934,7 @@ def _build_computed_breaths(
     recovery_breath_indices: set[int],
     leak_timestamps: Any | None,
     leak_values: Any | None,
+    device_manufacturer: str = "ResMed",
 ) -> list[ComputedBreath]:
     """Build the list of ComputedBreath for one session's analysis.
 
@@ -914,6 +946,9 @@ def _build_computed_breaths(
         recovery_breath_indices: Set of breath_numbers identified as recovery breaths.
         leak_timestamps: Leak waveform timestamps (may be None).
         leak_values: Leak waveform values (may be None).
+        device_manufacturer: Manufacturer string from the Device row.  Trigger/cycle
+            inference is only validated on ResMed devices; other vendors receive
+            ``vendor_applicability="unvalidated_device"``.
 
     Returns:
         list of ComputedBreath (same length as breaths).
@@ -922,11 +957,22 @@ def _build_computed_breaths(
         WaveformFeatureExtractor,
         compute_mid_insp_flattening,
     )
-    from snore.analysis.shared.trigger_cycle import infer_trigger_cycle  # noqa: PLC0415
+    from snore.analysis.shared.trigger_cycle import (  # noqa: PLC0415
+        APPLICABILITY_UNVALIDATED_DEVICE,
+        APPLICABILITY_VALIDATED,
+        infer_trigger_cycle,
+    )
 
     extractor = WaveformFeatureExtractor()
     sample_rate: float = (
         25.0  # default; the exact rate doesn't affect per-breath slicing
+    )
+    # Gate vendor-specific heuristic: trigger/cycle inference is tuned on ResMed
+    # flow waveforms only.  Other vendors get confidence=null + unvalidated_device.
+    tc_vendor_applicability = (
+        APPLICABILITY_VALIDATED
+        if device_manufacturer == "ResMed"
+        else APPLICABILITY_UNVALIDATED_DEVICE
     )
 
     computed: list[ComputedBreath] = []
@@ -957,7 +1003,7 @@ def _build_computed_breaths(
             inspiration_time_s=breath.inspiration_time,
             gap_before_s=gap_before,
             insp_flow_array=insp_arr,
-            vendor_applicability="validated",
+            vendor_applicability=tc_vendor_applicability,
         )
 
         leak_valid, leak_valid_reason = _compute_leak_valid(

@@ -533,7 +533,11 @@ async def fetch_waveform_window_raw(
 
     rows = (await db.execute(stmt)).all()
     if not rows:
-        # Return empty window
+        if request.session_id is not None:
+            raise ValueError(
+                f"Session {request.session_id} not found for date {request.therapy_date}"
+            )
+        # Return empty window (no sessions on this date/device)
         return RawWaveformWindow(
             request=request,
             session_id=request.session_id or 0,
