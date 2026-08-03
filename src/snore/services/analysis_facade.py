@@ -418,22 +418,23 @@ class AnalysisFacade:
 
         t_start = time.monotonic()
 
-        # Ownership check: confirm session belongs to this profile before I/O.
-        owned = (
-            await self.db_session.execute(
-                select(models.Session.id)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(
-                    models.Session.id == session_id,
-                    self._profile_filter(),
-                )
-            )
-        ).scalar_one_or_none()
-        if owned is None:
-            raise _NotFoundError(f"Session {session_id} not found")
-
         # I/O phase: open a dedicated short async scope — close it before compute.
+        # Ownership check runs inside this scope so self.db_session is never used
+        # (it may already be closed by the CLI before this method is called).
         async with session_scope() as read_db:
+            owned = (
+                await read_db.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        models.Device.profile_id == self.profile_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if owned is None:
+                raise _NotFoundError(f"Session {session_id} not found")
+
             read_svc = AnalysisService(read_db)
             raw = await read_svc.load_session_inputs_raw(session_id, modes=modes)
         # Session closed; prepare DTO (NumPy deserialization) — still sync/fast.

@@ -482,7 +482,11 @@ async def _analyze_single_session(
                 await session.execute(
                     select(models.Session)
                     .join(models.Day)
-                    .where(models.Day.date == date.date())
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Day.date == date.date(),
+                        models.Device.profile_id == profile_id,
+                    )
                 )
             )
             .scalars()
@@ -497,7 +501,11 @@ async def _analyze_single_session(
             (
                 await session.execute(
                     select(models.Session)
-                    .filter_by(id=session_id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        models.Device.profile_id == profile_id,
+                    )
                     .options(joinedload(models.Session.day))
                 )
             )
