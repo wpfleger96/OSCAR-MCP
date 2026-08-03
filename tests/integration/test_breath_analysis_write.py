@@ -31,12 +31,16 @@ from sqlalchemy import func, select
 # ---------------------------------------------------------------------------
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.analysis.service import AnalysisService
 from snore.analysis.shared.versioning import (
     AlgorithmIdentity,
     AlgoVersions,
     AnalysisRunMetadata,
 )
+from snore.analysis.types import AnalysisComputation, ModeResult
+from snore.analysis.types import AnalysisResult as AnalysisResultDTO
 from snore.database import models
+from snore.database.models import AnalysisResult as AnalysisResult_ORM
 from snore.database.session import init_database, session_scope
 
 
@@ -404,107 +408,81 @@ class TestAtomicRollbackOnChildInsertFailure:
 
 @pytest.mark.integration
 class TestNonUtcHostDeterminism:
-    async def test_analysis_timestamps_stored_as_naive_utc(self, temp_db):
-        """AnalysisResult timestamps stored as naive UTC regardless of host tz.
+    async def test_store_result_timestamp_matches_utc_under_shifted_tz(self, temp_db):
+        """store_result stores timestamps as naive UTC regardless of OS timezone.
 
-        Simulates a non-UTC host by setting TZ env var and re-importing time,
-        then verifying that the stored timestamps have no tzinfo (naive) and
-        match the expected UTC value.
+        Shifts the process timezone to America/New_York (UTC-5 in winter) using
+        os.environ["TZ"] + time.tzset() (POSIX only — skipped on Windows), then
+        drives the real store_result() with a known epoch.  The stored naive
+        datetime must equal datetime.utcfromtimestamp(epoch), not the local-time
+        interpretation.  If store_result used bare datetime.fromtimestamp(epoch)
+        without a tz argument, this test would fail on a UTC-5 host by 5 hours.
         """
+        import os
+        import time as _time
+
+        if not hasattr(_time, "tzset"):
+            pytest.skip("tzset not available on this platform (Windows)")
+
+        # 2024-01-19 02:00:00 UTC — wall-clock is 2024-01-18 21:00:00 in UTC-5.
+        epoch = 1705622400.0
+        expected_naive_utc = datetime.utcfromtimestamp(epoch)  # 2024-01-19 02:00:00
+
         await init_database(str(temp_db))
 
-        # Use explicit naive UTC datetimes (as the service would store them)
-        ts_start_utc = datetime(2025, 3, 15, 22, 30, 0)  # naive UTC
-        ts_end_utc = datetime(2025, 3, 16, 5, 45, 0)
+        original_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "America/New_York"
+            _time.tzset()
 
-        async with session_scope() as db:
-            _, profile_id = await _make_profile(db)
-            _, session_id = await _make_device_and_session(
-                db, profile_id, start=ts_start_utc
-            )
-            algo = _make_algo_versions()
-            ar = models.AnalysisResult(
-                session_id=session_id,
-                timestamp_start=ts_start_utc,
-                timestamp_end=ts_end_utc,
-                programmatic_result_json={},
-                processing_time_ms=70,
-                engine_versions_json=algo.model_dump(),
-            )
-            db.add(ar)
-            await db.flush()
-            ar_id = ar.id
+            async with session_scope() as db:
+                _, profile_id = await _make_profile(db)
+                session_start = expected_naive_utc
+                _, session_id = await _make_device_and_session(
+                    db, profile_id, start=session_start
+                )
+
+                result_dto = AnalysisResultDTO(
+                    session_id=session_id,
+                    session_duration_hours=7.0,
+                    total_breaths=0,
+                    machine_events=[],
+                    mode_results={
+                        "aasm": ModeResult(
+                            mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                        )
+                    },
+                    timestamp_start=epoch,
+                    timestamp_end=epoch + 7 * 3600.0,
+                )
+                computation = AnalysisComputation(
+                    summary=result_dto, breaths=[], primary_mode="aasm"
+                )
+                svc = AnalysisService(db, profile_id=profile_id)
+                ar_id = await svc.store_result(computation, processing_time_ms=10)
+        finally:
+            if original_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_tz
+            _time.tzset()
 
         async with session_scope() as db:
             stored = (
                 (
                     await db.execute(
-                        select(models.AnalysisResult).where(
-                            models.AnalysisResult.id == ar_id
-                        )
+                        select(AnalysisResult_ORM).where(AnalysisResult_ORM.id == ar_id)
                     )
                 )
                 .scalars()
                 .first()
             )
             assert stored is not None
-
-            # Must be naive (no tzinfo) — stored as offset-naive UTC
-            assert stored.timestamp_start.tzinfo is None, (
-                "timestamp_start must be stored as naive (UTC) — got tzinfo="
-                f"{stored.timestamp_start.tzinfo}"
-            )
-            assert stored.timestamp_end.tzinfo is None
-
-            # Values must round-trip exactly (no timezone shift)
-            assert stored.timestamp_start == ts_start_utc
-            assert stored.timestamp_end == ts_end_utc
-
-    async def test_from_timestamp_call_matches_utc_epoch_regardless_of_tz(
-        self, temp_db
-    ):
-        """datetime.fromtimestamp(epoch) in store_result must match UTC epoch.
-
-        The AnalysisService.store_result calls datetime.fromtimestamp(result.timestamp_start).
-        For a non-UTC host this can drift — verify the stored value matches the
-        UTC interpretation by comparing against datetime.utcfromtimestamp.
-        """
-
-        # Use a fixed epoch that differs in UTC vs US/Eastern (UTC-5)
-        epoch = 1705622400.0  # 2024-01-19 02:00:00 UTC
-        utc_dt = datetime.utcfromtimestamp(epoch)  # always UTC interpretation
-
-        await init_database(str(temp_db))
-        async with session_scope() as db:
-            _, profile_id = await _make_profile(db)
-            _, session_id = await _make_device_and_session(db, profile_id, start=utc_dt)
-            algo = _make_algo_versions()
-            ar = models.AnalysisResult(
-                session_id=session_id,
-                timestamp_start=utc_dt,
-                timestamp_end=utc_dt,
-                programmatic_result_json={},
-                processing_time_ms=10,
-                engine_versions_json=algo.model_dump(),
-            )
-            db.add(ar)
-            await db.flush()
-            ar_id = ar.id
-
-        async with session_scope() as db:
-            stored = (
-                (
-                    await db.execute(
-                        select(models.AnalysisResult).where(
-                            models.AnalysisResult.id == ar_id
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            assert stored is not None
-            # The stored value must match the UTC epoch interpretation
-            assert stored.timestamp_start == utc_dt, (
-                f"Stored {stored.timestamp_start!r} ≠ UTC epoch {utc_dt!r}"
+            # Must be naive (UTC, no tzinfo).
+            assert stored.timestamp_start.tzinfo is None
+            # Must match the UTC epoch interpretation, not local-time.
+            assert stored.timestamp_start == expected_naive_utc, (
+                f"Under UTC-5 host, stored {stored.timestamp_start!r} "
+                f"but expected UTC epoch {expected_naive_utc!r} — "
+                "service.py must use fromtimestamp(ts, tz=UTC).replace(tzinfo=None)"
             )

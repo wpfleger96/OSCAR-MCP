@@ -1124,26 +1124,73 @@ class TestDeletionCascade:
 
 
 # ---------------------------------------------------------------------------
-# Missing breaths table — actionable RuntimeError
+# Missing breaths table — actionable RuntimeError (real-path, no monkeypatching)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 class TestMissingBreathsTable:
     async def test_missing_breaths_table_raises_actionable_error(
-        self, async_db_session
+        self, async_db_session, tmp_path
     ):
-        """store_result raises RuntimeError with actionable message when breaths table missing."""
-        from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+        """store_result raises a RuntimeError with actionable message when breaths table absent.
 
-        _, profile_id = await _make_profile(async_db_session)
-        dev = await _make_device(async_db_session, profile_id)
-        _, session = await _make_day_and_session(
-            async_db_session, dev.id, date(2025, 10, 1)
+        Uses a separate fresh SQLite database (created via Base.metadata.create_all)
+        then executes ``DROP TABLE breaths`` before calling store_result().  When
+        store_result flushes the breath children, SQLAlchemy raises
+        OperationalError("no such table: breaths") from the real SQLite engine —
+        no monkeypatching.  The handler must convert this to a RuntimeError with
+        the drop-and-reimport guidance message.
+        """
+        import sqlite3  # noqa: PLC0415
+
+        from sqlalchemy.ext.asyncio import (  # noqa: PLC0415
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        from snore.analysis.types import ComputedBreath  # noqa: PLC0415
+        from snore.database.models import Base  # noqa: PLC0415
+
+        db_path = tmp_path / "missing_breaths.db"
+        async_url = f"sqlite+aiosqlite:///{db_path}"
+        engine = create_async_engine(async_url, echo=False)
+
+        # Create full schema (including breaths table).
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(
+            bind=engine, expire_on_commit=False, class_=AsyncSession
+        )
+
+        # Insert the prerequisite rows (profile, device, session) using the full schema.
+        async with factory() as setup_db:
+            _, profile_id = await _make_profile(setup_db)
+            dev = await _make_device(setup_db, profile_id)
+            _, session = await _make_day_and_session(
+                setup_db, dev.id, date(2025, 10, 1)
+            )
+            await setup_db.commit()
+            session_id = session.id
+
+        await engine.dispose()
+
+        # Drop the breaths table directly via sqlite3 (synchronous, no ORM).
+        con = sqlite3.connect(str(db_path))
+        con.execute("DROP TABLE breaths")
+        con.commit()
+        con.close()
+
+        # Re-open the engine — now the breaths table is gone.
+        engine2 = create_async_engine(async_url, echo=False)
+        factory2 = async_sessionmaker(
+            bind=engine2, expire_on_commit=False, class_=AsyncSession
         )
 
         result_dto = AnalysisResultDTO(
-            session_id=session.id,
+            session_id=session_id,
             session_duration_hours=7.0,
             total_breaths=1,
             machine_events=[],
@@ -1152,14 +1199,9 @@ class TestMissingBreathsTable:
                     mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
                 )
             },
-            timestamp_start=session.start_time.timestamp(),
-            timestamp_end=(
-                session.end_time or session.start_time + timedelta(hours=7)
-            ).timestamp(),
+            timestamp_start=1000.0,
+            timestamp_end=26200.0,
         )
-
-        from snore.analysis.types import ComputedBreath  # noqa: PLC0415
-
         breath = ComputedBreath(
             breath_number=1,
             start_offset_s=0.0,
@@ -1190,27 +1232,17 @@ class TestMissingBreathsTable:
             mask_off=None,
             mask_off_reason=None,
         )
-
         computation = AnalysisComputation(
             summary=result_dto, breaths=[breath], primary_mode="aasm"
         )
 
-        # Monkeypatch add_all to raise "no such table: breaths"
-        original_add_all = async_db_session.add_all
-
-        def _table_missing_add_all(rows: Any) -> None:
-            raise OperationalError(
-                "no such table: breaths", {}, Exception("no such table: breaths")
-            )
-
-        async_db_session.add_all = _table_missing_add_all
-
         try:
-            svc = AnalysisService(async_db_session, profile_id=profile_id)
-            with pytest.raises(
-                RuntimeError, match="breaths.*table.*missing|drop.*database|re-import"
-            ):
-                await svc.store_result(computation, processing_time_ms=1)
+            async with factory2() as db:
+                svc = AnalysisService(db, profile_id=profile_id)
+                with pytest.raises(
+                    RuntimeError,
+                    match="breaths.*table.*missing|drop.*database|re-import",
+                ):
+                    await svc.store_result(computation, processing_time_ms=1)
         finally:
-            async_db_session.add_all = original_add_all
-            await async_db_session.rollback()
+            await engine2.dispose()

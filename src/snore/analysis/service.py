@@ -28,7 +28,7 @@ import logging
 import time
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -834,8 +834,12 @@ class AnalysisService:
 
         analysis = models.AnalysisResult(
             session_id=result.session_id,
-            timestamp_start=datetime.fromtimestamp(result.timestamp_start),
-            timestamp_end=datetime.fromtimestamp(result.timestamp_end),
+            timestamp_start=datetime.fromtimestamp(
+                result.timestamp_start, tz=UTC
+            ).replace(tzinfo=None),
+            timestamp_end=datetime.fromtimestamp(result.timestamp_end, tz=UTC).replace(
+                tzinfo=None
+            ),
             programmatic_result_json=result.model_dump(),
             processing_time_ms=processing_time_ms,
             engine_versions_json=algo_versions.model_dump(),
@@ -884,6 +888,7 @@ class AnalysisService:
             ]
             try:
                 self.db_session.add_all(breath_rows)
+                await self.db_session.flush()
             except Exception as exc:
                 exc_msg = str(exc).lower()
                 if "no such table" in exc_msg and "breath" in exc_msg:

@@ -134,8 +134,13 @@ def test_import_without_no_analyze_runs_analysis_phase(snore, resmed_sd, tmp_pat
     """A default import (no --no-analyze) runs analysis and stores a result.
 
     After `snore import`, `analysis show --session-id 1` must succeed — the
-    import-time analysis phase populated the analysis_results table.
+    import-time analysis phase populated the analysis_results table.  The
+    breaths table must also be non-empty: if the segmenter wiring were broken
+    and produced zero breaths, the analysis_results row would still exist but
+    no breath rows would.
     """
+    import sqlite3
+
     db = tmp_path / "with_analyze.db"
     result = snore("import", str(resmed_sd), "--no-backup", "--all", db=db)
     assert result.returncode == 0, result.stderr or result.stdout
@@ -143,3 +148,12 @@ def test_import_without_no_analyze_runs_analysis_phase(snore, resmed_sd, tmp_pat
     # Analysis result must be present (import-time analysis ran).
     shown = snore("analysis", "show", "--session-id", "1", db=db)
     assert shown.returncode == 0, shown.stderr or shown.stdout
+
+    # breaths table must be non-empty — proves segmenter ran and wrote rows.
+    con = sqlite3.connect(str(db))
+    breath_count = con.execute("SELECT COUNT(*) FROM breaths").fetchone()[0]
+    con.close()
+    assert breath_count > 0, (
+        f"Expected at least one breath row after real import; got {breath_count}. "
+        "Segmenter wiring may be broken."
+    )
