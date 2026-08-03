@@ -1465,3 +1465,166 @@ class TestTwoProfileIsolation:
                 ),
                 profile_id=profile_a_id,
             )
+
+
+# ---------------------------------------------------------------------------
+# Stale-session coverage / status-precedence tests (Thufir pass-1 finding #3)
+# ---------------------------------------------------------------------------
+
+
+async def _store_stale_analysis_with_breaths(
+    db: AsyncSession, session: models.Session, n_breaths: int = 5
+) -> models.AnalysisResult:
+    """Insert a stale AnalysisResult (legacy engine_versions_json) + Breath rows.
+
+    Uses the legacy flat shape to guarantee STALE_VERSION from _latest_analysis_for_session.
+    """
+    start = session.start_time
+    end = session.end_time or (start + timedelta(hours=7))
+    ar = models.AnalysisResult(
+        session_id=session.id,
+        timestamp_start=start,
+        timestamp_end=end,
+        programmatic_result_json={},
+        processing_time_ms=10,
+        engine_versions_json={"version": "0.0.1"},  # legacy flat → STALE_VERSION
+    )
+    db.add(ar)
+    await db.flush()
+
+    breaths = [
+        models.Breath(
+            analysis_result_id=ar.id,
+            session_id=session.id,
+            breath_number=i + 1,
+            start_offset_s=float(i * 4),
+            end_offset_s=float(i * 4 + 3),
+            leak_valid=True,
+            flow_class=4,  # flow-limited → would rank in WORST_FLATTENING
+            mid_insp_flattening=0.8,  # high — would pollute results if included
+        )
+        for i in range(n_breaths)
+    ]
+    db.add_all(breaths)
+    await db.flush()
+    return ar
+
+
+@pytest.mark.unit
+class TestStaleCoverageStateMachine:
+    """Status-precedence and stale-row exclusion tests for finding #3."""
+
+    async def test_all_stale_nightly_summary_is_stale(self, async_db_session):
+        """get_nightly_summary returns STALE (not NOT_RUN) when analysis exists but is stale."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 3, 1)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        # Stale analysis — old engine_versions_json
+        await _store_stale_analysis_with_breaths(async_db_session, session, n_breaths=3)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_nightly_summary(therapy_date)
+
+        # All-stale day must be STALE, not NOT_RUN
+        assert result.day_status == DayAnalysisStatus.STALE
+
+    async def test_stale_session_excluded_from_find_windows_breath_rows(
+        self, async_db_session
+    ):
+        """find_windows returns empty windows when the only analysis is stale.
+
+        Stale breath rows must not contribute to WORST_FLATTENING results even
+        though ar_id is not None.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 3, 2)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        # Stale analysis with highly-ranked breaths that would appear if leaking
+        await _store_stale_analysis_with_breaths(async_db_session, session, n_breaths=5)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date,
+            WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=10,
+        )
+
+        assert result.day_status == DayAnalysisStatus.STALE
+        assert result.windows == [], "stale breath rows must not appear in windows"
+
+    async def test_stale_and_not_run_find_windows_status_is_stale(
+        self, async_db_session
+    ):
+        """find_windows returns STALE (not NOT_RUN) for a stale+not-run mixed day.
+
+        One session has a stale analysis; a second session on the same day has
+        no analysis at all.  The day_status must be STALE, not NOT_RUN.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 3, 3)
+
+        # Session A: stale
+        day, session_a = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date
+        )
+        await _store_stale_analysis_with_breaths(
+            async_db_session, session_a, n_breaths=2
+        )
+
+        # Session B: not run — share the same Day
+        session_b = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 2, 0
+            ),
+            end_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 5, 0
+            ),
+            duration_seconds=3 * 3600.0,
+        )
+        async_db_session.add(session_b)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date, WindowCriterion.WORST_FLATTENING_LEAK_VALID, n=5
+        )
+
+        assert result.day_status == DayAnalysisStatus.STALE
+
+    async def test_ca_events_returned_when_analysis_stale(self, async_db_session):
+        """get_ca_analysis returns CA events even when analysis is stale.
+
+        CA events are stored at import time (event-anchored) and must be available
+        regardless of analysis version.  day_status must be STALE, not NOT_RUN.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 3, 4)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        # Stale analysis
+        await _store_stale_analysis_with_breaths(async_db_session, session, n_breaths=2)
+
+        # CA event stored at import time (independent of analysis)
+        ca_event = models.Event(
+            session_id=session.id,
+            event_type="CA",
+            start_time=session.start_time + timedelta(seconds=120),
+            duration_seconds=15.0,
+        )
+        async_db_session.add(ca_event)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date, device_id=dev.id)
+
+        assert result.day_status == DayAnalysisStatus.STALE
+        assert len(result.ca_events) == 1, "CA events must be returned on stale days"

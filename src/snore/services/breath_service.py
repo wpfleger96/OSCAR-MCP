@@ -1444,7 +1444,7 @@ class BreathService:
         for sid in session_ids:
             ar_id = ar_by_session.get(sid)
             ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
-            if ar_id is None:
+            if ar_id is None or ar_status != AnalysisStatus.OK:
                 continue
 
             # Fetch all breaths for this session ordered by breath_number
@@ -1601,7 +1601,7 @@ class BreathService:
         for sid in session_ids:
             ar_id = ar_by_session.get(sid)
             ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
-            if ar_id is None:
+            if ar_id is None or ar_status != AnalysisStatus.OK:
                 continue
 
             breath_rows = (
@@ -2184,8 +2184,12 @@ class BreathService:
         analyzed = len(ok_sessions)
 
         if not ok_sessions:
+            any_stale = any(
+                c.analysis_status == AnalysisStatus.STALE_VERSION
+                for c in session_coverages
+            )
             day_status = (
-                DayAnalysisStatus.NOT_RUN if analyzed == 0 else DayAnalysisStatus.STALE
+                DayAnalysisStatus.STALE if any_stale else DayAnalysisStatus.NOT_RUN
             )
             return NightlyAnalysisSummary(
                 therapy_date=therapy_date,
@@ -2726,20 +2730,17 @@ class BreathService:
             )
         ]
 
-        if status != AnalysisStatus.OK or ar_id is None:
-            return CaAnalysisResult(
-                query_date=therapy_date,
-                device_id=resolved_device_id,
-                day_status=DayAnalysisStatus.NOT_RUN,
-                session_coverage=coverage,
-                algorithm_identity=algo.identity if algo else None,
-                null_reason=NullReason.NOT_AVAILABLE,
-                ca_events=[],
-                periodic_breathing_pct=None,
-                pb_reason=NullReason.NOT_AVAILABLE,
-                mv_rolling_variance=None,
-                mv_variance_reason=NullReason.NOT_AVAILABLE,
-            )
+        # CA events are event-anchored (stored at import, not analysis time) and
+        # are always returned.  Map analysis status → day_status with honest provenance.
+        if status == AnalysisStatus.OK:
+            ca_day_status = DayAnalysisStatus.OK
+            ca_null_reason: NullReason | None = None
+        elif status == AnalysisStatus.STALE_VERSION:
+            ca_day_status = DayAnalysisStatus.STALE
+            ca_null_reason = NullReason.ANALYSIS_STALE
+        else:
+            ca_day_status = DayAnalysisStatus.NOT_RUN
+            ca_null_reason = NullReason.ANALYSIS_NOT_RUN
 
         # Fetch CA events
         ca_rows = (
@@ -2777,51 +2778,56 @@ class BreathService:
                 )
             )
 
-        # Periodic breathing percentage from persisted programmatic_result_json.
-        # The pattern_detector records periodic_breathing_episodes with durations.
-        # MV rolling variance from MV waveform bins (10-min windows).
+        # pb_pct: from persisted analysis result — available when ar_id is not None
+        # (OK or STALE both have an ar_id).
         pb_pct: float | None = None
-        pb_reason: NullReason | None = None
+        pb_reason: NullReason | None = (
+            NullReason.NOT_AVAILABLE if ar_id is None else None
+        )
         mv_rolling_var: float | None = None
         mv_var_reason: NullReason | None = None
 
-        # Fetch the analysis result row for persisted data
-        ar_row = (
-            (
-                await self._db.execute(
-                    select(models.AnalysisResult).where(
-                        models.AnalysisResult.id == ar_id
+        if ar_id is not None:
+            ar_row = (
+                (
+                    await self._db.execute(
+                        select(models.AnalysisResult).where(
+                            models.AnalysisResult.id == ar_id
+                        )
                     )
                 )
+                .scalars()
+                .first()
             )
-            .scalars()
-            .first()
-        )
-        if ar_row is not None and ar_row.programmatic_result_json:
-            from snore.analysis.types import (
-                AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
-            )
+            if ar_row is not None and ar_row.programmatic_result_json:
+                from snore.analysis.types import (
+                    AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+                )
 
-            try:
-                dto = AnalysisResultDTO.model_validate(ar_row.programmatic_result_json)
-                episodes = dto.periodic_breathing_episodes or []
-                if episodes:
-                    # pb_pct = total episode duration / session duration * 100
-                    session_duration_s = session_row.duration_seconds or 0.0
-                    total_pb_s = sum(float(ep.get("duration", 0)) for ep in episodes)
-                    if session_duration_s > 0:
-                        pb_pct = total_pb_s / session_duration_s * 100.0
-                    else:
+                try:
+                    dto = AnalysisResultDTO.model_validate(
+                        ar_row.programmatic_result_json
+                    )
+                    episodes = dto.periodic_breathing_episodes or []
+                    if episodes:
+                        # pb_pct = total episode duration / session duration * 100
+                        session_duration_s = session_row.duration_seconds or 0.0
+                        total_pb_s = sum(
+                            float(ep.get("duration", 0)) for ep in episodes
+                        )
+                        if session_duration_s > 0:
+                            pb_pct = total_pb_s / session_duration_s * 100.0
+                        else:
+                            pb_pct = 0.0
+                    elif dto.periodic_breathing is not None:
+                        # Summary-only: no episode list, return 0 (not null)
                         pb_pct = 0.0
-                elif dto.periodic_breathing is not None:
-                    # Summary-only: no episode list, return 0 (not null)
-                    pb_pct = 0.0
-                else:
+                    else:
+                        pb_reason = NullReason.NOT_AVAILABLE
+                except Exception:  # noqa: BLE001
                     pb_reason = NullReason.NOT_AVAILABLE
-            except Exception:  # noqa: BLE001
-                pb_reason = NullReason.NOT_AVAILABLE
 
-        # MV rolling variance: compute from MV waveform in 10-min bins
+        # MV rolling variance: from waveform (independent of analysis status)
         try:
             raw_mv_full = await fetch_waveform_window_raw(
                 self._db,
@@ -2842,7 +2848,6 @@ class BreathService:
                     bin_size = 600.0  # 10 minutes
                     offsets = ch.offset_seconds
                     vals = ch.values
-                    # Bin means
                     bin_start = 0.0
                     bin_means: list[float] = []
                     while bin_start < max(offsets):
@@ -2866,10 +2871,10 @@ class BreathService:
         return CaAnalysisResult(
             query_date=therapy_date,
             device_id=resolved_device_id,
-            day_status=DayAnalysisStatus.OK,
+            day_status=ca_day_status,
             session_coverage=coverage,
             algorithm_identity=algo.identity if algo else None,
-            null_reason=None,
+            null_reason=ca_null_reason,
             ca_events=ca_details,
             periodic_breathing_pct=pb_pct,
             pb_reason=pb_reason,
