@@ -633,3 +633,130 @@ class TestRunTxnIdempotency:
             await redeem_invite(invite_id)
 
         await cleanup_database()
+
+    async def test_production_import_chunk_contention_retries_with_exactly_one_row(
+        self, temp_db
+    ):
+        """Contention raised from production _import_batch_with_session reaches run_txn
+        and triggers a fresh-session replay — exactly one Session row persists.
+
+        Strategy: patch _import_single_session so attempt 1 flushes the row then
+        raises a contention error.  The re-raise logic in _import_batch_with_session
+        propagates it past the except block to run_txn.  Attempt 2 uses a fresh
+        session (attempt 1 was rolled back) and succeeds — UNIQUE guard ensures
+        no duplication.
+        """
+        import uuid
+
+        from unittest.mock import patch
+
+        from sqlalchemy import select
+
+        from snore.database.importers import SessionImporter
+        from snore.database.models import Profile, Session, User
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+        from snore.database.txn import run_txn
+
+        db_path = str(temp_db)
+        await init_database(db_path)
+
+        # Seed: user → profile.
+        async with session_scope() as db:
+            user = User(
+                canonical_email=f"chunk_{uuid.uuid4().hex[:8]}@test", role="admin"
+            )
+            db.add(user)
+            await db.flush()
+            profile = Profile(user_id=user.id, name="Chunk Test")
+            db.add(profile)
+            await db.flush()
+            profile_id = profile.id
+
+        device_session_id = f"chunk_contention_{uuid.uuid4().hex[:8]}"
+        attempt_count = 0
+
+        # Build a minimal UnifiedSession.
+        from datetime import UTC, datetime
+
+        from snore.parsers.unified import DeviceInfo, UnifiedSession
+
+        device_info = DeviceInfo(
+            manufacturer="TestMfr",
+            model="TestModel",
+            serial_number=f"SN_{uuid.uuid4().hex[:6]}",
+        )
+        unified = UnifiedSession(
+            device_info=device_info,
+            device_session_id=device_session_id,
+            start_time=datetime(2025, 3, 1, 22, 0, 0, tzinfo=UTC),
+            end_time=datetime(2025, 3, 2, 6, 0, 0, tzinfo=UTC),
+            duration_seconds=28800.0,
+        )
+
+        # Patch _import_single_session: attempt 1 flushes then raises contention.
+        original_import_single = SessionImporter._import_single_session
+
+        async def _single_with_contention(self_imp, db, session_data, force=False):
+            nonlocal attempt_count
+            attempt_count += 1
+            # Call the real method to flush all rows.
+            result = await original_import_single(
+                self_imp, db, session_data, force=force
+            )
+            if attempt_count == 1:
+                raise RuntimeError("SQLITE_BUSY simulated at flush in batch")
+            return result
+
+        importer = SessionImporter(profile_id)
+
+        # _is_sqlite_contention always True so run_txn retries.
+        with (
+            patch.object(
+                SessionImporter, "_import_single_session", _single_with_contention
+            ),
+            patch("snore.database.txn._is_sqlite_contention", return_value=True),
+            patch("snore.database.txn.asyncio.sleep"),
+        ):
+
+            async def _import_chunk(db):
+                (
+                    imp_count,
+                    skip_count,
+                    fail_count,
+                ) = await importer.import_sessions_batch(
+                    [unified],
+                    force=False,
+                    batch_size=50,
+                    db=db,
+                )
+                return (imp_count, skip_count, fail_count)
+
+            result = await run_txn(_import_chunk)
+
+        imported, skipped, failed = result
+        assert attempt_count == 2, (
+            f"Expected 2 attempts (1 rollback + 1 success); got {attempt_count}"
+        )
+        assert imported == 1, f"Expected 1 imported; got {imported}"
+        assert failed == 0, f"Expected 0 failed; got {failed}"
+
+        # Exactly one row persisted.
+        async with session_scope() as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(Session).where(
+                            Session.device_session_id == device_session_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1, f"Expected 1 Session row after retry; got {len(rows)}"
+
+        await cleanup_database()

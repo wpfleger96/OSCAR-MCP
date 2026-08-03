@@ -323,9 +323,9 @@ class AnalysisFacade:
     ) -> int:
         """Delete analysis results for given sessions.
 
-        Only analysis records whose sessions belong to this profile are deleted.
-        Foreign session IDs are silently ignored — the caller sees the count of
-        records actually removed (0 for a fully-foreign list).
+        All requested session IDs must belong to this profile — callers should
+        validate via ``get_owned_session_ids`` and return 404 before calling
+        this method.  The scoped subquery is retained as defence-in-depth.
 
         Args:
             session_ids: Session IDs to delete analysis for
@@ -395,6 +395,30 @@ class AnalysisFacade:
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
 
+    async def get_owned_session_ids(self, session_ids: list[int]) -> set[int]:
+        """Return the subset of session_ids that belong to this profile.
+
+        Used by routes to validate ownership before mutation: any ID absent from
+        the returned set is either missing or owned by a different profile.
+        """
+        if not session_ids:
+            return set()
+        rows = (
+            (
+                await self.db_session.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id.in_(session_ids),
+                        self._profile_filter(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return set(rows)
+
     async def run_analysis(
         self,
         session_id: int,
@@ -435,7 +459,7 @@ class AnalysisFacade:
             if owned is None:
                 raise _NotFoundError(f"Session {session_id} not found")
 
-            read_svc = AnalysisService(read_db)
+            read_svc = AnalysisService(read_db, profile_id=self.profile_id)
             raw = await read_svc.load_session_inputs_raw(session_id, modes=modes)
         # Session closed; prepare DTO (NumPy deserialization) — still sync/fast.
         inputs = AnalysisService.prepare_inputs(raw)
@@ -449,7 +473,7 @@ class AnalysisFacade:
         if store_results:
             # Write phase: short INSERT-only scope.
             async with session_scope() as write_db:
-                write_svc = AnalysisService(write_db)
+                write_svc = AnalysisService(write_db, profile_id=self.profile_id)
                 await write_svc.store_result(result, processing_time_ms)
 
         return result
@@ -547,6 +571,7 @@ class AnalysisFacade:
         return await coordinator.submit(
             matched_total=matched_total,
             session_stream=async_result,
+            profile_id=self.profile_id,
             modes=modes,
             store_results=store_results,
             max_workers=max_workers,
@@ -589,6 +614,7 @@ class BatchAnalysisCoordinator:
         *,
         matched_total: int,
         session_stream: Any,  # AsyncResult from session.stream(); yields rows lazily
+        profile_id: int,
         modes: Sequence[str] | None = None,
         store_results: bool = True,
         max_workers: int = 4,
@@ -608,6 +634,8 @@ class BatchAnalysisCoordinator:
                 ``total`` in the result so cancelled sessions are never silently dropped.
             session_stream: Async stream from ``session.stream(stmt)``; yields rows lazily.
                 Scalars only — no ORM objects passed to workers.
+            profile_id: Profile that owns the sessions — threaded into each
+                ``AnalysisService`` read/write scope so all I/O is scoped.
             modes: Detection modes to run (``None`` = default).
             store_results: If True, write each result to the DB.
             max_workers: Concurrency cap (number of simultaneous coroutines).
@@ -657,6 +685,7 @@ class BatchAnalysisCoordinator:
                     async with session_scope() as read_session:
                         svc = AnalysisService(
                             read_session,
+                            profile_id=profile_id,
                             # Reuse modes_list from outer scope (snapshot).
                         )
                         raw = await svc.load_session_inputs_raw(
@@ -671,7 +700,9 @@ class BatchAnalysisCoordinator:
                     # --- Write phase: persist result on the event loop ---
                     if store_results and result is not None:
                         async with session_scope() as write_session:
-                            write_svc = AnalysisService(write_session)
+                            write_svc = AnalysisService(
+                                write_session, profile_id=profile_id
+                            )
                             await write_svc.store_result(result, processing_time_ms)
 
                     return "success"

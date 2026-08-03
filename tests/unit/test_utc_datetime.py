@@ -501,6 +501,7 @@ class TestAnalysisResultOrdering:
             db.add_all([older, newer])
             db.commit()
             session_id = session.id
+            profile_id = profile.id
 
         engine.dispose()
 
@@ -510,7 +511,7 @@ class TestAnalysisResultOrdering:
             bind=async_engine, class_=AsyncSession, expire_on_commit=False
         )
         async with factory() as async_db:
-            svc = AnalysisService(async_db)
+            svc = AnalysisService(async_db, profile_id=profile_id)
             result = await svc.get_analysis_result(session_id)
         await async_engine.dispose()
 

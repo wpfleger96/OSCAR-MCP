@@ -406,6 +406,7 @@ class TestBatchCoordinatorHandle:
         result = await coord.submit(
             matched_total=3,
             session_stream=_pairs_as_stream([(1, None), (2, None), (3, None)]),
+            profile_id=1,
             store_results=False,
             max_workers=1,
         )
@@ -502,6 +503,7 @@ class TestBatchCoordinatorHandle:
             result = await coord.submit(
                 matched_total=n_total,
                 session_stream=_pairs_as_stream(pairs),
+                profile_id=1,
                 store_results=False,
                 max_workers=max_workers,
                 progress_callback=on_progress,
@@ -592,6 +594,7 @@ class TestBatchCoordinatorHandle:
             result = await coord.submit(
                 matched_total=n_total,
                 session_stream=_pairs_as_stream(pairs),
+                profile_id=1,
                 store_results=False,
                 max_workers=max_workers,
             )

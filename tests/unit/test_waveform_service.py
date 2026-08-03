@@ -552,3 +552,80 @@ class TestCompareEvents:
         result = await service.compare_events(session.id)
         assert result.false_negatives == []
         assert result.false_positives_apnea == []
+
+    async def test_get_waveform_data_leaves_session_open_for_subsequent_queries(
+        self, async_db_session, async_test_device
+    ):
+        """get_waveform_data must NOT close the injected session.
+
+        After fetching waveform data, the caller must be able to make further
+        DB queries on the same session (e.g., loading analysis overlays in
+        'waveform show').  A closed session raises InvalidRequestError on any
+        subsequent execute().
+
+        Regression guard: WaveformService previously called
+        ``await self.db_session.close()`` at the end of the I/O phase,
+        invalidating the caller's session.
+        """
+
+        import numpy as np
+
+        from snore.database.models import Session, Waveform
+        from snore.services.waveform_service import WaveformService
+
+        now = datetime(2025, 1, 15, 22, 0, 0)
+        session = Session(
+            device_id=async_test_device.id,
+            device_session_id="test_overlay_session",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        async_db_session.add(session)
+        await async_db_session.flush()
+
+        sample_count = 100
+        sample_rate = 25.0
+        timestamps = np.arange(sample_count, dtype=np.float32) / sample_rate
+        values = np.zeros(sample_count, dtype=np.float32)
+        data = np.column_stack([timestamps, values])
+        wf = Waveform(
+            session_id=session.id,
+            waveform_type="flow",
+            sample_rate=sample_rate,
+            unit="L/min",
+            sample_count=sample_count,
+            data_blob=data.tobytes(),
+        )
+        async_db_session.add(wf)
+        await async_db_session.flush()
+
+        service = WaveformService(
+            async_db_session, profile_id=async_test_device.profile_id
+        )
+
+        # Fetch waveform data — must NOT close the session.
+        ts, vals, meta = await service.get_waveform_data(
+            session_id=session.id,
+            waveform_type="flow",
+        )
+        assert len(ts) == sample_count
+
+        # The session must still be usable for subsequent queries (overlay loading).
+        # This would raise InvalidRequestError if the session had been closed.
+        from sqlalchemy import select
+
+        from snore.database.models import Waveform as WaveformModel
+
+        row = (
+            (
+                await async_db_session.execute(
+                    select(WaveformModel).where(WaveformModel.session_id == session.id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert row is not None, (
+            "Session was closed after get_waveform_data — subsequent query failed"
+        )

@@ -334,15 +334,16 @@ class SessionService:
     async def delete_sessions(self, session_ids: list[int]) -> int:
         """Delete sessions by ID list.
 
-        Only sessions belonging to this profile are deleted.  Foreign IDs are
-        silently ignored — the caller sees the count of rows actually removed,
-        which is 0 for a fully-foreign list (indistinguishable from "not found").
+        All requested IDs must belong to this profile.  If any are foreign the
+        caller should have validated first (via ``get_owned_ids``) and returned
+        404 before calling this method.  The DELETE itself carries the predicate
+        as a defence-in-depth measure.
         """
         if not session_ids:
             return 0
 
-        # The ownership predicate is in the DELETE itself so a foreign session_id
-        # cannot cause a deletion — no separate SELECT needed.
+        # Ownership predicate inside the DELETE — foreign IDs cannot be deleted
+        # even if the caller skips the pre-validation.
         cursor: CursorResult[Any] = await self.db_session.execute(  # type: ignore[assignment]
             delete(models.Session)
             .where(models.Session.id.in_(session_ids))
@@ -353,6 +354,30 @@ class SessionService:
             )
         )
         return cursor.rowcount or 0
+
+    async def get_owned_ids(self, session_ids: list[int]) -> set[int]:
+        """Return the subset of session_ids that belong to this profile.
+
+        Used by routes to validate ownership before mutation: any ID absent from
+        the returned set is either missing or owned by a different profile.
+        """
+        if not session_ids:
+            return set()
+        rows = (
+            (
+                await self.db_session.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id.in_(session_ids),
+                        self._profile_filter(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return set(rows)
 
     async def set_session_enabled(self, session_id: int, enabled: bool) -> None:
         """Toggle session enabled/disabled status.

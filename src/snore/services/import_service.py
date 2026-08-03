@@ -9,7 +9,6 @@ from pathlib import Path, PurePosixPath
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.auth.factory import resolve_local_profile_id
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
 from snore.database.txn import run_txn
@@ -100,9 +99,7 @@ class ImportService:
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
-        user_ref: str | None = None,
-        profile_ref: str | None = None,
-        profile_id: int | None = None,
+        profile_id: int,
     ) -> ImportResult:
         """Run the import pipeline for the selected sources.
 
@@ -113,11 +110,8 @@ class ImportService:
             cancel_predicate: Optional callable that returns True when the caller
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
-            user_ref:    Value of --user / SNORE_USER for profile resolution.
-            profile_ref: Value of --profile / SNORE_PROFILE for profile resolution.
-            profile_id:  Pre-resolved profile ID (skips user_ref/profile_ref resolution
-                         when provided — used by the import worker to consume its
-                         snapshotted job.target_profile_id).
+            profile_id:  Resolved profile ID — required.  All devices and sessions
+                         created during this import are owned by this profile.
         """
         return await self._import_sources_async(
             sources,
@@ -133,8 +127,6 @@ class ImportService:
             dry_run=dry_run,
             progress_callback=progress_callback,
             cancel_predicate=cancel_predicate,
-            user_ref=user_ref,
-            profile_ref=profile_ref,
             profile_id=profile_id,
         )
 
@@ -154,9 +146,7 @@ class ImportService:
         dry_run: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
-        user_ref: str | None = None,
-        profile_ref: str | None = None,
-        profile_id: int | None = None,
+        profile_id: int,
     ) -> ImportResult:
 
         def emit(msg: str) -> None:
@@ -171,28 +161,9 @@ class ImportService:
         total_skipped = 0
         total_failed = 0
 
-        # Resolve the active profile once — all devices created during this import
-        # are owned by this profile.  In local mode this auto-provisions the first
-        # admin user + profile on first run.
-        #
-        # If profile_id is already resolved (e.g. from a snapshotted job), skip
-        # user_ref/profile_ref resolution entirely.
-        if profile_id is None:
-            async with session_scope() as _profile_db:
-                if user_ref is not None or profile_ref is not None:
-                    from snore.auth.factory import (
-                        resolve_cli_profile_id,  # noqa: PLC0415
-                    )
-
-                    profile_id = await resolve_cli_profile_id(
-                        _profile_db, user_ref, profile_ref
-                    )
-                else:
-                    profile_id = await resolve_local_profile_id(_profile_db)
-
         # Default backup root is namespaced by profile so raw files from
         # different profiles never share a directory — mirrors ExportService.
-        if backup_root is None and profile_id is not None:
+        if backup_root is None:
             from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
             backup_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
@@ -292,7 +263,7 @@ class ImportService:
             # Import — ImportService opens ONE scope per bounded batch chunk.
             # Each chunk is committed separately; a failed chunk does not poison
             # subsequent chunks.
-            importer = SessionImporter()
+            importer = SessionImporter(profile_id)
             emit("Importing sessions...")
             imported = 0
             skipped = 0
@@ -315,7 +286,6 @@ class ImportService:
                     db: AsyncSession,
                     *,
                     _chunk: list[UnifiedSession] = chunk,
-                    _profile_id: int | None = profile_id,
                     _importer: SessionImporter = importer,
                 ) -> tuple[int, int, int]:
                     return await _importer.import_sessions_batch(
@@ -325,7 +295,6 @@ class ImportService:
                         progress_callback=progress_callback,
                         cancel_predicate=cancel_predicate,
                         db=db,
-                        profile_id=_profile_id,
                     )
 
                 ci, cs, cf = await run_txn(_import_chunk)

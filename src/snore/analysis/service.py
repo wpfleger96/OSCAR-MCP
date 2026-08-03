@@ -114,20 +114,22 @@ class AnalysisService:
     - Storing results in the database
     - Providing structured results for consumption
 
-    Pass ``db_session=None`` to construct a compute-only instance: only
-    ``compute_analysis()`` and ``prepare_inputs()`` may be called — any method
-    that accesses the DB will raise.  Use this to avoid the
-    ``object.__new__()`` escape hatch previously required.
+    Two construction modes:
+    - **DB mode**: ``AnalysisService(db_session, profile_id=n)`` — ``profile_id`` is
+      required when a session is provided; all DB queries are scoped to that profile.
+    - **Compute mode**: ``AnalysisService()`` — ``db_session=None``; only
+      ``compute_analysis()`` and ``prepare_inputs()`` may be called.
 
     Example:
-        >>> service = AnalysisService(db_session)
-        >>> result = service.analyze_session(session_id=123)
+        >>> service = AnalysisService(db_session, profile_id=42)
+        >>> result = await service.analyze_session(session_id=123)
         >>> print(f"AHI: {result['event_timeline']['ahi']}")
     """
 
     def __init__(
         self,
         db_session: AsyncSession | None = None,
+        profile_id: int | None = None,
         min_breath_duration: float = BSC.MIN_BREATH_DURATION,
         confidence_threshold: float = FLC.CONFIDENCE_THRESHOLD,
     ):
@@ -135,11 +137,20 @@ class AnalysisService:
         Initialize analysis service.
 
         Args:
-            db_session: SQLAlchemy async database session
+            db_session: SQLAlchemy async database session.  Pass ``None`` for a
+                compute-only instance (``compute_analysis``/``prepare_inputs`` only).
+            profile_id: Required when ``db_session`` is provided.  All DB queries
+                are scoped to this profile — sessions not owned by it raise or
+                return ``None`` exactly as if missing.
             min_breath_duration: Minimum breath duration for segmentation (seconds)
             confidence_threshold: Minimum confidence for reliable findings
         """
+        if db_session is not None and profile_id is None:
+            raise ValueError(
+                "AnalysisService requires profile_id when db_session is provided"
+            )
         self.db_session = db_session
+        self.profile_id = profile_id
         self.waveform_loader = (
             WaveformLoader(db_session) if db_session is not None else None
         )
@@ -165,15 +176,13 @@ class AnalysisService:
             List of respiratory events with session-relative timestamps
         """
         assert self.db_session is not None, "_load_machine_events requires a DB session"
-        session = (
-            (
-                await self.db_session.execute(
-                    select(models.Session).filter_by(id=session_id)
-                )
-            )
-            .scalars()
-            .first()
-        )
+        # Scope session lookup to this profile — consistent with load_session_inputs_raw.
+        stmt = select(models.Session).where(models.Session.id == session_id)
+        if self.profile_id is not None:
+            stmt = stmt.join(
+                models.Device, models.Session.device_id == models.Device.id
+            ).where(models.Device.profile_id == self.profile_id)
+        session = (await self.db_session.execute(stmt)).scalars().first()
         if not session:
             return []
 
@@ -259,15 +268,14 @@ class AnalysisService:
         )
         modes_list = list(modes) if modes is not None else [DEFAULT_MODE]
 
-        session = (
-            (
-                await self.db_session.execute(
-                    select(models.Session).filter_by(id=session_id)
-                )
-            )
-            .scalars()
-            .first()
-        )
+        # Scope the session lookup to this profile so foreign IDs raise ValueError
+        # rather than loading another profile's data.
+        stmt = select(models.Session).where(models.Session.id == session_id)
+        if self.profile_id is not None:
+            stmt = stmt.join(
+                models.Device, models.Session.device_id == models.Device.id
+            ).where(models.Device.profile_id == self.profile_id)
+        session = (await self.db_session.execute(stmt)).scalars().first()
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
@@ -575,6 +583,9 @@ class AnalysisService:
         """
         Retrieve stored analysis result for a session.
 
+        Scoped to this profile — returns None for foreign session IDs (treats
+        "not owned" and "not analyzed" identically to avoid oracle attacks).
+
         Args:
             session_id: Database session ID
 
@@ -582,6 +593,21 @@ class AnalysisService:
             AnalysisResult dataclass or None if not found
         """
         assert self.db_session is not None, "get_analysis_result requires a DB session"
+        # Validate ownership before fetching analysis rows.
+        if self.profile_id is not None:
+            owned = (
+                await self.db_session.execute(
+                    select(models.Session.id)
+                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    .where(
+                        models.Session.id == session_id,
+                        models.Device.profile_id == self.profile_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if owned is None:
+                return None
+
         analysis = (
             (
                 await self.db_session.execute(

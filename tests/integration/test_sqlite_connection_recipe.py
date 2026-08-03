@@ -308,7 +308,6 @@ class TestImporterForcedFailureContinuation:
                 raise RuntimeError("Forced mid-import failure after partial flush")
             return await original_get_or_create(device_id, day_date, db_session)
 
-        importer = SessionImporter()
         with patch.object(DayManager, "get_or_create_day", patched_day):
             async with session_scope() as batch_db:
                 # Create a profile for devices.
@@ -328,11 +327,11 @@ class TestImporterForcedFailureContinuation:
                 await batch_db.flush()
                 _pid = _p.id
 
+                importer = SessionImporter(_pid)
                 imported, skipped, failed = await importer.import_sessions_batch(
                     iter([good1, bad_session, good2]),
                     batch_size=3,
                     db=batch_db,
-                    profile_id=_pid,
                 )
 
         assert failed == 1, f"Expected 1 failure, got {failed}"
@@ -394,12 +393,12 @@ class TestImporterForcedFailureContinuation:
         original_import_single = SessionImporter._import_single_session
 
         async def _raise_after_all_children_flushed(
-            self_imp, db, session_data, force=False, *, profile_id=None
+            self_imp, db, session_data, force=False
         ):
             """Call real _import_single_session (which flushes all children),
             then raise — savepoint must roll back all child rows for the bad session."""
             result = await original_import_single(
-                self_imp, db, session_data, force=force, profile_id=profile_id
+                self_imp, db, session_data, force=force
             )
             # All children (waveform/event/stat/setting) are now flushed inside the
             # savepoint.  Raise here to prove the savepoint rolls them all back.
@@ -422,7 +421,6 @@ class TestImporterForcedFailureContinuation:
                 )
             return result
 
-        importer = SessionImporter()
         with patch.object(
             SessionImporter, "_import_single_session", _raise_after_all_children_flushed
         ):
@@ -444,11 +442,11 @@ class TestImporterForcedFailureContinuation:
                 await chunk_db.flush()
                 _pid2 = _p2.id
 
+                importer = SessionImporter(_pid2)
                 imported, skipped, failed = await importer.import_sessions_batch(
                     iter([good, bad]),
                     batch_size=2,
                     db=chunk_db,
-                    profile_id=_pid2,
                 )
 
         assert failed == 1, f"Expected 1 failure, got {failed}"
@@ -706,11 +704,11 @@ class TestTypedBulkInsert:
             await setup_db.flush()
             profile_id = profile.id
 
-        importer = SessionImporter()
+        importer = SessionImporter(profile_id)
         async with session_scope() as db:
             async with db.begin_nested():
                 imported, day_id = await importer._import_single_session(
-                    db, session_data, profile_id=profile_id
+                    db, session_data
                 )
 
         assert imported is True
@@ -894,7 +892,6 @@ class TestTypedBulkInsert:
             sess.events = events
             return sess
 
-        importer = SessionImporter()
         peak_orm_sizes: list[int] = []
 
         # Create a profile for devices to satisfy the NOT NULL FK constraint.
@@ -914,6 +911,7 @@ class TestTypedBulkInsert:
             await setup_db.flush()
             _profile_id = _profile.id
 
+        importer = SessionImporter(_profile_id)
         async with session_scope() as db:
             for i in range(n_sessions):
                 session_data = _make_heavy_session(i)
@@ -924,9 +922,7 @@ class TestTypedBulkInsert:
                     # Explicit db.flush() calls inside the importer still run —
                     # only automatic pre-execute flushes are suppressed.
                     with db.no_autoflush:
-                        await importer._import_single_session(
-                            db, session_data, profile_id=_profile_id
-                        )
+                        await importer._import_single_session(db, session_data)
                     # Measure INSIDE the savepoint, before flush on exit.
                     # add_all() accumulates all child instances in db.new here;
                     # typed INSERT leaves db.new empty.

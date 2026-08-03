@@ -282,7 +282,7 @@ def show(
             )
             session_date_str = day_date.isoformat()
 
-            svc = AnalysisService(session)
+            svc = AnalysisService(session, profile_id=profile_id)
             result = await svc.get_analysis_result(sid)
 
         if result is None:

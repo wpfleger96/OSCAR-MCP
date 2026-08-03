@@ -228,7 +228,9 @@ def show_waveform(
                 programmatic_events = []
 
                 if waveform_type_single == "flow":
-                    analysis_service = AnalysisService(db_session)
+                    analysis_service = AnalysisService(
+                        db_session, profile_id=profile_id
+                    )
                     try:
                         result = await analysis_service.get_analysis_result(resolved_id)
                     except Exception:

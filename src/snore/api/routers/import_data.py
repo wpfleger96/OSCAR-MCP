@@ -89,6 +89,8 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         # correct profile even if the default profile changes between job creation
         # and worker execution.
         target_profile_id = job.target_profile_id
+        if target_profile_id is None:
+            raise ValueError("Import job has no target profile — cannot proceed")
         if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
             job.report_progress("Detecting data sources...")
             if job.cancel_requested:

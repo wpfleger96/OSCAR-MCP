@@ -48,7 +48,7 @@ async def get_actor(
 ActorDep = Annotated[ActorContext, Depends(get_actor)]
 
 
-def service_dep[T](cls: Callable[[AsyncSession, int | None], T]) -> Callable[..., T]:
+def service_dep[T](cls: Callable[[AsyncSession, int], T]) -> Callable[..., T]:
     """Return a FastAPI dependency that constructs ``cls(db, profile_id)``."""
 
     async def _dep(

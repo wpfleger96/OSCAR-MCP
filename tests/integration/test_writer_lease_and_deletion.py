@@ -148,43 +148,70 @@ class TestWriterLeaseManager:
     def test_lifespan_recovery_failure_yields_exactly_one_shared_acquire(
         self, tmp_path
     ):
-        """Injected recovery failure must not double-acquire the shared lease.
+        """Injected recovery failure in the real lifespan must not double-acquire
+        the shared lease.
 
-        Before the fix, a recovery exception inside the inner try would trigger
-        the inner finally (release exclusive + acquire shared) and then fall
-        through to the outer except (acquire shared again) — leaving refcount 2
-        and a stranded shared hold after shutdown.
+        Strategy: patch DeletionSaga.recover to raise, then run the actual
+        ``app.router.lifespan_context()`` with init_database and the import
+        reaper patched out (so the test stays fast and self-contained).  Assert
+        that exactly one shared hold is active during serving and that it is
+        released cleanly after exit.
         """
-        lock_path = tmp_path / "writers.lock"
-        mgr = _make_lease(lock_path)
+        import asyncio as _asyncio
+        import threading as _threading
 
-        # Simulate the lifespan sequence with an injected recovery failure.
-        exclusive_held = False
-        try:
-            mgr.acquire_exclusive()
-            exclusive_held = True
-        except Exception:
-            pass
+        from unittest.mock import AsyncMock, patch
 
-        if exclusive_held:
-            try:
-                raise RuntimeError("injected recovery failure")
-            except Exception:
-                pass  # Log would happen here in production.
-            finally:
-                mgr.release_exclusive()
+        from snore.api.app import create_app
+        from snore.services.writer_lease import WriterLeaseManager
 
-        mgr.acquire_shared()
+        lock_path = tmp_path / "lifespan_writers.lock"
+        mgr = WriterLeaseManager(lock_path=lock_path)
 
-        # Exactly one shared acquire must have occurred.
-        assert mgr._refcount == 1, (
-            f"Expected refcount 1 after recovery failure; got {mgr._refcount}"
+        # Sentinel list: [(refcount_during_serving,)]
+        snapshots: list[int] = []
+
+        app = create_app()
+
+        _dummy_stop = _threading.Event()
+        _dummy_thread = _threading.Thread(target=_dummy_stop.wait, daemon=True)
+        _dummy_thread.start()
+
+        async def run_lifespan() -> None:
+            with (
+                patch("snore.api.app.init_database", new_callable=AsyncMock),
+                patch(
+                    "snore.api.app._start_import_reaper",
+                    return_value=(_dummy_thread, _dummy_stop),
+                ),
+                patch("snore.api.app._shutdown_import_jobs", return_value=[]),
+                # Fault recovery so the lifespan exercises the failure branch.
+                patch(
+                    "snore.services.profile_service.DeletionSaga.recover",
+                    side_effect=RuntimeError("injected recovery failure"),
+                ),
+                # Point the lifespan's writer lease to our test-local path.
+                patch(
+                    "snore.services.writer_lease.get_writer_lease",
+                    return_value=mgr,
+                ),
+            ):
+                async with app.router.lifespan_context(app):
+                    # Serving: exactly one shared hold must be active.
+                    snapshots.append(mgr._refcount)
+
+        _asyncio.run(run_lifespan())
+        _dummy_stop.set()
+        _dummy_thread.join(timeout=1.0)
+
+        assert len(snapshots) == 1
+        assert snapshots[0] == 1, (
+            f"Expected refcount 1 during serving (recovery failure path); "
+            f"got {snapshots[0]}"
         )
-
-        # Releasing once should bring refcount to zero (no stranded hold).
-        mgr.release()
+        # After lifespan exit, the shared hold must be released.
         assert mgr._refcount == 0, (
-            f"Expected refcount 0 after release; got {mgr._refcount}"
+            f"Expected refcount 0 after lifespan exit; got {mgr._refcount}"
         )
 
     def test_release_idempotent_when_not_held(self, tmp_path):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,45 @@ from snore.cli.display import (
 )
 from snore.parsers.registry import parser_registry
 from snore.services.import_service import ImportService
+from snore.services.schemas import ImportResult, ImportSource
+
+
+async def _resolve_and_import(
+    service: ImportService,
+    sources: list[ImportSource],
+    *,
+    force: bool = False,
+    batch_size: int = 50,
+    backup: bool = True,
+    sort_by: str | None = None,
+    limit: int | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    parallel: bool = True,
+    progress_callback: Callable[[str], None] | None = None,
+    actor_user: str | None = None,
+    actor_profile: str | None = None,
+) -> ImportResult:
+    """Resolve the actor profile then delegate to import_sources with profile_id: int."""
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    async with session_scope() as db:
+        profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
+
+    return await service.import_sources(
+        sources,
+        force=force,
+        batch_size=batch_size,
+        backup=backup,
+        sort_by=sort_by,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+        parallel=parallel,
+        progress_callback=progress_callback,
+        profile_id=profile_id,
+    )
 
 
 @click.command("import")
@@ -311,20 +351,20 @@ def import_data(
         # Real import — delegate backup + parse + import to service
         try:
             result = asyncio.run(
-                service.import_sources(
+                _resolve_and_import(
+                    service,
                     [source],
                     force=force,
                     batch_size=batch_size,
                     backup=not no_backup,
-                    backup_root=None,
                     sort_by=sort_by if sort_by != "filesystem" else None,
                     limit=limit,
                     date_from=date_from_str,
                     date_to=date_to_str,
                     parallel=not no_parallel,
                     progress_callback=_progress,
-                    user_ref=actor_user,
-                    profile_ref=actor_profile,
+                    actor_user=actor_user,
+                    actor_profile=actor_profile,
                 )
             )
         except RuntimeError as e:

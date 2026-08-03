@@ -73,6 +73,12 @@ async def run_analysis(
 async def delete_analysis(
     body: AnalysisDeleteRequest, facade: AnalysisFacadeDep
 ) -> dict[str, int]:
+    if body.session_ids:
+        owned = await facade.get_owned_session_ids(body.session_ids)
+        if owned != set(body.session_ids):
+            raise HTTPException(
+                status_code=404, detail="One or more sessions not found"
+            )
     deleted_count = await facade.delete_analysis(
         body.session_ids, all_versions=body.all_versions
     )

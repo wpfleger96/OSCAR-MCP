@@ -820,6 +820,7 @@ class TestRouteWorkerBehavior:
         )
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
 
         with (
             patch(
@@ -859,6 +860,7 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
 
         with patch(
             "snore.api.routers.import_data.ImportService.detect_sources",
@@ -904,6 +906,7 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
         ch = job.attach_observer()
 
         # Start the worker but don't let it progress past detect_sources.
@@ -957,6 +960,7 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1  # satisfy the profile_id requirement
 
         with patch(
             "snore.api.routers.import_data.ImportService.detect_sources",

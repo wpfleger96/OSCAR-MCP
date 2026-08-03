@@ -134,10 +134,10 @@ class WaveformService:
         except ValueError as e:
             raise NotFoundError(str(e)) from e
 
-        # Close the session now — deserialization and LTTB are pure compute.
-        await self.db_session.close()
-
         # --- Compute phase: no DB session needed after this point ---
+        # The blob and metadata are plain Python objects — no ORM references held.
+        # Do NOT close self.db_session here: the caller may hold it open for
+        # subsequent queries (e.g. loading analysis overlays in waveform show).
         timestamps, values = deserialize_waveform_blob(data_blob, sample_count)
 
         if start_seconds is not None or end_seconds is not None:

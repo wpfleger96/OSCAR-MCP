@@ -102,3 +102,224 @@ class TestBatchAnalysis:
         assert data["total"] == 0
         assert data["successful"] == 0
         assert data["failed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Route-level two-profile isolation: DELETE /analysis must 404 on foreign IDs
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteAnalysisCrossProfileIsolation:
+    """Route-level proof that DELETE /api/v1/analysis returns 404 when any
+    requested session ID belongs to a different profile -- foreign analysis rows
+    must survive.
+    """
+
+    def _make_client_as_profile(
+        self, async_db_session: object, db_session: object, profile_id: int
+    ) -> object:
+        """Return a TestClient whose actor is locked to *profile_id*."""
+        from fastapi.testclient import TestClient
+
+        from snore.api.app import create_app
+        from snore.api.deps import get_actor, get_db
+        from snore.auth.actor import ActorContext, AuthMode, Role
+
+        actor = ActorContext(
+            user_id=1,
+            profile_id=profile_id,
+            role=Role.ADMIN,
+            mode=AuthMode.LOCAL,
+        )
+
+        app = create_app()
+
+        async def override_get_db():
+            async with async_db_session.begin():
+                yield async_db_session
+
+        async def override_get_actor():
+            return actor
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_actor] = override_get_actor
+        client = TestClient(app, raise_server_exceptions=True)
+        return client
+
+    def test_delete_analysis_foreign_session_ids_returns_404(
+        self, async_db_session, db_session
+    ):
+        """Profile A requesting deletion of profile B's analysis -> 404.
+
+        The foreign AnalysisResult row must survive -- no rows are deleted.
+        """
+        from datetime import UTC, datetime
+
+        from snore.database.models import AnalysisResult, Device, Profile, Session, User
+
+        # --- Seed two profiles ---
+        user_a = User(canonical_email="an_iso_a@test", role="admin")
+        user_b = User(canonical_email="an_iso_b@test", role="admin")
+        db_session.add(user_a)
+        db_session.add(user_b)
+        db_session.flush()
+
+        profile_a = Profile(user_id=user_a.id, name="A")
+        profile_b = Profile(user_id=user_b.id, name="B")
+        db_session.add(profile_a)
+        db_session.add(profile_b)
+        db_session.flush()
+
+        dev_b = Device(
+            profile_id=profile_b.id,
+            manufacturer="Mfr",
+            model="Model",
+            serial_number="AN_ISO_DEV_B",
+        )
+        db_session.add(dev_b)
+        db_session.flush()
+
+        now = datetime.now(UTC)
+        foreign_session = Session(
+            device_id=dev_b.id,
+            device_session_id="an_iso_foreign_session",
+            start_time=datetime(2025, 3, 1, 22, 0),
+            end_time=datetime(2025, 3, 2, 6, 0),
+            duration_seconds=28800.0,
+        )
+        db_session.add(foreign_session)
+        db_session.flush()
+
+        foreign_ar = AnalysisResult(
+            session_id=foreign_session.id,
+            timestamp_start=foreign_session.start_time,
+            timestamp_end=foreign_session.end_time,
+            programmatic_result_json={},
+            processing_time_ms=0,
+            created_at=now,
+        )
+        db_session.add(foreign_ar)
+        db_session.flush()
+        foreign_session_id = foreign_session.id
+        foreign_ar_id = foreign_ar.id
+
+        # --- Make request as profile A with profile B's session ID ---
+        client = self._make_client_as_profile(
+            async_db_session, db_session, profile_a.id
+        )
+        response = client.request(
+            "DELETE",
+            "/api/v1/analysis",
+            json={"session_ids": [foreign_session_id]},
+        )
+
+        assert response.status_code == 404, (
+            f"Expected 404 for foreign session ID; got {response.status_code}: "
+            f"{response.text}"
+        )
+
+        # Foreign AnalysisResult must still exist.
+        surviving = db_session.get(AnalysisResult, foreign_ar_id)
+        assert surviving is not None, (
+            "Foreign AnalysisResult must survive a cross-profile DELETE attempt"
+        )
+
+    def test_delete_analysis_mixed_own_and_foreign_returns_404_nothing_deleted(
+        self, async_db_session, db_session
+    ):
+        """Mixed list of own + foreign session IDs -> 404; neither row is deleted."""
+        from datetime import UTC, datetime
+
+        from snore.database.models import AnalysisResult, Device, Profile, Session, User
+
+        user_a = User(canonical_email="an_mix_a@test", role="admin")
+        user_b = User(canonical_email="an_mix_b@test", role="admin")
+        db_session.add(user_a)
+        db_session.add(user_b)
+        db_session.flush()
+
+        profile_a = Profile(user_id=user_a.id, name="A")
+        profile_b = Profile(user_id=user_b.id, name="B")
+        db_session.add(profile_a)
+        db_session.add(profile_b)
+        db_session.flush()
+
+        dev_a = Device(
+            profile_id=profile_a.id,
+            manufacturer="Mfr",
+            model="Model",
+            serial_number="AN_MIX_DEV_A",
+        )
+        dev_b = Device(
+            profile_id=profile_b.id,
+            manufacturer="Mfr",
+            model="Model",
+            serial_number="AN_MIX_DEV_B",
+        )
+        db_session.add(dev_a)
+        db_session.add(dev_b)
+        db_session.flush()
+
+        now = datetime.now(UTC)
+        own_session = Session(
+            device_id=dev_a.id,
+            device_session_id="an_mix_own_session",
+            start_time=datetime(2025, 4, 1, 22, 0),
+            end_time=datetime(2025, 4, 2, 6, 0),
+            duration_seconds=28800.0,
+        )
+        foreign_session = Session(
+            device_id=dev_b.id,
+            device_session_id="an_mix_foreign_session",
+            start_time=datetime(2025, 4, 1, 22, 0),
+            end_time=datetime(2025, 4, 2, 6, 0),
+            duration_seconds=28800.0,
+        )
+        db_session.add(own_session)
+        db_session.add(foreign_session)
+        db_session.flush()
+
+        own_ar = AnalysisResult(
+            session_id=own_session.id,
+            timestamp_start=own_session.start_time,
+            timestamp_end=own_session.end_time,
+            programmatic_result_json={},
+            processing_time_ms=0,
+            created_at=now,
+        )
+        foreign_ar = AnalysisResult(
+            session_id=foreign_session.id,
+            timestamp_start=foreign_session.start_time,
+            timestamp_end=foreign_session.end_time,
+            programmatic_result_json={},
+            processing_time_ms=0,
+            created_at=now,
+        )
+        db_session.add(own_ar)
+        db_session.add(foreign_ar)
+        db_session.flush()
+        own_session_id = own_session.id
+        foreign_session_id = foreign_session.id
+        own_ar_id = own_ar.id
+        foreign_ar_id = foreign_ar.id
+
+        client = self._make_client_as_profile(
+            async_db_session, db_session, profile_a.id
+        )
+        response = client.request(
+            "DELETE",
+            "/api/v1/analysis",
+            json={"session_ids": [own_session_id, foreign_session_id]},
+        )
+
+        assert response.status_code == 404, (
+            f"Expected 404 for mixed list; got {response.status_code}: {response.text}"
+        )
+
+        # Both analysis rows must survive -- no partial delete on 404.
+        assert db_session.get(AnalysisResult, own_ar_id) is not None, (
+            "Own AnalysisResult must survive"
+        )
+        assert db_session.get(AnalysisResult, foreign_ar_id) is not None, (
+            "Foreign AnalysisResult must survive"
+        )

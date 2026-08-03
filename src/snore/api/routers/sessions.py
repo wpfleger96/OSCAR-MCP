@@ -1,7 +1,7 @@
 from datetime import datetime, time
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.schemas import (
@@ -93,5 +93,11 @@ async def update_session(
 async def delete_sessions(
     body: SessionDeleteRequest, service: SessionServiceDep
 ) -> dict[str, int]:
+    if body.session_ids:
+        owned = await service.get_owned_ids(body.session_ids)
+        if owned != set(body.session_ids):
+            raise HTTPException(
+                status_code=404, detail="One or more sessions not found"
+            )
     deleted_count = await service.delete_sessions(body.session_ids)
     return {"deleted_count": deleted_count}
