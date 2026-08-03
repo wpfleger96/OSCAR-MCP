@@ -67,7 +67,10 @@ async def run_analysis(
     _actor: RequireWritable,
 ) -> AnalysisResult:
     return await facade.run_analysis(
-        session_id, modes=body.modes, store_results=body.store_results
+        session_id,
+        modes=body.modes,
+        primary_mode=body.primary_mode,
+        store_results=body.store_results,
     )
 
 
@@ -122,5 +125,6 @@ async def run_batch_analysis(
         else None,
         to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
         modes=cast(list[str], body.modes),
+        primary_mode=body.primary_mode,
         store_results=body.store_results,
     )

@@ -72,6 +72,15 @@ def analysis() -> None:
     help="Run all available detection modes",
 )
 @click.option(
+    "--primary-mode",
+    default=None,
+    help=(
+        "Mode whose recovery markers are persisted. "
+        "Must be a member of --mode when supplied. "
+        "Required when --mode excludes 'aasm'."
+    ),
+)
+@click.option(
     "--plain",
     is_flag=True,
     help="Plain output without colors/borders",
@@ -87,6 +96,7 @@ def run(
     no_store: bool,
     mode: tuple[str, ...],
     all_modes: bool,
+    primary_mode: str | None,
     plain: bool,
 ) -> int | None:
     """Run analysis on CPAP sessions."""
@@ -126,6 +136,7 @@ def run(
                     all_modes,
                     plain,
                     profile_id,
+                    primary_mode,
                 )
             else:
                 await _analyze_batch(
@@ -137,6 +148,7 @@ def run(
                     mode,
                     all_modes,
                     profile_id,
+                    primary_mode,
                 )
         return None
 
@@ -470,6 +482,7 @@ async def _analyze_single_session(
     all_modes: bool,
     plain: bool,
     profile_id: int,
+    primary_mode: str | None = None,
 ) -> None:
     from snore.analysis.modes import AVAILABLE_CONFIGS  # noqa: PLC0415
     from snore.database import models  # noqa: PLC0415
@@ -539,10 +552,13 @@ async def _analyze_single_session(
         result = await facade.run_analysis(
             session_id=session_id,
             modes=modes,
+            primary_mode=primary_mode,
             store_results=not no_store,
         )
         display_analysis_result(result, plain, session_date_str)
 
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     except Exception as e:
         err_console.print(f"\nAnalysis failed: {e}")
         logger.error("Analysis error", exc_info=True)
@@ -558,6 +574,7 @@ async def _analyze_batch(
     mode: tuple[str, ...],
     all_modes: bool,
     profile_id: int,
+    primary_mode: str | None = None,
 ) -> None:
     from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
@@ -576,30 +593,34 @@ async def _analyze_batch(
     facade = AnalysisFacade(session, profile_id)
     task_holder: list[Any] = []
 
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        console=console,
-    ) as progress:
+    try:
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=console,
+        ) as progress:
 
-        def on_progress(completed: int, total: int | None) -> None:
-            if not task_holder:
-                # total=None means we don't yet know how many sessions there are;
-                # use an indeterminate bar (total=None in Rich) until count is known.
-                task_holder.append(progress.add_task("Analyzing", total=total))
-            progress.update(task_holder[0], advance=1)
+            def on_progress(completed: int, total: int | None) -> None:
+                if not task_holder:
+                    # total=None means we don't yet know how many sessions there are;
+                    # use an indeterminate bar (total=None in Rich) until count is known.
+                    task_holder.append(progress.add_task("Analyzing", total=total))
+                progress.update(task_holder[0], advance=1)
 
-        result = await facade.run_batch_analysis(
-            from_date=from_date,
-            to_date=to_date,
-            modes=modes,
-            store_results=not no_store,
-            progress_callback=on_progress,
-            # SQLite tolerates only one concurrent writer; keep sequential.
-            # PostgreSQL (hosted) can increase this via the session_ids path.
-            max_workers=1,
-        )
+            result = await facade.run_batch_analysis(
+                from_date=from_date,
+                to_date=to_date,
+                modes=modes,
+                primary_mode=primary_mode,
+                store_results=not no_store,
+                progress_callback=on_progress,
+                # SQLite tolerates only one concurrent writer; keep sequential.
+                # PostgreSQL (hosted) can increase this via the session_ids path.
+                max_workers=1,
+            )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
     if result.total == 0:
         console.print("No sessions found for the specified criteria")

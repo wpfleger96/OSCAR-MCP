@@ -736,7 +736,10 @@ class AnalysisService:
                 await self.db_session.execute(
                     select(models.AnalysisResult)
                     .filter_by(session_id=session_id)
-                    .order_by(models.AnalysisResult.created_at.desc())
+                    .order_by(
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    )
                 )
             )
             .scalars()
