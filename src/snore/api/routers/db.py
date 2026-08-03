@@ -1,5 +1,3 @@
-# WARNING: vacuum and stats endpoints are unauthenticated. Add auth middleware before exposing to untrusted networks.
-
 from typing import Annotated
 
 from fastapi import APIRouter, Depends

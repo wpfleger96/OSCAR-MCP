@@ -32,6 +32,11 @@ Environment variables
     Per-upload ingress byte ceiling, enforced in the ASGI receive stream before
     any parser spooling begins.  Default: 512 MiB.  Accepts integer bytes.
 
+``SNORE_MAX_FILE_BYTES``
+    Per-file size limit applied after multipart spooling.  Default: 256 MiB.
+    Accepts integer bytes.  Prevents a single large file from consuming the
+    entire per-upload quota.
+
 ``SNORE_MAX_JOBS_PER_USER``
     Maximum active (PENDING_UPLOAD + PENDING + RUNNING) jobs per user.
     Default: 3.
@@ -66,6 +71,7 @@ class AppConfig:
     trusted_proxies: frozenset[str]
     # Upload / job resource bounds
     max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
+    max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
     max_jobs_per_user: int  # Per-user active-job cap; default 3.
     max_jobs_global: int  # Global active-job cap; default 10.
 
@@ -147,6 +153,17 @@ def load_config(
         raise ConfigError("SNORE_MAX_UPLOAD_BYTES must be a positive integer (bytes)")
 
     try:
+        max_file_bytes = int(
+            os.environ.get("SNORE_MAX_FILE_BYTES", str(256 * 1024 * 1024))
+        )
+    except ValueError as exc:
+        raise ConfigError(
+            "SNORE_MAX_FILE_BYTES must be a positive integer (bytes)"
+        ) from exc
+    if max_file_bytes <= 0:
+        raise ConfigError("SNORE_MAX_FILE_BYTES must be a positive integer (bytes)")
+
+    try:
         max_jobs_per_user = int(os.environ.get("SNORE_MAX_JOBS_PER_USER", "3"))
     except ValueError as exc:
         raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer") from exc
@@ -203,6 +220,7 @@ def load_config(
         bind_host=bind_host,
         trusted_proxies=trusted_proxies,
         max_upload_bytes=max_upload_bytes,
+        max_file_bytes=max_file_bytes,
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
     )

@@ -63,6 +63,34 @@ _NO_STORE = {"Cache-Control": "no-store"}
 
 
 # ---------------------------------------------------------------------------
+# Opportunistic oauth_attempts purge
+# ---------------------------------------------------------------------------
+
+
+async def _opportunistic_purge_oauth_attempts(db: AsyncSession) -> None:
+    """Delete expired/consumed oauth_attempts rows opportunistically.
+
+    Called on the login and invite-redeem paths to bound table growth between
+    restarts.  Failures are silently swallowed — this is best-effort cleanup,
+    not a hard requirement.
+    """
+    try:
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        from sqlalchemy import delete  # noqa: PLC0415
+
+        now = datetime.now(UTC)
+        await db.execute(
+            delete(models.OauthAttempt).where(
+                (models.OauthAttempt.expires_at <= now)
+                | (models.OauthAttempt.consumed_at.is_not(None))
+            )
+        )
+    except Exception:
+        pass  # Best-effort; never block the calling path.
+
+
+# ---------------------------------------------------------------------------
 # Helper: get trusted client IP from request
 # ---------------------------------------------------------------------------
 
@@ -220,6 +248,9 @@ async def login(
         user_row.password_hash = new_hash
 
     lockout.record_success(canonical, ip)
+
+    # Opportunistic cleanup of expired/consumed oauth_attempts rows.
+    await _opportunistic_purge_oauth_attempts(db)
 
     # Resolve profile (use current default).
     factory = ActorContextFactory(db)
@@ -530,6 +561,9 @@ async def redeem_invite_route(
         raise HTTPException(
             status_code=404, detail="Invite not found or expired"
         ) from exc
+
+    # Opportunistic cleanup of expired/consumed oauth_attempts rows.
+    await _opportunistic_purge_oauth_attempts(db)
 
     response = JSONResponse(
         content={"message": "Account created"},

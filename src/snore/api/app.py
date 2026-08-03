@@ -97,6 +97,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Purge expired/consumed oauth_attempts at startup.
     await _purge_expired_oauth_attempts()
 
+    # Clean orphaned import-spool temp directories left by a crashed process.
+    _cleanup_stale_upload_tempdirs()
+
     # Start a single lifespan-owned TTL reaper.
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
     try:
@@ -136,6 +139,45 @@ async def _purge_expired_oauth_attempts() -> None:
             logger.info("Purged %d expired/consumed oauth_attempts rows", purged)
     except Exception as exc:
         logger.warning("oauth_attempts purge failed: %s", exc)
+
+
+# Stale-temp retention: any snore-upload-* dir older than this is orphaned.
+_STALE_UPLOAD_TMPDIR_AGE_SECONDS: float = 2 * 3600  # 2 hours
+
+
+def _cleanup_stale_upload_tempdirs() -> None:
+    """Remove orphaned ``snore-upload-*`` temp dirs from a previous crashed process.
+
+    A normal upload cleans its temp directory via ``ImportJob.cleanup_files()``
+    on every terminal path.  A hard crash (SIGKILL, OOM) leaks the spool tree
+    forever.  This scans ``tempfile.gettempdir()`` at startup and removes any
+    ``snore-upload-*`` directories that are older than
+    ``_STALE_UPLOAD_TMPDIR_AGE_SECONDS``.
+    """
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    from pathlib import Path  # noqa: PLC0415
+
+    tmpdir = Path(tempfile.gettempdir())
+    now = time.time()
+    cleaned = 0
+    for entry in tmpdir.iterdir():
+        if not entry.name.startswith("snore-upload-"):
+            continue
+        if not entry.is_dir():
+            continue
+        try:
+            age = now - entry.stat().st_mtime
+            if age > _STALE_UPLOAD_TMPDIR_AGE_SECONDS:
+                shutil.rmtree(entry, ignore_errors=True)
+                logger.info("Cleaned stale upload temp dir: %s (age=%.0fs)", entry, age)
+                cleaned += 1
+        except OSError as exc:
+            logger.warning("Could not check/remove stale temp dir %s: %s", entry, exc)
+    if cleaned:
+        logger.info("Startup: removed %d stale upload temp dir(s)", cleaned)
 
 
 def create_app() -> FastAPI:

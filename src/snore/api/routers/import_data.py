@@ -56,15 +56,15 @@ class JobResponse(BaseModel):
     job_id: str
 
 
-def _get_upload_limits() -> tuple[int, int]:
-    """Return (max_upload_bytes, max_upload_files) from config with safe fallbacks."""
+def _get_upload_limits() -> tuple[int, int, int]:
+    """Return (max_upload_bytes, max_upload_files, max_file_bytes) from config with safe fallbacks."""
     try:
         from snore.api.config import get_config  # noqa: PLC0415
 
         cfg = get_config()
-        return cfg.max_upload_bytes, _DEFAULT_MAX_UPLOAD_FILES
+        return cfg.max_upload_bytes, _DEFAULT_MAX_UPLOAD_FILES, cfg.max_file_bytes
     except Exception:
-        return 512 * 1024 * 1024, _DEFAULT_MAX_UPLOAD_FILES
+        return 512 * 1024 * 1024, _DEFAULT_MAX_UPLOAD_FILES, 256 * 1024 * 1024
 
 
 def _require_localhost(request: Request) -> None:
@@ -244,7 +244,7 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
     },
 )
 async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
-    max_upload_bytes, max_upload_files = _get_upload_limits()
+    max_upload_bytes, max_upload_files, max_file_bytes = _get_upload_limits()
 
     # Step 1: Reserve admission slot BEFORE reading any body bytes.
     job = reserve_slot(actor.user_id)
@@ -268,7 +268,17 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
             ]
             if not uploads:
                 raise HTTPException(status_code=422, detail="No files provided")
-            # Defense-in-depth: also check post-spool size (catches absent/lying CL).
+            # Per-file limit: reject any individual file exceeding the cap.
+            oversized = [f for f in uploads if (f.size or 0) > max_file_bytes]
+            if oversized:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"One or more files exceed the "
+                        f"{max_file_bytes // (1024**2)} MiB per-file limit"
+                    ),
+                )
+            # Defense-in-depth: also check post-spool total size (catches absent/lying CL).
             total_size = sum(f.size or 0 for f in uploads)
             if total_size > max_upload_bytes:
                 raise HTTPException(
@@ -276,7 +286,7 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                     detail=f"Total upload size exceeds {max_upload_bytes // (1024**2)} MiB limit",
                 )
 
-            tmp = tempfile.mkdtemp()
+            tmp = tempfile.mkdtemp(prefix="snore-upload-")
             tmp_path = Path(tmp)
             tmp_root = tmp_path.resolve()
             for upload in uploads:

@@ -1,7 +1,24 @@
 """Route-level auth guards as FastAPI dependencies.
 
-Every route in ``/api/v1/*`` carries exactly one of these guards (or no
-guard for explicitly public routes such as ``/api/v1/auth/*``).
+Auth classification for ``/api/v1/*`` routes:
+
+- **Explicit guard parameter** (e.g. ``_actor: RequireAuth``): used on routes
+  where the guard is the *only* reason to declare the dependency (profiles,
+  db stats/vacuum, mutating session/analysis/import routes, auth router).
+
+- **Implicit via ``service_dep`` chain**: routes that take a
+  ``service_dep(SomeService)`` parameter authenticate through
+  ``ActorDep → get_actor``, which raises 401 in multiuser mode when no
+  actor is present.  The effect is identical to ``require_auth`` — there
+  is simply no duplicate declaration needed.  Affected routers: ``days``,
+  ``devices``, ``events``, ``reports``, ``rx``, ``sessions`` (list / read),
+  ``stats``, ``waveforms``, ``analysis`` (read routes).
+
+- **Public routes** (no auth): ``/api/v1/auth/*`` (login, logout, status,
+  invite lookup/redeem).  These are intentionally unauthenticated.
+
+- **Local-only routes** (not registered in multiuser): ``/import/detect``,
+  ``/import/path``, ``/db/reset``.
 
 ``require_auth``
     Returns the ``ActorContext`` for the request.  Raises 401 if the

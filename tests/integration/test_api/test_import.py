@@ -150,7 +150,7 @@ class TestImportUpload:
         """Cumulative upload size exceeding limit returns 413."""
         monkeypatch.setattr(
             "snore.api.routers.import_data._get_upload_limits",
-            lambda: (10, 500),
+            lambda: (10, 500, 10),
         )
         response = api_client.post(
             "/api/v1/import",
@@ -166,6 +166,20 @@ class TestImportUpload:
         )
         assert response.status_code == 422
         assert response.json()["detail"] == "No files provided"
+
+    def test_per_file_limit_exceeded_returns_413(self, api_client, monkeypatch):
+        """A single file exceeding max_file_bytes returns 413."""
+        # max_upload_bytes=1000, max_files=500, max_file_bytes=5 (very small cap)
+        monkeypatch.setattr(
+            "snore.api.routers.import_data._get_upload_limits",
+            lambda: (1000, 500, 5),
+        )
+        response = api_client.post(
+            "/api/v1/import",
+            files=[("files", ("big.edf", b"x" * 10, "application/octet-stream"))],
+        )
+        assert response.status_code == 413
+        assert "per-file limit" in response.json()["detail"]
 
 
 class TestImportProgress:
@@ -300,6 +314,71 @@ class TestPathImport:
         assert job is not None
         assert job.sources == []
         remove_job(data["job_id"])
+
+
+class TestStaleTempDirCleanup:
+    """_cleanup_stale_upload_tempdirs removes snore-upload-* dirs older than the threshold."""
+
+    def test_stale_upload_dir_is_removed(self, tmp_path, monkeypatch):
+        """A snore-upload-* dir old enough is deleted at startup."""
+        import tempfile  # noqa: PLC0415
+        import time  # noqa: PLC0415
+
+        from snore.api.app import (  # noqa: PLC0415
+            _STALE_UPLOAD_TMPDIR_AGE_SECONDS,
+            _cleanup_stale_upload_tempdirs,
+        )
+
+        stale = tmp_path / "snore-upload-stale"
+        stale.mkdir()
+
+        # Back-date mtime to exceed the threshold.
+        old_mtime = time.time() - _STALE_UPLOAD_TMPDIR_AGE_SECONDS - 60
+        import os  # noqa: PLC0415
+
+        os.utime(stale, (old_mtime, old_mtime))
+
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+        _cleanup_stale_upload_tempdirs()
+
+        assert not stale.exists(), "Stale snore-upload-* dir must be removed at startup"
+
+    def test_recent_upload_dir_is_kept(self, tmp_path, monkeypatch):
+        """A snore-upload-* dir created recently is NOT deleted."""
+        import tempfile  # noqa: PLC0415
+
+        from snore.api.app import _cleanup_stale_upload_tempdirs  # noqa: PLC0415
+
+        fresh = tmp_path / "snore-upload-fresh"
+        fresh.mkdir()
+
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+        _cleanup_stale_upload_tempdirs()
+
+        assert fresh.exists(), (
+            "Recent snore-upload-* dir must NOT be removed at startup"
+        )
+
+    def test_non_snore_dirs_are_ignored(self, tmp_path, monkeypatch):
+        """Dirs without the snore-upload- prefix are never touched."""
+        import os  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        import time  # noqa: PLC0415
+
+        from snore.api.app import (  # noqa: PLC0415
+            _STALE_UPLOAD_TMPDIR_AGE_SECONDS,
+            _cleanup_stale_upload_tempdirs,
+        )
+
+        other = tmp_path / "unrelated-tmpdir"
+        other.mkdir()
+        old_mtime = time.time() - _STALE_UPLOAD_TMPDIR_AGE_SECONDS - 60
+        os.utime(other, (old_mtime, old_mtime))
+
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+        _cleanup_stale_upload_tempdirs()
+
+        assert other.exists(), "Non-snore-upload dirs must never be removed"
 
 
 class TestRequireLocalhost:
