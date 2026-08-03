@@ -65,3 +65,28 @@ def parse_date_range(
             f"'{start_param}' ({start}) must not be after '{end_param}' ({end})."
         )
     return start_date, end_date
+
+
+def validate_page_args(page: int, page_size: int) -> int:
+    """Validate pagination args; return the capped page_size.
+
+    Raises:
+        ValidationError: If ``page < 1`` or ``page_size < 1``.
+    """
+    if page < 1:
+        raise ValidationError("page must be >= 1")
+    if page_size < 1:
+        raise ValidationError("page_size must be >= 1")
+    return min(page_size, 90)
+
+
+def validate_compliance_threshold(hours: float) -> None:
+    """Raise ValidationError if compliance threshold is negative."""
+    if hours < 0:
+        raise ValidationError("compliance_threshold_hours must be >= 0")
+
+
+def validate_min_duration(min_duration: float | None) -> None:
+    """Raise ValidationError if min_duration is negative."""
+    if min_duration is not None and min_duration < 0:
+        raise ValidationError("min_duration must be >= 0")

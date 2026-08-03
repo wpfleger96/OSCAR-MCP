@@ -551,13 +551,19 @@ class TestA6TimestampDeterminism:
         expected = (session_start + timedelta(hours=1)).isoformat()
         assert wall_clock_str == expected
 
-        # Verify the same invariant holds if we simulate a non-UTC TZ env var
-        # (we can't actually change the interpreter's TZ mid-process, but we can
-        # confirm the code never calls .astimezone() or .timestamp() which are
-        # host-TZ-dependent — by checking the value equals the naive .isoformat()).
+        # Verify the same invariant holds under a non-UTC host TZ.
+        # Setting os.environ["TZ"] + calling time.tzset() (POSIX-only) actually
+        # shifts the process timezone.  On Windows (no tzset), the test still
+        # checks offset-freedom through the env change, which is weaker but
+        # harmless.  The real protection is that our code never calls
+        # .astimezone() or .timestamp() on naive datetimes.
+        import time
+
         original_tz = os.environ.get("TZ")
         try:
             os.environ["TZ"] = "America/New_York"
+            if hasattr(time, "tzset"):
+                time.tzset()
             # Re-run the same tool — output must be byte-identical
             result2 = await get_events(async_db_session, target_date)
             assert result2.events[0].start_time_wall_clock == wall_clock_str
@@ -566,6 +572,8 @@ class TestA6TimestampDeterminism:
                 os.environ.pop("TZ", None)
             else:
                 os.environ["TZ"] = original_tz
+            if hasattr(time, "tzset"):
+                time.tzset()
 
 
 # ---------------------------------------------------------------------------

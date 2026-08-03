@@ -121,3 +121,94 @@ class TestBuildInstructions:
             profile = get_profile(name)
             instructions = _build_instructions(profile)
             assert len(instructions) > 100
+
+
+class TestValidatePageArgs:
+    """validate_page_args rejects out-of-range pagination values."""
+
+    def test_valid_args_return_capped_page_size(self) -> None:
+        from snore.mcp.validation import validate_page_args
+
+        assert validate_page_args(1, 30) == 30
+
+    def test_page_size_is_capped_at_90(self) -> None:
+        from snore.mcp.validation import validate_page_args
+
+        assert validate_page_args(1, 200) == 90
+
+    def test_page_zero_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page must be >= 1"):
+            validate_page_args(0, 30)
+
+    def test_page_negative_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page must be >= 1"):
+            validate_page_args(-5, 30)
+
+    def test_page_size_zero_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page_size must be >= 1"):
+            validate_page_args(1, 0)
+
+    def test_page_size_negative_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page_size must be >= 1"):
+            validate_page_args(1, -10)
+
+
+class TestValidateComplianceThreshold:
+    """validate_compliance_threshold rejects negative thresholds."""
+
+    def test_zero_is_valid(self) -> None:
+        from snore.mcp.validation import validate_compliance_threshold
+
+        validate_compliance_threshold(0.0)  # must not raise
+
+    def test_positive_value_is_valid(self) -> None:
+        from snore.mcp.validation import validate_compliance_threshold
+
+        validate_compliance_threshold(4.0)  # must not raise
+
+    def test_negative_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_compliance_threshold
+
+        with pytest.raises(
+            ValidationError, match="compliance_threshold_hours must be >= 0"
+        ):
+            validate_compliance_threshold(-1.0)
+
+
+class TestValidateMinDuration:
+    """validate_min_duration rejects negative durations."""
+
+    def test_none_is_valid(self) -> None:
+        from snore.mcp.validation import validate_min_duration
+
+        validate_min_duration(None)  # must not raise
+
+    def test_zero_is_valid(self) -> None:
+        from snore.mcp.validation import validate_min_duration
+
+        validate_min_duration(0.0)  # must not raise
+
+    def test_positive_is_valid(self) -> None:
+        from snore.mcp.validation import validate_min_duration
+
+        validate_min_duration(5.0)  # must not raise
+
+    def test_negative_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_min_duration
+
+        with pytest.raises(ValidationError, match="min_duration must be >= 0"):
+            validate_min_duration(-0.1)

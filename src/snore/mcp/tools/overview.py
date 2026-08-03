@@ -110,19 +110,13 @@ async def get_data_overview(db_session: AsyncSession) -> DataOverviewResponse:
         .all()
     )
 
-    # Analysis status
-    analysis_count_result = await db_session.execute(
-        select(func.count(models.AnalysisResult.id.distinct()))
-        .join(models.Session, models.AnalysisResult.session_id == models.Session.id)
-        .where(models.Session.enabled.is_(True))
-    )
+    # Analysis status — count distinct sessions that have at least one AnalysisResult
     analysis_session_count = (
         await db_session.execute(
             select(func.count(models.AnalysisResult.session_id.distinct()))
         )
     ).scalar_one()
     analysis_run = analysis_session_count > 0
-    _ = analysis_count_result  # suppress unused var
 
     return DataOverviewResponse(
         devices=device_infos,

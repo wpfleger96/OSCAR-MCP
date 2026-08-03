@@ -54,4 +54,4 @@ def mcp(db: str | None, profile: str, transport: str) -> None:
 
     logger.debug("snore mcp: profile=%s db=%r", profile, db)
     server = make_server(db_flag=db, profile_name=profile)
-    server.run(transport="stdio")
+    server.run(transport=transport)  # type: ignore[arg-type]  # validated above

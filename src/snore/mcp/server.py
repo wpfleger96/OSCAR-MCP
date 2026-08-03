@@ -49,13 +49,15 @@ from snore.database.target import DatabaseTarget
 from snore.mcp.errors import ValidationError
 from snore.mcp.profiles import ClinicalProfile, get_profile
 from snore.mcp.schemas import SCHEMA_MODEL_MAP, model_to_schema
-from snore.mcp.validation import parse_date, parse_date_range
+from snore.mcp.validation import (
+    parse_date,
+    parse_date_range,
+    validate_compliance_threshold,
+    validate_min_duration,
+    validate_page_args,
+)
 
 logger = logging.getLogger(__name__)
-
-# Module-level profile holder — set during lifespan, read-only from tools.
-# This is the ONLY module-level state permitted in this package (G3).
-_active_profile: ClinicalProfile | None = None
 
 # DB-access seam (M2): tools call _scope_provider(), never session_scope() directly.
 # Lifespan installs the concrete implementation; PR-C swaps in an actor-scoped version.
@@ -116,13 +118,12 @@ async def _lifespan(
     runs even if tool errors occur during shutdown.  The ``_scope_provider`` seam
     is reset to the default (global ``session_scope``) on teardown.
     """
-    global _active_profile, _scope_provider
+    global _scope_provider
 
     target = DatabaseTarget.from_env_and_flags(db_flag=db_flag, warn_ignored=True)
     async_url = target.resolve_async_url()
 
     await init_database_from_url(async_url)
-    _active_profile = get_profile(profile_name)
 
     # Install the scope-provider seam: currently delegates to the global
     # session_scope() that init_database_from_url populated.  PR-C replaces
@@ -138,7 +139,6 @@ async def _lifespan(
     finally:
         await cleanup_database()
         _scope_provider = session_scope  # reset to safe default
-        _active_profile = None
         logger.info("SNORE MCP server stopped")
 
 
@@ -396,9 +396,8 @@ def _register_tools(mcp: FastMCP) -> None:
 
         start_d, end_d = parse_date_range(start, end)
 
-        capped_page_size = min(page_size, 90)
-        if page < 1:
-            raise ValidationError("page must be >= 1")
+        capped_page_size = validate_page_args(page, page_size)
+        validate_compliance_threshold(compliance_threshold_hours)
 
         async with _scope_provider() as db:
             result = await _impl(
@@ -443,6 +442,8 @@ def _register_tools(mcp: FastMCP) -> None:
         from snore.mcp.tools.events import get_events as _impl
 
         event_date = parse_date(date, "date")
+
+        validate_min_duration(min_duration)
 
         async with _scope_provider() as db:
             result = await _impl(

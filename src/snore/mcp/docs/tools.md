@@ -116,7 +116,7 @@ Respiratory events for a single session date with per-event context.
 
 **Returns:** `EventsResponse`
 - `events` — list of `EventRow`
-  - `id`, `event_type`, `start_time_iso`, `duration_seconds`
+  - `id`, `event_type`, `start_time_wall_clock`, `timezone_status`, `offset_seconds`, `duration_seconds`
   - `spo2_drop_pct`, `peak_flow_limitation`
   - `context` — `minutes_since_session_start` (pressure/leak/MV context in Phase 4)
 
