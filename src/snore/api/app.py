@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from snore.api.errors import NotFoundError, not_found_handler, server_error_handler
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.import_jobs import start_reaper as _start_import_reaper
-from snore.api.middleware import AuthMiddleware, RateLimitMiddleware
+from snore.api.middleware import AuthMiddleware, CsrfMiddleware, RateLimitMiddleware
 from snore.api.routers import (
     analysis,
     days,
@@ -207,6 +207,7 @@ def create_app() -> FastAPI:
         for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(",")
     ]
     app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(CsrfMiddleware)
     app.add_middleware(AuthMiddleware)
     app.add_middleware(
         CORSMiddleware,

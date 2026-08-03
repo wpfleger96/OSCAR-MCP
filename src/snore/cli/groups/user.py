@@ -168,9 +168,11 @@ def user_invite(
             )
             session.add(inv)
 
-        base_url = (
-            "http://localhost:8000"  # Replaced by SNORE_PUBLIC_BASE_URL in Phase 2.
-        )
+        import os  # noqa: PLC0415
+
+        base_url = os.environ.get(
+            "SNORE_PUBLIC_BASE_URL", "http://localhost:8000"
+        ).rstrip("/")
         console.print(f"\n✉  Invite URL for {canonical}:")
         console.print(f"   {base_url}/api/v1/auth/invites/{raw_token}")
         console.print(f"\n   Role: {role}  |  Expires: {ttl_days} days from now")

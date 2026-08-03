@@ -43,11 +43,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth
-from snore.auth.actor import ActorContext, AuthMode
+from snore.auth.actor import ActorContext
 from snore.auth.factory import ActorContextFactory
 from snore.auth.invite import InviteRedemptionError
 from snore.auth.lockout import get_lockout_store
-from snore.auth.passwords import dummy_verify, hash_password, verify_password
+from snore.auth.passwords import (
+    dummy_verify_async,
+    hash_password_async,
+    validate_password_bytes,
+    verify_password_async,
+)
 from snore.auth.session_cookie import (
     clear_session_cookie,
     set_session_cookie,
@@ -113,38 +118,6 @@ def _client_ip(request: Request) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helper: CSRF origin check for unsafe methods
-# ---------------------------------------------------------------------------
-
-
-def _check_origin(request: Request) -> None:
-    """Raise 403 if the Origin/Referer does not match the allowed origins.
-
-    Applied to all unsafe-method (POST/PUT/PATCH/DELETE) auth routes.
-    Safe in local mode (loopback only) and enforced strictly in multiuser.
-    """
-    from snore.api.config import get_config  # noqa: PLC0415
-
-    cfg = get_config()
-    if cfg.auth_mode is AuthMode.LOCAL:
-        return  # Local mode: only reachable from loopback; no CSRF risk.
-
-    origin = request.headers.get("origin") or request.headers.get("referer") or ""
-    origin = origin.split("?")[0].rstrip("/")
-
-    allowed = set()
-    if cfg.public_base_url:
-        allowed.add(cfg.public_base_url.rstrip("/"))
-    # Allow browser-native requests from the same origin (e.g. dev env).
-    allowed.add("http://localhost:5173")
-    allowed.add("http://127.0.0.1:5173")
-
-    if not any(origin.startswith(a) for a in allowed):
-        logger.warning("CSRF origin mismatch: %r not in %r", origin, allowed)
-        raise HTTPException(status_code=403, detail="Origin not allowed")
-
-
-# ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
 
@@ -203,13 +176,19 @@ async def login(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Authenticate with email + password; set session cookie on success."""
-    _check_origin(request)
     from snore.api.config import get_config  # noqa: PLC0415
 
     cfg = get_config()
     lockout = get_lockout_store()
     canonical = body.email.lower().strip()
     ip = _client_ip(request)
+
+    # Validate password byte length before any DB work or KDF.
+    try:
+        validate_password_bytes(body.password)
+    except ValueError:
+        await dummy_verify_async()
+        raise HTTPException(status_code=401, detail="Authentication failed") from None
 
     # Check lockout FIRST before any DB work.
     if lockout.is_locked(canonical, ip):
@@ -229,16 +208,16 @@ async def login(
 
     if user_row is None or user_row.password_hash is None:
         # Unknown email or password-less account → dummy verify + generic error.
-        dummy_verify()
+        await dummy_verify_async()
         lockout.record_failure(canonical, ip)
         raise HTTPException(status_code=401, detail="Authentication failed")
 
     if user_row.disabled_at is not None:
-        dummy_verify()
+        await dummy_verify_async()
         lockout.record_failure(canonical, ip)
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-    ok, new_hash = verify_password(user_row.password_hash, body.password)
+    ok, new_hash = await verify_password_async(user_row.password_hash, body.password)
     if not ok:
         lockout.record_failure(canonical, ip)
         raise HTTPException(status_code=401, detail="Authentication failed")
@@ -272,7 +251,6 @@ async def login(
             active_profile_id=actor.profile_id,
             session_version=user_row.session_version,
             secure=cfg.secure_cookie,
-            domain=cfg.cookie_domain,
         )
     return response
 
@@ -280,15 +258,12 @@ async def login(
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request) -> JSONResponse:
     """Clear the session cookie."""
-    _check_origin(request)
     from snore.api.config import get_config  # noqa: PLC0415
 
     cfg = get_config()
     response = JSONResponse(content={"message": "Logged out"}, headers=_NO_STORE)
     if cfg.is_multiuser:
-        clear_session_cookie(
-            response, secure=cfg.secure_cookie, domain=cfg.cookie_domain
-        )
+        clear_session_cookie(response, secure=cfg.secure_cookie)
     return response
 
 
@@ -362,7 +337,6 @@ async def set_active_profile(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Switch the active profile; re-validates ownership."""
-    _check_origin(request)
     from snore.api.config import get_config  # noqa: PLC0415
 
     cfg = get_config()
@@ -400,7 +374,6 @@ async def set_active_profile(
             active_profile_id=body.profile_id,
             session_version=user.session_version,
             secure=cfg.secure_cookie,
-            domain=cfg.cookie_domain,
         )
     return response
 
@@ -408,13 +381,23 @@ async def set_active_profile(
 @router.get("/invites/{token}", response_model=InviteInfoResponse)
 async def lookup_invite(
     token: str,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Return invite metadata (email, valid) for a given token.
 
     The token itself is never echoed in the response.
+    Rate-limited by per-IP lockout to slow down token enumeration.
     """
+    ip = _client_ip(request)
+    lockout = get_lockout_store()
     token_hash = _hash_invite_token(token)
+
+    # Rate limit per (token_hash, IP): slow down repeated probing of the same
+    # token while the RateLimitMiddleware handles cross-token IP enumeration.
+    if lockout.is_locked(token_hash, ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
+
     invite = (
         (
             await db.execute(
@@ -432,6 +415,9 @@ async def lookup_invite(
         and invite.revoked_at is None
         and invite.expires_at > now
     )
+
+    if not valid:
+        lockout.record_failure(token_hash, ip)
 
     return JSONResponse(
         content=InviteInfoResponse(
@@ -453,7 +439,7 @@ async def redeem_invite_route(
 
     The full password-signup state machine:
     1. Validate the invite (token hash lookup, not expired/revoked/redeemed).
-    2. Validate the password length.
+    2. Validate the password byte length.
     3. In one transaction via ``run_txn``:
        - Consume the invite (conditional UPDATE — race-safe).
        - Create the User row with Argon2id password hash.
@@ -463,18 +449,31 @@ async def redeem_invite_route(
 
     Fails generically on any invite problem (no oracle attack on state).
     """
-    _check_origin(request)
     from snore.api.config import get_config  # noqa: PLC0415
 
     cfg = get_config()
-
-    # Validate password length.
-    if not body.password or len(body.password) > 1024:
-        raise HTTPException(
-            status_code=422, detail="Password must be 1–1024 characters"
-        )
-
+    ip = _client_ip(request)
+    lockout = get_lockout_store()
     token_hash = _hash_invite_token(token)
+
+    # Rate limit per (token_hash, IP): slow down repeated redeem attempts on
+    # the same token.  The RateLimitMiddleware handles cross-token enumeration.
+    if lockout.is_locked(token_hash, ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
+
+    # Validate password byte length using the shared byte-based validator.
+    if not body.password:
+        lockout.record_failure(token_hash, ip)
+        raise HTTPException(
+            status_code=422, detail="Password must be 1–1024 bytes encoded"
+        )
+    try:
+        validate_password_bytes(body.password)
+    except ValueError:
+        lockout.record_failure(token_hash, ip)
+        raise HTTPException(
+            status_code=422, detail="Password must be 1–1024 bytes encoded"
+        ) from None
 
     # Gather invite state outside the retry loop (read-only).
     invite = (
@@ -494,12 +493,13 @@ async def redeem_invite_route(
         or invite.revoked_at is not None
         or invite.expires_at <= now
     ):
+        lockout.record_failure(token_hash, ip)
         raise HTTPException(status_code=404, detail="Invite not found or expired")
 
     invite_id = invite.id
     invite_email = invite.email
     invite_role = invite.role
-    pw_hash = hash_password(body.password)
+    pw_hash = await hash_password_async(body.password)
 
     # Accumulate the created IDs so the cookie can be set.
     result_holder: dict[str, int] = {}
@@ -577,7 +577,6 @@ async def redeem_invite_route(
             active_profile_id=result_holder["profile_id"],
             session_version=0,
             secure=cfg.secure_cookie,
-            domain=cfg.cookie_domain,
         )
     return response
 

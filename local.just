@@ -12,10 +12,11 @@ dev-auth: _dev-auth-seed
     SNORE_SESSION_SECRET=dev-throwaway-secret-not-for-production-1234567890ab \
     SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
     SNORE_BIND_HOST=127.0.0.1 \
-    uv run uvicorn snore.api.app:create_app --factory --reload --host 127.0.0.1 --port 8000
+    SNORE_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
+    uv run snore serve --host 127.0.0.1 --port 8000 --reload
 
 # Seed an invite for dev-auth; print the signup URL.
 _dev-auth-seed:
     @echo "--- Dev-auth invite ---"
-    uv run snore invite create --email dev@localhost --role admin 2>/dev/null || true
-    @echo "Open: http://127.0.0.1:8000/invite (check snore invite list for the token)"
+    SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
+    uv run snore user invite dev@localhost --role admin

@@ -28,6 +28,11 @@ Environment variables
     Comma-separated list of trusted proxy IP addresses.  ``cf-connecting-ip``
     is honoured only when the immediate peer is in this list.
 
+``SNORE_DEV_ORIGINS``
+    Comma-separated list of additional origins allowed by the CSRF middleware.
+    For development only (e.g. ``http://localhost:5173`` when the Vite dev
+    server runs on a separate port).  Never set in production.
+
 ``SNORE_MAX_UPLOAD_BYTES``
     Per-upload ingress byte ceiling, enforced in the ASGI receive stream before
     any parser spooling begins.  Default: 512 MiB.  Accepts integer bytes.
@@ -69,6 +74,7 @@ class AppConfig:
     public_base_url: str  # Validated URL or empty string in local mode.
     bind_host: str
     trusted_proxies: frozenset[str]
+    dev_origins: frozenset[str]  # Extra CSRF-allowed origins (dev only; empty in prod).
     # Upload / job resource bounds
     max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
@@ -78,6 +84,24 @@ class AppConfig:
     @property
     def is_multiuser(self) -> bool:
         return self.auth_mode is AuthMode.MULTIUSER
+
+    @property
+    def public_origin(self) -> tuple[str, str, int] | None:
+        """Parsed ``(scheme, host, effective_port)`` from ``public_base_url``.
+
+        Returns ``None`` in local mode (no base URL configured).  The port is
+        the explicit value or the scheme default (443 for https, 80 for http).
+        Used by the CSRF middleware for exact-origin comparison.
+        """
+        if not self.public_base_url:
+            return None
+        parsed = urlparse(self.public_base_url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        return (scheme, host, port)
 
     @property
     def secure_cookie(self) -> bool:
@@ -99,14 +123,6 @@ class AppConfig:
         except ValueError:
             # Non-numeric host (e.g. "localhost") — treat as loopback-safe.
             return host not in ("localhost", "localhost.localdomain")
-
-    @property
-    def cookie_domain(self) -> str | None:
-        """Domain for the session cookie, or None to let the browser use the request host."""
-        if not self.public_base_url:
-            return None
-        host = urlparse(self.public_base_url).hostname
-        return host if host and "." in host else None
 
 
 _config: AppConfig | None = None
@@ -139,6 +155,9 @@ def load_config(
     bind_host = bind_host_override or os.environ.get("SNORE_BIND_HOST", "127.0.0.1")
     raw_proxies = os.environ.get("SNORE_TRUSTED_PROXIES", "")
     trusted_proxies = frozenset(p.strip() for p in raw_proxies.split(",") if p.strip())
+
+    raw_dev = os.environ.get("SNORE_DEV_ORIGINS", "")
+    dev_origins = frozenset(o.strip() for o in raw_dev.split(",") if o.strip())
 
     # Resource bounds — read with safe int parsing.
     try:
@@ -219,6 +238,7 @@ def load_config(
         public_base_url=public_base_url,
         bind_host=bind_host,
         trusted_proxies=trusted_proxies,
+        dev_origins=dev_origins,
         max_upload_bytes=max_upload_bytes,
         max_file_bytes=max_file_bytes,
         max_jobs_per_user=max_jobs_per_user,
@@ -227,7 +247,11 @@ def load_config(
 
 
 def _validate_public_base_url(url: str) -> None:
-    """Raise ConfigError if ``url`` is not a valid loopback HTTP or HTTPS URL."""
+    """Raise ConfigError if ``url`` is not a valid loopback HTTP or HTTPS URL.
+
+    Rejects userinfo, path, query string, and fragment so that the value can
+    be used as a canonical origin for CSRF comparison without ambiguity.
+    """
     try:
         parsed = urlparse(url)
     except Exception as exc:
@@ -241,6 +265,23 @@ def _validate_public_base_url(url: str) -> None:
     host = parsed.hostname or ""
     if not host:
         raise ConfigError("SNORE_PUBLIC_BASE_URL must include a host")
+
+    # Reject userinfo (username/password in the URL) — it would make the
+    # configured origin disagree with the Origin header browsers send.
+    if parsed.username or parsed.password:
+        raise ConfigError(
+            "SNORE_PUBLIC_BASE_URL must not contain userinfo (user:pass@host)"
+        )
+
+    # Reject path, query, and fragment for the same reason.
+    if parsed.path not in ("", "/"):
+        raise ConfigError(
+            f"SNORE_PUBLIC_BASE_URL must not include a path, got {parsed.path!r}"
+        )
+    if parsed.query:
+        raise ConfigError("SNORE_PUBLIC_BASE_URL must not include a query string")
+    if parsed.fragment:
+        raise ConfigError("SNORE_PUBLIC_BASE_URL must not include a fragment")
 
     if parsed.scheme == "http":
         # HTTP is only allowed for loopback addresses.

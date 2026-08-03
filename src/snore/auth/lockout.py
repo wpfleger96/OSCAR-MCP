@@ -16,6 +16,7 @@ from __future__ import annotations
 import threading
 import time
 
+from collections import deque
 from dataclasses import dataclass
 
 # Maximum lockout duration in seconds (15 minutes).
@@ -51,13 +52,25 @@ class LockoutStore:
             return time.monotonic() < entry.locked_until
 
     def record_failure(self, email: str, ip: str) -> None:
-        """Record an authentication failure and update the lockout window."""
+        """Record an authentication failure and update the lockout window.
+
+        When the store is at ``MAX_ENTRIES`` and all entries are still active
+        (no expired slot to reclaim), the new key is silently dropped rather
+        than evicting an active lockout — evicting an active lockout would
+        turn a flood into an auth bypass.
+        """
         key = (email.lower().strip(), ip)
         now = time.monotonic()
         with self._lock:
-            if len(self._entries) >= MAX_ENTRIES and key not in self._entries:
-                # Evict the oldest expired entry to cap memory usage.
+            if key in self._entries:
+                # Update existing entry unconditionally.
+                pass
+            elif len(self._entries) >= MAX_ENTRIES:
+                # At cap for a new key: try to free an expired slot.
                 self._evict_one_expired(now)
+                if len(self._entries) >= MAX_ENTRIES:
+                    # No expired entry found — drop without evicting an active lockout.
+                    return
 
             entry = self._entries.setdefault(key, _LockoutEntry())
             entry.failures += 1
@@ -88,3 +101,59 @@ _lockout_store = LockoutStore()
 
 def get_lockout_store() -> LockoutStore:
     return _lockout_store
+
+
+# ---------------------------------------------------------------------------
+# Per-IP sliding-window rate limiter for public auth endpoints
+# ---------------------------------------------------------------------------
+
+# Number of requests per IP allowed within the window before 429.
+RATE_WINDOW_SECONDS: float = 60.0
+RATE_MAX_PER_WINDOW: int = 30
+RATE_MAX_IPS: int = 10_000
+
+
+class RateLimitStore:
+    """Thread-safe per-IP sliding-window counter for public auth endpoints.
+
+    When the IP table is full, new IPs are allowed without tracking rather
+    than refusing them — being a DoS amplifier is worse than losing coarse
+    rate control.
+    """
+
+    def __init__(
+        self,
+        window: float = RATE_WINDOW_SECONDS,
+        max_per_window: int = RATE_MAX_PER_WINDOW,
+        max_ips: int = RATE_MAX_IPS,
+    ) -> None:
+        self._window = window
+        self._max = max_per_window
+        self._max_ips = max_ips
+        self._entries: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def check_and_record(self, ip: str) -> bool:
+        """Return True (allowed) or False (rate-limited); records allowed requests."""
+        now = time.monotonic()
+        cutoff = now - self._window
+        with self._lock:
+            if ip not in self._entries:
+                if len(self._entries) >= self._max_ips:
+                    # Table full — allow without tracking.
+                    return True
+                self._entries[ip] = deque()
+            times = self._entries[ip]
+            while times and times[0] < cutoff:
+                times.popleft()
+            if len(times) >= self._max:
+                return False
+            times.append(now)
+            return True
+
+
+_rate_limit_store = RateLimitStore()
+
+
+def get_rate_limit_store() -> RateLimitStore:
+    return _rate_limit_store

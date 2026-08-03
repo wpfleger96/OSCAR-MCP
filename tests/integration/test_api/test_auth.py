@@ -511,10 +511,11 @@ class TestPathImportAbsenceInMultiuser:
             "/api/v1/import/detect",
             json={"path": "/some/path"},
         )
-        # 404 = route missing; 405 = path matches but method absent.
+        # 403 = CSRF middleware rejected (no Origin), which also proves the route is not
+        # callable.  404 = route missing; 405 = path matches but method absent.
         # 422 = route exists and rejected the body. 200/202 = route callable → FAIL.
-        assert resp.status_code in (404, 405), (
-            f"Expected 404/405 for absent multiuser route, got {resp.status_code}"
+        assert resp.status_code in (403, 404, 405), (
+            f"Expected 403/404/405 for absent/blocked multiuser route, got {resp.status_code}"
         )
 
     def test_import_path_not_reachable_in_multiuser(self, async_db_session):
@@ -524,8 +525,10 @@ class TestPathImportAbsenceInMultiuser:
             "/api/v1/import/path",
             json={"sources": []},
         )
-        assert resp.status_code in (404, 405), (
-            f"Expected 404/405 for absent multiuser route, got {resp.status_code}"
+        # 403 = CSRF middleware rejected (no Origin); also proves the route is
+        # not callable without authentication bypass.
+        assert resp.status_code in (403, 404, 405), (
+            f"Expected 403/404/405 for absent/blocked multiuser route, got {resp.status_code}"
         )
 
     def test_import_detect_reachable_in_local_mode(self, async_db_session, monkeypatch):
@@ -581,8 +584,9 @@ class TestPathImportAbsenceInMultiuser:
             "/api/v1/import/path",
             json={"sources": []},
         )
-        assert resp.status_code in (404, 405), (
-            f"Expected 404/405 from loopback in multiuser; got {resp.status_code}"
+        # 403 = CSRF rejected (no Origin) also proves route unreachable.
+        assert resp.status_code in (403, 404, 405), (
+            f"Expected 403/404/405 from loopback in multiuser; got {resp.status_code}"
         )
 
 

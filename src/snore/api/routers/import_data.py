@@ -10,7 +10,7 @@ import threading
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -42,6 +42,35 @@ local_only_router = APIRouter()
 
 # Default file-count ceiling — read at import time, overridden via SNORE config.
 _DEFAULT_MAX_UPLOAD_FILES = 500
+
+# Chunk size for the off-event-loop file copy.
+_COPY_CHUNK = 65536  # 64 KiB
+
+
+class _FileSizeExceeded(Exception):
+    """Raised inside the thread worker when per-file byte limit is exceeded."""
+
+
+def _copy_chunked(src_file: IO[bytes], dest: Path, max_bytes: int) -> None:
+    """Synchronous chunk copy; raises ``_FileSizeExceeded`` on over-limit.
+
+    Runs inside ``asyncio.to_thread`` so it never blocks the event loop.
+    ``src_file`` must expose a ``read(n)`` method (SpooledTemporaryFile).
+    """
+    total = 0
+    try:
+        with dest.open("wb") as dst:
+            while True:
+                chunk = src_file.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise _FileSizeExceeded()
+                dst.write(chunk)
+    except _FileSizeExceeded:
+        dest.unlink(missing_ok=True)
+        raise
 
 
 class DetectRequest(BaseModel):
@@ -297,8 +326,18 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                     logger.warning("Skipping file with unsafe path: %r", filename)
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                content = await upload.read()
-                dest.write_bytes(content)
+                try:
+                    await asyncio.to_thread(
+                        _copy_chunked, upload.file, dest, max_file_bytes
+                    )
+                except _FileSizeExceeded:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"File '{filename}' exceeds the "
+                            f"{max_file_bytes // (1024**2)} MiB per-file limit"
+                        ),
+                    ) from None
 
         job.temp_dir = tmp_path
         tmp = None  # Job owns the directory now.

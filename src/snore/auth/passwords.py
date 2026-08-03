@@ -6,6 +6,8 @@ current parameters when the stored hash was produced with older settings.
 
 from __future__ import annotations
 
+import asyncio
+
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
@@ -17,6 +19,21 @@ _hasher = PasswordHasher()
 # Maximum password length (bytes) before hashing.  Argon2 has no silent
 # truncation, but we cap here to prevent DoS via enormous payloads.
 MAX_PASSWORD_BYTES = 1024
+
+# Bound concurrent KDF operations so an adversary with unique-email credentials
+# cannot trivially saturate memory by flooding the login/redeem endpoints.
+# At memory_cost=65536 (64 MiB per op), 4 concurrent ops peak at ~256 MiB.
+_KDF_SEMAPHORE = asyncio.Semaphore(4)
+
+
+def validate_password_bytes(password: str) -> None:
+    """Raise ValueError if the password exceeds MAX_PASSWORD_BYTES when UTF-8-encoded.
+
+    Shared by login and invite-redemption so the byte-based check is applied
+    consistently before any Argon2 operation.
+    """
+    if len(password.encode()) > MAX_PASSWORD_BYTES:
+        raise ValueError(f"Password must be at most {MAX_PASSWORD_BYTES} bytes encoded")
 
 
 def hash_password(password: str) -> str:
@@ -31,8 +48,7 @@ def hash_password(password: str) -> str:
     Raises:
         ValueError: If the password exceeds MAX_PASSWORD_BYTES.
     """
-    if len(password.encode()) > MAX_PASSWORD_BYTES:
-        raise ValueError(f"Password must be at most {MAX_PASSWORD_BYTES} bytes encoded")
+    validate_password_bytes(password)
     return _hasher.hash(password)
 
 
@@ -75,3 +91,29 @@ def dummy_verify() -> None:
         )
     except Exception:
         pass  # Expected — the hash above is invalid; the timing is what matters.
+
+
+# ---------------------------------------------------------------------------
+# Async wrappers — run KDF operations in a thread pool behind a semaphore so
+# Argon2 never blocks the event loop and parallel KDF calls are bounded.
+# ---------------------------------------------------------------------------
+
+
+async def hash_password_async(password: str) -> str:
+    """Async wrapper for ``hash_password``; runs in a thread, bounded by semaphore."""
+    async with _KDF_SEMAPHORE:
+        return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(
+    stored_hash: str, password: str
+) -> tuple[bool, str | None]:
+    """Async wrapper for ``verify_password``; runs in a thread, bounded by semaphore."""
+    async with _KDF_SEMAPHORE:
+        return await asyncio.to_thread(verify_password, stored_hash, password)
+
+
+async def dummy_verify_async() -> None:
+    """Async wrapper for ``dummy_verify``; runs in a thread, bounded by semaphore."""
+    async with _KDF_SEMAPHORE:
+        await asyncio.to_thread(dummy_verify)

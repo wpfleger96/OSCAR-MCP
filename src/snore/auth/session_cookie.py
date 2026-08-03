@@ -81,16 +81,18 @@ def set_session_cookie(
     session_version: int,
     *,
     secure: bool,
-    domain: str | None = None,
 ) -> None:
-    """Write the session cookie onto ``response``."""
+    """Write the session cookie onto ``response``.
+
+    No ``Domain`` attribute is set so the browser issues a host-only cookie —
+    the cookie is scoped to the exact origin and never shared with subdomains.
+    """
     token = encode_session(secret, user_id, active_profile_id, session_version)
     response.set_cookie(
         COOKIE_NAME,
         token,
         max_age=COOKIE_MAX_AGE_SECONDS,
         path="/",
-        domain=domain,
         secure=secure,
         httponly=True,
         samesite="lax",
@@ -101,13 +103,11 @@ def clear_session_cookie(
     response: Response,
     *,
     secure: bool,
-    domain: str | None = None,
 ) -> None:
     """Clear the session cookie on ``response``."""
     response.delete_cookie(
         COOKIE_NAME,
         path="/",
-        domain=domain,
         secure=secure,
         httponly=True,
         samesite="lax",
