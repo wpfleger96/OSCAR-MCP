@@ -9,7 +9,7 @@ src/snore/services/breath_service.py").
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -842,6 +842,41 @@ class CaAnalysisResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# §13 — BreathService helpers
+# ---------------------------------------------------------------------------
+
+
+def _count_fl_run_reras(
+    breath_rows: Sequence[Any],
+    fl_class_threshold: int = 4,
+    min_fl_run_length: int = 2,
+) -> int:
+    """Count RERA-proxy events: FL runs ending in a recovery breath."""
+    count = 0
+    i = 0
+    while i < len(breath_rows):
+        b = breath_rows[i]
+        if b.flow_class is not None and b.flow_class >= fl_class_threshold:
+            run_start = i
+            while (
+                i < len(breath_rows)
+                and breath_rows[i].flow_class is not None
+                and breath_rows[i].flow_class >= fl_class_threshold
+            ):
+                i += 1
+            run_len = i - run_start
+            if (
+                run_len >= min_fl_run_length
+                and i < len(breath_rows)
+                and breath_rows[i].is_recovery_breath
+            ):
+                count += 1
+        else:
+            i += 1
+    return count
+
+
+# ---------------------------------------------------------------------------
 # §13 — BreathService
 # ---------------------------------------------------------------------------
 
@@ -1457,8 +1492,10 @@ class BreathService:
         coverage: list[SessionCoverage] = []
         identities: list[AlgorithmIdentity] = []
         primary_modes: list[str] = []
+        ar_by_session: dict[int, int | None] = {}
         for sid in session_ids:
-            status, algo, _ = await self._latest_analysis_for_session(sid)
+            status, algo, ar_id = await self._latest_analysis_for_session(sid)
+            ar_by_session[sid] = ar_id
             coverage.append(
                 SessionCoverage(
                     session_id=sid, analysis_status=status, algo_versions=algo
@@ -1523,11 +1560,7 @@ class BreathService:
             else None
         )
 
-        # Collect analysis_result_ids per session (for per-window provenance)
-        ar_by_session: dict[int, int | None] = {}
-        for cov in coverage:
-            _, _, ar_id = await self._latest_analysis_for_session(cov.session_id)
-            ar_by_session[cov.session_id] = ar_id
+        # ar_by_session populated during the coverage loop above
         ar_status_by_session: dict[int, AnalysisStatus] = {
             c.session_id: c.analysis_status for c in coverage
         }
@@ -2001,6 +2034,7 @@ class BreathService:
                         "nights_with_data": 0,
                         "nights_missing_analysis": 0,
                         "rx_violation": None,
+                        "ar_ids": {},
                     }
                 )
                 continue
@@ -2012,13 +2046,17 @@ class BreathService:
             session_rx_dated: list[tuple[date, dict[str, str]]] = []
             nights_with_data = 0
             nights_missing_analysis = 0
+            ar_ids_for_epoch: dict[int, int | None] = {}
 
             for therapy_date, sessions in sessions_by_date.items():
                 ok_on_date: list[tuple[int, AlgoVersions]] = []
                 for sess in sessions:
-                    status, algo, _ = await self._latest_analysis_for_session(sess.id)
+                    status, algo, ar_id = await self._latest_analysis_for_session(
+                        sess.id
+                    )
                     if status == AnalysisStatus.OK and algo is not None:
                         ok_on_date.append((sess.id, algo))
+                        ar_ids_for_epoch[sess.id] = ar_id
                         # Per-session RX snapshot (not merged per-day)
                         setting_rows = (
                             (
@@ -2078,6 +2116,7 @@ class BreathService:
                     "nights_with_data": nights_with_data,
                     "nights_missing_analysis": nights_missing_analysis,
                     "rx_violation": rx_violation,
+                    "ar_ids": ar_ids_for_epoch,
                 }
             )
 
@@ -2211,12 +2250,12 @@ class BreathService:
                 uniform_primary_mode = None
                 rera_reason = NullReason.PRIMARY_MODE_MISMATCH
 
-            # Fetch ar_ids (avoid re-calling _latest_analysis_for_session)
-            contributing_ar_ids: list[tuple[int, int]] = []
-            for sid, _ in contributing_sessions:
-                _, _, ar_id = await self._latest_analysis_for_session(sid)
-                if ar_id is not None:
-                    contributing_ar_ids.append((sid, ar_id))
+            ar_ids = ed["ar_ids"]
+            contributing_ar_ids: list[tuple[int, int]] = [
+                (sid, ar_ids[sid])
+                for sid, _ in contributing_sessions
+                if ar_ids.get(sid) is not None
+            ]
 
             all_breath_rows: list[Any] = []
             for _sid, ar_id in contributing_ar_ids:
@@ -2274,26 +2313,7 @@ class BreathService:
                         .scalars()
                         .all()
                     )
-                    i = 0
-                    while i < len(brows_all):
-                        b = brows_all[i]
-                        if b.flow_class is not None and b.flow_class >= 4:
-                            j = i
-                            while j < len(brows_all) and (
-                                brows_all[j].flow_class is not None
-                                and (brows_all[j].flow_class or 0) >= 4
-                            ):
-                                j += 1
-                            fl_len = j - i
-                            if (
-                                j < len(brows_all)
-                                and brows_all[j].is_recovery_breath
-                                and fl_len >= 2
-                            ):
-                                rera_count += 1
-                            i = j
-                        else:
-                            i += 1
+                    rera_count += _count_fl_run_reras(brows_all)
 
             epoch_stats.append(
                 EpochBreathStats(
@@ -2433,10 +2453,11 @@ class BreathService:
         identities_for_reduce: list[AlgorithmIdentity] = []
         missing_or_stale: list[int] = []
         algo_identity: AlgorithmIdentity | None = None
+        ar_id_by_session: dict[int, int | None] = {}
 
         for s in day_sessions:
             sid = s.id
-            status, algo, _ = await self._latest_analysis_for_session(sid)
+            status, algo, ar_id = await self._latest_analysis_for_session(sid)
             session_coverages.append(
                 SessionCoverage(
                     session_id=sid, analysis_status=status, algo_versions=algo
@@ -2446,6 +2467,7 @@ class BreathService:
                 ok_sessions.append((sid, algo))
                 identities_for_reduce.append(algo.identity)
                 algo_identity = algo.identity
+                ar_id_by_session[sid] = ar_id
             else:
                 missing_or_stale.append(sid)
 
@@ -2477,36 +2499,8 @@ class BreathService:
                 is_compliant=total_therapy_hours >= compliance_threshold_hours,
             )
 
-        # Cross-version check
-        current_identity_dict = AlgorithmIdentity.current().model_dump()
-        cross_keys = list(CROSS_VERSION_REFUSAL_KEYS)
-        all_same = all(
-            {k: algo.identity.model_dump()[k] for k in cross_keys}
-            == {k: current_identity_dict[k] for k in cross_keys}
-            for _, algo in ok_sessions
-        )
-        if not all_same:
-            day_status = DayAnalysisStatus.MIXED_VERSION
-            return NightlyAnalysisSummary(
-                therapy_date=therapy_date,
-                device_id=resolved_device_id,
-                day_status=day_status,
-                session_coverage=session_coverages,
-                eligible_session_count=eligible,
-                analyzed_session_count=analyzed,
-                missing_or_stale_session_ids=missing_or_stale,
-                algorithm_identity=algo_identity,
-                rera_count=None,
-                rera_reason=NullReason.ALGO_VERSION_MISMATCH,
-                primary_mode=None,
-                fl_median=None,
-                fl_95th=None,
-                fl_max=None,
-                fl_reason=NullReason.ALGO_VERSION_MISMATCH,
-                total_therapy_hours=total_therapy_hours,
-                compliance_threshold_hours=compliance_threshold_hours,
-                is_compliant=total_therapy_hours >= compliance_threshold_hours,
-            )
+        # MIXED_VERSION within a day is handled by _reduce_day_status; under current
+        # _latest_analysis_for_session semantics all OK sessions share the current identity.
 
         # Determine primary_mode uniformity
         modes_seen = {algo.run.primary_mode for _, algo in ok_sessions}
@@ -2516,7 +2510,7 @@ class BreathService:
         fl_vals: list[float] = []
         rera_count = 0
         for sid, _algo in ok_sessions:
-            _, _, ar_id = await self._latest_analysis_for_session(sid)
+            ar_id = ar_id_by_session.get(sid)
             if ar_id is None:
                 continue
             breath_rows = (
@@ -2535,26 +2529,7 @@ class BreathService:
                     fl_vals.append(b.mid_insp_flattening)
 
             # RERA proxy: FL runs ending in recovery breath
-            i = 0
-            while i < len(breath_rows):
-                b = breath_rows[i]
-                if b.flow_class is not None and (b.flow_class or 0) >= 4:
-                    j = i
-                    while j < len(breath_rows) and (
-                        breath_rows[j].flow_class is not None
-                        and (breath_rows[j].flow_class or 0) >= 4
-                    ):
-                        j += 1
-                    fl_len = j - i
-                    if (
-                        j < len(breath_rows)
-                        and breath_rows[j].is_recovery_breath
-                        and fl_len >= 2
-                    ):
-                        rera_count += 1
-                    i = j
-                else:
-                    i += 1
+            rera_count += _count_fl_run_reras(breath_rows)
 
         fl_median: float | None
         fl_95th: float | None
@@ -2695,11 +2670,9 @@ class BreathService:
         ensure_registered_parsers()
 
         # Verify device ownership before querying
-        from sqlalchemy import select as _select  # noqa: PLC0415
-
         owned_device = (
             await self._db.execute(
-                _select(models.Device.id).where(
+                select(models.Device.id).where(
                     models.Device.id == device_id,
                     models.Device.profile_id == self._profile_id,
                 )
@@ -3135,6 +3108,11 @@ class BreathService:
 
         ca_day_status = self._reduce_day_status(coverage, identities_for_reduce)
 
+        # ar_id lookup from the first pass — avoids re-calling _latest_analysis_for_session
+        ar_id_by_session: dict[int, int | None] = {
+            sess.id: ar_id for sess, _, ar_id in ok_sessions_info
+        }
+
         # plan §12 lines 984-993: MIXED_VERSION must return algorithm_identity=None
         if ca_day_status == DayAnalysisStatus.MIXED_VERSION:
             algo_identity = None
@@ -3312,7 +3290,7 @@ class BreathService:
                 total_eligible_s += session_duration_s
 
                 # PB% from persisted AnalysisResult
-                _, _, ar_id = await self._latest_analysis_for_session(session_id)
+                ar_id = ar_id_by_session.get(session_id)
                 if ar_id is not None:
                     ar_row = (
                         (

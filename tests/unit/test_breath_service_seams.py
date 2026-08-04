@@ -379,7 +379,7 @@ class TestFindWindows:
         from snore.services.breath_service import DayAnalysisStatus  # noqa: PLC0415
 
         # plan §1 line 864 rule 3: all-not-run → NOT_RUN
-        assert result.day_status != DayAnalysisStatus.OK
+        assert result.day_status == DayAnalysisStatus.NOT_RUN
 
     async def test_worst_flattening_criterion_returns_result(self, async_db_session):
         """find_windows returns a FindWindowsResult for WORST_FLATTENING_LEAK_VALID."""
@@ -403,8 +403,8 @@ class TestFindWindows:
 
         # plan §1 line 864 rule 2: all-OK → OK
         assert result.day_status == DayAnalysisStatus.OK
-        # May be empty if flattening threshold not met, but no exception
-        assert isinstance(result.windows, list)
+        assert len(result.windows) > 0
+        assert result.windows[0].worst_mid_insp_flattening == pytest.approx(0.35)
 
 
 # ---------------------------------------------------------------------------
@@ -496,11 +496,7 @@ class TestGetNightlySummary:
 
         assert summary.therapy_date == therapy_date
         assert summary.device_id == dev.id
-        # Should be OK or PARTIAL depending on coverage
-        assert summary.day_status in (
-            DayAnalysisStatus.OK,
-            DayAnalysisStatus.PARTIAL,
-        )
+        assert summary.day_status == DayAnalysisStatus.OK
         assert summary.analyzed_session_count >= 1
 
     async def test_not_run_day_returns_not_run_status(self, async_db_session):
@@ -3193,6 +3189,124 @@ class TestCompareEpochsRefusal:
             assert es.null_reason == NullReason.ALGO_VERSION_MISMATCH
             assert es.mid_insp_flattening.median is None
             assert es.flatness_index.median is None
+
+    async def test_primary_mode_mismatch_nulls_rera_fields(self, async_db_session):
+        """Same identity but different primary_mode → rera_reason=PRIMARY_MODE_MISMATCH, rera_proxy_count=None.
+
+        Two OK sessions in one epoch share the same algorithm identity (so
+        distributions are computed) but have different primary_mode values.
+        The RERA fields must be null with PRIMARY_MODE_MISMATCH while other
+        distribution fields remain populated.
+        """
+        from datetime import timedelta  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.analysis.shared.versioning import (  # noqa: PLC0415
+            AlgorithmIdentity,
+            AnalysisRunMetadata,
+        )
+        from snore.database import models as _models  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 1)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = _models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        session_a = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(hours=3),
+            duration_seconds=3 * 3600.0,
+        )
+        session_b = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=4),
+            end_time=start_a + timedelta(hours=7),
+            duration_seconds=3 * 3600.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        # Insert real AnalysisResult rows so sessions are found; status injected via mock
+        current_id = AlgorithmIdentity.current()
+        run_meta_a = AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"])
+        run_meta_b = AnalysisRunMetadata(
+            primary_mode="aasm_relaxed", modes=["aasm_relaxed"]
+        )
+        algo_a = AlgoVersions(identity=current_id, run=run_meta_a)
+        algo_b = AlgoVersions(identity=current_id, run=run_meta_b)
+
+        for sess in (session_a, session_b):
+            async_db_session.add(
+                _models.AnalysisResult(
+                    session_id=sess.id,
+                    timestamp_start=sess.start_time,
+                    timestamp_end=sess.end_time or sess.start_time + timedelta(hours=7),
+                    programmatic_result_json={},
+                    processing_time_ms=5,
+                    engine_versions_json=algo_a.model_dump(),
+                )
+            )
+        await async_db_session.flush()
+
+        from sqlalchemy import select as _sel  # noqa: PLC0415
+
+        ar_a_id = (
+            await async_db_session.execute(
+                _sel(_models.AnalysisResult.id)
+                .where(_models.AnalysisResult.session_id == session_a.id)
+                .limit(1)
+            )
+        ).scalar()
+        ar_b_id = (
+            await async_db_session.execute(
+                _sel(_models.AnalysisResult.id)
+                .where(_models.AnalysisResult.session_id == session_b.id)
+                .limit(1)
+            )
+        ).scalar()
+
+        async def _mocked_latest(
+            session_id: int,
+        ) -> tuple[AnalysisStatus, AlgoVersions | None, int | None]:
+            if session_id == session_a.id:
+                return (AnalysisStatus.OK, algo_a, ar_a_id)
+            if session_id == session_b.id:
+                return (AnalysisStatus.OK, algo_b, ar_b_id)
+            return (AnalysisStatus.NOT_RUN, None, None)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with patch.object(
+            svc, "_latest_analysis_for_session", side_effect=_mocked_latest
+        ):
+            result = await svc.compare_epochs(
+                epochs=[
+                    EpochRequest(
+                        label="mixed_mode",
+                        date_start=therapy_date,
+                        date_end=therapy_date,
+                        device_id=dev.id,
+                    )
+                ]
+            )
+
+        assert len(result.epochs) == 1
+        epoch_result = result.epochs[0]
+        # Distributions are computed (no identity mismatch)
+        assert result.null_reason is None
+        # RERA fields are nulled because primary_mode differs across sessions
+        assert epoch_result.rera_reason == NullReason.PRIMARY_MODE_MISMATCH
+        assert epoch_result.rera_proxy_count is None
 
 
 # ---------------------------------------------------------------------------
