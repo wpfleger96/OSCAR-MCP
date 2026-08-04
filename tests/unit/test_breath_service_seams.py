@@ -856,6 +856,54 @@ class TestFetchWaveformWindowRaw:
         assert raw.session_id == session.id
         assert WaveformChannelName.FLOW in raw.missing_channels
 
+    async def test_wrong_therapy_date_raises_value_error(self, async_db_session):
+        """fetch_waveform_window_raw raises ValueError when therapy_date does not match.
+
+        An owned session on the correct profile is paired with a different therapy_date
+        in the request.  The Day join must detect the mismatch and reject.
+        plan §9 lines 822-825: full tuple (session, date, device) must match.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        correct_date = date(2025, 3, 1)
+        wrong_date = date(2025, 3, 2)  # different date
+        _, session = await _make_day_and_session(async_db_session, dev.id, correct_date)
+
+        req = WaveformWindowRequest(
+            therapy_date=wrong_date,  # does not match the session's date
+            session_id=session.id,
+            offset_start=0.0,
+            offset_end=10.0,
+            channels=[WaveformChannelName.FLOW],
+        )
+        with pytest.raises(ValueError):
+            await fetch_waveform_window_raw(async_db_session, profile_id, req)
+
+    async def test_wrong_device_id_raises_value_error(self, async_db_session):
+        """fetch_waveform_window_raw raises ValueError when device_id doesn't match session.
+
+        Same profile, two devices.  Session belongs to device_a; request specifies
+        device_b.  The device_id predicate must reject the mismatch.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev_a = await _make_device(async_db_session, profile_id)
+        dev_b = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 3, 3)
+        _, session_a = await _make_day_and_session(
+            async_db_session, dev_a.id, therapy_date
+        )
+
+        req = WaveformWindowRequest(
+            therapy_date=therapy_date,
+            session_id=session_a.id,
+            device_id=dev_b.id,  # session belongs to dev_a, not dev_b
+            offset_start=0.0,
+            offset_end=10.0,
+            channels=[WaveformChannelName.FLOW],
+        )
+        with pytest.raises(ValueError):
+            await fetch_waveform_window_raw(async_db_session, profile_id, req)
+
 
 # ---------------------------------------------------------------------------
 # compute_waveform_window (module-level)

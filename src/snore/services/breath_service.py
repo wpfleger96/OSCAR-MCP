@@ -625,22 +625,26 @@ async def fetch_waveform_window_raw(
             "must resolve a session before calling this function"
         )
 
-    # One ownership-enforcing query: Session ⟵ Device with profile predicate.
-    row = (
-        await db.execute(
-            select(models.Session.start_time)
-            .join(models.Device, models.Session.device_id == models.Device.id)
-            .where(
-                models.Session.id == request.session_id,
-                models.Device.profile_id == profile_id,
-            )
+    # Full-tuple ownership query: Session + Device (profile) + Day (date) + optional device.
+    # plan §9 lines 822-825: the session must match profile_id, therapy_date, AND device_id.
+    stmt = (
+        select(models.Session.start_time)
+        .join(models.Device, models.Session.device_id == models.Device.id)
+        .join(models.Day, models.Session.day_id == models.Day.id)
+        .where(
+            models.Session.id == request.session_id,
+            models.Device.profile_id == profile_id,
+            models.Day.date == request.therapy_date,
         )
-    ).one_or_none()
+    )
+    if request.device_id is not None:
+        stmt = stmt.where(models.Session.device_id == request.device_id)
+    row = (await db.execute(stmt)).one_or_none()
 
     if row is None:
         raise ValueError(
             f"Session {request.session_id} not found or not owned by "
-            f"profile {profile_id}"
+            f"profile {profile_id} for date {request.therapy_date}"
         )
 
     session_start: datetime = row[0]
@@ -2978,9 +2982,12 @@ class BreathService:
     ) -> WaveformWindow:
         """Convenience orchestrator: resolve → fetch blobs → compute. Never closes self._db.
 
-        Uses _resolve_range for device validation and session selection so that
-        multi-device ambiguity raises DeviceAmbiguityError, foreign device_id raises
-        DeviceNotOwnedError, and fetch_waveform_window_raw performs no additional resolution.
+        Uses ``_resolve_range`` for device validation and session selection (raises
+        ``DeviceAmbiguityError`` for multi-device, ``DeviceNotOwnedError`` for foreign
+        device_id), then calls private ``_fetch_waveform_blobs`` directly with the
+        already-scoped session.  The public ``fetch_waveform_window_raw`` is not called
+        here; that function enforces the full identity tuple (profile + date + device)
+        and is intended for direct callers such as future MCP render/raw tools.
         """
         resolved_device_id, sessions_by_date = await self._resolve_range(
             request.therapy_date, request.therapy_date, request.device_id
