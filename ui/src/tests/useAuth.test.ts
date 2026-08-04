@@ -213,9 +213,12 @@ describe('useAuth', () => {
     it('fetchStatus_supersededByRefresh_chainesToReplacementWhenOldResolvesFirst', async () => {
         // Scenario: router guard starts an anonymous fetch (gen=N).
         // refreshStatus() fires (gen=N+1) and starts an authenticated fetch.
-        // The OLD anonymous request resolves FIRST with unauthenticated status.
-        // The guard's promise must still eventually resolve with authenticated state
-        // because fetchStatus() chains superseded callers to the current-generation promise.
+        // The anonymous request resolves WHILE the authenticated request is still pending.
+        //
+        // Without the fix: P1's .then() returns undefined → P1 settles immediately →
+        //   guardSettled = true before auth resolves → guard reads isAuthenticated=false → bails.
+        // With the fix: P1's .then() returns _fetchPromise (P2) → P1 chains to P2 →
+        //   guardSettled stays false until P2 resolves → guard reads isAuthenticated=true.
 
         const anonStatus = { ...mockStatus, authenticated: false }
         const authedStatus = { ...mockStatus, authenticated: true }
@@ -237,20 +240,29 @@ describe('useAuth', () => {
 
         const { fetchStatus, refreshStatus, isAuthenticated } = useAuth()
 
-        // Router guard starts anonymous fetch (P1).
-        const guardPromise = fetchStatus()
-        // refreshStatus invalidates gen and starts authenticated fetch (P2);
-        // _fetchPromise is now P2 by the time the guard's .then() runs.
+        // Router guard starts anonymous fetch (P1) and tracks when it settles.
+        let guardSettled = false
+        const guardPromise = fetchStatus().then(() => {
+            guardSettled = true
+        })
+        // refreshStatus invalidates gen and starts authenticated fetch (P2).
         const refreshPromise = refreshStatus()
 
-        // Anonymous request resolves first — P1's .then() chains to P2.
+        // Resolve anonymous ONLY — leave the authenticated request still pending.
         resolveAnon(anonStatus)
-        // Authenticated request resolves — P2 writes status, P1 (chained) resolves.
+        // Flush microtasks so P1's .then() chain runs before we assert.
+        for (let i = 0; i < 5; i++) await Promise.resolve()
+
+        // KEY: with the fix, P1 chained to P2 and P2 is still pending → guard not yet settled.
+        // Without the fix, P1 would have returned undefined and settled here → guard settled = true.
+        expect(guardSettled).toBe(false)
+
+        // Now resolve the authenticated fetch — P2 writes status, P1 (chained) resolves.
         resolveAuth(authedStatus)
+        await guardPromise
+        await refreshPromise
 
-        await Promise.all([guardPromise, refreshPromise])
-
-        // Guard received the authenticated result via the chain, not the stale anon result.
+        // Guard received the authenticated result via the chain.
         expect(isAuthenticated.value).toBe(true)
     })
 
