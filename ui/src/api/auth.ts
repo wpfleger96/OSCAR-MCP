@@ -9,6 +9,15 @@ type InviteLookupRequest = components['schemas']['InviteLookupRequest']
 type InviteInfoResponse = components['schemas']['InviteInfoResponse']
 type InviteRedeemRequest = components['schemas']['InviteRedeemRequest']
 
+// POST /auth/invites/google — token in body (never in URL path).
+// Returns an authorization URL to redirect the browser to.
+interface GoogleInviteRequest {
+    token: string
+}
+interface GoogleInviteResponse {
+    authorization_url: string
+}
+
 export const getAuthStatus = apiGet<AuthStatusResponse>('/auth/status')
 
 export const loginUser = apiPost<MessageResponse, [body: LoginRequest]>('/auth/login', (body) => ({
@@ -29,5 +38,10 @@ export const lookupInvite = apiPost<InviteInfoResponse, [body: InviteLookupReque
 
 export const redeemInvite = apiPost<MessageResponse, [body: InviteRedeemRequest]>(
     '/auth/invites/redeem',
+    (body) => ({ data: body }),
+)
+
+export const initiateGoogleInvite = apiPost<GoogleInviteResponse, [body: GoogleInviteRequest]>(
+    '/auth/invites/google',
     (body) => ({ data: body }),
 )

@@ -1,5 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import type { RouteLocationNormalized } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
+
+declare module 'vue-router' {
+    interface RouteMeta {
+        authFree?: boolean
+    }
+}
 
 function sessionIdProp(route: { params: { id: string | string[] } }) {
     const id = Number(route.params.id)
@@ -9,16 +16,18 @@ function sessionIdProp(route: { params: { id: string | string[] } }) {
 const router = createRouter({
     history: createWebHistory(),
     routes: [
-        // Auth-free routes
+        // Auth-free routes — no sidebar, no navigation chrome.
         {
             path: '/',
             name: 'login',
             component: () => import('@/views/LoginView.vue'),
+            meta: { authFree: true },
         },
         {
-            path: '/invite/:token',
+            path: '/invite',
             name: 'invite',
             component: () => import('@/views/InviteView.vue'),
+            meta: { authFree: true },
         },
 
         // Authenticated routes
@@ -113,22 +122,20 @@ const router = createRouter({
     ],
 })
 
-// Auth-free paths: login page and invite redemption.
-const AUTH_FREE = ['/', '/invite']
-
-router.beforeEach(async (to) => {
+// Exported for unit testing — the production router uses this directly.
+export async function authGuard(to: RouteLocationNormalized): Promise<string | boolean | void> {
     const { fetchStatus, isAuthenticated, isLocal } = useAuth()
 
     try {
         await fetchStatus()
     } catch {
-        // Network failure — allow through (server will return 401 on data requests).
+        // Network failure — allow through (data endpoints will 401 if session is bad).
     }
 
     const authed = isAuthenticated.value || isLocal.value
 
-    // Unauthenticated user trying to reach a guarded route → login.
-    if (!authed && !AUTH_FREE.some((p) => to.path === p || to.path.startsWith('/invite/'))) {
+    // Unauthenticated user on a guarded route → login.
+    if (!authed && !to.meta.authFree) {
         return '/'
     }
 
@@ -136,6 +143,8 @@ router.beforeEach(async (to) => {
     if (authed && to.path === '/') {
         return '/dashboard'
     }
-})
+}
+
+router.beforeEach(authGuard)
 
 export default router

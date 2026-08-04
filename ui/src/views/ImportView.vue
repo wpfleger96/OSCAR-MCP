@@ -335,11 +335,15 @@ async function onDrop(event: DragEvent) {
 
 async function handleImport() {
     // Switch active profile if the user selected a different one.
+    // Abort entirely on failure — writing health data to the wrong profile silently
+    // is worse than a visible error.
     if (selectedProfileId.value !== null && selectedProfileId.value !== activeProfileId.value) {
         try {
             await setActiveProfile(selectedProfileId.value)
         } catch {
-            // Non-fatal: import proceeds with the current active profile.
+            importError.value =
+                'Could not switch to the selected profile. Please refresh and try again.'
+            return
         }
     }
 

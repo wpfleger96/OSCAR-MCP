@@ -1,17 +1,18 @@
 <template>
-    <div class="app-layout">
+    <template v-if="!route.meta.authFree">
         <AppSidebar class="hidden md:flex" />
-        <main class="app-main">
-            <button
-                class="md:hidden fixed top-3 left-3 z-50 inline-flex items-center justify-center rounded-md border border-border bg-background p-2 text-foreground shadow-sm"
-                @click="mobileMenuOpen = true"
-            >
-                <Menu class="h-5 w-5" />
-            </button>
-            <RouterView />
-        </main>
-    </div>
-    <Sheet v-model:open="mobileMenuOpen">
+    </template>
+    <main :class="route.meta.authFree ? 'auth-layout' : 'app-main'">
+        <button
+            v-if="!route.meta.authFree"
+            class="md:hidden fixed top-3 left-3 z-50 inline-flex items-center justify-center rounded-md border border-border bg-background p-2 text-foreground shadow-sm"
+            @click="mobileMenuOpen = true"
+        >
+            <Menu class="h-5 w-5" />
+        </button>
+        <RouterView :key="profileKey" />
+    </main>
+    <Sheet v-if="!route.meta.authFree" v-model:open="mobileMenuOpen">
         <SheetContent side="left" class="w-[220px] p-0">
             <SheetTitle class="sr-only">Navigation</SheetTitle>
             <AppSidebar />
@@ -25,9 +26,11 @@ import { useRoute } from 'vue-router'
 import { Menu } from '@lucide/vue'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
 import AppSidebar from '@/components/AppSidebar.vue'
+import { useAuth } from '@/composables/useAuth'
 
 const mobileMenuOpen = ref(false)
 const route = useRoute()
+const { profileKey } = useAuth()
 
 watch(
     () => route.path,
@@ -51,6 +54,10 @@ watch(
     padding: 1.5rem;
     overflow-y: auto;
     min-width: 0;
+}
+
+.auth-layout {
+    min-height: 100vh;
 }
 
 @media (max-width: 767px) {

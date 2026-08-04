@@ -27,6 +27,7 @@ describe('LoginView', () => {
             logout: vi.fn(),
             clearAuth: vi.fn(),
             fetchStatus: vi.fn(),
+            refreshStatus: vi.fn(),
             setActiveProfile: vi.fn(),
             user: { value: null } as never,
             isAuthenticated: { value: false } as never,
@@ -34,6 +35,7 @@ describe('LoginView', () => {
             profiles: { value: [] } as never,
             activeProfileId: { value: null } as never,
             authMode: { value: null } as never,
+            profileKey: { value: 0 } as never,
         })
     })
 

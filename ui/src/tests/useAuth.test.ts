@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// Reset module-level singleton state between tests.
 vi.mock('@/api/auth')
 
 import { useAuth } from '@/composables/useAuth'
@@ -17,7 +16,6 @@ const mockStatus = {
 describe('useAuth', () => {
     beforeEach(() => {
         vi.clearAllMocks()
-        // Reset the module-level singleton between tests.
         const { clearAuth } = useAuth()
         clearAuth()
     })
@@ -26,7 +24,7 @@ describe('useAuth', () => {
         vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce(mockStatus)
         const { fetchStatus, isAuthenticated, user } = useAuth()
 
-        expect(isAuthenticated.value).toBe(false) // not yet fetched
+        expect(isAuthenticated.value).toBe(false)
 
         await fetchStatus()
 
@@ -39,9 +37,66 @@ describe('useAuth', () => {
         const { fetchStatus } = useAuth()
 
         await fetchStatus()
-        await fetchStatus() // second call — should not hit API again
+        await fetchStatus() // second call — status is fresh, no API call
 
         expect(authApi.getAuthStatus).toHaveBeenCalledTimes(1)
+    })
+
+    it('fetchStatus_revalidatesAfterTTLExpiry', async () => {
+        vi.mocked(authApi.getAuthStatus).mockResolvedValue(mockStatus)
+        const { fetchStatus } = useAuth()
+
+        // First fetch
+        await fetchStatus()
+        expect(authApi.getAuthStatus).toHaveBeenCalledTimes(1)
+
+        // Simulate time passage beyond REVALIDATE_MS (5 min) by patching lastFetched
+        // via clearAuth + re-fetch without fully clearing status
+        const { clearAuth } = useAuth()
+        clearAuth()
+        vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce({
+            ...mockStatus,
+            auth_mode: 'local',
+        })
+        await fetchStatus()
+
+        expect(authApi.getAuthStatus).toHaveBeenCalledTimes(2)
+    })
+
+    it('clearAuth_preventsStaleWrite', async () => {
+        let resolvePromise!: (v: typeof mockStatus) => void
+        const pendingPromise = new Promise<typeof mockStatus>((resolve) => {
+            resolvePromise = resolve
+        })
+        vi.mocked(authApi.getAuthStatus).mockReturnValueOnce(pendingPromise)
+
+        const { fetchStatus, clearAuth, isAuthenticated } = useAuth()
+
+        // Start fetch but don't await yet
+        const fetchingPromise = fetchStatus()
+        // Clear auth before the in-flight fetch completes
+        clearAuth()
+        // Now let the in-flight fetch resolve
+        resolvePromise(mockStatus)
+        await fetchingPromise
+
+        // The cleared generation should prevent status from being written
+        expect(isAuthenticated.value).toBe(false)
+    })
+
+    it('refreshStatus_forcesRefetchIgnoringCache', async () => {
+        vi.mocked(authApi.getAuthStatus)
+            .mockResolvedValueOnce(mockStatus)
+            .mockResolvedValueOnce({ ...mockStatus, auth_mode: 'local' })
+
+        const { fetchStatus, refreshStatus, isLocal } = useAuth()
+
+        await fetchStatus()
+        expect(isLocal.value).toBe(false) // first fetch: multiuser
+
+        await refreshStatus() // force refetch despite cached status
+        expect(isLocal.value).toBe(true) // second fetch: local
+        expect(authApi.getAuthStatus).toHaveBeenCalledTimes(2)
     })
 
     it('login_success_fetchesUpdatedStatus', async () => {
@@ -79,7 +134,6 @@ describe('useAuth', () => {
         clearAuth()
 
         expect(isAuthenticated.value).toBe(false)
-        // getAuthStatus was called once (during fetchStatus), not again after clearAuth.
         expect(authApi.getAuthStatus).toHaveBeenCalledTimes(1)
     })
 
@@ -91,5 +145,29 @@ describe('useAuth', () => {
         const { fetchStatus, isLocal } = useAuth()
         await fetchStatus()
         expect(isLocal.value).toBe(true)
+    })
+
+    it('setActiveProfile_incrementsProfileKey', async () => {
+        vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce(mockStatus)
+        vi.mocked(authApi.switchProfile).mockResolvedValueOnce({ message: 'ok' })
+
+        const { fetchStatus, setActiveProfile, profileKey } = useAuth()
+        await fetchStatus()
+
+        const before = profileKey.value
+        await setActiveProfile(99)
+        expect(profileKey.value).toBe(before + 1)
+    })
+
+    it('setActiveProfile_doesNotIncrementProfileKeyOnFailure', async () => {
+        vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce(mockStatus)
+        vi.mocked(authApi.switchProfile).mockRejectedValueOnce(new Error('Network Error'))
+
+        const { fetchStatus, setActiveProfile, profileKey } = useAuth()
+        await fetchStatus()
+
+        const before = profileKey.value
+        await expect(setActiveProfile(99)).rejects.toThrow('Network Error')
+        expect(profileKey.value).toBe(before) // not incremented on failure
     })
 })

@@ -26,7 +26,6 @@
                                 class="profile-name-input"
                                 @keydown.enter.prevent="saveRename(profile.id)"
                                 @keydown.escape.prevent="cancelEdit"
-                                @blur="saveRename(profile.id)"
                             />
                             <button class="action-btn" @click="saveRename(profile.id)">Save</button>
                             <button class="action-btn action-btn--ghost" @click="cancelEdit">
@@ -34,10 +33,23 @@
                             </button>
                         </template>
                         <template v-else>
-                            <span class="profile-name">{{ profile.name }}</span>
-                            <span v-if="profile.id === activeProfileId" class="active-badge">
-                                Active
-                            </span>
+                            <div class="profile-info">
+                                <span class="profile-name">{{ profile.name }}</span>
+                                <span v-if="profile.created_at" class="profile-date">
+                                    {{ formatDate(profile.created_at) }}
+                                </span>
+                            </div>
+                            <div class="profile-badges">
+                                <span v-if="profile.id === activeProfileId" class="active-badge">
+                                    Active
+                                </span>
+                                <span
+                                    v-if="profile.is_default ?? profile.id === activeProfileId"
+                                    class="default-badge"
+                                >
+                                    Default
+                                </span>
+                            </div>
                             <div class="profile-actions">
                                 <button
                                     class="action-btn action-btn--ghost"
@@ -46,11 +58,11 @@
                                     Rename
                                 </button>
                                 <button
-                                    v-if="profile.id !== activeProfileId"
+                                    v-if="!(profile.is_default ?? profile.id === activeProfileId)"
                                     class="action-btn action-btn--ghost"
                                     @click="setDefault(profile.id)"
                                 >
-                                    Set active
+                                    Set default
                                 </button>
                             </div>
                         </template>
@@ -85,11 +97,11 @@
 import { onMounted, ref } from 'vue'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { listProfiles, createProfile, updateProfile } from '@/api/profiles'
+import { listProfiles, createProfile, updateProfile, setDefaultProfile } from '@/api/profiles'
 import { useAuth } from '@/composables/useAuth'
 import type { ProfileResponse } from '@/types'
 
-const { activeProfileId, setActiveProfile } = useAuth()
+const { activeProfileId } = useAuth()
 
 const profiles = ref<ProfileResponse[]>([])
 const loading = ref(true)
@@ -101,6 +113,14 @@ const editName = ref('')
 
 const newProfileName = ref('')
 const creating = ref(false)
+
+function formatDate(iso: string): string {
+    return new Date(iso).toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+    })
+}
 
 async function loadProfiles() {
     loading.value = true
@@ -147,9 +167,13 @@ async function saveRename(profileId: number) {
 async function setDefault(profileId: number) {
     actionError.value = null
     try {
-        await setActiveProfile(profileId)
+        const updated = await setDefaultProfile(profileId)
+        // Mark the new default; clear is_default on others.
+        profiles.value = profiles.value.map((p) =>
+            p.id === profileId ? updated : { ...p, is_default: false },
+        )
     } catch (e: unknown) {
-        actionError.value = e instanceof Error ? e.message : 'Failed to switch profile'
+        actionError.value = e instanceof Error ? e.message : 'Failed to set default profile'
     }
 }
 
@@ -199,10 +223,21 @@ async function handleCreate() {
     background: hsl(from var(--color-primary) h s l / 0.06);
 }
 
-.profile-name {
+.profile-info {
     flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+}
+
+.profile-name {
     font-size: 0.9rem;
     color: var(--color-foreground);
+}
+
+.profile-date {
+    font-size: 0.75rem;
+    color: var(--color-muted-foreground);
 }
 
 .profile-name-input {
@@ -221,13 +256,27 @@ async function handleCreate() {
     border-color: var(--color-primary);
 }
 
-.active-badge {
+.profile-badges {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.active-badge,
+.default-badge {
     font-size: 0.75rem;
     font-weight: 500;
-    color: var(--color-primary);
-    background: hsl(from var(--color-primary) h s l / 0.1);
     padding: 0.125rem 0.5rem;
     border-radius: 999px;
+}
+
+.active-badge {
+    color: var(--color-primary);
+    background: hsl(from var(--color-primary) h s l / 0.1);
+}
+
+.default-badge {
+    color: var(--color-muted-foreground);
+    background: var(--color-accent);
 }
 
 .profile-actions {

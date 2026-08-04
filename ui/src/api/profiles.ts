@@ -19,3 +19,6 @@ export const updateProfile = apiPatch<
     (profileId) => `/profiles/${profileId}`,
     (_profileId, body) => ({ data: body }),
 )
+
+export const setDefaultProfile = (profileId: number): Promise<ProfileResponse> =>
+    updateProfile(profileId, { default: true })
