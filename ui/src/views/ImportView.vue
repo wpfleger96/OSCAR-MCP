@@ -224,7 +224,7 @@ const isLocalhost =
 // Profile selection
 // ---------------------------------------------------------------------------
 
-const { profiles, activeProfileId, setActiveProfile } = useAuth()
+const { profiles, activeProfileId } = useAuth()
 const selectedProfileId = ref<number | null>(activeProfileId.value)
 
 // ---------------------------------------------------------------------------
@@ -334,19 +334,11 @@ async function onDrop(event: DragEvent) {
 }
 
 async function handleImport() {
-    // Switch active profile if the user selected a different one.
-    // Abort entirely on failure — writing health data to the wrong profile silently
-    // is worse than a visible error.
-    if (selectedProfileId.value !== null && selectedProfileId.value !== activeProfileId.value) {
-        try {
-            await setActiveProfile(selectedProfileId.value)
-        } catch {
-            importError.value =
-                'Could not switch to the selected profile. Please refresh and try again.'
-            return
-        }
-    }
-
+    // NOTE: the backend reads profile from the session's active_profile_id.
+    // Explicit profile_id in the multipart body is not yet supported.
+    // selectedProfileId is captured here for when backend support is added.
+    // Do NOT call setActiveProfile() here — it increments profileKey and
+    // would unmount this view before the upload begins.
     uploadPhase.value = 'uploading'
     uploadProgress.value = 0
     uploadLoaded.value = 0
@@ -450,6 +442,8 @@ async function handlePathImport() {
     pathImportError.value = null
     processingMessage.value = 'Starting import...'
 
+    // NOTE: selectedProfileId is the user's intent; explicit profile_id in path
+    // import body is not yet backend-supported (tracked for future API update).
     try {
         const { job_id } = await importFromPath({ sources: selected })
 

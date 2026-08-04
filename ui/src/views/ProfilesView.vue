@@ -101,7 +101,7 @@ import { listProfiles, createProfile, updateProfile, setDefaultProfile } from '@
 import { useAuth } from '@/composables/useAuth'
 import type { ProfileResponse } from '@/types'
 
-const { activeProfileId } = useAuth()
+const { activeProfileId, refreshStatus } = useAuth()
 
 const profiles = ref<ProfileResponse[]>([])
 const loading = ref(true)
@@ -159,6 +159,8 @@ async function saveRename(profileId: number) {
         const idx = profiles.value.findIndex((p) => p.id === profileId)
         if (idx !== -1) profiles.value[idx] = updated
         cancelEdit()
+        // Refresh shared auth store so AppSidebar and ImportView show the new name.
+        await refreshStatus()
     } catch (e: unknown) {
         actionError.value = e instanceof Error ? e.message : 'Rename failed'
     }
@@ -172,6 +174,8 @@ async function setDefault(profileId: number) {
         profiles.value = profiles.value.map((p) =>
             p.id === profileId ? updated : { ...p, is_default: false },
         )
+        // Refresh shared auth store so profile selectors reflect the change.
+        await refreshStatus()
     } catch (e: unknown) {
         actionError.value = e instanceof Error ? e.message : 'Failed to set default profile'
     }
@@ -186,6 +190,8 @@ async function handleCreate() {
         const created = await createProfile({ name })
         profiles.value.push(created)
         newProfileName.value = ''
+        // Refresh shared auth store so AppSidebar and ImportView show the new profile.
+        await refreshStatus()
     } catch (e: unknown) {
         actionError.value = e instanceof Error ? e.message : 'Failed to create profile'
     } finally {

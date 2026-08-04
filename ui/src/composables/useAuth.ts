@@ -26,14 +26,18 @@ export function useAuth() {
         const gen = _generation
         _fetchPromise = getAuthStatus()
             .then((s) => {
-                // Discard the result if clearAuth() was called while in-flight.
+                // Only write if this generation is still the active one.
                 if (_generation === gen) {
                     status.value = s
                     _lastFetched = Date.now()
                 }
             })
             .finally(() => {
-                _fetchPromise = null
+                // Only clear _fetchPromise if this generation owns it —
+                // prevents a stale .finally() from killing a newer in-flight request.
+                if (_generation === gen) {
+                    _fetchPromise = null
+                }
             })
         return _fetchPromise
     }
@@ -41,13 +45,17 @@ export function useAuth() {
     async function refreshStatus(): Promise<void> {
         status.value = null
         _fetchPromise = null
+        _generation++ // invalidate any in-flight requests from earlier generation
         _lastFetched = 0
         await fetchStatus()
     }
 
     async function login(email: string, password: string): Promise<void> {
         await loginUser({ email, password })
+        // Invalidate any in-flight status fetch so the post-login fetch wins.
         status.value = null
+        _fetchPromise = null
+        _generation++
         _lastFetched = 0
         await fetchStatus()
     }

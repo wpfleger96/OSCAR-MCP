@@ -1,15 +1,17 @@
 <template>
-    <template v-if="!route.meta.authFree">
+    <div v-if="!route.meta.authFree" class="app-layout">
         <AppSidebar class="hidden md:flex" />
-    </template>
-    <main :class="route.meta.authFree ? 'auth-layout' : 'app-main'">
-        <button
-            v-if="!route.meta.authFree"
-            class="md:hidden fixed top-3 left-3 z-50 inline-flex items-center justify-center rounded-md border border-border bg-background p-2 text-foreground shadow-sm"
-            @click="mobileMenuOpen = true"
-        >
-            <Menu class="h-5 w-5" />
-        </button>
+        <main class="app-main">
+            <button
+                class="md:hidden fixed top-3 left-3 z-50 inline-flex items-center justify-center rounded-md border border-border bg-background p-2 text-foreground shadow-sm"
+                @click="mobileMenuOpen = true"
+            >
+                <Menu class="h-5 w-5" />
+            </button>
+            <RouterView :key="profileKey" />
+        </main>
+    </div>
+    <main v-else class="auth-layout">
         <RouterView :key="profileKey" />
     </main>
     <Sheet v-if="!route.meta.authFree" v-model:open="mobileMenuOpen">

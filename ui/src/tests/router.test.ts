@@ -197,14 +197,39 @@ describe('workflow: login page has no sidebar', () => {
         // Sidebar should not be rendered on auth-free routes
         expect(wrapper.findComponent(AppSidebar).exists()).toBe(false)
     })
+
+    it('test_dashboard_has_app_layout_wrapper', async () => {
+        makeAuthMock(true, false)
+        vi.mocked(authApi.getAuthStatus).mockResolvedValue({
+            authenticated: true,
+            auth_mode: 'multiuser',
+            profiles: [],
+        } as never)
+
+        const App = (await import('@/App.vue')).default
+        const Dashboard = { template: '<div class="dash" />' }
+
+        const testRouter = createRouter({
+            history: createWebHistory(),
+            routes: [{ path: '/dashboard', component: Dashboard }],
+        })
+        await testRouter.push('/dashboard')
+
+        const wrapper = mount(App, { global: { plugins: [testRouter] } })
+        // Protected route must render inside .app-layout so the CSS grid applies.
+        expect(wrapper.find('.app-layout').exists()).toBe(true)
+        expect(wrapper.find('.app-main').exists()).toBe(true)
+    })
 })
 
 // profileKey increment is covered in useAuth.test.ts (setActiveProfile_incrementsProfileKey).
 // Testing it here would require vi.unmock which breaks subsequent mocks in the same file.
 
-describe('workflow: import aborts on failed profile switch', () => {
-    it('test_import_aborts_on_failed_profile_switch', async () => {
-        const setActiveProfileMock = vi.fn().mockRejectedValueOnce(new Error('Network Error'))
+describe('workflow: import does not call setActiveProfile during submit', () => {
+    it('test_import_does_not_call_setActiveProfile', async () => {
+        // After the pass-2 fix, setActiveProfile is no longer called from handleImport.
+        // The profileKey remount that would unmount the view during upload is eliminated.
+        const setActiveProfileMock = vi.fn()
         vi.mocked(useAuth).mockReturnValue({
             isAuthenticated: ref(true) as never,
             isLocal: ref(false) as never,
@@ -224,6 +249,8 @@ describe('workflow: import aborts on failed profile switch', () => {
             setActiveProfile: setActiveProfileMock,
         })
 
+        vi.mocked(importApi.importFiles).mockResolvedValueOnce({ job_id: 'job-1' })
+
         const ImportView = (await import('@/views/ImportView.vue')).default
         const testRouter = createRouter({
             history: createWebHistory(),
@@ -232,14 +259,14 @@ describe('workflow: import aborts on failed profile switch', () => {
         await testRouter.push('/import')
         const wrapper = mount(ImportView, { global: { plugins: [testRouter] } })
 
-        // In Vue 3 <script setup>, refs auto-unwrap through vm's proxy.
-        // Assign directly (no .value) and call the internal function via (vm as any).
+        // Select a different profile and call handleImport.
         const vm = wrapper.vm as unknown as Record<string, unknown>
-        vm['selectedProfileId'] = 2 // assigns into the underlying ref via proxy
+        vm['selectedProfileId'] = 2
         await (vm as { handleImport: () => Promise<void> }).handleImport()
 
-        expect(vi.mocked(importApi.importFiles)).not.toHaveBeenCalled()
-        expect(vm['importError']).toContain('Could not switch')
+        // setActiveProfile must NOT be called — it would increment profileKey and
+        // unmount the view before the upload starts.
+        expect(setActiveProfileMock).not.toHaveBeenCalled()
     })
 })
 
@@ -283,5 +310,56 @@ describe('workflow: profile default calls PATCH endpoint', () => {
         // Must NOT have called setActiveProfile on the auth composable
         const authMock = vi.mocked(useAuth)()
         expect(authMock.setActiveProfile).not.toHaveBeenCalled()
+    })
+})
+
+describe('workflow: profile CRUD refreshes shared auth store', () => {
+    it('test_create_profile_calls_refreshStatus_to_update_shared_store', async () => {
+        const refreshStatusMock = vi.fn().mockResolvedValue(undefined)
+        vi.mocked(useAuth).mockReturnValue({
+            isAuthenticated: ref(true) as never,
+            isLocal: ref(false) as never,
+            fetchStatus: vi.fn().mockResolvedValue(undefined),
+            refreshStatus: refreshStatusMock,
+            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+            profiles: ref([{ id: 1, name: 'Primary' }]) as never,
+            activeProfileId: ref(1) as never,
+            authMode: ref('multiuser') as never,
+            profileKey: ref(0) as never,
+            login: vi.fn(),
+            logout: vi.fn(),
+            clearAuth: vi.fn(),
+            setActiveProfile: vi.fn(),
+        })
+
+        vi.mocked(profilesApi.listProfiles).mockResolvedValueOnce([
+            { id: 1, name: 'Primary', user_id: 1 },
+        ])
+        vi.mocked(profilesApi.createProfile).mockResolvedValueOnce({
+            id: 2,
+            name: 'Work',
+            user_id: 1,
+        })
+
+        const ProfilesView = (await import('@/views/ProfilesView.vue')).default
+        const testRouter = createRouter({
+            history: createWebHistory(),
+            routes: [{ path: '/profiles', component: ProfilesView }],
+        })
+        await testRouter.push('/profiles')
+        const wrapper = mount(ProfilesView, { global: { plugins: [testRouter] } })
+
+        // Wait for onMounted
+        await wrapper.vm.$nextTick()
+        await wrapper.vm.$nextTick()
+
+        // Fill the create form and submit
+        await wrapper.find('.create-form input').setValue('Work')
+        await wrapper.find('.create-form').trigger('submit')
+        await wrapper.vm.$nextTick()
+        await wrapper.vm.$nextTick()
+
+        // refreshStatus must be called so AppSidebar and ImportView pick up the new profile.
+        expect(refreshStatusMock).toHaveBeenCalled()
     })
 })

@@ -170,4 +170,78 @@ describe('useAuth', () => {
         await expect(setActiveProfile(99)).rejects.toThrow('Network Error')
         expect(profileKey.value).toBe(before) // not incremented on failure
     })
+
+    it('refreshStatus_generationGuard_staleAnonymousFetchCannotOverwriteAuthenticated', async () => {
+        // Scenario: router guard starts an anonymous fetch (gen=N).
+        // User redeems invite → refreshStatus() increments generation (gen=N+1)
+        // and starts an authenticated fetch. The old anonymous fetch settles LAST.
+        // isAuthenticated must stay true.
+
+        const authedStatus = { ...mockStatus, authenticated: true }
+        const anonStatus = { ...mockStatus, authenticated: false }
+
+        let resolveAnonymous!: (v: typeof mockStatus) => void
+        const anonymousPromise = new Promise<typeof mockStatus>((res) => {
+            resolveAnonymous = res
+        })
+
+        // Anonymous fetch (from router guard) starts first but resolves last.
+        vi.mocked(authApi.getAuthStatus)
+            .mockReturnValueOnce(anonymousPromise)
+            .mockResolvedValueOnce(authedStatus)
+
+        const { fetchStatus, refreshStatus, isAuthenticated } = useAuth()
+
+        // Start anonymous fetch without awaiting.
+        const anonymousFetchPromise = fetchStatus()
+
+        // Simulate invite redemption: refreshStatus increments generation.
+        const refreshPromise = refreshStatus()
+
+        // Let the authenticated fetch resolve.
+        await refreshPromise
+        expect(isAuthenticated.value).toBe(true) // authenticated now
+
+        // Now resolve the stale anonymous fetch.
+        resolveAnonymous(anonStatus)
+        await anonymousFetchPromise
+
+        // Stale fetch must not have overwritten authenticated status.
+        expect(isAuthenticated.value).toBe(true)
+    })
+
+    it('login_generationGuard_stalePreLoginFetchCannotOverwriteAuthenticated', async () => {
+        // Scenario: fetchStatus starts (gen=N), login() fires before it completes.
+        // login() increments generation (gen=N+1). Old fetch resolves last.
+        // isAuthenticated must stay true.
+
+        const authedStatus = { ...mockStatus, authenticated: true }
+        const anonStatus = { ...mockStatus, authenticated: false }
+
+        let resolveAnonymous!: (v: typeof mockStatus) => void
+        const anonymousPromise = new Promise<typeof mockStatus>((res) => {
+            resolveAnonymous = res
+        })
+
+        vi.mocked(authApi.getAuthStatus)
+            .mockReturnValueOnce(anonymousPromise)
+            .mockResolvedValueOnce(authedStatus)
+        vi.mocked(authApi.loginUser).mockResolvedValueOnce({ message: 'ok' })
+
+        const { fetchStatus, login, isAuthenticated } = useAuth()
+
+        // Start anonymous fetch without awaiting.
+        const anonymousFetchPromise = fetchStatus()
+
+        // Login invalidates the old generation.
+        await login('alice@example.com', 'pw')
+        expect(isAuthenticated.value).toBe(true)
+
+        // Now let the old anonymous fetch settle.
+        resolveAnonymous(anonStatus)
+        await anonymousFetchPromise
+
+        // Must still be authenticated.
+        expect(isAuthenticated.value).toBe(true)
+    })
 })

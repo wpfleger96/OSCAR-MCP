@@ -186,6 +186,8 @@ async function startGoogleSignup() {
         const httpStatus = (e as { response?: { status?: number } }).response?.status
         if (httpStatus === 400) {
             redeemError.value = 'This invite link is invalid or has expired.'
+        } else if (httpStatus === 429) {
+            redeemError.value = 'Too many attempts — try again later'
         } else if (httpStatus === 503) {
             redeemError.value = 'Google sign-in is not available right now.'
         } else {
