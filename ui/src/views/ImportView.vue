@@ -334,9 +334,6 @@ async function onDrop(event: DragEvent) {
 }
 
 async function handleImport() {
-    // NOTE: the backend reads profile from the session's active_profile_id.
-    // Explicit profile_id in the multipart body is not yet supported.
-    // selectedProfileId is captured here for when backend support is added.
     // Do NOT call setActiveProfile() here — it increments profileKey and
     // would unmount this view before the upload begins.
     uploadPhase.value = 'uploading'
@@ -355,7 +352,11 @@ async function handleImport() {
     }
 
     try {
-        const { job_id } = await importFiles(fileEntries.value, onProgress)
+        const { job_id } = await importFiles(
+            fileEntries.value,
+            onProgress,
+            selectedProfileId.value ?? undefined,
+        )
         uploadPhase.value = 'processing'
         processingMessage.value = 'Starting import...'
 
@@ -442,10 +443,11 @@ async function handlePathImport() {
     pathImportError.value = null
     processingMessage.value = 'Starting import...'
 
-    // NOTE: selectedProfileId is the user's intent; explicit profile_id in path
-    // import body is not yet backend-supported (tracked for future API update).
     try {
-        const { job_id } = await importFromPath({ sources: selected })
+        const { job_id } = await importFromPath(
+            { sources: selected },
+            selectedProfileId.value ?? undefined,
+        )
 
         connectImportProgress(job_id, {
             onProgress: (data) => {

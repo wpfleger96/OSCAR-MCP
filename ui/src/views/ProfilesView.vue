@@ -160,7 +160,8 @@ async function saveRename(profileId: number) {
         if (idx !== -1) profiles.value[idx] = updated
         cancelEdit()
         // Refresh shared auth store so AppSidebar and ImportView show the new name.
-        await refreshStatus()
+        // Fire-and-forget: a refresh failure must not report the committed rename as failed.
+        refreshStatus().catch(() => {})
     } catch (e: unknown) {
         actionError.value = e instanceof Error ? e.message : 'Rename failed'
     }
@@ -175,7 +176,8 @@ async function setDefault(profileId: number) {
             p.id === profileId ? updated : { ...p, is_default: false },
         )
         // Refresh shared auth store so profile selectors reflect the change.
-        await refreshStatus()
+        // Fire-and-forget: a refresh failure must not report the committed change as failed.
+        refreshStatus().catch(() => {})
     } catch (e: unknown) {
         actionError.value = e instanceof Error ? e.message : 'Failed to set default profile'
     }
@@ -191,7 +193,8 @@ async function handleCreate() {
         profiles.value.push(created)
         newProfileName.value = ''
         // Refresh shared auth store so AppSidebar and ImportView show the new profile.
-        await refreshStatus()
+        // Fire-and-forget: a refresh failure must not report the committed create as failed.
+        refreshStatus().catch(() => {})
     } catch (e: unknown) {
         actionError.value = e instanceof Error ? e.message : 'Failed to create profile'
     } finally {

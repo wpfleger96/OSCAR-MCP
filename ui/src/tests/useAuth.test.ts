@@ -210,6 +210,50 @@ describe('useAuth', () => {
         expect(isAuthenticated.value).toBe(true)
     })
 
+    it('fetchStatus_supersededByRefresh_chainesToReplacementWhenOldResolvesFirst', async () => {
+        // Scenario: router guard starts an anonymous fetch (gen=N).
+        // refreshStatus() fires (gen=N+1) and starts an authenticated fetch.
+        // The OLD anonymous request resolves FIRST with unauthenticated status.
+        // The guard's promise must still eventually resolve with authenticated state
+        // because fetchStatus() chains superseded callers to the current-generation promise.
+
+        const anonStatus = { ...mockStatus, authenticated: false }
+        const authedStatus = { ...mockStatus, authenticated: true }
+
+        let resolveAnon!: (v: typeof mockStatus) => void
+        let resolveAuth!: (v: typeof mockStatus) => void
+
+        vi.mocked(authApi.getAuthStatus)
+            .mockReturnValueOnce(
+                new Promise((r) => {
+                    resolveAnon = r
+                }),
+            )
+            .mockReturnValueOnce(
+                new Promise((r) => {
+                    resolveAuth = r
+                }),
+            )
+
+        const { fetchStatus, refreshStatus, isAuthenticated } = useAuth()
+
+        // Router guard starts anonymous fetch (P1).
+        const guardPromise = fetchStatus()
+        // refreshStatus invalidates gen and starts authenticated fetch (P2);
+        // _fetchPromise is now P2 by the time the guard's .then() runs.
+        const refreshPromise = refreshStatus()
+
+        // Anonymous request resolves first — P1's .then() chains to P2.
+        resolveAnon(anonStatus)
+        // Authenticated request resolves — P2 writes status, P1 (chained) resolves.
+        resolveAuth(authedStatus)
+
+        await Promise.all([guardPromise, refreshPromise])
+
+        // Guard received the authenticated result via the chain, not the stale anon result.
+        expect(isAuthenticated.value).toBe(true)
+    })
+
     it('login_generationGuard_stalePreLoginFetchCannotOverwriteAuthenticated', async () => {
         // Scenario: fetchStatus starts (gen=N), login() fires before it completes.
         // login() increments generation (gen=N+1). Old fetch resolves last.

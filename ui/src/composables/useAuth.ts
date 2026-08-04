@@ -26,10 +26,14 @@ export function useAuth() {
         const gen = _generation
         _fetchPromise = getAuthStatus()
             .then((s) => {
-                // Only write if this generation is still the active one.
                 if (_generation === gen) {
+                    // Only write if this generation is still the active one.
                     status.value = s
                     _lastFetched = Date.now()
+                } else if (_fetchPromise !== null) {
+                    // Superseded by a newer generation — chain to the active fetch
+                    // so callers awaiting this promise get the authenticated result.
+                    return _fetchPromise
                 }
             })
             .finally(() => {

@@ -225,6 +225,54 @@ describe('workflow: login page has no sidebar', () => {
 // profileKey increment is covered in useAuth.test.ts (setActiveProfile_incrementsProfileKey).
 // Testing it here would require vi.unmock which breaks subsequent mocks in the same file.
 
+describe('workflow: import passes selectedProfileId to importFiles', () => {
+    it('test_import_passes_selected_profile_id_to_importFiles', async () => {
+        // selectedProfileId (2) differs from the active session profile (1).
+        // importFiles must be called with profileId=2 so the backend targets the right profile.
+        // Falsifiability: if profileId is omitted from the importFiles call this assertion fails.
+        vi.mocked(useAuth).mockReturnValue({
+            isAuthenticated: ref(true) as never,
+            isLocal: ref(false) as never,
+            fetchStatus: vi.fn().mockResolvedValue(undefined),
+            refreshStatus: vi.fn().mockResolvedValue(undefined),
+            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+            profiles: ref([
+                { id: 1, name: 'Primary' },
+                { id: 2, name: 'Work' },
+            ]) as never,
+            activeProfileId: ref(1) as never,
+            authMode: ref('multiuser') as never,
+            profileKey: ref(0) as never,
+            login: vi.fn(),
+            logout: vi.fn(),
+            clearAuth: vi.fn(),
+            setActiveProfile: vi.fn(),
+        })
+
+        vi.mocked(importApi.importFiles).mockResolvedValueOnce({ job_id: 'job-1' })
+
+        const ImportView = (await import('@/views/ImportView.vue')).default
+        const testRouter = createRouter({
+            history: createWebHistory(),
+            routes: [{ path: '/import', component: ImportView }],
+        })
+        await testRouter.push('/import')
+        const wrapper = mount(ImportView, { global: { plugins: [testRouter] } })
+
+        const vm = wrapper.vm as unknown as Record<string, unknown>
+        // Select profile 2 (different from active profile 1)
+        vm['selectedProfileId'] = 2
+        await (vm as { handleImport: () => Promise<void> }).handleImport()
+
+        // importFiles must receive the selected profile id as the third argument
+        expect(importApi.importFiles).toHaveBeenCalledWith(
+            expect.anything(), // fileEntries
+            expect.anything(), // onProgress callback
+            2, // selectedProfileId
+        )
+    })
+})
+
 describe('workflow: import does not call setActiveProfile during submit', () => {
     it('test_import_does_not_call_setActiveProfile', async () => {
         // After the pass-2 fix, setActiveProfile is no longer called from handleImport.
@@ -361,5 +409,73 @@ describe('workflow: profile CRUD refreshes shared auth store', () => {
 
         // refreshStatus must be called so AppSidebar and ImportView pick up the new profile.
         expect(refreshStatusMock).toHaveBeenCalled()
+    })
+})
+
+describe('workflow: profile mutation success not shadowed by refresh failure', () => {
+    it('test_profile_rename_success_shows_no_error_when_refresh_throws', async () => {
+        // A committed rename must not be reported as a failure just because the
+        // subsequent GET /auth/status throws. refreshStatus() is fire-and-forget.
+        const refreshStatusMock = vi.fn().mockRejectedValue(new Error('Network'))
+        vi.mocked(useAuth).mockReturnValue({
+            isAuthenticated: ref(true) as never,
+            isLocal: ref(false) as never,
+            fetchStatus: vi.fn().mockResolvedValue(undefined),
+            refreshStatus: refreshStatusMock,
+            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+            profiles: ref([{ id: 1, name: 'Primary' }]) as never,
+            activeProfileId: ref(1) as never,
+            authMode: ref('multiuser') as never,
+            profileKey: ref(0) as never,
+            login: vi.fn(),
+            logout: vi.fn(),
+            clearAuth: vi.fn(),
+            setActiveProfile: vi.fn(),
+        })
+
+        vi.mocked(profilesApi.listProfiles).mockResolvedValueOnce([
+            { id: 1, name: 'Primary', user_id: 1 },
+        ])
+        vi.mocked(profilesApi.updateProfile).mockResolvedValueOnce({
+            id: 1,
+            name: 'NewName',
+            user_id: 1,
+        })
+
+        const ProfilesView = (await import('@/views/ProfilesView.vue')).default
+        const testRouter = createRouter({
+            history: createWebHistory(),
+            routes: [{ path: '/profiles', component: ProfilesView }],
+        })
+        await testRouter.push('/profiles')
+        const wrapper = mount(ProfilesView, { global: { plugins: [testRouter] } })
+
+        // Wait for onMounted
+        await wrapper.vm.$nextTick()
+        await wrapper.vm.$nextTick()
+
+        // Click the Rename button for the first profile
+        const renameBtn = wrapper.findAll('button').find((b) => b.text().includes('Rename'))
+        expect(renameBtn).toBeDefined()
+        await renameBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Enter new name and save
+        await wrapper.find('.profile-name-input').setValue('NewName')
+        const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('Save'))
+        expect(saveBtn).toBeDefined()
+        await saveBtn!.trigger('click')
+
+        // Flush async: mutation resolves, refresh fires and forgets
+        await wrapper.vm.$nextTick()
+        await wrapper.vm.$nextTick()
+        await wrapper.vm.$nextTick()
+
+        // refreshStatus was called
+        expect(refreshStatusMock).toHaveBeenCalled()
+        // No error banner — refresh failure must not surface as a mutation failure
+        expect(wrapper.find('.action-error').exists()).toBe(false)
+        // Profile name updated in the local list from the mutation response
+        expect(wrapper.text()).toContain('NewName')
     })
 })
