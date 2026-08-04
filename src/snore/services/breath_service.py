@@ -762,6 +762,11 @@ class NightlyAnalysisSummary(BaseModel):
     fl_max: float | None
     fl_reason: NullReason | None
 
+    ti_median_s: float | None
+    ti_median_reason: NullReason | None
+    ie_ratio_median: float | None
+    ie_ratio_reason: NullReason | None
+
     total_therapy_hours: float
     compliance_threshold_hours: float
     is_compliant: bool
@@ -2494,6 +2499,10 @@ class BreathService:
                 fl_95th=None,
                 fl_max=None,
                 fl_reason=NullReason.NOT_AVAILABLE,
+                ti_median_s=None,
+                ti_median_reason=NullReason.NOT_AVAILABLE,
+                ie_ratio_median=None,
+                ie_ratio_reason=NullReason.NOT_AVAILABLE,
                 total_therapy_hours=total_therapy_hours,
                 compliance_threshold_hours=compliance_threshold_hours,
                 is_compliant=total_therapy_hours >= compliance_threshold_hours,
@@ -2506,8 +2515,10 @@ class BreathService:
         modes_seen = {algo.run.primary_mode for _, algo in ok_sessions}
         uniform_primary_mode = next(iter(modes_seen)) if len(modes_seen) == 1 else None
 
-        # Gather FL (mid_insp_flattening) values across leak-valid breaths
+        # Gather FL, Ti, I:E values across leak-valid breaths
         fl_vals: list[float] = []
+        ti_vals: list[float] = []
+        ie_vals: list[float] = []
         rera_count = 0
         for sid, _algo in ok_sessions:
             ar_id = ar_id_by_session.get(sid)
@@ -2525,11 +2536,18 @@ class BreathService:
                 .all()
             )
             for b in breath_rows:
-                if b.leak_valid is True and b.mid_insp_flattening is not None:
-                    fl_vals.append(b.mid_insp_flattening)
+                if b.leak_valid is True:
+                    if b.mid_insp_flattening is not None:
+                        fl_vals.append(b.mid_insp_flattening)
+                    if b.inspiration_time_s is not None:
+                        ti_vals.append(b.inspiration_time_s)
+                    if b.i_e_ratio is not None:
+                        ie_vals.append(b.i_e_ratio)
 
             # RERA proxy: FL runs ending in recovery breath
             rera_count += _count_fl_run_reras(breath_rows)
+
+        import statistics  # noqa: PLC0415
 
         fl_median: float | None
         fl_95th: float | None
@@ -2537,8 +2555,6 @@ class BreathService:
         fl_reason: NullReason | None
 
         if fl_vals:
-            import statistics  # noqa: PLC0415
-
             sorted_fl = sorted(fl_vals)
             n = len(sorted_fl)
             fl_median = float(statistics.median(sorted_fl))
@@ -2549,6 +2565,25 @@ class BreathService:
         else:
             fl_median = fl_95th = fl_max = None
             fl_reason = NullReason.NOT_AVAILABLE
+
+        ti_median_s: float | None
+        ti_median_reason: NullReason | None
+        ie_ratio_median: float | None
+        ie_ratio_reason: NullReason | None
+
+        if ti_vals:
+            ti_median_s = float(statistics.median(ti_vals))
+            ti_median_reason = None
+        else:
+            ti_median_s = None
+            ti_median_reason = NullReason.NOT_AVAILABLE
+
+        if ie_vals:
+            ie_ratio_median = float(statistics.median(ie_vals))
+            ie_ratio_reason = None
+        else:
+            ie_ratio_median = None
+            ie_ratio_reason = NullReason.NOT_AVAILABLE
 
         # day_status already set by _reduce_day_status above; use it directly
         return NightlyAnalysisSummary(
@@ -2569,6 +2604,10 @@ class BreathService:
             fl_95th=fl_95th,
             fl_max=fl_max,
             fl_reason=fl_reason,
+            ti_median_s=ti_median_s,
+            ti_median_reason=ti_median_reason,
+            ie_ratio_median=ie_ratio_median,
+            ie_ratio_reason=ie_ratio_reason,
             total_therapy_hours=total_therapy_hours,
             compliance_threshold_hours=compliance_threshold_hours,
             is_compliant=total_therapy_hours >= compliance_threshold_hours,

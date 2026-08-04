@@ -4075,3 +4075,253 @@ class TestCodeReviewFixes:
             "must be None with NOT_AVAILABLE reason"
         )
         assert result.pb_reason == NullReason.NOT_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Ti / I:E ratio fields on NightlyAnalysisSummary
+# ---------------------------------------------------------------------------
+
+
+async def _store_night_with_breath_specs(
+    db: AsyncSession,
+    therapy_date: date,
+    breath_specs: list[dict],
+) -> tuple[int, int]:
+    """Seed one night and return (profile_id, device_id).
+
+    Each dict in ``breath_specs`` may set any ``ComputedBreath`` field;
+    unset keys fall back to sensible defaults.  Supported overrides:
+    ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``.
+    """
+    from snore.analysis.types import ComputedBreath  # noqa: PLC0415
+
+    _, profile_id = await _make_profile(db)
+    dev = await _make_device(db, profile_id)
+    _, session = await _make_day_and_session(db, dev.id, therapy_date)
+
+    computed_breaths = []
+    for i, spec in enumerate(breath_specs):
+        computed_breaths.append(
+            ComputedBreath(
+                breath_number=i + 1,
+                start_offset_s=float(i * 4),
+                end_offset_s=float(i * 4 + 3),
+                inspiration_time_s=spec.get("inspiration_time_s", 1.2),
+                expiration_time_s=1.8,
+                total_time_s=3.0,
+                i_e_ratio=spec.get("i_e_ratio", 0.67),
+                duty_cycle=0.4,
+                peak_flow_lpm=30.0,
+                peak_exp_flow_lpm=20.0,
+                tidal_volume_ml=400.0,
+                respiratory_rate_rolling=15.0,
+                flatness_index=0.2,
+                mid_insp_flattening=0.35,
+                flow_class=1,
+                flow_confidence=0.9,
+                is_recovery_breath=False,
+                inferred_trigger_type="normal",
+                trigger_confidence=0.8,
+                inferred_cycle_type="normal",
+                cycle_confidence=0.75,
+                trigger_cycle_applicable=True,
+                trigger_cycle_reason=None,
+                leak_valid=spec.get("leak_valid", True),
+                leak_valid_reason=None,
+                ramp_active=None,
+                ramp_active_reason="not_available",
+                mask_off=False,
+                mask_off_reason=None,
+            )
+        )
+
+    result_dto = AnalysisResultDTO(
+        session_id=session.id,
+        session_duration_hours=7.0,
+        total_breaths=len(computed_breaths),
+        machine_events=[],
+        mode_results={
+            "aasm": ModeResult(
+                mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+            )
+        },
+        timestamp_start=session.start_time.timestamp(),
+        timestamp_end=(session.start_time + timedelta(hours=7)).timestamp(),
+    )
+    computation = AnalysisComputation(
+        summary=result_dto, breaths=computed_breaths, primary_mode="aasm"
+    )
+    await AnalysisService(db, profile_id=profile_id).store_result(
+        computation, processing_time_ms=42
+    )
+    await db.flush()
+    return profile_id, dev.id
+
+
+@pytest.mark.unit
+class TestNightlyRangeSummaryTiIe:
+    """Ti (inspiration time) and I:E ratio fields on per-night NightlyAnalysisSummary."""
+
+    async def test_ti_and_ie_median_odd_count_equals_middle_value(
+        self, async_db_session
+    ):
+        """ti_median_s and ie_ratio_median are the exact middle value for odd-count leak-valid breaths."""
+        therapy_date = date(2025, 7, 1)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"inspiration_time_s": 1.0, "i_e_ratio": 0.5, "leak_valid": True},
+                {"inspiration_time_s": 1.2, "i_e_ratio": 0.6, "leak_valid": True},
+                {"inspiration_time_s": 1.4, "i_e_ratio": 0.7, "leak_valid": True},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.ti_median_s == pytest.approx(1.2)
+        assert night.ti_median_reason is None
+        assert night.ie_ratio_median == pytest.approx(0.6)
+        assert night.ie_ratio_reason is None
+
+    async def test_ti_and_ie_median_even_count_averages_two_middle_values(
+        self, async_db_session
+    ):
+        """ti_median_s and ie_ratio_median average the two middle values for even-count breaths."""
+        therapy_date = date(2025, 7, 2)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"inspiration_time_s": 1.0, "i_e_ratio": 0.4, "leak_valid": True},
+                {"inspiration_time_s": 1.2, "i_e_ratio": 0.6, "leak_valid": True},
+                {"inspiration_time_s": 1.4, "i_e_ratio": 0.8, "leak_valid": True},
+                {"inspiration_time_s": 1.6, "i_e_ratio": 1.0, "leak_valid": True},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.ti_median_s == pytest.approx(1.3)  # (1.2 + 1.4) / 2
+        assert night.ti_median_reason is None
+        assert night.ie_ratio_median == pytest.approx(0.7)  # (0.6 + 0.8) / 2
+        assert night.ie_ratio_reason is None
+
+    async def test_leak_invalid_breaths_excluded_from_ti_and_ie_medians(
+        self, async_db_session
+    ):
+        """Breaths with leak_valid=False or leak_valid=None do not shift ti_median_s or ie_ratio_median."""
+        therapy_date = date(2025, 7, 3)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                # Three qualifying breaths; median Ti=1.2, I:E=0.6
+                {"inspiration_time_s": 1.0, "i_e_ratio": 0.5, "leak_valid": True},
+                {"inspiration_time_s": 1.2, "i_e_ratio": 0.6, "leak_valid": True},
+                {"inspiration_time_s": 1.4, "i_e_ratio": 0.7, "leak_valid": True},
+                # Would shift the median if not filtered:
+                {"inspiration_time_s": 9.9, "i_e_ratio": 9.9, "leak_valid": False},
+                {"inspiration_time_s": 9.9, "i_e_ratio": 9.9, "leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.ti_median_s == pytest.approx(1.2)
+        assert night.ie_ratio_median == pytest.approx(0.6)
+
+    async def test_null_ti_or_ie_within_leak_valid_breaths_excluded_independently(
+        self, async_db_session
+    ):
+        """Null inspiration_time_s or i_e_ratio within leak-valid breaths are skipped per-field."""
+        therapy_date = date(2025, 7, 4)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                # Ti present, I:E null → Ti contributes; I:E does not
+                {"inspiration_time_s": 1.0, "i_e_ratio": None, "leak_valid": True},
+                {"inspiration_time_s": 1.4, "i_e_ratio": None, "leak_valid": True},
+                # Ti null, I:E present → I:E contributes; Ti does not
+                {"inspiration_time_s": None, "i_e_ratio": 0.6, "leak_valid": True},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        # Ti from breaths 1 & 2 only: (1.0 + 1.4) / 2 = 1.2
+        assert night.ti_median_s == pytest.approx(1.2)
+        assert night.ti_median_reason is None
+        # I:E from breath 3 only: 0.6
+        assert night.ie_ratio_median == pytest.approx(0.6)
+        assert night.ie_ratio_reason is None
+
+    async def test_no_leak_valid_breaths_ti_and_ie_null_with_not_available_reason(
+        self, async_db_session
+    ):
+        """All breaths leak_valid=False/None → ti_median_s and ie_ratio_median are None with NOT_AVAILABLE."""
+        therapy_date = date(2025, 7, 5)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"inspiration_time_s": 1.2, "i_e_ratio": 0.6, "leak_valid": False},
+                {"inspiration_time_s": 1.5, "i_e_ratio": 0.7, "leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.ti_median_s is None
+        assert night.ti_median_reason == NullReason.NOT_AVAILABLE
+        assert night.ie_ratio_median is None
+        assert night.ie_ratio_reason == NullReason.NOT_AVAILABLE
+
+    async def test_zero_breaths_ti_and_ie_null_with_not_available_reason(
+        self, async_db_session
+    ):
+        """A session with no breaths at all → ti_median_s and ie_ratio_median are None with NOT_AVAILABLE."""
+        therapy_date = date(2025, 7, 6)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.ti_median_s is None
+        assert night.ti_median_reason == NullReason.NOT_AVAILABLE
+        assert night.ie_ratio_median is None
+        assert night.ie_ratio_reason == NullReason.NOT_AVAILABLE
