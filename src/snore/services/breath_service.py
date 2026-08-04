@@ -548,25 +548,23 @@ class WaveformWindowRequest(BaseModel):
         return self
 
 
-async def fetch_waveform_window_raw(
+async def _fetch_waveform_blobs(
     db: AsyncSession,
     request: WaveformWindowRequest,
     session_id: int,
     session_start: datetime,
 ) -> RawWaveformWindow:
-    """DB I/O ONLY — fetch waveform blobs for a pre-resolved session.
+    """PRIVATE — fetch waveform blobs for a pre-resolved, already-owned session.
 
-    Never closes db: the scope owner opens and closes the scope around this call.
-
-    ``session_id`` and ``session_start`` must be pre-resolved by the caller
-    (typically via ``_resolve_range``).  No Session query is performed here.
+    Trusted internal helper: ownership has already been verified by the caller
+    (via ``_resolve_range`` or ``fetch_waveform_window_raw``).  No ownership
+    check or Session query is performed here.
     """
 
     from sqlalchemy import select  # noqa: PLC0415
 
     from snore.database import models  # noqa: PLC0415
 
-    # Fetch waveform blobs for the known session — no resolution pass.
     requested_types = [ch.value for ch in request.channels]
     wf_stmt = select(models.Waveform).where(
         models.Waveform.session_id == session_id,
@@ -599,6 +597,54 @@ async def fetch_waveform_window_raw(
         channels=channels,
         missing_channels=missing,
     )
+
+
+async def fetch_waveform_window_raw(
+    db: AsyncSession,
+    profile_id: int,
+    request: WaveformWindowRequest,
+) -> RawWaveformWindow:
+    """PUBLIC — fetch waveform blobs with profile-level ownership enforcement.
+
+    Never closes db: the scope owner opens and closes the scope around this call.
+
+    ``request.session_id`` must be set (direct callers must have a resolved session).
+    Verifies ``Device.profile_id == profile_id`` via a join; raises ``ValueError``
+    when the session is not found or is not owned by ``profile_id``.  Derives
+    ``session_start`` from the DB row — never from caller-supplied data (plan §9
+    lines 720-735).
+    """
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from snore.database import models  # noqa: PLC0415
+
+    if request.session_id is None:
+        raise ValueError(
+            "request.session_id must be set; direct callers of fetch_waveform_window_raw "
+            "must resolve a session before calling this function"
+        )
+
+    # One ownership-enforcing query: Session ⟵ Device with profile predicate.
+    row = (
+        await db.execute(
+            select(models.Session.start_time)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Session.id == request.session_id,
+                models.Device.profile_id == profile_id,
+            )
+        )
+    ).one_or_none()
+
+    if row is None:
+        raise ValueError(
+            f"Session {request.session_id} not found or not owned by "
+            f"profile {profile_id}"
+        )
+
+    session_start: datetime = row[0]
+    return await _fetch_waveform_blobs(db, request, request.session_id, session_start)
 
 
 def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
@@ -863,7 +909,7 @@ class BreathService:
             Validate ownership independent of data presence.
             Return (device_id, sessions_by_date) — sessions_by_date may be empty.
         device_id given and NOT owned:
-            Raise ValueError("not owned by this profile").
+            Raise DeviceNotOwnedError(device_id, profile_id).
         device_id None, 0 owned devices with sessions in range:
             Raise ValueError("No sessions found in range").
         device_id None, 1 distinct owned device in range:
@@ -2859,7 +2905,7 @@ class BreathService:
 
                 # Fetch pressure/leak context — absent channels land in missing_channels,
                 # no exception needed.  Corrupt blobs raise ValueError (plan IMPORTANT-8).
-                raw_ctx = await fetch_waveform_window_raw(
+                raw_ctx = await _fetch_waveform_blobs(
                     self._db,
                     WaveformWindowRequest(
                         therapy_date=therapy_date,
@@ -2888,7 +2934,7 @@ class BreathService:
 
                 # MV window (prior 120 s) — same propagation rule
                 if offset_s > 0.0:
-                    raw_mv = await fetch_waveform_window_raw(
+                    raw_mv = await _fetch_waveform_blobs(
                         self._db,
                         WaveformWindowRequest(
                             therapy_date=therapy_date,
@@ -2941,7 +2987,15 @@ class BreathService:
         )
         day_sessions = sessions_by_date.get(request.therapy_date, [])
 
+        # Validate explicit session_id BEFORE the empty-day return.
+        # An owned device on an empty date with an explicit session_id must raise,
+        # not silently return a synthetic empty window (plan §9 lines 822-825).
         if not day_sessions:
+            if request.session_id is not None:
+                raise ValueError(
+                    f"Session {request.session_id} not found for date "
+                    f"{request.therapy_date} on device {resolved_device_id}"
+                )
             return compute_waveform_window(
                 RawWaveformWindow(
                     request=request,
@@ -2980,7 +3034,7 @@ class BreathService:
         resolved_request = request.model_copy(
             update={"device_id": resolved_device_id, "session_id": session_row.id}
         )
-        raw = await fetch_waveform_window_raw(
+        raw = await _fetch_waveform_blobs(
             self._db, resolved_request, session_row.id, session_row.start_time
         )
         return compute_waveform_window(raw)
@@ -3124,7 +3178,7 @@ class BreathService:
                 if offset_s > 0.0:
                     # plan §12 line 976: stability_index uses 60-second window
                     mv_win_start = max(0.0, offset_s - 60.0)
-                    raw_mv = await fetch_waveform_window_raw(
+                    raw_mv = await _fetch_waveform_blobs(
                         self._db,
                         WaveformWindowRequest(
                             therapy_date=therapy_date,
@@ -3168,7 +3222,7 @@ class BreathService:
 
                 ps_win_start = max(0.0, offset_s - 5.0)
                 ps_win_end = offset_s + 5.0
-                raw_ps = await fetch_waveform_window_raw(
+                raw_ps = await _fetch_waveform_blobs(
                     self._db,
                     WaveformWindowRequest(
                         therapy_date=therapy_date,
@@ -3261,7 +3315,7 @@ class BreathService:
                 # MV rolling variance: collect bin means across ALL OK sessions
                 # (combined; variance computed once after the loop)
                 session_cap = max(session_duration_s, 1.0)
-                raw_mv_full = await fetch_waveform_window_raw(
+                raw_mv_full = await _fetch_waveform_blobs(
                     self._db,
                     WaveformWindowRequest(
                         therapy_date=therapy_date,

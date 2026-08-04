@@ -745,6 +745,55 @@ class TestGetWaveformWindow:
         # No waveform blobs stored → empty channels
         assert window.channels == []
 
+    async def test_explicit_session_id_on_empty_date_raises(self, async_db_session):
+        """get_waveform_window raises ValueError for explicit session_id on an empty date.
+
+        plan §9 lines 822-825: a non-None session_id must raise if it doesn't belong
+        to the requested date/device.  An owned device with no sessions on the
+        requested date and an explicit session_id must NOT return a synthetic empty window.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        # No sessions created for this date — empty day
+        therapy_date = date(2025, 6, 11)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(ValueError):
+            await svc.get_waveform_window(
+                WaveformWindowRequest(
+                    therapy_date=therapy_date,
+                    device_id=dev.id,
+                    session_id=99999,  # non-None, bogus
+                    offset_start=0.0,
+                    offset_end=60.0,
+                )
+            )
+
+    async def test_no_session_id_on_empty_date_returns_empty_window(
+        self, async_db_session
+    ):
+        """get_waveform_window with session_id=None on empty date returns empty window.
+
+        Regression guard: the session_id validation fix must not raise when session_id
+        is None — only the synthetic empty window is returned.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 6, 12)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        window = await svc.get_waveform_window(
+            WaveformWindowRequest(
+                therapy_date=therapy_date,
+                device_id=dev.id,
+                # session_id=None (default)
+                offset_start=0.0,
+                offset_end=60.0,
+            )
+        )
+        assert window.session_id == 0
+        assert window.channels == []
+
 
 # ---------------------------------------------------------------------------
 # fetch_waveform_window_raw (module-level)
@@ -753,24 +802,58 @@ class TestGetWaveformWindow:
 
 @pytest.mark.unit
 class TestFetchWaveformWindowRaw:
-    async def test_unknown_session_id_returns_empty_channels(self, async_db_session):
-        """fetch_waveform_window_raw returns empty channels for an unknown session_id.
+    async def test_foreign_session_id_raises_value_error(self, async_db_session):
+        """fetch_waveform_window_raw raises ValueError for a foreign session_id.
 
-        After removing the internal resolver, the function only queries Waveform rows.
-        A session_id with no Waveform rows → all channels go to missing_channels.
-        Resolution (profile/device/session ownership) is the caller's responsibility.
+        plan §9 lines 720-735: the public seam must verify Device.profile_id and
+        raise ValueError when the session is not owned by profile_id.
         """
+        _, profile_a_id = await _make_profile(async_db_session)
+        _, profile_b_id = await _make_profile(async_db_session)
+        dev_b = await _make_device(async_db_session, profile_b_id)
+        therapy_date = date(2025, 2, 1)
+        _, session_b = await _make_day_and_session(
+            async_db_session, dev_b.id, therapy_date
+        )
+        # Give session_b a waveform row so the difference from "no data" is detectable
+        async_db_session.add(
+            models.Waveform(
+                session_id=session_b.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                sample_count=10,
+                data_blob=b"\x00" * 80,
+            )
+        )
+        await async_db_session.flush()
+
         req = WaveformWindowRequest(
-            therapy_date=date(2025, 1, 1),
-            session_id=99999,
+            therapy_date=therapy_date,
+            session_id=session_b.id,
             offset_start=0.0,
-            offset_end=120.0,
+            offset_end=10.0,
             channels=[WaveformChannelName.FLOW],
         )
-        raw = await fetch_waveform_window_raw(
-            async_db_session, req, 99999, datetime.min
+        # Profile A must not receive profile B's waveform bytes
+        with pytest.raises(ValueError):
+            await fetch_waveform_window_raw(async_db_session, profile_a_id, req)
+
+    async def test_owned_session_returns_waveform_data(self, async_db_session):
+        """fetch_waveform_window_raw returns data for an owned session."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 2, 2)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        req = WaveformWindowRequest(
+            therapy_date=therapy_date,
+            session_id=session.id,
+            offset_start=0.0,
+            offset_end=10.0,
+            channels=[WaveformChannelName.FLOW],
         )
-        assert raw.channels == []
+        # No Waveform row → empty channels but no error
+        raw = await fetch_waveform_window_raw(async_db_session, profile_id, req)
+        assert raw.session_id == session.id
         assert WaveformChannelName.FLOW in raw.missing_channels
 
 
