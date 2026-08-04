@@ -6,8 +6,8 @@ POST /api/v1/auth/login
 POST /api/v1/auth/logout
 GET  /api/v1/auth/status
 POST /api/v1/auth/active-profile
-GET  /api/v1/auth/invites/{token}
-POST /api/v1/auth/invites/{token}/redeem
+POST /api/v1/auth/invites/lookup   (token in request body — never in URL)
+POST /api/v1/auth/invites/redeem   (token + password in request body)
 
 All auth/invite responses carry ``Cache-Control: no-store`` to prevent
 credential caching by proxies or browsers.

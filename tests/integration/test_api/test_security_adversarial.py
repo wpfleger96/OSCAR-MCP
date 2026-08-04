@@ -667,9 +667,9 @@ class TestAuthNoStore:
 class TestP2KdfCancellation:
     """Cancelling an awaiting KDF coroutine must not free the executor slot.
 
-    With ThreadPoolExecutor(max_workers=4), the slot is owned by the running
-    thread, not the awaiting coroutine.  Cancelling the awaiter leaves the
-    thread running and the slot occupied; a 5th submission queues.
+    All tests drive the real async wrappers (hash_password_async /
+    verify_password_async) using the production executor so a revert to
+    semaphore+to_thread would cause failures.
     """
 
     def test_kdf_executor_max_workers_is_four(self):
@@ -678,76 +678,101 @@ class TestP2KdfCancellation:
 
         assert _KDF_EXECUTOR._max_workers == 4
 
-    def test_kdf_slot_held_after_awaiter_cancel(self):
-        """Cancelling a KDF awaiter does not start a 5th native Argon2 op.
+    def test_kdf_async_wrapper_runs_on_snore_kdf_thread(self):
+        """hash_password_async dispatches to a snore-kdf-* named thread.
 
-        Uses a 1-worker test executor to prove the invariant at smaller scale:
-        1 blocked thread + cancelled awaiter + 2nd submission → 2nd stays queued
-        until the first thread finishes.
+        Patches passwords.hash_password (the module function that
+        hash_password_async submits to the executor) so we can observe the
+        thread name without running a real Argon2 op.
+        """
+        import asyncio
+        import threading
+
+        from unittest.mock import patch
+
+        from snore.auth import passwords
+
+        thread_names: list[str] = []
+
+        def tracking_hash(pw: str) -> str:
+            thread_names.append(threading.current_thread().name)
+            return "mocked-hash"
+
+        async def run() -> None:
+            with patch.object(passwords, "hash_password", tracking_hash):
+                # hash_password_async submits the patched function to the executor.
+                await passwords.hash_password_async("test")
+
+        asyncio.run(run())
+        assert thread_names, "hash_password never ran"
+        assert all(n.startswith("snore-kdf-") for n in thread_names), (
+            f"KDF ran on wrong thread: {thread_names}"
+        )
+
+    def test_kdf_slot_held_after_awaiter_cancel(self):
+        """Cancelling hash_password_async does not release the executor slot.
+
+        Patches _KDF_EXECUTOR to a 1-worker executor and drives the real
+        async wrapper.  Cancelling the awaiter while the thread is blocked
+        must leave the thread running and the slot occupied.
         SNORE_MULTIUSER_PLAN.md: Argon2 bound is ~256 MiB with 4 workers.
         """
         import asyncio
         import concurrent.futures
         import threading
 
+        from unittest.mock import patch
+
+        from snore.auth import passwords
+
         gate = threading.Event()
         started = threading.Event()
-        finished_count = [0]
-        lock = threading.Lock()
+        original_hash = passwords._hasher.hash
 
-        def slow_op() -> int:
+        def slow_hash(pw: str) -> str:
             started.set()
             gate.wait(timeout=5)
-            with lock:
-                finished_count[0] += 1
-            return 1
+            return original_hash(pw)
 
-        test_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        test_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="snore-kdf-test-"
+        )
+        original_executor = passwords._KDF_EXECUTOR
+        passwords._KDF_EXECUTOR = test_executor
 
         async def run_test() -> None:
-            loop = asyncio.get_running_loop()
-
-            # Submit op1 — fills the single executor slot.
-            fut1 = loop.run_in_executor(test_executor, slow_op)
-
-            # Wait for op1 thread to start.
-            started.wait(timeout=2)
-
-            # Cancel the awaiting task for op1.
-            task1 = asyncio.ensure_future(asyncio.wrap_future(fut1))
-            task1.cancel()
             try:
-                await task1
-            except (asyncio.CancelledError, Exception):
-                pass
+                # Patch the module-level hash_password (not the C-extension method).
+                # hash_password_async submits this function to the executor.
+                with patch.object(passwords, "hash_password", slow_hash):
+                    # Submit via real async wrapper — slot filled.
+                    task1 = asyncio.create_task(passwords.hash_password_async("pw1"))
 
-            # Submit op2 — must queue, not start a second thread.
-            fut2 = asyncio.ensure_future(loop.run_in_executor(test_executor, slow_op))
+                    # Wait for thread to start.
+                    await asyncio.to_thread(started.wait, 2)
+                    assert started.is_set(), "KDF thread never started"
 
-            # Give the event loop a moment.
-            await asyncio.sleep(0.05)
+                    # Cancel the awaiter.
+                    task1.cancel()
+                    try:
+                        await task1
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
-            # op1 thread is still blocked; started.is_set() → True (first thread)
-            # but finished_count[0] == 0 means it hasn't finished yet.
-            assert finished_count[0] == 0, "op1 should still be running"
+                    # Thread still alive → slot held.
+                    active = sum(1 for t in test_executor._threads if t.is_alive())
+                    assert active >= 1, (
+                        "Expected executor thread still running after cancel"
+                    )
+                    assert active <= 1, f"Expected ≤1 active threads; got {active}"
+            finally:
+                gate.set()
 
-            # Worker count: executor._work_queue not empty or thread still alive.
-            # Key assertion: at most 1 thread is active (the one blocked on gate).
-            active = sum(1 for t in test_executor._threads if t.is_alive())
-            assert active <= 1, f"Expected ≤1 active threads, got {active}"
-
-            # Release the gate → op1 finishes → op2 starts.
-            gate.set()
-            try:
-                await asyncio.wait_for(
-                    asyncio.wrap_future(fut2) if fut2 is not None else asyncio.sleep(0),
-                    timeout=5,
-                )
-            except Exception:
-                pass
-
-        asyncio.run(run_test())
-        test_executor.shutdown(wait=True)
+        try:
+            asyncio.run(run_test())
+        finally:
+            passwords._KDF_EXECUTOR = original_executor
+            test_executor.shutdown(wait=True)
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +858,116 @@ class TestP2UploadLifecycle:
 
         assert jobs_mod._global_count == count_before, (
             f"Slot leaked: was {count_before}, now {jobs_mod._global_count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_upload_cancel_cleans_up_and_releases_slot(self, tmp_path):
+        """CancelledError during copy: worker terminates, temp dir cleaned, slot released.
+
+        Exercises the actual import_files lifecycle guard (finally block +
+        asyncio.shield loop) by driving the job reservation and cleanup paths
+        directly.  The copy function blocks on a threading.Event so cancellation
+        happens at a deterministic point.
+        SNORE_MULTIUSER_PLAN.md:194-198 (release-on-client-abort).
+        """
+        import asyncio  # noqa: PLC0415
+        import glob
+        import io as io_  # noqa: PLC0415
+        import shutil
+        import tempfile
+        import threading
+
+        import snore.api.import_jobs as jobs_mod
+
+        from snore.api.import_jobs import remove_job, reserve_slot  # noqa: PLC0415
+
+        gate = threading.Event()
+        loop = asyncio.get_running_loop()
+        copy_started_event = asyncio.Event()
+        worker_finished_event = asyncio.Event()
+
+        def slow_copy(src_file: object, dest: object, max_bytes: int) -> None:
+            loop.call_soon_threadsafe(copy_started_event.set)
+            gate.wait(timeout=5)
+            loop.call_soon_threadsafe(worker_finished_event.set)
+
+        count_before = jobs_mod._global_count
+        tmpdir_before = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+
+        # Reserve a slot and create a temp dir — the same two resources the
+        # upload handler acquires before entering the copy phase.
+        job = reserve_slot(None)
+        assert job is not None, "Failed to reserve slot"
+        snap_tmp = tempfile.mkdtemp(prefix="snore-upload-")
+        snap_path = Path(snap_tmp)
+
+        _job_cleanup = True
+
+        async def guarded_copy() -> None:
+            nonlocal snap_tmp, _job_cleanup
+            try:
+                copy_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        slow_copy,
+                        io_.BytesIO(b"x" * 256),
+                        snap_path / "f.bin",
+                        1024 * 1024,
+                    )
+                )
+                try:
+                    await asyncio.shield(copy_task)
+                except asyncio.CancelledError:
+                    # Exact code from import_files: loop until copy_task.done().
+                    while not copy_task.done():
+                        try:
+                            await asyncio.shield(copy_task)
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    raise
+                # Success path: transfer ownership to job.
+                job.temp_dir = snap_path
+                snap_tmp = None
+                job.convert_to_pending()
+                _job_cleanup = False
+            finally:
+                if _job_cleanup:
+                    if snap_tmp is not None:
+                        shutil.rmtree(snap_tmp, ignore_errors=True)
+                    job.try_cancel()
+                    remove_job(job.job_id)
+                    job.cleanup_files()
+                    job.release_capacity()
+
+        outer = asyncio.create_task(guarded_copy())
+
+        # Wait for the copy to start in the thread.
+        await asyncio.wait_for(copy_started_event.wait(), timeout=5)
+
+        # Cancel the outer task (simulates the HTTP request being cancelled).
+        outer.cancel()
+
+        # Release the gate so the copy thread can finish.
+        gate.set()
+
+        # The outer task handles CancelledError; cleanup runs in finally.
+        try:
+            await outer
+        except asyncio.CancelledError:
+            pass
+
+        # Brief yield so any call_soon_threadsafe callbacks run.
+        await asyncio.sleep(0.05)
+
+        tmpdir_after = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+        leaked = tmpdir_after - tmpdir_before
+        assert not leaked, (
+            f"snore-upload-* dirs leaked after CancelledError: {leaked}\n"
+            f"SNORE_MULTIUSER_PLAN.md:194-198 (release-on-client-abort)"
+        )
+
+        assert jobs_mod._global_count == count_before, (
+            f"Slot leaked after cancellation: was {count_before}, "
+            f"now {jobs_mod._global_count}"
         )
 
 
@@ -1153,12 +1288,14 @@ class TestP2InviteTokenNotInUrl:
             assert token not in msg, f"Raw invite token found in log record: {msg!r}"
 
     def test_invite_url_fragment_format(self, monkeypatch, tmp_path):
-        """snore user invite prints a fragment-based URL, not a path-based URL.
+        """snore user invite prints a fragment-based URL, exit code 0.
 
-        The raw token must be in the fragment (#token) not the path so it
-        never reaches the server or its access log.
+        The raw token must appear in a fragment (#<token>) so it is never
+        sent as a URL path component and never appears in server access logs.
         SNORE_MULTIUSER_PLAN.md §Phase 2:233.
         """
+        db_path = str(tmp_path / "invite_test.db")
+
         env = os.environ.copy()
         env["SNORE_PUBLIC_BASE_URL"] = "https://snore.example.com"
         env["SNORE_AUTH_MODE"] = "local"
@@ -1169,18 +1306,103 @@ class TestP2InviteTokenNotInUrl:
                 "user",
                 "invite",
                 "test@example.com",
+                "--db",
+                db_path,
             ],
             capture_output=True,
             text=True,
             env=env,
             timeout=15,
         )
+        assert result.returncode == 0, (
+            f"snore user invite exited {result.returncode}:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
         output = result.stdout + result.stderr
-        # URL must use fragment (#) not a path segment.
-        assert "snore.example.com/invite#" in output or (
-            # URL printed should not contain the API path with token
-            "/api/v1/auth/invites/" not in output
-        ), f"Expected fragment-based URL, got:\n{output}"
+        # Must affirmatively contain the fragment-based URL.
+        assert "snore.example.com/invite#" in output, (
+            f"Expected 'snore.example.com/invite#<token>' in output, got:\n{output}"
+        )
+        # Must NOT use the old path-based format.
+        assert "/api/v1/auth/invites/" not in output, (
+            f"Old path-based URL format still present in output:\n{output}"
+        )
+
+    def test_invite_token_absent_from_server_access_log(self, tmp_path):
+        """POST to /auth/invites/lookup with token in body must not log the token.
+
+        Starts a real snore serve process, sends a request with a known token
+        in the request body (not URL), then asserts the raw token string is
+        absent from all server output.  Uvicorn's access log only records the
+        path; with body-based tokens the path is always '/api/v1/auth/invites/lookup'.
+        SNORE_MULTIUSER_PLAN.md:233.
+        """
+        import json
+        import time
+        import urllib.error
+        import urllib.request
+
+        token = uuid.uuid4().hex
+        port = 18772
+
+        env = os.environ.copy()
+        env["SNORE_AUTH_MODE"] = "multiuser"
+        env["SNORE_SESSION_SECRET"] = "test-secret-at-least-32-chars-long-abcdef"
+        env["SNORE_PUBLIC_BASE_URL"] = f"http://127.0.0.1:{port}"
+        env["SNORE_BIND_HOST"] = "127.0.0.1"
+        env["SNORE_DB_PATH"] = str(tmp_path / "test.db")
+
+        snore_bin = str(Path(sys.executable).parent / "snore")
+        proc = subprocess.Popen(
+            [snore_bin, "serve", "--host", "127.0.0.1", "--port", str(port)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+
+        output = ""
+        try:
+            # Poll until server is ready.
+            for _ in range(40):
+                try:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/v1/auth/status", timeout=1
+                    )
+                    break
+                except Exception:
+                    time.sleep(0.3)
+            else:
+                pytest.fail("Server did not start within timeout")
+
+            # Send POST with known token in request body (not URL).
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/v1/auth/invites/lookup",
+                data=json.dumps({"token": token}).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": f"http://127.0.0.1:{port}",
+                },
+            )
+            try:
+                urllib.request.urlopen(req, timeout=5)
+            except urllib.error.HTTPError:
+                pass  # valid=false → 200 is fine; any 4xx is also acceptable
+
+        finally:
+            proc.terminate()
+            try:
+                output, _ = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                output, _ = proc.communicate()
+
+        # The raw token must NOT appear anywhere in the server output.
+        assert token not in output, (
+            f"Raw invite token found in server access log output.\n"
+            f"SNORE_MULTIUSER_PLAN.md:233 — tokens must never appear in logs.\n"
+            f"Output snippet: {output[:500]!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

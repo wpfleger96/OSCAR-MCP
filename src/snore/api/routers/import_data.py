@@ -312,12 +312,15 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                 try:
                     await asyncio.shield(copy_task)
                 except asyncio.CancelledError:
-                    # Request cancelled: wait for the copy thread to finish so
-                    # cleanup doesn't race a still-running write.
-                    try:
-                        await asyncio.shield(copy_task)
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                    # Request cancelled.  Loop the shielded wait until the copy
+                    # task is truly done so cleanup never races a running write.
+                    # The loop is robust to repeated cancellations: each inner
+                    # CancelledError is absorbed and the loop re-tests .done().
+                    while not copy_task.done():
+                        try:
+                            await asyncio.shield(copy_task)
+                        except (asyncio.CancelledError, Exception):
+                            pass
                     raise  # propagates to finally → cleanup
                 except _FileSizeExceeded:
                     raise HTTPException(
