@@ -8,7 +8,7 @@ access is required.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -88,14 +88,10 @@ def mcp_client_factory() -> Any:
 
         mcp = make_server()
         with patch("snore.mcp.server._lifespan", _fake_lifespan):
-            cm_stack = list(extra_patches or [])
-            for cm in cm_stack:
-                cm.__enter__()
-            try:
+            with ExitStack() as stack:
+                for p in extra_patches or []:
+                    stack.enter_context(p)
                 async with fastmcp.Client(mcp) as client:
                     yield client
-            finally:
-                for cm in reversed(cm_stack):
-                    cm.__exit__(None, None, None)
 
     return _client_context

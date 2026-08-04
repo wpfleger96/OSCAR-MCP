@@ -172,15 +172,15 @@ class TestBuildInstructions:
         instructions = _build_instructions(profile)
         assert "UARS" in instructions
 
-    def test_contains_required_reading_directive(self) -> None:
+    def test_does_not_reference_docs_tools(self) -> None:
         profile = get_profile("neutral")
         instructions = _build_instructions(profile)
-        assert "REQUIRED READING" in instructions
+        assert "docs://tools" not in instructions
 
-    def test_contains_docs_tools_reference(self) -> None:
+    def test_instructions_mention_schemas_resource(self) -> None:
         profile = get_profile("neutral")
         instructions = _build_instructions(profile)
-        assert "docs://tools" in instructions
+        assert "docs://schemas" in instructions
 
     def test_all_profiles_produce_non_empty_instructions(self) -> None:
         from snore.mcp.profiles import VALID_PROFILES

@@ -34,7 +34,6 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from functools import wraps
 from importlib.metadata import version
-from pathlib import Path
 from typing import Any, cast
 
 from fastmcp import Context, FastMCP
@@ -101,8 +100,8 @@ def _build_instructions(profile: ClinicalProfile) -> str:
 SNORE MCP Server v{version("snore")}
 Sleep eNvironment Observation & Respiratory Evaluation
 
-REQUIRED READING: Read `docs://tools` before using any tool. Failure to read
-the tool documentation may result in incorrect or incomplete results.
+Each tool's description documents its parameters, refusal semantics, and error
+conditions. Use `docs://schemas/{{type}}` for full response JSON schemas.
 
 Active clinical profile: {profile.display_name}
 {profile.priority_hint}
@@ -259,7 +258,12 @@ def tool_error_boundary(
 
 
 def _check_response_size(result: Any, tool_name: str) -> None:
-    """Raise ToolError if the serialized result exceeds RESPONSE_SIZE_LIMIT."""
+    """Raise ToolError if the serialized result exceeds RESPONSE_SIZE_LIMIT.
+
+    Cost note: this re-serializes the already-model_dumped payload purely to
+    measure its byte length — O(response size) work on every successful call,
+    bounded by the page/window/epoch caps and the size limit itself.
+    """
     try:
         size = len(json.dumps(result, default=str).encode("utf-8"))
     except Exception:
@@ -282,12 +286,6 @@ def _check_response_size(result: Any, tool_name: str) -> None:
 
 
 def _register_resources(mcp: FastMCP) -> None:
-
-    @mcp.resource("docs://tools")
-    def get_tool_documentation() -> str:
-        """Complete tool reference documentation."""
-        docs_path = Path(__file__).resolve().parent / "docs" / "tools.md"
-        return docs_path.read_text()
 
     @mcp.resource("docs://schemas/{schema_type}")
     def get_schema(schema_type: str) -> str:
@@ -421,6 +419,9 @@ def _register_tools(mcp: FastMCP) -> None:
         Uses generic RX_KEYS only (mode, epr_level, epr_mode, pressure_min,
         pressure_max, pressure_fixed, ipap, epap, ps).
 
+        Each epoch's ``device_id`` is ``null`` (never ``0``) when no device is
+        associated with the epoch.
+
         Args:
             start: Start date in YYYY-MM-DD format.
             end: End date in YYYY-MM-DD format.
@@ -459,6 +460,15 @@ def _register_tools(mcp: FastMCP) -> None:
         Paginated at 30 nights/call (adjustable). Analysis-derived fields (RERA
         index, RDI) are null + reason "analysis_not_run" when analysis has not
         been run. Compliance fields are included in the response.
+
+        The ``compliance`` block is present whenever ``start != end`` (range
+        mode), even when the range contains no night data rows; it is ``null``
+        only for single-date requests. ``days_total`` counts CALENDAR nights in
+        the requested range — nights without data count as non-compliant.
+
+        ``rera_index_reason`` may be ``"duration_zero"`` when a RERA count
+        exists but therapy hours for the night is zero, making the per-hour
+        rate undefined.
 
         Args:
             start: Start date in YYYY-MM-DD format.
@@ -523,7 +533,9 @@ def _register_tools(mcp: FastMCP) -> None:
             device_id: Optional device ID filter. Required when multiple devices
                        have data for the same date.
             types: Optional event type filter, e.g. ["CA", "OA", "H", "RERA"].
-                   See docs://tools for common event_type values.
+                   Common values: ``OA`` (obstructive apnea), ``CA`` (central
+                   apnea), ``H`` (hypopnea), ``RERA`` (respiratory effort-related
+                   arousal), ``FL`` (flow limitation), ``VS`` (vibratory snore).
             min_duration: Minimum event duration in seconds (optional).
             include_context: Attach per-event waveform context block (default true).
             max_events: Maximum number of events to return after filtering (default 500,
@@ -603,9 +615,12 @@ def _register_tools(mcp: FastMCP) -> None:
             ``device_capabilities`` describes what the device records.
 
         Refusal semantics:
-            When ``analysis_status`` is ``"not_run"`` or ``"stale"``, ``null_reason``
-            explains why (``"analysis_not_run"``, ``"analysis_stale"``).
-            These are successful responses with ``total_breaths=0``, not tool errors.
+            ``analysis_status`` is one of ``"ok"`` (results present),
+            ``"not_run"`` (no analysis run), or ``"stale"`` (source data
+            changed since analysis ran). When ``"not_run"`` or ``"stale"``,
+            ``null_reason`` explains why (``"analysis_not_run"``,
+            ``"analysis_stale"``). These are successful responses with
+            ``total_breaths=0``, not tool errors.
 
         Error conditions:
             - No sessions found for date → tool error; use ``get_data_overview``.
@@ -695,6 +710,8 @@ def _register_tools(mcp: FastMCP) -> None:
 
         Returns:
             FindWindowsResponse.  ``windows`` is ordered worst-first.
+            ``device_id`` is ``null`` when no sessions were found on the date
+            (the service-internal sentinel ``0`` is never emitted).
             ``session_coverage`` lists per-session analysis status.
             ``device_capabilities`` describes what the device records.
 
@@ -775,6 +792,9 @@ def _register_tools(mcp: FastMCP) -> None:
         Returns:
             CompareEpochsResponse.  Each entry in ``epochs`` contains distributions
             and coverage metadata (``nights_with_data``, ``nights_missing_analysis``).
+            ``flow_class_distribution`` keys are strings (``"0"``, ``"1"``, ...) because
+            JSON object keys are always strings.
+            ``rx_settings`` holds representative therapy settings observed for the epoch.
             ``rx_violations`` lists any therapy-settings changes detected within an
             epoch's date range; callers should split affected epochs at those dates.
 
@@ -785,14 +805,17 @@ def _register_tools(mcp: FastMCP) -> None:
             ``null_reason: "rx_changed_within_epoch"`` — therapy settings changed within
                 at least one epoch; ``rx_violations`` lists the epoch label, changed keys,
                 and change dates so the caller can split the range.
-            Partial degradation: ``null_reason: "primary_mode_mismatch"`` on individual
-                epochs nulls only RERA-related fields (``rera_proxy_count``,
-                ``rera_reason``); the FL distributions remain populated.
+            Partial degradation: when sessions within an epoch differ in ``primary_mode``,
+                the epoch's ``null_reason`` stays ``null``; only ``rera_proxy_count`` is
+                set to ``null`` with ``rera_reason: "primary_mode_mismatch"``; FL
+                distributions remain populated.
+            Device not owned by the active profile: the service catches this internally
+                and returns a success response with every epoch's
+                ``null_reason: "not_available"``.
 
         Error conditions:
             - Epochs list empty or >6 entries → tool error.
             - Multiple device IDs across epoch specs → tool error.
-            - Device not owned → tool error.
             - Multiple devices on the date range and no ``device_id`` → tool error
               listing device IDs so the caller can re-issue with ``device_id``.
         """

@@ -162,7 +162,6 @@ async def _make_breath(
         is_recovery_breath=is_recovery_breath,
     )
     db.add(breath)
-    await db.flush()
     return breath
 
 

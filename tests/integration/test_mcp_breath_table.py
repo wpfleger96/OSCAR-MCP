@@ -152,7 +152,11 @@ async def _make_breath(
     flatness_index: float | None = None,
     mid_insp_flattening: float | None = None,
 ) -> Breath:
-    """Create a Breath row with configurable measurement fields."""
+    """Create a Breath row with configurable measurement fields.
+
+    Does NOT flush — callers must flush after their seeding loop so the DB sees
+    all rows in a single round-trip.
+    """
     offset = (
         start_offset_s if start_offset_s is not None else float(breath_number) * 5.0
     )
@@ -170,7 +174,6 @@ async def _make_breath(
         mid_insp_flattening=mid_insp_flattening,
     )
     db.add(breath)
-    await db.flush()
     return breath
 
 
@@ -204,6 +207,7 @@ class TestRawFetch:
                 start_offset_s=float(i) * 100.0,
                 tidal_volume_ml=400.0 + float(i),
             )
+        await async_db_session.flush()
 
         # Page 1 of 3
         page1 = await get_breath_table(
@@ -252,6 +256,7 @@ class TestRawFetch:
         await _make_breath(
             async_db_session, ar, sess, breath_number=1, start_offset_s=50.0
         )
+        await async_db_session.flush()
 
         result = await get_breath_table(
             async_db_session,
@@ -312,6 +317,7 @@ class TestBinnedFetch:
                 start_offset_s=900.0 + float(i + 1) * 100.0,
                 tidal_volume_ml=tv,
             )
+        await async_db_session.flush()
 
         result = await get_breath_table(
             async_db_session,
@@ -334,6 +340,47 @@ class TestBinnedFetch:
         b1 = result.bins[1]
         assert b1.breath_count == 3
         assert b1.tidal_volume_median_ml == pytest.approx(400.0)
+
+    async def test_binned_auto_resolved_session_returns_session_id(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Binned fetch with auto-resolve (no session_id arg) sets response session_id.
+
+        Regression guard: before fix 4, binned responses returned session_id=null
+        when the caller relied on auto-resolve because bins carry no session id
+        and the DTO only echoed the input query.
+        """
+        from snore.mcp.tools.breath_table import get_breath_table  # noqa: PLC0415
+
+        target_date = date(2024, 3, 15)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        _, sess = await _make_day_session(
+            async_db_session, device, target_date, duration_hours=1.0
+        )
+        ar = await _make_analysis_result(async_db_session, sess)
+
+        for i in range(1, 4):
+            await _make_breath(
+                async_db_session,
+                ar,
+                sess,
+                breath_number=i,
+                start_offset_s=float(i) * 200.0,
+            )
+        await async_db_session.flush()
+
+        # No session_id arg — must trigger auto-resolve
+        result = await get_breath_table(
+            async_db_session,
+            target_date,
+            profile_id=async_test_profile.id,
+            offset_start=0.0,
+            offset_end=1800.0,
+            bin_minutes=15.0,
+        )
+
+        assert result.is_binned is True
+        assert result.session_id == sess.id
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +495,7 @@ class TestMultiSessionAmbiguity:
         await _make_breath(
             async_db_session, ar1, sess1, breath_number=1, start_offset_s=50.0
         )
+        await async_db_session.flush()
 
         result = await get_breath_table(
             async_db_session,
@@ -534,6 +582,7 @@ class TestIsolation:
         _, sess_b = await _make_day_session(async_db_session, device_b, target_date)
         ar_b = await _make_analysis_result(async_db_session, sess_b)
         await _make_breath(async_db_session, ar_b, sess_b, breath_number=1)
+        await async_db_session.flush()
 
         with pytest.raises(ValidationError):
             await get_breath_table(
@@ -591,6 +640,7 @@ class TestIsolation:
                 start_offset_s=float(i) * 50.0,
                 tidal_volume_ml=400.0,
             )
+        await async_db_session.flush()
 
         # Profile B: 2 breaths, tidal_volume_ml=999.5 (unique sentinel)
         profile_b = await _make_profile(async_db_session)
@@ -606,6 +656,7 @@ class TestIsolation:
                 start_offset_s=float(i) * 50.0,
                 tidal_volume_ml=999.5,  # sentinel unique to B
             )
+        await async_db_session.flush()
 
         result = await get_breath_table(
             async_db_session,

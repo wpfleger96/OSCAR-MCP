@@ -15,7 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import EventContext, EventRow, EventsResponse
-from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._capabilities import (
+    build_device_capabilities,
+    get_device_id_for_session,
+)
+from snore.mcp.tools._service_errors import raise_mapped_service_error
 
 
 async def get_events(
@@ -58,12 +62,8 @@ async def get_events(
             min_duration=min_duration,
             device_id=device_id,
         )
-    except DeviceNotOwnedError as exc:
-        raise ValidationError(
-            f"device_id={exc.device_id} is not available in this session"
-        ) from exc
-    except DeviceAmbiguityError as exc:
-        raise ValidationError(str(exc)) from exc
+    except (DeviceNotOwnedError, DeviceAmbiguityError) as exc:
+        raise_mapped_service_error(exc)
     except ValueError as exc:
         raise ValidationError(
             f"No therapy data found for date {event_date}. "
@@ -140,22 +140,12 @@ async def get_events(
         anchor_session_start = None
 
     # Resolve device_id for capabilities: use the explicit arg when given;
-    # otherwise query the session's device, scoped to the profile for ownership.
+    # otherwise query the session's device via the shared profile-scoped helper.
     resolved_device_id = device_id
     if resolved_device_id is None:
-        from sqlalchemy import select  # noqa: PLC0415
-
-        from snore.database import models  # noqa: PLC0415
-
-        result = await db_session.execute(
-            select(models.Session.device_id)
-            .join(models.Device, models.Device.id == models.Session.device_id)
-            .where(
-                models.Session.id == contextual_events[0].session_id,
-                models.Device.profile_id == profile_id,
-            )
+        resolved_device_id = await get_device_id_for_session(
+            db_session, contextual_events[0].session_id, profile_id
         )
-        resolved_device_id = result.scalar_one_or_none()
 
     caps = (
         await build_device_capabilities(

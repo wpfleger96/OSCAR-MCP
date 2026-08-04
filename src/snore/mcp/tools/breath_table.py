@@ -19,11 +19,18 @@ from snore.mcp.schemas import (
     BreathTableResponse,
     BreathTableRow,
 )
-from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._capabilities import (
+    build_device_capabilities,
+    get_device_id_for_session,
+)
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
 )
+
+
+def _str_or_none(value: object | None) -> str | None:
+    return str(value) if value is not None else None
 
 
 async def get_breath_table(
@@ -61,6 +68,7 @@ async def get_breath_table(
             returning raw rows. Required for windows > 15 min.
     """
     from snore.services.breath_service import (  # noqa: PLC0415
+        AnalysisStatus,
         BreathQueryRange,
         BreathService,
     )
@@ -103,10 +111,9 @@ async def get_breath_table(
         bin_minutes=dto.query.bin_minutes,
     )
 
-    # Top-level session anchor: first row if rows present, else first bin, else None.
-    top_session_id: int | None = (
-        dto.rows[0].session_id if dto.rows else dto.query.session_id
-    )
+    # Top-level session anchor: dto.session_id is populated by the service for all
+    # return paths (raw, binned, not_run, stale_version); fallback only for legacy stubs.
+    top_session_id: int | None = dto.session_id
     top_session_start: str | None
     if dto.rows:
         top_session_start = dto.rows[0].session_start_wall_clock.isoformat()
@@ -142,32 +149,18 @@ async def get_breath_table(
             flow_class=r.flow_class,
             flow_class_confidence=r.flow_class_confidence,
             is_recovery_breath=r.is_recovery_breath,
-            trigger_type=str(r.trigger_type) if r.trigger_type is not None else None,
-            cycle_type=str(r.cycle_type) if r.cycle_type is not None else None,
+            trigger_type=_str_or_none(r.trigger_type),
+            cycle_type=_str_or_none(r.cycle_type),
             trigger_cycle_confidence=r.trigger_cycle_confidence,
             trigger_cycle_experimental=True,
-            trigger_cycle_applicability=(
-                str(r.trigger_cycle_applicability)
-                if r.trigger_cycle_applicability is not None
-                else None
-            ),
-            trigger_cycle_reason=(
-                str(r.trigger_cycle_reason)
-                if r.trigger_cycle_reason is not None
-                else None
-            ),
+            trigger_cycle_applicability=_str_or_none(r.trigger_cycle_applicability),
+            trigger_cycle_reason=_str_or_none(r.trigger_cycle_reason),
             leak_valid=r.leak_valid,
-            leak_valid_reason=(
-                str(r.leak_valid_reason) if r.leak_valid_reason is not None else None
-            ),
+            leak_valid_reason=_str_or_none(r.leak_valid_reason),
             ramp_active=r.ramp_active,
-            ramp_active_reason=(
-                str(r.ramp_active_reason) if r.ramp_active_reason is not None else None
-            ),
+            ramp_active_reason=_str_or_none(r.ramp_active_reason),
             mask_off=r.mask_off,
-            mask_off_reason=(
-                str(r.mask_off_reason) if r.mask_off_reason is not None else None
-            ),
+            mask_off_reason=_str_or_none(r.mask_off_reason),
         )
         for r in dto.rows
     ]
@@ -192,24 +185,12 @@ async def get_breath_table(
     ]
 
     # Resolve device_id for the capabilities block.
-    # Priority: explicit arg → first row's session → explicit session_id arg → None.
+    # Priority: explicit arg → dto.session_id via shared helper (fix 4 guarantees it's set).
     resolved_device_id: int | None = device_id
-    if resolved_device_id is None:
-        source_session_id = dto.rows[0].session_id if dto.rows else session_id
-        if source_session_id is not None:
-            from sqlalchemy import select  # noqa: PLC0415
-
-            from snore.database import models  # noqa: PLC0415
-
-            result = await db_session.execute(
-                select(models.Session.device_id)
-                .join(models.Device, models.Device.id == models.Session.device_id)
-                .where(
-                    models.Session.id == source_session_id,
-                    models.Device.profile_id == profile_id,
-                )
-            )
-            resolved_device_id = result.scalar_one_or_none()
+    if resolved_device_id is None and dto.session_id is not None:
+        resolved_device_id = await get_device_id_for_session(
+            db_session, dto.session_id, profile_id
+        )
 
     caps = (
         await build_device_capabilities(
@@ -218,6 +199,8 @@ async def get_breath_table(
             resolved_device_id,
             date_start=therapy_date,
             date_end=therapy_date,
+            # An OK page proves analysis exists for this profile — skip 3-join count query.
+            analysis_run=True if dto.analysis_status == AnalysisStatus.OK else None,
         )
         if resolved_device_id is not None
         else None

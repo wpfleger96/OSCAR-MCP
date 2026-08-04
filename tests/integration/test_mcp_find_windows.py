@@ -196,7 +196,6 @@ async def _make_breath(
         is_recovery_breath=is_recovery_breath,
     )
     db.add(breath)
-    await db.flush()
     return breath
 
 
@@ -240,6 +239,7 @@ class TestWorstFlatteningLeakValid:
                 leak_valid=lv,
             )
 
+        await async_db_session.flush()
         result = await find_windows(
             async_db_session,
             target_date,
@@ -284,6 +284,7 @@ class TestWorstFlatteningLeakValid:
                 leak_valid=lv,
             )
 
+        await async_db_session.flush()
         result = await find_windows(
             async_db_session,
             target_date,
@@ -378,6 +379,7 @@ class TestMixedAlgorithmIdentities:
                 return (AnalysisStatus.OK, algo_b, ar2.id)
             return (AnalysisStatus.NOT_RUN, None, None)
 
+        await async_db_session.flush()
         with patch.object(BreathService, "_latest_analysis_for_session", _mock_latest):
             result = await find_windows(
                 async_db_session,
@@ -594,6 +596,7 @@ class TestFlRunEndingInRecovery:
         )
         await _make_breath(async_db_session, ar, sess, breath_number=4, flow_class=1)
 
+        await async_db_session.flush()
         result = await find_windows(
             async_db_session,
             target_date,
@@ -678,6 +681,7 @@ class TestFlRunEndingInRecovery:
                 return (AnalysisStatus.OK, algo_b, ar2.id)
             return (AnalysisStatus.NOT_RUN, None, None)
 
+        await async_db_session.flush()
         with patch.object(BreathService, "_latest_analysis_for_session", _mock_latest):
             result = await find_windows(
                 async_db_session,
@@ -718,6 +722,7 @@ class TestCriterionIrrelevantOption:
             leak_valid=True,
         )
 
+        await async_db_session.flush()
         with pytest.raises(ValueError) as exc_info:
             await find_windows(
                 async_db_session,
@@ -764,6 +769,7 @@ class TestIsolation:
             )
 
         # Profile A calls find_windows for the date that only B has data for
+        await async_db_session.flush()
         result = await find_windows(
             async_db_session,
             target_date,

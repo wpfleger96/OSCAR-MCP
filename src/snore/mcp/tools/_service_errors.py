@@ -1,4 +1,10 @@
-"""Shared mapping of BreathService exceptions to MCP ValidationError."""
+"""Shared mapping of BreathService exceptions to MCP ValidationError.
+
+OperationalError handling:
+- "no such table": maps to a user-visible table_missing message.
+- Any other OperationalError: maps to a generic sanitized message so that raw
+  SQLite detail (DB file paths, column names, SQL fragments) never surfaces.
+"""
 
 from __future__ import annotations
 
@@ -30,8 +36,9 @@ def raise_mapped_service_error(exc: Exception) -> NoReturn:
 
     Raises:
         ValidationError: for DeviceNotOwnedError, DeviceAmbiguityError,
-            MultiSessionAmbiguityError, or OperationalError("no such table").
-        The original exception: for any other OperationalError or unexpected type.
+            MultiSessionAmbiguityError, OperationalError("no such table"), or
+            any other OperationalError (sanitized to a generic message).
+        The original exception: for any other unexpected type.
     """
     if isinstance(exc, DeviceNotOwnedError):
         raise ValidationError(
@@ -59,12 +66,19 @@ def raise_mapped_service_error(exc: Exception) -> NoReturn:
             f"pass session_id to disambiguate. Sessions: {session_list}"
         ) from exc
 
-    if isinstance(exc, OperationalError) and "no such table" in str(exc):
+    if isinstance(exc, OperationalError):
+        if "no such table" in str(exc):
+            raise ValidationError(
+                "Breath-level data tables are missing from this database "
+                "(reason: table_missing). Run 'snore analysis run' or re-import "
+                "with analysis enabled to generate breath data."
+            ) from exc
+        # Other OperationalErrors may include DB paths, column names, or SQL
+        # fragments — sanitize to a generic message rather than leaking internals.
         raise ValidationError(
-            "Breath-level data tables are missing from this database "
-            "(reason: table_missing). Run 'snore analysis run' or re-import "
-            "with analysis enabled to generate breath data."
+            "A database error occurred while querying breath data. "
+            "Retry; if the problem persists, check the server logs."
         ) from exc
 
-    # Any other OperationalError or unknown type — propagate unchanged.
+    # Unknown type — propagate unchanged.
     raise exc

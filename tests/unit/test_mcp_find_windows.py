@@ -360,6 +360,50 @@ class TestFindWindowsRoundtrip:
         assert payload["windows"] == []
         assert payload["null_reason"] == "analysis_not_run"
 
+    async def test_primary_mode_mismatch_refusal_pass_through_as_success(
+        self, mcp_client_factory: object, mock_db_session: object
+    ) -> None:
+        """Service returning PRIMARY_MODE_MISMATCH for fl_run_ending_in_recovery
+        produces a SUCCESS response (not a ToolError) with null_reason=
+        'primary_mode_mismatch' and empty windows list."""
+        from snore.services.breath_service import (  # noqa: PLC0415
+            DayAnalysisStatus,
+            FindWindowsResult,
+            NullReason,
+            WindowCriterion,
+        )
+
+        mock_result = FindWindowsResult(
+            query_date=date(2025, 7, 14),
+            device_id=3,
+            criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
+            day_status=DayAnalysisStatus.MIXED_VERSION,
+            session_coverage=[],
+            algorithm_identity=None,
+            null_reason=NullReason.PRIMARY_MODE_MISMATCH,
+            primary_mode=None,
+            windows=[],
+        )
+
+        mock_fw = AsyncMock(return_value=mock_result)
+        patch_fw = patch(
+            "snore.services.breath_service.BreathService.find_windows",
+            mock_fw,
+        )
+
+        async with mcp_client_factory(
+            mock_db_session, extra_patches=[patch_fw]
+        ) as client:
+            result = await client.call_tool(
+                "find_windows",
+                {"date": "2025-07-14", "criterion": "fl_run_ending_in_recovery"},
+            )
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert payload["windows"] == []
+        assert payload["null_reason"] == "primary_mode_mismatch"
+
     async def test_device_ambiguity_error_raises_tool_error_with_device_list(
         self, mcp_client_factory: object, mock_db_session: object
     ) -> None:

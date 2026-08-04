@@ -32,6 +32,7 @@ def _make_mock_breath_page(
     total_breaths: int = 1,
     page: int = 1,
     page_size: int = 500,
+    session_id: int | None = 42,
 ) -> object:
     """Build a BreathPage-like mock using the real service DTOs."""
     from snore.services.breath_service import (  # noqa: PLC0415
@@ -57,6 +58,7 @@ def _make_mock_breath_page(
         page_size=page_size,
         rows=rows or [],
         bins=bins or [],
+        session_id=session_id,
     )
 
 
@@ -206,6 +208,7 @@ class TestGetBreathTableRoundtrip:
             bins=[mock_bin],
             is_binned=True,
             total_breaths=5,
+            session_id=99,
         )
 
         async with mcp_client_factory(
@@ -235,6 +238,8 @@ class TestGetBreathTableRoundtrip:
         assert payload["total_breaths"] == 5
         assert payload["session_start_wall_clock"] == "2024-01-01T22:00:00"
         assert payload["rows"] == []
+        # session_id must come from dto.session_id even when only bins are present
+        assert payload["session_id"] == 99
 
         bin_wire = payload["bins"][0]
         assert bin_wire["breath_count"] == 5
@@ -406,6 +411,41 @@ class TestGetBreathTableRoundtrip:
                     "get_breath_table",
                     {"date": "2024-01-01", "offset_start": 0.0, "offset_end": 300.0},
                 )
+
+    async def test_non_table_operational_error_is_sanitized(
+        self, mock_db_session: object, mcp_client_factory: object
+    ) -> None:
+        """OperationalError not containing 'no such table' → generic ToolError message.
+
+        The raw SQLite error text (which may include DB paths, column names, or SQL
+        fragments) must not appear in the user-facing message.
+        """
+        from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+
+        exc = OperationalError("attempt to write a readonly database", None, None)
+
+        async with mcp_client_factory(
+            mock_db_session,
+            extra_patches=[
+                patch(
+                    "snore.services.breath_service.BreathService.get_breath_table",
+                    new_callable=AsyncMock,
+                    side_effect=exc,
+                ),
+            ],
+        ) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.call_tool(
+                    "get_breath_table",
+                    {"date": "2024-01-01", "offset_start": 0.0, "offset_end": 300.0},
+                )
+
+        message = str(exc_info.value)
+        # Must not leak the raw SQLite error text or any path
+        assert "readonly database" not in message
+        assert "attempt to write" not in message
+        # Must contain the generic sanitized message
+        assert "database error" in message.lower()
 
     async def test_oversize_response_advises_narrowing_query(
         self, mock_db_session: object, mcp_client_factory: object
