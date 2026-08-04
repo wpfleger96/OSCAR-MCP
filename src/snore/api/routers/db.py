@@ -1,5 +1,3 @@
-# WARNING: vacuum and stats endpoints are unauthenticated. Add auth middleware before exposing to untrusted networks.
-
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -7,6 +5,7 @@ from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db, service_dep
+from snore.api.guards import RequireAdmin, RequireAuth
 from snore.database.target import DatabaseTarget
 from snore.services.database_service import DatabaseService
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
@@ -14,6 +13,10 @@ from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 router = APIRouter()
 
 DatabaseServiceDep = Annotated[DatabaseService, Depends(service_dep(DatabaseService))]
+
+# Separate router for local-mode-only operations.
+# ``/reset`` is removed from the web API in multiuser mode — it is CLI-only.
+local_only_router = APIRouter()
 
 
 class DatabaseStatsPublic(DatabaseStats):
@@ -31,6 +34,7 @@ def _get_target() -> DatabaseTarget:
 async def get_stats(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
+    _actor: RequireAuth,
 ) -> DatabaseStats:
     db_path = target.sqlite_path if target.dialect == "sqlite" else ""
     return await service.get_stats(db_path)
@@ -40,6 +44,7 @@ async def get_stats(
 def vacuum_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
+    _actor: RequireAdmin,
 ) -> VacuumResult:
     """Vacuum the SQLite database to reclaim space after deletions.
 
@@ -59,7 +64,7 @@ def vacuum_db(
     return service.vacuum_sqlite(target.sqlite_path)
 
 
-@router.post("/reset", response_model=ResetResult)
+@local_only_router.post("/reset", response_model=ResetResult)
 async def reset_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],

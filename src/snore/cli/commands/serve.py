@@ -40,6 +40,20 @@ def serve(host: str, port: int, reload: bool, db: str | None) -> None:
     os.environ["SNORE_DATABASE_URL"] = canonical_url
     os.environ.pop("SNORE_DB_PATH", None)
 
+    # Export the actual bind host so the app lifespan validates the same
+    # address that uvicorn will actually bind.  This is the single source of
+    # truth: the lifespan reads SNORE_BIND_HOST, not --host.
+    os.environ["SNORE_BIND_HOST"] = host
+
+    # Validate config — including local-mode + non-loopback bind refusal —
+    # before the socket is created.  Fail fast with a clear error message.
+    from snore.api.config import ConfigError, load_config  # noqa: PLC0415
+
+    try:
+        load_config()
+    except ConfigError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
+
     logger.debug(
         "serve: resolved database target %r → %r", target.raw_url, canonical_url
     )

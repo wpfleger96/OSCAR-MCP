@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from snore.analysis.types import AnalysisResult
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
+from snore.api.guards import RequireWritable
 from snore.api.schemas import (
     AnalysisDeleteRequest,
     AnalysisRunRequest,
@@ -63,6 +64,7 @@ async def run_analysis(
     session_id: int,
     body: AnalysisRunRequest,
     facade: AnalysisFacadeDep,
+    _actor: RequireWritable,
 ) -> AnalysisResult:
     return await facade.run_analysis(
         session_id, modes=body.modes, store_results=body.store_results
@@ -71,7 +73,9 @@ async def run_analysis(
 
 @router.delete("/analysis")
 async def delete_analysis(
-    body: AnalysisDeleteRequest, facade: AnalysisFacadeDep
+    body: AnalysisDeleteRequest,
+    facade: AnalysisFacadeDep,
+    _actor: RequireWritable,
 ) -> dict[str, int]:
     if body.session_ids:
         owned = await facade.get_owned_session_ids(body.session_ids)
@@ -105,6 +109,7 @@ async def get_analysis_delete_preview(
 async def run_batch_analysis(
     body: BatchAnalysisRequest,
     facade: AnalysisFacadeDep,
+    _actor: RequireWritable,
 ) -> BatchAnalysisResult:
     if body.from_date is None and body.to_date is None:
         raise HTTPException(

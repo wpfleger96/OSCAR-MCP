@@ -8,8 +8,9 @@ import shutil
 import tempfile
 import threading
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
+from typing import IO, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from snore.api.deps import ActorDep
+from snore.api.guards import RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
     JobType,
@@ -31,10 +33,78 @@ from snore.services.schemas import ImportSource
 
 logger = logging.getLogger(__name__)
 
+
+class _ByteCeilingReceive:
+    """ASGI receive wrapper that raises HTTPException(413) on byte-ceiling breach.
+
+    Used for the upload ingress ceiling.  The auth-body ceiling uses a
+    pre-read buffer in AuthPathMiddleware instead, which avoids the Starlette
+    body-parser translating the 413 to 400.
+    """
+
+    def __init__(
+        self,
+        inner: Callable[[], Awaitable[MutableMapping[str, Any]]],
+        max_bytes: int,
+        detail: str | None = None,
+    ) -> None:
+        self._inner = inner
+        self._max = max_bytes
+        self._detail = (
+            detail or f"Request body exceeds the {max_bytes // 1024} KiB limit"
+        )
+        self._seen = 0
+
+    async def __call__(self) -> MutableMapping[str, Any]:
+        from fastapi import HTTPException  # noqa: PLC0415
+
+        msg = await self._inner()
+        if msg.get("type") == "http.request":
+            chunk: bytes = msg.get("body", b"")
+            self._seen += len(chunk)
+            if self._seen > self._max:
+                raise HTTPException(status_code=413, detail=self._detail)
+        return msg
+
+
 router = APIRouter()
 
-MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB per upload (configurable via env)
-MAX_UPLOAD_FILES = 500  # sane default; 20k was unreasonably high
+# Routes that accept server-local filesystem paths.  These are registered
+# ONLY in local auth mode — in multiuser the loopback-peer check is
+# worthless behind Cloudflare, so we structurally exclude them.
+local_only_router = APIRouter()
+
+# Default file-count ceiling — read at import time, overridden via SNORE config.
+_DEFAULT_MAX_UPLOAD_FILES = 500
+
+# Chunk size for the off-event-loop file copy.
+_COPY_CHUNK = 65536  # 64 KiB
+
+
+class _FileSizeExceeded(Exception):
+    """Raised inside the thread worker when per-file byte limit is exceeded."""
+
+
+def _copy_chunked(src_file: IO[bytes], dest: Path, max_bytes: int) -> None:
+    """Synchronous chunk copy; raises ``_FileSizeExceeded`` on over-limit.
+
+    Runs inside ``asyncio.to_thread`` so it never blocks the event loop.
+    ``src_file`` must expose a ``read(n)`` method (SpooledTemporaryFile).
+    """
+    total = 0
+    try:
+        with dest.open("wb") as dst:
+            while True:
+                chunk = src_file.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise _FileSizeExceeded()
+                dst.write(chunk)
+    except _FileSizeExceeded:
+        dest.unlink(missing_ok=True)
+        raise
 
 
 class DetectRequest(BaseModel):
@@ -47,6 +117,17 @@ class ImportPathRequest(BaseModel):
 
 class JobResponse(BaseModel):
     job_id: str
+
+
+def _get_upload_limits() -> tuple[int, int, int]:
+    """Return (max_upload_bytes, max_upload_files, max_file_bytes) from config with safe fallbacks."""
+    try:
+        from snore.api.config import get_config  # noqa: PLC0415
+
+        cfg = get_config()
+        return cfg.max_upload_bytes, _DEFAULT_MAX_UPLOAD_FILES, cfg.max_file_bytes
+    except Exception:
+        return 512 * 1024 * 1024, _DEFAULT_MAX_UPLOAD_FILES, 256 * 1024 * 1024
 
 
 def _require_localhost(request: Request) -> None:
@@ -65,7 +146,7 @@ def _require_localhost(request: Request) -> None:
         )
 
 
-@router.post("/detect", response_model=list[ImportSource])
+@local_only_router.post("/detect", response_model=list[ImportSource])
 def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     _require_localhost(request)
     service = ImportService()
@@ -191,9 +272,8 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         }
     },
 )
-async def import_files(request: Request, actor: ActorDep) -> JobResponse:
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
+async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
+    max_upload_bytes, max_upload_files, max_file_bytes = _get_upload_limits()
 
     # Step 1: Reserve admission slot BEFORE reading any body bytes.
     job = reserve_slot(actor.user_id)
@@ -203,22 +283,47 @@ async def import_files(request: Request, actor: ActorDep) -> JobResponse:
             detail="Too many active imports. Please wait for existing imports to complete.",
         )
 
+    # Wrap the ASGI receive callable with the ingress byte ceiling.
+    # This raises 413 as soon as the cumulative chunk stream exceeds the
+    # limit — before Starlette's multipart parser spools to temp files.
+    ceiling_receive = _ByteCeilingReceive(
+        request.receive,
+        max_upload_bytes,
+        detail=f"Upload exceeds the {max_upload_bytes // (1024**2)} MiB per-upload limit",
+    )
+    request._receive = ceiling_receive  # noqa: SLF001
+
+    # _job_cleanup: True until the job is handed to the worker.  The finally
+    # block uses this flag to decide whether to clean up the job.
+    _job_cleanup = True
     tmp: str | None = None
+
     try:
-        async with request.form(max_files=MAX_UPLOAD_FILES) as form:
+        async with request.form(max_files=max_upload_files) as form:
             uploads = [
                 f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
             ]
             if not uploads:
                 raise HTTPException(status_code=422, detail="No files provided")
-            total_size = sum(f.size or 0 for f in uploads)
-            if total_size > MAX_UPLOAD_BYTES:
+            # Per-file limit: reject any individual file exceeding the cap.
+            oversized = [f for f in uploads if (f.size or 0) > max_file_bytes]
+            if oversized:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"Total upload size exceeds {MAX_UPLOAD_BYTES // (1024**2)} MiB limit",
+                    detail=(
+                        f"One or more files exceed the "
+                        f"{max_file_bytes // (1024**2)} MiB per-file limit"
+                    ),
+                )
+            # Defense-in-depth: also check post-spool total size (catches absent/lying CL).
+            total_size = sum(f.size or 0 for f in uploads)
+            if total_size > max_upload_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Total upload size exceeds {max_upload_bytes // (1024**2)} MiB limit",
                 )
 
-            tmp = tempfile.mkdtemp()
+            tmp = tempfile.mkdtemp(prefix="snore-upload-")
             tmp_path = Path(tmp)
             tmp_root = tmp_path.resolve()
             for upload in uploads:
@@ -229,28 +334,53 @@ async def import_files(request: Request, actor: ActorDep) -> JobResponse:
                     logger.warning("Skipping file with unsafe path: %r", filename)
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                content = await upload.read()
-                dest.write_bytes(content)
+                # Run copy in a thread so the event loop stays responsive.
+                # asyncio.create_task wraps the coroutine in a task that can be
+                # individually awaited; asyncio.shield lets us wait for it even
+                # under task cancellation so the copy thread runs to completion
+                # before we clean up.
+                copy_task = asyncio.create_task(
+                    asyncio.to_thread(_copy_chunked, upload.file, dest, max_file_bytes)
+                )
+                try:
+                    await asyncio.shield(copy_task)
+                except asyncio.CancelledError:
+                    # Request cancelled.  Loop the shielded wait until the copy
+                    # task is truly done so cleanup never races a running write.
+                    # The loop is robust to repeated cancellations: each inner
+                    # CancelledError is absorbed and the loop re-tests .done().
+                    while not copy_task.done():
+                        try:
+                            await asyncio.shield(copy_task)
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    raise  # propagates to finally → cleanup
+                except _FileSizeExceeded:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"File '{filename}' exceeds the "
+                            f"{max_file_bytes // (1024**2)} MiB per-file limit"
+                        ),
+                    ) from None
 
+        # Transfer ownership to the job; the worker will clean up on completion.
         job.temp_dir = tmp_path
         tmp = None  # Job owns the directory now.
         job.convert_to_pending()
         job.target_profile_id = actor.profile_id
-    except HTTPException:
-        # Release capacity before re-raising: job is abandoned.
-        job.try_cancel()
-        remove_job(job.job_id)
-        job.cleanup_files()
-        job.release_capacity()
-        raise
-    except Exception:
-        if tmp is not None:
-            shutil.rmtree(tmp, ignore_errors=True)
-        job.try_cancel()
-        remove_job(job.job_id)
-        job.cleanup_files()
-        job.release_capacity()
-        raise
+        _job_cleanup = False  # Worker owns the job from here.
+
+    finally:
+        # Runs on every exit: normal (no-op), HTTPException, Exception,
+        # CancelledError.  _job_cleanup is False only when the worker started.
+        if _job_cleanup:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+            job.try_cancel()
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
 
     # Derive profile-scoped backup root from actor.
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
@@ -262,13 +392,11 @@ async def import_files(request: Request, actor: ActorDep) -> JobResponse:
     return JobResponse(job_id=job.job_id)
 
 
-@router.post("/path", response_model=JobResponse, status_code=202)
+@local_only_router.post("/path", response_model=JobResponse, status_code=202)
 async def import_from_path(
-    body: ImportPathRequest, request: Request, actor: ActorDep
+    body: ImportPathRequest, request: Request, actor: RequireWritable
 ) -> JobResponse:
     _require_localhost(request)
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
 
     try:
         job = create_job(
@@ -288,7 +416,7 @@ async def import_from_path(
 
 
 @router.delete("/{job_id}", status_code=204)
-def cancel_import(job_id: str, actor: ActorDep) -> None:
+def cancel_import(job_id: str, actor: RequireWritable) -> None:
     """Cancel an import job.
 
     Requires write access and ownership of the job. Returns 404 for foreign jobs
@@ -302,8 +430,6 @@ def cancel_import(job_id: str, actor: ActorDep) -> None:
     ):
         # 404 instead of 403 — no information about foreign job IDs.
         raise HTTPException(status_code=404, detail="Import job not found")
-    if not actor.can_write:
-        raise HTTPException(status_code=403, detail="Write access required")
     cancel_job(job_id)
 
 

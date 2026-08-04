@@ -4,6 +4,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
+from snore.api.guards import RequireWritable
 from snore.api.schemas import (
     BulkDeletePreviewRequest,
     PaginatedResponse,
@@ -84,6 +85,7 @@ async def update_session(
     session_id: int,
     body: SessionEnabledRequest,
     service: SessionServiceDep,
+    _actor: RequireWritable,
 ) -> SessionDetail:
     await service.set_session_enabled(session_id, body.enabled)
     return await service.get_session_detail(session_id)
@@ -91,7 +93,9 @@ async def update_session(
 
 @router.delete("/", response_model=dict)
 async def delete_sessions(
-    body: SessionDeleteRequest, service: SessionServiceDep
+    body: SessionDeleteRequest,
+    service: SessionServiceDep,
+    _actor: RequireWritable,
 ) -> dict[str, int]:
     if body.session_ids:
         owned = await service.get_owned_ids(body.session_ids)
