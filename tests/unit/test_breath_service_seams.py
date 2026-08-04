@@ -2900,10 +2900,10 @@ class TestCaNumericProvenanceExtended:
     """Additional CA numeric tests exercising the eligibility gate and cross-session variance."""
 
     async def test_ca_stability_index_over_60s_window(self, async_db_session):
-        """stability_index uses a 60-second window (plan §12 line 976).
+        """stability_index uses a 60-second window (plan §12 line 980).
 
         CA at 90 s.  MV data covers [30, 90] s (60 s window).
-        Known values so variance is computable; index = stdev / mean.
+        Alternating 8.0/12.0: mean≈10, stdev≈2, CV≈0.2.
         """
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
@@ -2940,11 +2940,11 @@ class TestCaNumericProvenanceExtended:
 
         assert len(result.ca_events) == 1
         ev = result.ca_events[0]
-        # stability_index = stdev / mean must be non-null for valid window data
+        # plan §12 line 980: stability_index = stdev / mean (CV) over 60-s window
         assert ev.stability_index is not None
         assert ev.stability_reason is None
-        # mean([8,12]) = 10, stdev ≈ 2; CV ≈ 0.2
-        assert ev.stability_index > 0.0
+        # alternating 8/12 in [30,90]: mean≈10, stdev≈2, CV≈0.2
+        assert abs(ev.stability_index - 0.2) < 0.05
 
     async def test_ca_pb_pct_over_eligible_sessions_only(self, async_db_session):
         """PB% uses only OK-session durations in denominator (eligibility gate).
@@ -3276,3 +3276,133 @@ class TestUnexpectedErrorPropagation:
         ):
             with pytest.raises(RuntimeError, match="injected CA compute failure"):
                 await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+
+# ---------------------------------------------------------------------------
+# CA MIXED_VERSION refusal test (Thufir pass-4 acceptance item)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCaMixedVersionRefusal:
+    """get_ca_analysis refuses night-level fields on MIXED_VERSION day coverage."""
+
+    async def test_mixed_version_refuses_ca_night_level_fields(self, async_db_session):
+        """MIXED_VERSION day_status nulls pb_pct and mv_rolling_variance.
+
+        Two sessions on the same night with different algorithm identities
+        → day_status=MIXED_VERSION → periodic_breathing_pct is None
+        with pb_reason=ALGO_VERSION_MISMATCH.
+
+        plan §1 line 185: MIXED_VERSION is the first-wins state.
+        """
+        import copy  # noqa: PLC0415
+
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.analysis.shared.versioning import (  # noqa: PLC0415
+            AlgorithmIdentity,
+            AnalysisRunMetadata,
+        )
+        from snore.database import models as _models  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 20)
+
+        day = _models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        session_a = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+            ),
+            end_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 23, 0
+            ),
+            duration_seconds=7200.0,
+        )
+        session_b = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 23, 30
+            ),
+            end_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day + 1, 1, 30
+            ),
+            duration_seconds=7200.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        # Build two distinct algorithm identities
+        current_id = AlgorithmIdentity.current()
+        run_meta = AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"])
+        algo_a = AlgoVersions(identity=current_id, run=run_meta)
+
+        alt_id_dict = copy.deepcopy(current_id.model_dump())
+        old_seg = alt_id_dict.get("segmenter", "v0")
+        alt_id_dict["segmenter"] = "v999.0.0" if old_seg != "v999.0.0" else "v998.0.0"
+        algo_b = AlgoVersions(
+            identity=AlgorithmIdentity.model_validate(alt_id_dict), run=run_meta
+        )
+
+        for sess, algo in ((session_a, algo_a), (session_b, algo_b)):
+            async_db_session.add(
+                _models.AnalysisResult(
+                    session_id=sess.id,
+                    timestamp_start=sess.start_time,
+                    timestamp_end=sess.end_time,
+                    programmatic_result_json={},
+                    processing_time_ms=5,
+                    engine_versions_json=algo.model_dump(),
+                )
+            )
+        await async_db_session.flush()
+
+        from sqlalchemy import select as _select  # noqa: PLC0415
+
+        ar_a_id = (
+            await async_db_session.execute(
+                _select(_models.AnalysisResult.id)
+                .where(_models.AnalysisResult.session_id == session_a.id)
+                .limit(1)
+            )
+        ).scalar()
+        ar_b_id = (
+            await async_db_session.execute(
+                _select(_models.AnalysisResult.id)
+                .where(_models.AnalysisResult.session_id == session_b.id)
+                .limit(1)
+            )
+        ).scalar()
+
+        async def _mocked_latest(
+            session_id: int,
+        ) -> tuple[AnalysisStatus, AlgoVersions | None, int | None]:
+            if session_id == session_a.id:
+                return (AnalysisStatus.OK, algo_a, ar_a_id)
+            if session_id == session_b.id:
+                return (AnalysisStatus.OK, algo_b, ar_b_id)
+            return (AnalysisStatus.NOT_RUN, None, None)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with patch.object(
+            svc, "_latest_analysis_for_session", side_effect=_mocked_latest
+        ):
+            result = await svc.get_ca_analysis(
+                therapy_date=therapy_date, device_id=dev.id
+            )
+
+        # plan §1 line 185: MIXED_VERSION when sessions have distinct identities
+        assert result.day_status == DayAnalysisStatus.MIXED_VERSION
+        # Night-level fields refused on MIXED_VERSION (plan §12 line 980)
+        assert result.periodic_breathing_pct is None
+        assert result.pb_reason == NullReason.ALGO_VERSION_MISMATCH
+        assert result.mv_rolling_variance is None

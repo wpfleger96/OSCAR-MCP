@@ -3113,30 +3113,25 @@ class BreathService:
                             AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
                         )
 
-                        try:
-                            dto = AnalysisResultDTO.model_validate(
-                                ar_row.programmatic_result_json
-                            )
-                            episodes = dto.periodic_breathing_episodes or []
-                            if episodes:
-                                pb_seen_any = True
-                                for ep in episodes:
-                                    start_t = float(
-                                        ep.get("start_time", ep.get("start", 0))
+                        dto = AnalysisResultDTO.model_validate(
+                            ar_row.programmatic_result_json
+                        )
+                        episodes = dto.periodic_breathing_episodes or []
+                        if episodes:
+                            pb_seen_any = True
+                            for ep in episodes:
+                                start_t = float(
+                                    ep.get("start_time", ep.get("start", 0))
+                                )
+                                end_t = float(
+                                    ep.get(
+                                        "end_time",
+                                        ep.get("end", start_t + ep.get("duration", 0)),
                                     )
-                                    end_t = float(
-                                        ep.get(
-                                            "end_time",
-                                            ep.get(
-                                                "end", start_t + ep.get("duration", 0)
-                                            ),
-                                        )
-                                    )
-                                    total_pb_s += max(0.0, end_t - start_t)
-                            elif dto.periodic_breathing is not None:
-                                pb_seen_any = True
-                        except Exception:  # noqa: BLE001
-                            pass
+                                )
+                                total_pb_s += max(0.0, end_t - start_t)
+                        elif dto.periodic_breathing is not None:
+                            pb_seen_any = True
 
                 # MV rolling variance: collect bin means across ALL OK sessions
                 # (combined; variance computed once after the loop)
