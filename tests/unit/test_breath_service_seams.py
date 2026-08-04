@@ -589,6 +589,38 @@ class TestGetDeviceCapabilities:
         assert caps.actual_date_start == therapy_date
         assert caps.actual_date_end == therapy_date
 
+    async def test_day_with_no_sessions_returns_no_data_in_range(
+        self, async_db_session
+    ):
+        """get_device_capabilities returns NO_DATA_IN_RANGE for a Day row with no sessions.
+
+        Empty Day cache rows (session_count=0, no Session children) must not inflate
+        nights_with_data or produce a non-null actual date range.
+        plan §13 lines 949-961: actual endpoints derived from dates with ≥1 session.
+        """
+        from snore.database import models as _m  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        # Create a Day row with session_count=0 and NO Session children
+        empty_day = _m.Day(
+            device_id=dev.id,
+            date=date(2025, 6, 1),
+            session_count=0,
+        )
+        async_db_session.add(empty_day)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        caps = await svc.get_device_capabilities(device_id=dev.id)
+
+        # Day row with no sessions must NOT count as imported data
+        assert caps.null_reason == NullReason.NO_DATA_IN_RANGE
+        assert caps.actual_date_start is None
+        assert caps.actual_date_end is None
+        assert caps.nights_with_data == 0
+
 
 # ---------------------------------------------------------------------------
 # get_contextual_events
@@ -2679,6 +2711,50 @@ class TestSameProfileTwoDeviceExtended:
         assert len(result.epochs) == 1
         assert result.epochs[0].null_reason == NullReason.NOT_AVAILABLE
 
+    async def test_two_device_nightly_range_raises_device_ambiguity(
+        self, async_db_session
+    ):
+        """get_nightly_range_summary with two devices and no device_id raises DeviceAmbiguityError.
+
+        Before the fix, the per-date loop resolved independently and mixed both devices.
+        """
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        therapy_date = date(2026, 3, 10)
+        profile_id, dev_a, _, dev_b, _ = await self._setup_two_devices_on_date(
+            async_db_session, therapy_date
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(DeviceAmbiguityError) as exc_info:
+            await svc.get_nightly_range_summary(
+                date_start=therapy_date,
+                date_end=therapy_date,
+            )
+        err = exc_info.value
+        assert dev_a.id in err.owned_device_ids
+        assert dev_b.id in err.owned_device_ids
+
+    async def test_foreign_device_id_in_contextual_events_propagates(
+        self, async_db_session
+    ):
+        """get_contextual_events with a foreign device_id propagates ValueError (not []).
+
+        Before the fix, the ValueError was caught and silently returned [].
+        """
+        _, profile_a_id = await _make_profile(async_db_session)
+        _, profile_b_id = await _make_profile(async_db_session)
+        dev_b = await _make_device(async_db_session, profile_b_id)
+        therapy_date = date(2026, 3, 11)
+        await _make_day_and_session(async_db_session, dev_b.id, therapy_date)
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        # profile A asking about profile B's device → must propagate, not silently []
+        with pytest.raises(ValueError):
+            await svc_a.get_contextual_events(
+                therapy_date=therapy_date, device_id=dev_b.id
+            )
+
 
 # ---------------------------------------------------------------------------
 # compare_epochs refusal tests (two-phase: RX + identity checks before breath queries)
@@ -2902,8 +2978,12 @@ class TestCaNumericProvenanceExtended:
     async def test_ca_stability_index_over_60s_window(self, async_db_session):
         """stability_index uses a 60-second window (plan §12 line 980).
 
-        CA at 90 s.  MV data covers [30, 90] s (60 s window).
-        Alternating 8.0/12.0: mean≈10, stdev≈2, CV≈0.2.
+        CA at 90 s.  The 60-second window covers [30, 90] s.
+        Signal design: [0, 30) s = 0.0 (constant-zero region);
+                       [30, 90] s = alternating 8.0/12.0 → mean≈10, stdev≈2, CV≈0.2.
+        The old 120-second window [−30→0, 30, 90] includes the zero region, producing
+        a very different CV (the zero values drag the mean down toward 0, causing
+        stdev/mean → large or undefined).  This fixture falsifies the 120-second path.
         """
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
@@ -2912,10 +2992,14 @@ class TestCaNumericProvenanceExtended:
             async_db_session, dev.id, therapy_date, duration_hours=1.0
         )
 
-        # MV data: alternating 8.0 and 12.0 to produce known stdev
+        # [0, 30) = 0.0; [30, 90] = alternating 8/12; rest = 0.0
         n = 3600
         ts = np.arange(n, dtype=np.float32)
-        vals = np.where(ts % 2 == 0, 8.0, 12.0).astype(np.float32)
+        vals = np.where(
+            (ts >= 30) & (ts <= 90),
+            np.where(ts % 2 == 0, 8.0, 12.0),
+            0.0,
+        ).astype(np.float32)
         async_db_session.add(
             models.Waveform(
                 session_id=session.id,
@@ -3159,38 +3243,24 @@ class TestContextualEventsInputValidationExtended:
         )
         assert result == []
 
-    async def test_event_types_over_cap_is_truncated(self, async_db_session):
-        """get_contextual_events with 60 unique event_types truncates to 50, no error."""
+    async def test_event_types_over_cap_raises_value_error(self, async_db_session):
+        """get_contextual_events with 51 unique event_types raises ValueError.
+
+        Silent truncation would drop valid requested types — the service must reject.
+        """
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
         therapy_date = date(2026, 7, 2)
-        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _make_day_and_session(async_db_session, dev.id, therapy_date)
 
-        # Insert an event whose type is in position 51 (would be dropped after cap)
-        dropped_type = "TYPE_060"  # index 60, past cap
-        async_db_session.add(
-            models.Event(
-                session_id=session.id,
-                event_type=dropped_type,
-                start_time=session.start_time + timedelta(minutes=10),
-                duration_seconds=5.0,
-            )
-        )
-        await async_db_session.flush()
-
-        event_types_60 = [
-            f"TYPE_{i:03d}" for i in range(60)
-        ]  # 60 unique, all different
+        event_types_51 = [f"TYPE_{i:03d}" for i in range(51)]
         svc = BreathService(async_db_session, profile_id=profile_id)
-        # Should succeed; the dropped_type at index 60 is truncated (not queried)
-        result = await svc.get_contextual_events(
-            therapy_date=therapy_date,
-            device_id=dev.id,
-            event_types=event_types_60,
-        )
-        # dropped_type (index 60) was truncated, so it won't appear
-        returned_types = {e.event_type for e in result}
-        assert dropped_type not in returned_types
+        with pytest.raises(ValueError, match="50"):
+            await svc.get_contextual_events(
+                therapy_date=therapy_date,
+                device_id=dev.id,
+                event_types=event_types_51,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -3402,6 +3472,8 @@ class TestCaMixedVersionRefusal:
 
         # plan §1 line 185: MIXED_VERSION when sessions have distinct identities
         assert result.day_status == DayAnalysisStatus.MIXED_VERSION
+        # plan §12 lines 984-993: MIXED_VERSION requires algorithm_identity=None
+        assert result.algorithm_identity is None
         # Night-level fields refused on MIXED_VERSION (plan §12 line 980)
         assert result.periodic_breathing_pct is None
         assert result.pb_reason == NullReason.ALGO_VERSION_MISMATCH

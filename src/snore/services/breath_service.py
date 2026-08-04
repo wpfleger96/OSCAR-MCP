@@ -1866,8 +1866,61 @@ class BreathService:
         )
 
         # -----------------------------------------------------------------------
-        # Phase 1: Resolve sessions + build per-session RX snapshots for all epochs
+        # Phase 1: Resolve ONE device for the whole comparison, then per-epoch sessions.
+        # All epochs must target the same device.  Union-resolve fires DeviceAmbiguityError
+        # if multiple owned devices span the combined date range and no device_id is given.
         # -----------------------------------------------------------------------
+
+        explicit_device_ids = {e.device_id for e in epochs if e.device_id is not None}
+        if len(explicit_device_ids) > 1:
+            raise ValueError(
+                "All epochs in a comparison must target the same device_id"
+            )
+        union_device_id = explicit_device_ids.pop() if explicit_device_ids else None
+        union_start = min(e.date_start for e in epochs)
+        union_end = max(e.date_end for e in epochs)
+        # Union-resolve to guarantee one device across all epochs.
+        # DeviceAmbiguityError (multi-device profile, no device_id) propagates.
+        # ValueError for a foreign/unknown explicit device_id: return NOT_AVAILABLE for all epochs.
+        try:
+            union_resolved_device_id, _ = await self._resolve_range(
+                union_start, union_end, union_device_id
+            )
+        except DeviceAmbiguityError:
+            raise
+        except ValueError:
+            # No sessions in range (device_id=None) → NO_DATA_IN_RANGE
+            # Foreign/unknown explicit device_id → NOT_AVAILABLE
+            no_data_reason = (
+                NullReason.NOT_AVAILABLE
+                if union_device_id is not None
+                else NullReason.NO_DATA_IN_RANGE
+            )
+            null_epochs = [
+                EpochBreathStats(
+                    label=e.label,
+                    date_start=e.date_start,
+                    date_end=e.date_end,
+                    nights_with_data=0,
+                    nights_missing_analysis=0,
+                    algorithm_identity=None,
+                    null_reason=no_data_reason,
+                    primary_mode=None,
+                    mid_insp_flattening=_null_dist,
+                    flatness_index=_null_dist,
+                    flow_class_distribution={},
+                    tidal_volume_ml=_null_dist,
+                    ie_ratio=_null_dist,
+                    rera_proxy_count=None,
+                    rera_reason=NullReason.NOT_AVAILABLE,
+                    rx_settings={},
+                )
+                for e in epochs
+            ]
+            return CompareEpochsResult(
+                null_reason=no_data_reason,
+                epochs=null_epochs,
+            )
 
         # Each entry: dict with epoch metadata + resolved sessions + RX data
         epoch_resolved: list[dict[str, Any]] = []
@@ -1876,7 +1929,7 @@ class BreathService:
         for epoch in epochs:
             try:
                 resolved_device_id, sessions_by_date = await self._resolve_range(
-                    epoch.date_start, epoch.date_end, epoch.device_id
+                    epoch.date_start, epoch.date_end, union_resolved_device_id
                 )
             except ValueError:
                 # Foreign/unknown device_id → NOT_AVAILABLE; no sessions → NO_DATA_IN_RANGE
@@ -2508,6 +2561,27 @@ class BreathService:
             )
 
         n_calendar = (date_end - date_start).days + 1
+
+        # Resolve device ONCE across the full range.
+        # DeviceAmbiguityError propagates; ValueError (no sessions, device_id=None) → empty.
+        try:
+            resolved_device_id, _ = await self._resolve_range(
+                date_start, date_end, device_id
+            )
+        except DeviceAmbiguityError:
+            raise
+        except ValueError:
+            return NightlyRangeSummary(
+                date_start=date_start,
+                date_end=date_end,
+                device_id=device_id or 0,
+                compliance_threshold_hours=compliance_threshold_hours,
+                n_calendar_nights=n_calendar,
+                n_nights=0,
+                days_compliant=0,
+                compliance_pct=0.0,
+                nights=[],
+            )
         nights: list[NightlyAnalysisSummary] = []
         days_compliant = 0
         current = date_start
@@ -2515,7 +2589,7 @@ class BreathService:
             try:
                 summary = await self.get_nightly_summary(
                     current,
-                    device_id=device_id,
+                    device_id=resolved_device_id,
                     compliance_threshold_hours=compliance_threshold_hours,
                 )
                 nights.append(summary)
@@ -2524,8 +2598,6 @@ class BreathService:
             except ValueError:
                 pass  # no sessions on this day
             current += timedelta(days=1)
-
-        resolved_device_id = device_id or (nights[0].device_id if nights else 0)
         n_nights = len(nights)
         compliance_pct = (
             (days_compliant / n_calendar * 100.0) if n_calendar > 0 else 0.0
@@ -2587,8 +2659,14 @@ class BreathService:
                 supported_vendor_models=[],
             )
 
-        # Date range of actual data
-        day_stmt = select(models.Day).where(models.Day.device_id == device_id)
+        # Date range of actual data — only days with at least one Session count
+        # as "imported nights" (plan §13 lines 949-961).
+        from sqlalchemy import exists  # noqa: PLC0415
+
+        day_stmt = select(models.Day).where(
+            models.Day.device_id == device_id,
+            exists().where(models.Session.day_id == models.Day.id),
+        )
         if date_start is not None:
             day_stmt = day_stmt.where(models.Day.date >= date_start)
         if date_end is not None:
@@ -2744,18 +2822,18 @@ class BreathService:
                 raise ValueError(
                     "event_types must be None or a list of non-empty strings"
                 )
-            # Deduplicate, order-preserving; cap at 50 items (plan §13)
-            event_types = list(dict.fromkeys(event_types))[:50]
+            # Deduplicate (order-preserving), then enforce the 50-item cap (plan §13).
+            event_types = list(dict.fromkeys(event_types))
+            if len(event_types) > 50:
+                raise ValueError("event_types must contain at most 50 unique values")
         if min_duration is not None and min_duration < 0:
             raise ValueError("min_duration must be None or >= 0")
 
-        # Resolve device via _resolve_range (DeviceAmbiguityError propagates to caller)
-        try:
-            resolved_device_id, sessions_by_date = await self._resolve_range(
-                therapy_date, therapy_date, device_id
-            )
-        except ValueError:
-            return []
+        # Resolve device via _resolve_range — DeviceAmbiguityError and ownership
+        # errors propagate to the caller; a foreign/unknown device is not []
+        resolved_device_id, sessions_by_date = await self._resolve_range(
+            therapy_date, therapy_date, device_id
+        )
         day_sessions = sessions_by_date.get(therapy_date, [])
 
         results: list[ContextualEvent] = []
@@ -2860,9 +2938,18 @@ class BreathService:
     async def get_waveform_window(
         self, request: WaveformWindowRequest
     ) -> WaveformWindow:
-        """Convenience orchestrator: fetch then compute. Never closes self._db."""
+        """Convenience orchestrator: fetch then compute. Never closes self._db.
+
+        Validates device ownership via _resolve_range before fetching so that
+        multi-device ambiguity raises DeviceAmbiguityError (not MultiSessionAmbiguityError)
+        and unknown explicit device_ids raise ValueError (not a synthetic empty window).
+        """
+        resolved_device_id, _ = await self._resolve_range(
+            request.therapy_date, request.therapy_date, request.device_id
+        )
+        resolved_request = request.model_copy(update={"device_id": resolved_device_id})
         raw = await fetch_waveform_window_raw(
-            self._db, request, profile_id=self._profile_id
+            self._db, resolved_request, profile_id=self._profile_id
         )
         return compute_waveform_window(raw)
 
@@ -2924,6 +3011,10 @@ class BreathService:
                 algo_identity = algo.identity
 
         ca_day_status = self._reduce_day_status(coverage, identities_for_reduce)
+
+        # plan §12 lines 984-993: MIXED_VERSION must return algorithm_identity=None
+        if ca_day_status == DayAnalysisStatus.MIXED_VERSION:
+            algo_identity = None
 
         # Map day_status → null_reason for the result
         if ca_day_status == DayAnalysisStatus.OK:
