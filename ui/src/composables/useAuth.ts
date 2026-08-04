@@ -40,6 +40,7 @@ export function useAuth() {
 
     async function refreshStatus(): Promise<void> {
         status.value = null
+        _fetchPromise = null
         _lastFetched = 0
         await fetchStatus()
     }
