@@ -31,14 +31,21 @@ def get_client_ip(request: Request) -> str:
     """
     from snore.api.config import get_config  # noqa: PLC0415
 
-    peer = request.client.host if request.client else "unknown"
+    raw_peer = request.client.host if request.client else "unknown"
+    # Normalise the peer address to canonical form so equivalent IPv6
+    # spellings (e.g. ``2001:0db8::1`` vs ``2001:db8::1``) map to the
+    # same rate-limit and lockout key.
+    try:
+        peer = str(ipaddress.ip_address(raw_peer))
+    except ValueError:
+        peer = raw_peer
+
     cfg = get_config()
-    if peer in cfg.trusted_proxies:
+    if raw_peer in cfg.trusted_proxies or peer in cfg.trusted_proxies:
         forwarded = request.headers.get("cf-connecting-ip", "").strip()
         if forwarded:
             try:
-                ipaddress.ip_address(forwarded)
-                return forwarded
+                return str(ipaddress.ip_address(forwarded))
             except ValueError:
                 logger.warning(
                     "cf-connecting-ip %r is not a valid IP address; using peer %r",

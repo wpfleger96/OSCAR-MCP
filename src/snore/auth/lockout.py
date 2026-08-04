@@ -132,6 +132,10 @@ class RateLimitStore:
         self._max_ips = max_ips
         self._entries: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
+        # Persistent cursor for _purge_stale: advances 64 slots per call so
+        # every position in the table is examined within ceil(n/64) calls
+        # regardless of where active entries are clustered.
+        self._purge_cursor: int = 0
 
     def check_and_record(self, ip: str) -> bool:
         """Return True (allowed) or False (rate-limited); records allowed requests.
@@ -165,22 +169,33 @@ class RateLimitStore:
     def _purge_stale(self, cutoff: float, budget: int) -> None:
         """Evict IPs whose tracking windows have fully expired.
 
-        Only examines up to ``budget`` entries to bound per-call work.  Must
-        be called with ``_lock`` held.
+        Examines exactly ``budget`` entries starting from ``_purge_cursor``
+        and wraps around the table.  Advancing the cursor each call ensures
+        every position is eventually examined regardless of where active
+        entries are clustered — a prefix of 9,936 active IPs does not pin
+        the cursor to the front and leave the stale tail unexamined.
+
+        Must be called with ``_lock`` held.
         """
+        if not self._entries:
+            return
+        keys = list(self._entries.keys())
+        n = len(keys)
+        start = self._purge_cursor % n
         stale: list[str] = []
-        examined = 0
-        for ip_key, times in self._entries.items():
-            if examined >= budget:
-                break
-            examined += 1
-            # Prune the deque in place.
+        for i in range(min(budget, n)):
+            ip_key = keys[(start + i) % n]
+            times = self._entries.get(ip_key)
+            if times is None:
+                continue  # deleted earlier in this sweep
             while times and times[0] < cutoff:
                 times.popleft()
             if not times:
                 stale.append(ip_key)
+        # Advance the cursor by the number of positions examined.
+        self._purge_cursor = (start + min(budget, n)) % max(n, 1)
         for ip_key in stale:
-            del self._entries[ip_key]
+            self._entries.pop(ip_key, None)
 
 
 _rate_limit_store = RateLimitStore()

@@ -172,16 +172,24 @@ def load_config(
     trusted_proxies = frozenset(p.strip() for p in raw_proxies.split(",") if p.strip())
 
     # Parse and validate dev origins at startup; malformed entries are a ConfigError.
+    # The same strict rules apply as for SNORE_PUBLIC_BASE_URL: http/https only,
+    # no userinfo, no path/query/fragment.
     raw_dev = os.environ.get("SNORE_DEV_ORIGINS", "")
     dev_origins: set[tuple[str, str, int]] = set()
     for raw_origin in raw_dev.split(","):
         raw_origin = raw_origin.strip()
         if not raw_origin:
             continue
+        try:
+            _validate_dev_origin(raw_origin)
+        except ConfigError as exc:
+            raise ConfigError(
+                f"SNORE_DEV_ORIGINS contains an invalid origin: {raw_origin!r}. {exc}"
+            ) from exc
         parsed_origin = parse_origin(raw_origin)
         if parsed_origin is None:
             raise ConfigError(
-                f"SNORE_DEV_ORIGINS contains an invalid origin: {raw_origin!r}. "
+                f"SNORE_DEV_ORIGINS contains an unparseable origin: {raw_origin!r}. "
                 "Expected format: http://hostname or https://hostname[:port]"
             )
         dev_origins.add(parsed_origin)
@@ -344,6 +352,40 @@ def _validate_public_base_url(url: str) -> None:
                     f"SNORE_PUBLIC_BASE_URL with http:// must be localhost or a "
                     f"loopback IP, got {host!r}."
                 ) from None
+
+
+def _validate_dev_origin(url: str) -> None:
+    """Raise ConfigError if ``url`` is not a strict http/https origin.
+
+    Applies the same restrictions as ``_validate_public_base_url``:
+    ``http``/``https`` only, no userinfo, no path/query/fragment, valid
+    host and port.  This prevents exotic schemes (``javascript:``, etc.)
+    or partial URLs from silently collapsing into a host-wide origin.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        raise ConfigError(f"Not a valid URL: {exc}") from exc
+
+    if parsed.scheme not in ("http", "https"):
+        raise ConfigError(f"Must use http or https, got {parsed.scheme!r}")
+    if not (parsed.hostname or ""):
+        raise ConfigError("Must include a host")
+    if parsed.username or parsed.password:
+        raise ConfigError("Must not contain userinfo (user:pass@host)")
+    if parsed.path not in ("", "/"):
+        raise ConfigError(f"Must not include a path, got {parsed.path!r}")
+    if parsed.query:
+        raise ConfigError("Must not include a query string")
+    if parsed.fragment:
+        raise ConfigError("Must not include a fragment")
+
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"Has an invalid port: {exc}") from exc
+    if port is not None and not (1 <= port <= 65535):
+        raise ConfigError(f"Port must be 1–65535, got {port}")
 
 
 def get_config() -> AppConfig:

@@ -53,6 +53,21 @@ _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _AUTH_BODY_LIMIT = 16 * 1024  # 16 KiB
 
 
+class _BodyCeilingExceeded(Exception):
+    """Sentinel raised by _ByteCeilingReceive when the auth-body ceiling is crossed.
+
+    A separate exception type (not ``HTTPException``) is used so
+    ``CsrfMiddleware.dispatch`` can catch it before Starlette's form/body
+    parser gets a chance to convert it into a 400 "error parsing body" response.
+    The upload ingress ceiling (import_data.py) continues to raise
+    ``HTTPException(413)`` directly because it lives inside the route handler
+    rather than in middleware.
+    """
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+
+
 # ---------------------------------------------------------------------------
 # Shared ASGI receive wrapper
 # ---------------------------------------------------------------------------
@@ -71,6 +86,7 @@ class _ByteCeilingReceive:
         inner: Callable[[], Awaitable[MutableMapping[str, Any]]],
         max_bytes: int,
         detail: str | None = None,
+        raise_as_body_ceiling: bool = False,
     ) -> None:
         self._inner = inner
         self._max = max_bytes
@@ -78,15 +94,21 @@ class _ByteCeilingReceive:
             detail or f"Request body exceeds the {max_bytes // 1024} KiB limit"
         )
         self._seen = 0
+        # When True, raise _BodyCeilingExceeded instead of HTTPException so the
+        # auth middleware can catch it and return a proper 413 before Starlette's
+        # body/form parser converts it to a 400.
+        self._raise_as_body_ceiling = raise_as_body_ceiling
 
     async def __call__(self) -> MutableMapping[str, Any]:
-        from fastapi import HTTPException  # noqa: PLC0415
-
         msg = await self._inner()
         if msg.get("type") == "http.request":
             chunk: bytes = msg.get("body", b"")
             self._seen += len(chunk)
             if self._seen > self._max:
+                if self._raise_as_body_ceiling:
+                    raise _BodyCeilingExceeded(self._detail)
+                from fastapi import HTTPException  # noqa: PLC0415
+
                 raise HTTPException(status_code=413, detail=self._detail)
         return msg
 
@@ -208,8 +230,33 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         is_auth_path = request.url.path.startswith(_AUTH_PATH_PREFIX)
 
         # Apply conservative body ceiling to all auth-endpoint requests.
+        # We first check Content-Length so we can return 413 directly before
+        # Starlette's body/form parser gets control (it catches exceptions from
+        # the receive wrapper and converts them to 400).  The receive wrapper
+        # remains as a backstop for chunked requests that omit Content-Length.
         if is_auth_path:
-            request._receive = _ByteCeilingReceive(request.receive, _AUTH_BODY_LIMIT)  # noqa: SLF001
+            cl_header = request.headers.get("content-length", "")
+            try:
+                if int(cl_header) > _AUTH_BODY_LIMIT:
+                    from starlette.responses import JSONResponse  # noqa: PLC0415
+
+                    return JSONResponse(
+                        {
+                            "detail": (
+                                f"Request body exceeds the "
+                                f"{_AUTH_BODY_LIMIT // 1024} KiB limit"
+                            )
+                        },
+                        status_code=413,
+                        headers={"Cache-Control": "no-store"},
+                    )
+            except (ValueError, TypeError):
+                # No valid Content-Length — streaming ceiling handles it.
+                pass
+            # Streaming backstop for chunked bodies without Content-Length.
+            request._receive = _ByteCeilingReceive(  # noqa: SLF001
+                request.receive, _AUTH_BODY_LIMIT
+            )
 
         if cfg.auth_mode is AuthMode.MULTIUSER and request.method in _UNSAFE_METHODS:
             error = self._check_origin(request, cfg)

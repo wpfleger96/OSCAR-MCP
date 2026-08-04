@@ -15,7 +15,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from snore.api.errors import NotFoundError, not_found_handler, server_error_handler
+from snore.api.errors import (
+    NotFoundError,
+    auth_validation_error_handler,
+    not_found_handler,
+    server_error_handler,
+)
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, CsrfMiddleware, RateLimitMiddleware
@@ -219,6 +224,10 @@ def create_app() -> FastAPI:
 
     app.add_exception_handler(NotFoundError, not_found_handler)
     app.add_exception_handler(Exception, server_error_handler)
+    # Strip credential inputs from 422 validation errors on auth routes.
+    from fastapi.exceptions import RequestValidationError  # noqa: PLC0415
+
+    app.add_exception_handler(RequestValidationError, auth_validation_error_handler)
 
     # Auth router — always registered (public endpoints + mode-aware).
     app.include_router(

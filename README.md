@@ -243,21 +243,28 @@ uv run snore validate --from 2024-01-01 --to 2024-12-31
 ### 8. Web UI & REST API
 
 ```bash
-# Build UI and start the server (single command)
-just serve
+# Start API in single-user local mode (no authentication, loopback only)
+just dev
 
-# Or start the API server directly (serves UI if already built)
-uv run snore serve                              # Default: local mode, 127.0.0.1:8000
-uv run snore serve --host 127.0.0.1 --port 8000 --reload  # explicit loopback
+# Start API in multiuser mode with a seeded test invite (dev config in local.just)
+just dev-auth
+
+# Production / network deployment — requires SNORE_SESSION_SECRET and SNORE_PUBLIC_BASE_URL
+SNORE_AUTH_MODE=multiuser \
+SNORE_SESSION_SECRET=<32-char-secret> \
+SNORE_PUBLIC_BASE_URL=https://snore.example.com \
+uv run snore serve --host 0.0.0.0 --port 8000
 
 # Web UI at http://localhost:8000, API docs at http://localhost:8000/docs
 ```
 
-> **Deployment note:** `snore serve` is the supported network launcher.  In
-> **local mode** (`SNORE_AUTH_MODE=local`, the default), the server refuses to
-> bind to a non-loopback address.  Use **multiuser mode** for any network
-> deployment; set `SNORE_AUTH_MODE=multiuser`, `SNORE_SESSION_SECRET`, and
-> `SNORE_PUBLIC_BASE_URL`.  See `local.just` for the `dev-auth` recipe.
+> **Deployment note:** `snore serve` is the supported network launcher.
+> The **default auth mode is `multiuser`** (fail-closed) — running
+> `uv run snore serve` without setting `SNORE_AUTH_MODE=local` will exit
+> immediately if `SNORE_SESSION_SECRET` or `SNORE_PUBLIC_BASE_URL` is not
+> configured.  Use `just dev` for explicit single-user local mode (loopback
+> only), `just dev-auth` for multiuser development, or the full env block
+> above for network deployment.
 
 ### 9. Shell Completions
 
@@ -291,17 +298,11 @@ just pre-commit
 # CI workflow (type-check, lint, format, test)
 just ci
 
-# Build UI and start the server
-just serve
+# Start API in single-user local mode (no auth, loopback only)
+just dev
 
-# Start REST API dev server (with reload)
-just dev-api
-
-# Start Vue UI dev server (HMR, proxies API to dev-api)
-just dev-ui
-
-# Install UI pnpm dependencies
-just ui-install
+# Start API in multiuser mode with a seeded invite
+just dev-auth
 
 # Build UI for production
 just ui-build
