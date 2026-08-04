@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,8 +31,8 @@ async def get_data_overview(
     if not raw_devices:
         return DataOverviewResponse(devices=[])
 
-    # Analysis status — count distinct sessions with at least one AnalysisResult,
-    # scoped to this profile via Session → Device.
+    # Analysis status — run once; derive both the bool flag and the count from
+    # the same query to avoid two round-trips over the same three-join path.
     analysis_session_count = (
         await db_session.execute(
             select(func.count(models.AnalysisResult.session_id.distinct()))
@@ -52,25 +52,52 @@ async def get_data_overview(
     ).scalar_one()
     analysis_run = analysis_session_count > 0
 
+    device_ids = [d.id for d in raw_devices]
+
+    # Bulk session stats — one query over all devices instead of N per-device queries.
+    stats_rows = (
+        await db_session.execute(
+            select(
+                models.Session.device_id,
+                func.count(models.Session.id),
+                func.min(models.Session.start_time),
+                func.max(models.Session.start_time),
+            )
+            .where(
+                models.Session.device_id.in_(device_ids),
+                models.Session.enabled.is_(True),
+            )
+            .group_by(models.Session.device_id)
+        )
+    ).all()
+    stats_by_device: dict[int, tuple[int, datetime | None, datetime | None]] = {
+        int(row[0]): (row[1], row[2], row[3]) for row in stats_rows
+    }
+
+    # Bulk therapy modes — one query; Python groups by device_id.
+    modes_rows = (
+        await db_session.execute(
+            select(models.Session.device_id, models.Session.therapy_mode)
+            .where(
+                models.Session.device_id.in_(device_ids),
+                models.Session.enabled.is_(True),
+                models.Session.therapy_mode.is_not(None),
+            )
+            .distinct()
+            .order_by(models.Session.device_id, models.Session.therapy_mode)
+        )
+    ).all()
+    modes_by_device: dict[int, list[str]] = {}
+    for dev_id, mode in modes_rows:
+        modes_by_device.setdefault(int(dev_id), []).append(mode)
+
     device_infos: list[DeviceInfo] = []
     total_sessions = 0
     global_min_date: date | None = None
     global_max_date: date | None = None
 
     for d in raw_devices:
-        # Per-device session stats
-        result = await db_session.execute(
-            select(
-                func.count(models.Session.id),
-                func.min(models.Session.start_time),
-                func.max(models.Session.start_time),
-            ).where(
-                models.Session.device_id == d.id,
-                models.Session.enabled.is_(True),
-            )
-        )
-        row = result.one()
-        count, min_dt, max_dt = row
+        count, min_dt, max_dt = stats_by_device.get(int(d.id), (0, None, None))
 
         first_date = min_dt.date() if min_dt else None
         last_date = max_dt.date() if max_dt else None
@@ -82,25 +109,11 @@ async def get_data_overview(
 
         total_sessions += count or 0
 
-        # Therapy modes for this device
-        mode_rows = (
-            (
-                await db_session.execute(
-                    select(models.Session.therapy_mode)
-                    .where(
-                        models.Session.device_id == d.id,
-                        models.Session.enabled.is_(True),
-                        models.Session.therapy_mode.is_not(None),
-                    )
-                    .distinct()
-                    .order_by(models.Session.therapy_mode)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        therapy_modes = modes_by_device.get(int(d.id), [])
 
-        # Device capabilities — profile-scoped; exceptions propagate (no swallowing)
+        # Device capabilities — profile-scoped; exceptions propagate (no swallowing).
+        # analysis_run is pre-computed above to avoid re-running the three-join query
+        # per device.  AsyncSession is not safe under asyncio.gather — sequential.
         dev_caps = await build_device_capabilities(
             db_session,
             profile_id,
@@ -119,7 +132,7 @@ async def get_data_overview(
                 first_session_date=first_date,
                 last_session_date=last_date,
                 session_count=count or 0,
-                therapy_modes=[m for m in mode_rows if m],
+                therapy_modes=[m for m in therapy_modes if m],
                 device_capabilities=dev_caps,
             )
         )

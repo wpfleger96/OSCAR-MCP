@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-VALID_PROFILES = frozenset({"neutral", "uars", "osa", "csa"})
-
 
 @dataclass(frozen=True)
 class ClinicalProfile:
@@ -89,6 +87,8 @@ _PROFILES: dict[str, ClinicalProfile] = {
         ),
     ),
 }
+
+VALID_PROFILES: frozenset[str] = frozenset(_PROFILES)
 
 
 def get_profile(name: str) -> ClinicalProfile:

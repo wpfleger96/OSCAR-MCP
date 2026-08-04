@@ -26,6 +26,7 @@ async def get_events(
     types: list[str] | None = None,
     min_duration: float | None = None,
     include_context: bool = True,
+    max_events: int = 500,
 ) -> EventsResponse:
     """Return respiratory events for a session date with inline waveform context.
 
@@ -40,6 +41,8 @@ async def get_events(
         types: Optional list of event types to filter (e.g. ["OA", "CA", "H"]).
         min_duration: Minimum event duration in seconds (optional filter).
         include_context: Whether to attach per-event waveform context block.
+        max_events: Maximum events to return (≥1, pre-validated by server wrapper).
+            total_events reflects the untruncated count; truncated=True when cut.
     """
     from snore.services.breath_service import (  # noqa: PLC0415
         BreathService,
@@ -55,7 +58,11 @@ async def get_events(
             min_duration=min_duration,
             device_id=device_id,
         )
-    except (DeviceAmbiguityError, DeviceNotOwnedError) as exc:
+    except DeviceNotOwnedError as exc:
+        raise ValidationError(
+            f"device_id={exc.device_id} is not available in this session"
+        ) from exc
+    except DeviceAmbiguityError as exc:
         raise ValidationError(str(exc)) from exc
     except ValueError as exc:
         raise ValidationError(
@@ -85,8 +92,12 @@ async def get_events(
             device_capabilities=caps,
         )
 
+    total_events = len(contextual_events)
+    truncated = total_events > max_events
+    events_to_map = contextual_events[:max_events] if truncated else contextual_events
+
     rows: list[EventRow] = []
-    for ev in contextual_events:
+    for ev in events_to_map:
         context: EventContext | None = None
         if include_context:
             context = EventContext(
@@ -164,6 +175,7 @@ async def get_events(
         session_start_wall_clock=anchor_session_start,
         timezone_status="unknown",
         events=rows,
-        total_events=len(rows),
+        total_events=total_events,
+        truncated=truncated,
         device_capabilities=caps,
     )

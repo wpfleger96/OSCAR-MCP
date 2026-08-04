@@ -206,3 +206,54 @@ class TestDeviceCapabilitiesOnSchemas:
         assert "has_pressure_waveform" in props
         assert "has_events" in props
         assert "has_analysis" in props
+
+
+class TestSettingsEpochDeviceId:
+    def test_device_id_accepts_none(self) -> None:
+        """SettingsEpoch.device_id is nullable (was changed from int to int | None)."""
+        from datetime import date
+
+        from snore.mcp.schemas import SettingsEpoch
+
+        epoch = SettingsEpoch(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 3, 31),
+            nights=90,
+            settings={"mode": "CPAP"},
+            device_id=None,
+        )
+        assert epoch.device_id is None
+
+    def test_device_id_accepts_integer(self) -> None:
+        from datetime import date
+
+        from snore.mcp.schemas import SettingsEpoch
+
+        epoch = SettingsEpoch(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 3, 31),
+            nights=90,
+            settings={"mode": "CPAP"},
+            device_id=7,
+        )
+        assert epoch.device_id == 7
+
+
+class TestEventsResponseTruncated:
+    def test_truncated_defaults_to_false(self) -> None:
+        """EventsResponse.truncated defaults to False when not specified."""
+        resp = EventsResponse(date="2024-01-01", events=[], total_events=0)
+        assert resp.truncated is False
+
+    def test_truncated_can_be_set_true(self) -> None:
+        resp = EventsResponse(
+            date="2024-01-01", events=[], total_events=10, truncated=True
+        )
+        assert resp.truncated is True
+
+    def test_truncated_serializes_in_json_dump(self) -> None:
+        import json
+
+        resp = EventsResponse(date="2024-01-01", events=[], total_events=0)
+        payload = json.loads(resp.model_dump_json())
+        assert payload["truncated"] is False

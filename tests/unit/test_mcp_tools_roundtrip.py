@@ -116,7 +116,15 @@ class TestGetDataOverviewRoundtrip:
         assert payload["analysis_run"] is False
 
     async def test_single_device_appears_in_overview(self) -> None:
-        """get_data_overview with one device returns device info."""
+        """get_data_overview with one device returns device info.
+
+        Query order in get_data_overview (after list_devices):
+          1. analysis-session-count → .scalar_one()
+          2. bulk session stats GROUP BY → .all()  rows: (device_id, count, min, max)
+          3. bulk therapy modes DISTINCT → .all()  rows: (device_id, therapy_mode)
+          4. waveform types → .scalars().all()
+          5. event types → .scalars().all()
+        """
         session = _make_mock_session()
 
         mock_device = MagicMock()
@@ -125,18 +133,23 @@ class TestGetDataOverviewRoundtrip:
         mock_device.model = "AirCurve 11"
         mock_device.serial_number = "SN123"
 
+        # Query 1: analysis session count
         count_result = MagicMock()
         count_result.scalar_one.return_value = 0
 
+        # Query 2: bulk session stats — rows shaped (device_id, count, min_start, max_start)
         stats_result = MagicMock()
-        stats_result.one.return_value = (2, None, None)
+        stats_result.all.return_value = [(1, 2, None, None)]
 
+        # Query 3: bulk therapy modes — rows shaped (device_id, therapy_mode)
         mode_result = MagicMock()
-        mode_result.scalars.return_value.all.return_value = []
+        mode_result.all.return_value = []
 
+        # Query 4: waveform types
         waveform_result = MagicMock()
         waveform_result.scalars.return_value.all.return_value = []
 
+        # Query 5: event types
         event_result = MagicMock()
         event_result.scalars.return_value.all.return_value = []
 
@@ -455,3 +468,107 @@ class TestGetEventsRoundtrip:
         assert events[0]["session_start_wall_clock"] == "2024-01-01T21:00:00"
         assert events[1]["session_id"] == 11
         assert events[1]["session_start_wall_clock"] == "2024-01-02T00:00:00"
+
+    async def test_max_events_truncates_list_and_sets_flag(self) -> None:
+        """max_events < event count: truncated=True, total_events is full count."""
+        from snore.services.breath_service import ContextualEvent, TimezoneStatus
+
+        session = _make_mock_session()
+
+        def _make_event() -> ContextualEvent:
+            return ContextualEvent(
+                session_id=1,
+                session_start_wall_clock=datetime(2024, 1, 1, 22, 0, 0),
+                event_type="OA",
+                event_start_wall_clock=datetime(2024, 1, 1, 22, 30, 0),
+                timezone_status=TimezoneStatus.UNKNOWN,
+                offset_seconds=1800.0,
+                duration_seconds=10.0,
+                pressure_at_event_cmh2o=None,
+                pressure_reason=None,
+                leak_at_event_lpm=None,
+                leak_reason=None,
+                mv_prior_120s_lpm=None,
+                mv_reason=None,
+                minutes_since_session_start=30.0,
+            )
+
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.get_contextual_events",
+                new_callable=AsyncMock,
+                return_value=[_make_event() for _ in range(5)],
+            ),
+            patch(
+                "snore.mcp.tools._capabilities.build_device_capabilities",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            async with _patched_client(session) as client:
+                result = await client.call_tool(
+                    "get_events", {"date": "2024-01-01", "max_events": 3}
+                )
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert payload["truncated"] is True
+        assert payload["total_events"] == 5
+        assert len(payload["events"]) == 3
+
+    async def test_default_max_events_produces_no_truncation(self) -> None:
+        """Default max_events (500) with fewer events: truncated=False."""
+        from snore.services.breath_service import ContextualEvent, TimezoneStatus
+
+        session = _make_mock_session()
+
+        ev = ContextualEvent(
+            session_id=1,
+            session_start_wall_clock=datetime(2024, 1, 1, 22, 0, 0),
+            event_type="CA",
+            event_start_wall_clock=datetime(2024, 1, 1, 22, 30, 0),
+            timezone_status=TimezoneStatus.UNKNOWN,
+            offset_seconds=1800.0,
+            duration_seconds=20.0,
+            pressure_at_event_cmh2o=None,
+            pressure_reason=None,
+            leak_at_event_lpm=None,
+            leak_reason=None,
+            mv_prior_120s_lpm=None,
+            mv_reason=None,
+            minutes_since_session_start=30.0,
+        )
+
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.get_contextual_events",
+                new_callable=AsyncMock,
+                return_value=[ev],
+            ),
+            patch(
+                "snore.mcp.tools._capabilities.build_device_capabilities",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            async with _patched_client(session) as client:
+                result = await client.call_tool("get_events", {"date": "2024-01-01"})
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert payload["truncated"] is False
+        assert payload["total_events"] == 1
+
+    async def test_max_events_zero_raises_tool_error(self) -> None:
+        """max_events=0 is rejected before the DB is touched."""
+        from fastmcp.exceptions import ToolError
+
+        session = _make_mock_session()
+
+        async with _patched_client(session) as client:
+            with pytest.raises(ToolError, match="max_events must be >= 1"):
+                await client.call_tool(
+                    "get_events", {"date": "2024-01-01", "max_events": 0}
+                )
+
+        session.execute.assert_not_called()

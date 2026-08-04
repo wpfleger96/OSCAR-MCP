@@ -2252,7 +2252,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1.0" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "fastapi", specifier = ">=0.136.1" },
-    { name = "fastmcp", specifier = ">=3" },
+    { name = "fastmcp", specifier = ">=3,<4" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "mne", marker = "extra == 'edf-discontinuous'", specifier = ">=1.6.0" },

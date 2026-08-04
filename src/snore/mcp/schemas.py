@@ -29,9 +29,9 @@ class DeviceCapabilities(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    manufacturer: str
-    model: str
-    serial_number: str
+    manufacturer: str | None = None
+    model: str | None = None
+    serial_number: str | None = None
     has_flow_waveform: bool
     has_pressure_waveform: bool
     has_leak_waveform: bool
@@ -82,7 +82,7 @@ class SettingsEpoch(BaseModel):
     nights: int
     settings: dict[str, str | None]
     changed_keys: list[str] = []
-    device_id: int
+    device_id: int | None = None
     device_capabilities: DeviceCapabilities | None = None
 
 
@@ -236,6 +236,7 @@ class EventsResponse(BaseModel):
     timezone_status: str = "unknown"
     events: list[EventRow]
     total_events: int
+    truncated: bool = False
     device_capabilities: DeviceCapabilities | None = None
 
 

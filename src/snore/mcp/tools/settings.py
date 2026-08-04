@@ -12,7 +12,7 @@ from snore.mcp.schemas import (
     SettingsEpoch,
     SettingsTimelineResponse,
 )
-from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._capabilities import _has_analysis, build_device_capabilities
 
 
 async def get_settings_timeline(
@@ -42,35 +42,43 @@ async def get_settings_timeline(
         and p.start_date <= end
         and (device_id is None or p.device_id == device_id)
     ]
-    filtered.sort(key=lambda p: (p.device_id or 0, p.start_date))
+    filtered.sort(
+        key=lambda p: (p.device_id if p.device_id is not None else -1, p.start_date)
+    )
+
+    # Pre-compute analysis status once to avoid re-running the three-join query
+    # per device inside build_device_capabilities.
+    analysis_run = await _has_analysis(db_session, profile_id)
 
     # Build capabilities once per real device id across the filtered epochs
     caps_cache: dict[int, DeviceCapabilities | None] = {}
     for period in filtered:
-        dev_id = period.device_id or 0
-        if dev_id > 0 and dev_id not in caps_cache:
+        dev_id = period.device_id
+        if dev_id is not None and dev_id not in caps_cache:
             caps_cache[dev_id] = await build_device_capabilities(
                 db_session,
                 profile_id,
                 dev_id,
                 date_start=start,
                 date_end=end,
+                analysis_run=analysis_run,
             )
 
     epochs: list[SettingsEpoch] = []
     prev_settings: dict[int, dict[str, str | None]] = {}
 
     for period in filtered:
-        dev_id = period.device_id or 0
+        dev_id = period.device_id
         raw = period.settings
 
         # Restrict to generic RX_KEYS; absent keys become None
         settings: dict[str, str | None] = {k: raw.get(k) for k in RX_KEYS}
 
         # Determine which keys changed vs. previous epoch for this device
-        prev = prev_settings.get(dev_id, {})
+        key = dev_id if dev_id is not None else -1
+        prev = prev_settings.get(key, {})
         changed_keys = [k for k in settings if settings[k] != prev.get(k)]
-        prev_settings[dev_id] = settings
+        prev_settings[key] = settings
 
         # Clip epoch boundaries to requested range
         epoch_start = max(period.start_date, start)
@@ -85,7 +93,9 @@ async def get_settings_timeline(
                 settings=settings,
                 changed_keys=changed_keys if prev else [],
                 device_id=dev_id,
-                device_capabilities=caps_cache.get(dev_id),
+                device_capabilities=caps_cache.get(dev_id)
+                if dev_id is not None
+                else None,
             )
         )
 

@@ -90,3 +90,9 @@ def validate_min_duration(min_duration: float | None) -> None:
     """Raise ValidationError if min_duration is negative."""
     if min_duration is not None and min_duration < 0:
         raise ValidationError("min_duration must be >= 0")
+
+
+def validate_max_events(max_events: int) -> None:
+    """Raise ValidationError if max_events is less than 1."""
+    if max_events < 1:
+        raise ValidationError("max_events must be >= 1")

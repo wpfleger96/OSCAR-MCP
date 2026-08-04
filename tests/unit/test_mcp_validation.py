@@ -62,3 +62,29 @@ class TestParseDateRange:
     def test_invalid_end_propagates_validation_error(self) -> None:
         with pytest.raises(ValidationError, match="end"):
             parse_date_range("2024-01-01", "bad")
+
+
+class TestValidateMaxEvents:
+    """validate_max_events rejects values below 1 and accepts values >= 1."""
+
+    def test_zero_raises_with_exact_message(self) -> None:
+        from snore.mcp.validation import validate_max_events
+
+        with pytest.raises(ValidationError, match="max_events must be >= 1"):
+            validate_max_events(0)
+
+    def test_negative_raises_with_exact_message(self) -> None:
+        from snore.mcp.validation import validate_max_events
+
+        with pytest.raises(ValidationError, match="max_events must be >= 1"):
+            validate_max_events(-100)
+
+    def test_one_is_valid(self) -> None:
+        from snore.mcp.validation import validate_max_events
+
+        validate_max_events(1)  # must not raise
+
+    def test_large_value_is_valid(self) -> None:
+        from snore.mcp.validation import validate_max_events
+
+        validate_max_events(10_000)  # must not raise

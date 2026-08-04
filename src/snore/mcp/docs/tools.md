@@ -16,8 +16,7 @@ Example: `"rera_index": null, "rera_index_reason": "analysis_not_run"`.
 
 ### Device capabilities block
 Most tools return a `device_capabilities` block declaring what the device/dataset
-actually provides for the queried range.  Do not assume a channel is present — always
-check this block before interpreting a null value.
+actually provides for the queried range.  The block includes `manufacturer`, `model`, and `serial_number` identifying the device.  Do not assume a channel is present — always check this block before interpreting a null value.
 
 ### Clinical profiles
 The server is configured with a clinical profile (`neutral` by default).  Profiles
@@ -77,7 +76,7 @@ Returns therapy settings epochs — contiguous periods with identical settings.
   - `start_date`, `end_date`, `nights` — epoch span
   - `settings` — dict of setting keys (mode, epr_level, epr_mode, pressure_min, pressure_max, pressure_fixed, ipap, epap, ps); absent keys are `null`
   - `changed_keys` — which keys changed vs. previous epoch
-  - `device_id`
+  - `device_id` — `int | null`; null when no device is associated with the epoch (no `0` sentinel is used to represent an unknown device)
   - `device_capabilities` — device/dataset capability block for this epoch's date range
 - `total_epochs`
 
@@ -103,8 +102,8 @@ multiple calls for longer ranges.
 - `nights` — list of `NightlyRow` with per-night metrics
   - `date`, `usage_hours`, `session_count`
   - `ahi`, `oai`, `cai`, `hi` (events/hr) — null if not computed
-  - `rera_index` (events/hr) — null + `rera_index_reason` when analysis absent
-  - `rdi` (events/hr) = AHI + RERA-proxy index — null + `rdi_reason` when analysis absent
+  - `rera_index` (events/hr) — null + `rera_index_reason` when absent; reason values include `"analysis_not_run"` (breath analysis has not been executed for this night) and `"duration_zero"` (a RERA count exists but total therapy hours is 0, making the per-hour index undefined)
+  - `rdi` (events/hr) = AHI + RERA-proxy index — null + `rdi_reason` when absent; same reason values as `rera_index_reason`
   - `fl_median`, `fl_p95`, `fl_max` — breath-level flow-limitation stats — null + `*_reason`
   - `rera_proxy_count` — RERA-proxy breath count — null + `rera_proxy_reason`
   - `ti_median_s` — median inspiratory time in seconds — null + `ti_median_reason`
@@ -113,7 +112,7 @@ multiple calls for longer ranges.
   - Leak: `leak_median_lpm`, `leak_95th_lpm`
   - Resp: `rr_mean_bpm`, `tv_mean_ml`, `mv_mean_lpm`
   - SpO₂: `spo2_mean_pct`
-- `compliance` — present in range mode: `threshold_hours`, `days_compliant`, `days_total` (CALENDAR nights in the requested range; nights without data count as non-compliant), `compliance_pct`
+- `compliance` — present whenever `start != end` (range mode), even when the range contains no night data rows; null only for single-date requests. Fields: `threshold_hours`, `days_compliant`, `days_total` (CALENDAR nights in the requested range; nights without data count as non-compliant), `compliance_pct`
 - `device_capabilities` — device/dataset capability block for the queried range; null when device is ambiguous
 
 **Error conditions:**
@@ -134,6 +133,7 @@ Respiratory events for a single session date with per-event context.
 | types | list[str] | No | Event type filter (e.g. `["CA", "OA"]`) |
 | min_duration | float | No | Minimum event duration in seconds |
 | include_context | bool | No | Attach per-event context block (default true) |
+| max_events | int | No | Maximum events to return after filtering (default 500, minimum 1). Truncation is applied after type and duration filters. |
 
 **Returns:** `EventsResponse`
 - `date` — queried session date
@@ -148,8 +148,9 @@ Respiratory events for a single session date with per-event context.
   - `pressure_reason`, `leak_reason`, `mv_reason` — explain null context values when waveform data is absent
   - `context` (`EventContext`) — attached when `include_context` is true:
     `pressure_at_event_cmh2o`, `leak_at_event_lpm`, `mv_prior_120s_lpm`, `minutes_since_session_start`
-- `total_events`
-- `device_capabilities` — device/dataset capability block for the queried date
+- `total_events` — untruncated count of events matching the filters (before `max_events` truncation)
+- `truncated` — `true` when the events list was cut at `max_events`; `total_events` still reflects the full count
+- `device_capabilities` — device/dataset capability block for the queried date; null when no events were found for the date and no `device_id` argument was provided
 
 **Error conditions:**
 - Date with no therapy data → tool error; use `get_data_overview` to find imported dates.

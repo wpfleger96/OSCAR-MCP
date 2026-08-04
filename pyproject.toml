@@ -27,7 +27,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "argon2-cffi>=23.1.0",
     "itsdangerous>=2.2.0",
-    "fastmcp>=3",
+    "fastmcp>=3,<4",
 ]
 
 [project.optional-dependencies]

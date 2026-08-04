@@ -24,7 +24,7 @@ from snore.mcp.schemas import (
     NightlyRow,
     NightlySummaryResponse,
 )
-from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._capabilities import _has_analysis, build_device_capabilities
 
 _DEFAULT_PAGE_SIZE = 30
 _DEFAULT_COMPLIANCE_THRESHOLD_HOURS = 4.0
@@ -70,7 +70,11 @@ async def get_nightly_summary(
             device_id=device_id,
             compliance_threshold_hours=compliance_threshold_hours,
         )
-    except (DeviceAmbiguityError, DeviceNotOwnedError) as exc:
+    except DeviceNotOwnedError as exc:
+        raise ValidationError(
+            f"device_id={exc.device_id} is not available in this session"
+        ) from exc
+    except DeviceAmbiguityError as exc:
         raise ValidationError(str(exc)) from exc
 
     # Index per-night analysis summaries by therapy_date for O(1) lookup.
@@ -111,22 +115,35 @@ async def get_nightly_summary(
     day_rows = (await db_session.execute(day_q)).scalars().all()
 
     if not day_rows:
+        early_compliance: ComplianceFields | None = None
+        if start != end and bs_range is not None:
+            early_compliance = ComplianceFields(
+                threshold_hours=compliance_threshold_hours,
+                days_compliant=bs_range.days_compliant,
+                days_total=bs_range.n_calendar_nights,
+                compliance_pct=round(bs_range.compliance_pct, 1),
+            )
         return NightlySummaryResponse(
             nights=[],
             total_nights=total,
             page=page,
             page_size=page_size,
+            compliance=early_compliance,
         )
 
     day_ids = [int(d.id) for d in day_rows]
 
-    # For each day get the earliest enabled session (representative for stats)
+    # For each day get the earliest enabled session (representative for stats).
+    # Defense-in-depth: join through Device.profile_id even though day_ids are
+    # already profile-scoped by the Day query above.
     session_rows = (
         await db_session.execute(
             select(models.Session.id, models.Session.day_id)
+            .join(models.Device, models.Session.device_id == models.Device.id)
             .where(
                 models.Session.day_id.in_(day_ids),
                 models.Session.enabled.is_(True),
+                models.Device.profile_id == profile_id,
             )
             .order_by(models.Session.day_id, models.Session.start_time)
         )
@@ -140,14 +157,24 @@ async def get_nightly_summary(
 
     session_ids = list(day_to_session.values())
 
-    # Statistics rows for MV/RR/TV
+    # Statistics rows for MV/RR/TV — defense-in-depth join through Device.profile_id.
     stats_by_session: dict[int, models.Statistics] = {}
     if session_ids:
         stat_rows = (
             (
                 await db_session.execute(
-                    select(models.Statistics).where(
-                        models.Statistics.session_id.in_(session_ids)
+                    select(models.Statistics)
+                    .join(
+                        models.Session,
+                        models.Statistics.session_id == models.Session.id,
+                    )
+                    .join(
+                        models.Device,
+                        models.Session.device_id == models.Device.id,
+                    )
+                    .where(
+                        models.Statistics.session_id.in_(session_ids),
+                        models.Device.profile_id == profile_id,
                     )
                 )
             )
@@ -184,14 +211,23 @@ async def get_nightly_summary(
         ie_ratio_reason: str | None = None
 
         if bs_night is not None:
+            # rera_proxy: raw count from service (not divided by hours)
             if bs_night.rera_count is not None:
-                duration_h = day.total_therapy_hours or 0.0
                 rera_proxy_count = bs_night.rera_count
-                if duration_h > 0:
-                    rera_index = round(bs_night.rera_count / duration_h, 2)
             elif bs_night.rera_reason is not None:
-                rera_index_reason = str(bs_night.rera_reason)
                 rera_proxy_reason = str(bs_night.rera_reason)
+
+            # rera_index and rdi mapped straight through from service DTO
+            rera_index = bs_night.rera_index
+            rera_index_reason = (
+                str(bs_night.rera_index_reason)
+                if bs_night.rera_index_reason is not None
+                else None
+            )
+            rdi = bs_night.rdi
+            rdi_reason = (
+                str(bs_night.rdi_reason) if bs_night.rdi_reason is not None else None
+            )
 
             if bs_night.fl_median is not None:
                 fl_median = round(bs_night.fl_median, 4)
@@ -213,14 +249,6 @@ async def get_nightly_summary(
                 ie_ratio = round(bs_night.ie_ratio_median, 3)
             if bs_night.ie_ratio_reason is not None:
                 ie_ratio_reason = str(bs_night.ie_ratio_reason)
-
-            # RDI = AHI + RERA index (events/hr, same unit)
-            if day.ahi is not None and rera_index is not None:
-                rdi = round(day.ahi + rera_index, 2)
-            elif rera_index is None and rera_index_reason is not None:
-                rdi_reason = rera_index_reason
-            else:
-                rdi_reason = "not_available"
         else:
             rera_index_reason = "analysis_not_run"
             rdi_reason = "analysis_not_run"
@@ -286,7 +314,10 @@ async def get_nightly_summary(
                 compliance_pct=round(bs_range.compliance_pct, 1),
             )
 
-    # Device capabilities block — populated when BreathService resolved a device
+    # Device capabilities block — populated when BreathService resolved a device.
+    # analysis_run is computed once here to avoid re-running the three-join query
+    # inside build_device_capabilities.
+    analysis_run = await _has_analysis(db_session, profile_id)
     dev_caps = None
     if bs_range is not None and bs_range.device_id and bs_range.device_id > 0:
         dev_caps = await build_device_capabilities(
@@ -295,6 +326,7 @@ async def get_nightly_summary(
             bs_range.device_id,
             date_start=start,
             date_end=end,
+            analysis_run=analysis_run,
         )
 
     return NightlySummaryResponse(

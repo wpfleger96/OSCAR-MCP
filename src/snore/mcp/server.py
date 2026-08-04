@@ -54,6 +54,7 @@ from snore.mcp.validation import (
     parse_date,
     parse_date_range,
     validate_compliance_threshold,
+    validate_max_events,
     validate_min_duration,
     validate_page_args,
 )
@@ -156,40 +157,45 @@ async def _lifespan(
 
     await init_database_from_url(async_url)
 
-    # Register vendor parsers once at startup (idempotent; tools must not call
-    # ensure_registered_parsers() themselves — this is the single call site).
-    ensure_registered_parsers()
+    try:
+        # Register vendor parsers once at startup (idempotent; tools must not call
+        # ensure_registered_parsers() themselves — this is the single call site).
+        ensure_registered_parsers()
 
-    # Resolve the active profile — required by BreathService, DeviceService,
-    # and RxTracker (all scoped to a profile_id since multiuser Phase 1).
-    async with session_scope() as _db:
-        _profile_row = (
-            (
-                await _db.execute(
-                    select(models.Profile)
-                    .where(models.Profile.deleting_at.is_(None))
-                    .limit(1)
+        # Resolve the active profile — required by BreathService, DeviceService,
+        # and RxTracker (all scoped to a profile_id since multiuser Phase 1).
+        async with session_scope() as _db:
+            _profile_row = (
+                (
+                    await _db.execute(
+                        select(models.Profile)
+                        .where(models.Profile.deleting_at.is_(None))
+                        .order_by(models.Profile.id)
+                        .limit(1)
+                    )
                 )
+                .scalars()
+                .first()
             )
-            .scalars()
-            .first()
+            if _profile_row is None:
+                raise RuntimeError(
+                    "No profile found in database — run 'snore db init' first "
+                    "or import CPAP data to create a profile."
+                )
+            profile_id = int(_profile_row.id)
+
+        # PR-C swap site: replace session_scope with an actor-scoped factory here.
+        runtime = SNORERuntime(scope_provider=session_scope, profile_id=profile_id)
+
+        logger.info(
+            "SNORE MCP server started — db=%r profile=%s profile_id=%d",
+            target.location,
+            profile_name,
+            runtime.profile_id,
         )
-        if _profile_row is None:
-            raise RuntimeError(
-                "No profile found in database — run 'snore db init' first "
-                "or import CPAP data to create a profile."
-            )
-        profile_id = int(_profile_row.id)
-
-    # PR-C swap site: replace session_scope with an actor-scoped factory here.
-    runtime = SNORERuntime(scope_provider=session_scope, profile_id=profile_id)
-
-    logger.info(
-        "SNORE MCP server started — db=%r profile=%s profile_id=%d",
-        target.location,
-        profile_name,
-        runtime.profile_id,
-    )
+    except Exception:
+        await cleanup_database()
+        raise
 
     try:
         yield runtime
@@ -239,7 +245,12 @@ def tool_error_boundary(
             raise ToolError(str(exc)) from exc
         except Exception as exc:
             response = getattr(exc, "response", None)
-            message = response.text if response is not None else str(exc)
+            status = getattr(response, "status_code", None)
+            message = (
+                f"HTTP {status} from upstream service"
+                if status is not None
+                else str(exc)
+            )
             raise ToolError(message) from exc
 
     return wrapper
@@ -248,10 +259,12 @@ def tool_error_boundary(
 def _check_response_size(result: Any, tool_name: str) -> None:
     """Raise ToolError if the serialized result exceeds RESPONSE_SIZE_LIMIT."""
     try:
-        import sys
-
-        size = sys.getsizeof(json.dumps(result, default=str))
+        size = len(json.dumps(result, default=str).encode("utf-8"))
     except Exception:
+        logger.warning(
+            "_check_response_size: measurement failed for %s; skipping size gate",
+            tool_name,
+        )
         return
     if size > RESPONSE_SIZE_LIMIT:
         raise ToolError(
@@ -493,6 +506,7 @@ def _register_tools(mcp: FastMCP) -> None:
         types: list[str] | None = None,
         min_duration: float | None = None,
         include_context: bool = True,
+        max_events: int = 500,
     ) -> dict[str, Any]:
         """Return respiratory events for a single session date with inline waveform context.
 
@@ -507,9 +521,13 @@ def _register_tools(mcp: FastMCP) -> None:
                    See docs://tools for common event_type values.
             min_duration: Minimum event duration in seconds (optional).
             include_context: Attach per-event waveform context block (default true).
+            max_events: Maximum number of events to return after filtering (default 500,
+                        minimum 1). When the result is truncated, ``total_events`` still
+                        reports the full unfiltered count and ``truncated`` is set to true
+                        in the response.
 
         Returns:
-            EventsResponse with events list and total_events count.
+            EventsResponse with events list, total_events count, and truncated flag.
         """
         from snore.mcp.tools.events import get_events as _impl
 
@@ -517,6 +535,7 @@ def _register_tools(mcp: FastMCP) -> None:
         event_date = parse_date(date, "date")
 
         validate_min_duration(min_duration)
+        validate_max_events(max_events)
 
         async with runtime.scope_provider() as db:
             result = await _impl(
@@ -527,6 +546,7 @@ def _register_tools(mcp: FastMCP) -> None:
                 types=types,
                 min_duration=min_duration,
                 include_context=include_context,
+                max_events=max_events,
             )
 
         payload = result.model_dump(mode="json")

@@ -64,6 +64,47 @@ class TestToolErrorBoundary:
         with pytest.raises(ToolError, match="unexpected"):
             await _bad()
 
+    async def test_exc_with_response_status_code_emits_http_status_message(
+        self,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+
+        exc = RuntimeError("secret response body")
+        exc.response = mock_response
+
+        @tool_error_boundary
+        async def _bad() -> str:
+            raise exc
+
+        with pytest.raises(ToolError, match="HTTP 503 from upstream service"):
+            await _bad()
+
+    async def test_exc_with_response_status_does_not_include_response_body(
+        self,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+
+        exc = RuntimeError("secret response body text")
+        exc.response = mock_response
+
+        @tool_error_boundary
+        async def _bad() -> str:
+            raise exc
+
+        with pytest.raises(ToolError) as exc_info:
+            await _bad()
+        assert "secret response body text" not in str(exc_info.value)
+
 
 class TestCheckResponseSize:
     def test_small_response_passes(self) -> None:
@@ -91,6 +132,33 @@ class TestCheckResponseSize:
         huge = {"data": "x" * (RESPONSE_SIZE_LIMIT + 1)}
         with pytest.raises(ToolError, match="Narrow your query"):
             _check_response_size(huge, "test_tool")
+
+    def test_non_ascii_payload_under_byte_limit_passes(self) -> None:
+        # "Ā" (U+0100) is escaped by json.dumps to "Ā" — 6 ASCII bytes per char.
+        # 80,000 chars × 6 bytes + JSON overhead ≈ 480,012 bytes; under 500,000.
+        payload = {"data": "Ā" * 80_000}
+        _check_response_size(payload, "test_tool")  # must not raise
+
+    def test_non_ascii_payload_over_byte_limit_fails(self) -> None:
+        from fastmcp.exceptions import ToolError
+
+        # 90,000 "Ā" chars × 6 JSON bytes + overhead ≈ 540,012 bytes → over limit.
+        payload = {"data": "Ā" * 90_000}
+        with pytest.raises(ToolError, match="exceeds"):
+            _check_response_size(payload, "test_tool")
+
+    def test_measurement_failure_logs_warning_and_does_not_raise(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        from unittest.mock import patch
+
+        with patch("snore.mcp.server.json.dumps", side_effect=RuntimeError("boom")):
+            with caplog.at_level(logging.WARNING, logger="snore.mcp.server"):
+                _check_response_size({"key": "value"}, "my_tool")  # must not raise
+
+        assert any("measurement failed" in r.message for r in caplog.records)
 
 
 class TestBuildInstructions:
@@ -212,3 +280,44 @@ class TestValidateMinDuration:
 
         with pytest.raises(ValidationError, match="min_duration must be >= 0"):
             validate_min_duration(-0.1)
+
+
+class TestLifespanStartupFailure:
+    """_lifespan calls cleanup_database and re-raises when startup fails."""
+
+    async def test_cleanup_called_and_error_reraised_on_profile_not_found(
+        self,
+    ) -> None:
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from snore.mcp.server import _lifespan
+
+        # A mock DB session where .scalars().first() returns None → profile not found.
+        mock_db = MagicMock()
+        result_mock = MagicMock()
+        result_mock.scalars.return_value.first.return_value = None
+        mock_db.execute = AsyncMock(return_value=result_mock)
+
+        @asynccontextmanager
+        async def _mock_session_scope():
+            yield mock_db
+
+        cleanup_mock = AsyncMock()
+        mock_target = MagicMock()
+        mock_target.resolve_async_url.return_value = "sqlite+aiosqlite:///:memory:"
+
+        with (
+            patch("snore.mcp.server.DatabaseTarget") as mock_target_cls,
+            patch("snore.mcp.server.init_database_from_url", new_callable=AsyncMock),
+            patch("snore.mcp.server.cleanup_database", cleanup_mock),
+            patch("snore.mcp.server.session_scope", _mock_session_scope),
+            patch("snore.parsers.register_all.ensure_registered_parsers"),
+        ):
+            mock_target_cls.from_env_and_flags.return_value = mock_target
+
+            with pytest.raises(RuntimeError, match="No profile found"):
+                async with _lifespan(None):
+                    pass  # pragma: no cover
+
+        cleanup_mock.assert_awaited_once()
