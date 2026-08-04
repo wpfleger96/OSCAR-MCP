@@ -861,114 +861,163 @@ class TestP2UploadLifecycle:
         )
 
     @pytest.mark.asyncio
-    async def test_upload_cancel_cleans_up_and_releases_slot(self, tmp_path):
-        """CancelledError during copy: worker terminates, temp dir cleaned, slot released.
+    async def test_upload_cancel_drives_real_handler(
+        self, async_db_session, db_session, monkeypatch
+    ):
+        """Cancel a real POST /api/v1/import mid-copy via httpx.AsyncClient.
 
-        Exercises the actual import_files lifecycle guard (finally block +
-        asyncio.shield loop) by driving the job reservation and cleanup paths
-        directly.  The copy function blocks on a threading.Event so cancellation
-        happens at a deterministic point.
+        Drives the actual import_files handler through ASGITransport.
+        Patches _copy_chunked to a double that signals via call_soon_threadsafe
+        and blocks on a threading.Event gate so cancellation is deterministic.
+        Asserts: no new snore-upload-* dirs, slot returned to baseline, and a
+        fresh reservation succeeds at the cap.
         SNORE_MULTIUSER_PLAN.md:194-198 (release-on-client-abort).
         """
         import asyncio  # noqa: PLC0415
         import glob
-        import io as io_  # noqa: PLC0415
-        import shutil
         import tempfile
         import threading
 
+        import httpx
+
         import snore.api.import_jobs as jobs_mod
+        import snore.api.routers.import_data as import_mod
 
+        from snore.api.app import create_app  # noqa: PLC0415
+        from snore.api.config import load_config, set_config  # noqa: PLC0415
+        from snore.api.deps import get_actor, get_db  # noqa: PLC0415
         from snore.api.import_jobs import remove_job, reserve_slot  # noqa: PLC0415
+        from snore.auth.actor import AuthMode  # noqa: PLC0415
+        from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
 
-        gate = threading.Event()
+        monkeypatch.setenv("SNORE_AUTH_MODE", "local")
+        set_config(
+            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        )
+
         loop = asyncio.get_running_loop()
+        gate = threading.Event()
         copy_started_event = asyncio.Event()
-        worker_finished_event = asyncio.Event()
+        patch_call_count = [0]
 
-        def slow_copy(src_file: object, dest: object, max_bytes: int) -> None:
+        def blocking_copy(src_file: object, dest: object, max_bytes: int) -> None:
+            patch_call_count[0] += 1
             loop.call_soon_threadsafe(copy_started_event.set)
-            gate.wait(timeout=5)
-            loop.call_soon_threadsafe(worker_finished_event.set)
+            gate.wait(timeout=10)
+            # Return without error so the copy "succeeds" after unblocking.
+
+        monkeypatch.setattr(import_mod, "_copy_chunked", blocking_copy)
+        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
 
         count_before = jobs_mod._global_count
         tmpdir_before = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
 
-        # Reserve a slot and create a temp dir — the same two resources the
-        # upload handler acquires before entering the copy phase.
-        job = reserve_slot(None)
-        assert job is not None, "Failed to reserve slot"
-        snap_tmp = tempfile.mkdtemp(prefix="snore-upload-")
-        snap_path = Path(snap_tmp)
+        app = create_app()
 
-        _job_cleanup = True
+        from collections.abc import AsyncGenerator  # noqa: PLC0415
 
-        async def guarded_copy() -> None:
-            nonlocal snap_tmp, _job_cleanup
-            try:
-                copy_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        slow_copy,
-                        io_.BytesIO(b"x" * 256),
-                        snap_path / "f.bin",
-                        1024 * 1024,
-                    )
+        async def override_db() -> AsyncGenerator[AsyncSession]:
+            async with async_db_session.begin():
+                yield async_db_session
+
+        async def override_actor(
+            db: Annotated[AsyncSession, Depends(get_db)],
+        ) -> ActorContext:
+            return await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[get_actor] = override_actor
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            upload_task = asyncio.create_task(
+                client.post(
+                    "/api/v1/import/",
+                    files=[
+                        (
+                            "files",
+                            ("test.edf", b"x" * 256, "application/octet-stream"),
+                        )
+                    ],
                 )
-                try:
-                    await asyncio.shield(copy_task)
-                except asyncio.CancelledError:
-                    # Exact code from import_files: loop until copy_task.done().
-                    while not copy_task.done():
+            )
+
+            # Poll for copy to start, yielding to the event loop each iteration
+            # so upload_task can make progress.
+            deadline = loop.time() + 10
+            while not copy_started_event.is_set():
+                if loop.time() > deadline:
+                    gate.set()
+                    upload_task.cancel()
+                    try:
+                        await upload_task
+                    except Exception:
+                        pass
+                    status = "still running"
+                    if upload_task.done():
                         try:
-                            await asyncio.shield(copy_task)
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    raise
-                # Success path: transfer ownership to job.
-                job.temp_dir = snap_path
-                snap_tmp = None
-                job.convert_to_pending()
-                _job_cleanup = False
-            finally:
-                if _job_cleanup:
-                    if snap_tmp is not None:
-                        shutil.rmtree(snap_tmp, ignore_errors=True)
-                    job.try_cancel()
-                    remove_job(job.job_id)
-                    job.cleanup_files()
-                    job.release_capacity()
+                            resp = upload_task.result()
+                            status = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                        except Exception as exc:
+                            status = f"exc={exc!r}"
+                    pytest.fail(
+                        f"blocking_copy never called (patch_call_count={patch_call_count[0]}).\n"
+                        f"Upload result: {status}\n"
+                        f"SNORE_MULTIUSER_PLAN.md:194-198."
+                    )
+                if upload_task.done():
+                    # Upload completed before copy started — patch not intercepted.
+                    gate.set()
+                    status = "exception"
+                    try:
+                        resp = upload_task.result()
+                        status = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    except Exception as exc:
+                        status = f"exc={exc!r}"
+                    pytest.fail(
+                        f"Upload completed before copy started "
+                        f"(patch_call_count={patch_call_count[0]}).\n"
+                        f"Result: {status}"
+                    )
+                await asyncio.sleep(0.05)
 
-        outer = asyncio.create_task(guarded_copy())
+            # Copy has started — cancel the upload task.
+            upload_task.cancel()
 
-        # Wait for the copy to start in the thread.
-        await asyncio.wait_for(copy_started_event.wait(), timeout=5)
+            # Release the gate so the copy thread can finish.
+            gate.set()
 
-        # Cancel the outer task (simulates the HTTP request being cancelled).
-        outer.cancel()
+            # Await cancellation propagation.
+            try:
+                await upload_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
-        # Release the gate so the copy thread can finish.
-        gate.set()
+            # Allow finally cleanup to complete.
+            await asyncio.sleep(0.2)
 
-        # The outer task handles CancelledError; cleanup runs in finally.
-        try:
-            await outer
-        except asyncio.CancelledError:
-            pass
-
-        # Brief yield so any call_soon_threadsafe callbacks run.
-        await asyncio.sleep(0.05)
+        app.dependency_overrides.clear()
 
         tmpdir_after = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
         leaked = tmpdir_after - tmpdir_before
         assert not leaked, (
-            f"snore-upload-* dirs leaked after CancelledError: {leaked}\n"
+            f"snore-upload-* leaked after CancelledError: {leaked}\n"
             f"SNORE_MULTIUSER_PLAN.md:194-198 (release-on-client-abort)"
         )
 
         assert jobs_mod._global_count == count_before, (
-            f"Slot leaked after cancellation: was {count_before}, "
-            f"now {jobs_mod._global_count}"
+            f"Slot leaked: was {count_before}, now {jobs_mod._global_count}"
         )
+
+        # Verify a fresh reservation succeeds at the cap.
+        fresh = reserve_slot(None)
+        assert fresh is not None, "Fresh reservation failed — slot permanently held"
+        fresh.try_cancel()
+        remove_job(fresh.job_id)
+        fresh.cleanup_files()
+        fresh.release_capacity()
 
 
 # ---------------------------------------------------------------------------
