@@ -1,29 +1,18 @@
-"""get_nightly_summary tool — StatsService / DayService adapter.
+"""get_nightly_summary tool — StatsService / DayService + BreathService adapter.
 
 Timestamp contract (A6): date fields are Python ``date`` objects serialized as
 ``YYYY-MM-DD`` — no timezone issue since dates have no time component.
 
-Domain-computation note (F5):
-  Compliance calc (days_compliant / compliance_pct) is currently computed
-  inline here as a temporary measure pending PR-A merge.
-  TODO(PR-A seam): replace the compliance block with a call to
-  BreathService.get_nightly_range_summary(), which returns NightlyRangeSummary
-  with pre-computed compliance fields.  Swap site: the ComplianceFields block
-  at the bottom of this function.
-  Ref: docs/mcp-server-plan.md Appendix A §10 + Amendment 2.
-
-  Similarly, RERA/FL analysis fields are read directly from
-  AnalysisResult.programmatic_result_json (latest run by created_at per session).
-  TODO(PR-A seam): when BreathService.get_nightly_summary() is available,
-  replace the per-session analysis dict parsing with a single seam call that
-  returns NightlyAnalysisSummary per night with fl_median/95th/max from Breath rows.
-  Ref: docs/mcp-server-plan.md Appendix A §10 (NightlyAnalysisSummary).
+Compliance and breath-level FL/RERA fields are populated via
+BreathService.get_nightly_range_summary() when available (ranges ≤ 90 nights and
+no device ambiguity).  For ranges > 90 nights or when BreathService cannot
+resolve the device, compliance falls back to inline arithmetic over
+Day.total_therapy_hours and FL/RERA fields are null + reason.
 """
 
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +32,7 @@ async def get_nightly_summary(
     db_session: AsyncSession,
     start: date,
     end: date,
+    profile_id: int = 0,
     device_id: int | None = None,
     page: int = 1,
     page_size: int = _DEFAULT_PAGE_SIZE,
@@ -50,13 +40,41 @@ async def get_nightly_summary(
 ) -> NightlySummaryResponse:
     """Return per-night therapy summary for a date range.
 
-    Analysis-derived fields (RERA index, RDI) are read from the latest
-    AnalysisResult for each session; when absent they are null with reason
-    "analysis_not_run" (A2).
-
-    Compliance fields (compliance_pct, days_compliant, days_total) are
-    included in range mode using the supplied threshold (default 4 h).
+    Analysis-derived fields (RERA index, RDI, FL) are populated from
+    BreathService.get_nightly_range_summary() when possible; absent entries are
+    null with reason (A2).  Compliance fields use the same seam.
     """
+    from snore.services.breath_service import (  # noqa: PLC0415
+        BreathService,
+        DeviceAmbiguityError,
+        NightlyAnalysisSummary,
+        NightlyRangeSummary,
+    )
+
+    # Attempt BreathService range summary for compliance + FL/RERA.
+    # Falls back gracefully on: range > 90 nights, device ambiguity, no profile.
+    bs_range: NightlyRangeSummary | None = None
+    if profile_id:
+        n_calendar = (end - start).days + 1
+        if n_calendar <= 90:
+            try:
+                bs_range = await BreathService(
+                    db_session, profile_id
+                ).get_nightly_range_summary(
+                    start,
+                    end,
+                    device_id=device_id,
+                    compliance_threshold_hours=compliance_threshold_hours,
+                )
+            except (ValueError, DeviceAmbiguityError):
+                bs_range = None
+
+    # Index per-night analysis summaries by therapy_date for O(1) lookup.
+    bs_by_date: dict[date, NightlyAnalysisSummary] = {}
+    if bs_range is not None:
+        for night in bs_range.nights:
+            bs_by_date[night.therapy_date] = night
+
     # Count total matching days for pagination
     count_q = select(func.count(models.Day.id)).where(
         models.Day.date >= start,
@@ -88,7 +106,7 @@ async def get_nightly_summary(
 
     day_ids = [int(d.id) for d in day_rows]
 
-    # For each day get the earliest enabled session (representative for analysis/stats)
+    # For each day get the earliest enabled session (representative for stats)
     session_rows = (
         await db_session.execute(
             select(models.Session.id, models.Session.day_id)
@@ -108,33 +126,6 @@ async def get_nightly_summary(
 
     session_ids = list(day_to_session.values())
 
-    # Latest AnalysisResult per session via row_number window
-    analysis_by_session: dict[int, Any] = {}
-    if session_ids:
-        subq = (
-            select(
-                models.AnalysisResult.session_id,
-                models.AnalysisResult.programmatic_result_json,
-                func.row_number()
-                .over(
-                    partition_by=models.AnalysisResult.session_id,
-                    order_by=models.AnalysisResult.created_at.desc(),
-                )
-                .label("rn"),
-            )
-            .where(models.AnalysisResult.session_id.in_(session_ids))
-            .subquery()
-        )
-        analysis_rows = (
-            await db_session.execute(
-                select(subq.c.session_id, subq.c.programmatic_result_json).where(
-                    subq.c.rn == 1
-                )
-            )
-        ).all()
-        for s_id, payload in analysis_rows:
-            analysis_by_session[int(s_id)] = payload if payload else {}
-
     # Statistics rows for MV/RR/TV
     stats_by_session: dict[int, models.Statistics] = {}
     if session_ids:
@@ -153,41 +144,59 @@ async def get_nightly_summary(
             stats_by_session[int(stat.session_id)] = stat
 
     nights: list[NightlyRow] = []
-    days_compliant = 0
+    days_compliant_inline = 0
 
     for day in day_rows:
         day_id = int(day.id)
         session_id = day_to_session.get(day_id)
-        analysis = analysis_by_session.get(session_id, {}) if session_id else {}
         stats = stats_by_session.get(session_id) if session_id else None
+        bs_night = bs_by_date.get(day.date)
 
-        # Analysis-derived fields (A2)
+        # Analysis-derived fields from BreathService (A2)
         rera_index: float | None = None
         rera_index_reason: str | None = None
         rdi: float | None = None
         rdi_reason: str | None = None
+        fl_median: float | None = None
+        fl_median_reason: str | None = None
+        fl_p95: float | None = None
+        fl_p95_reason: str | None = None
+        fl_max: float | None = None
+        fl_max_reason: str | None = None
+        rera_proxy_count: int | None = None
+        rera_proxy_reason: str | None = None
 
-        if analysis:
-            mode_results = analysis.get("mode_results", {})
-            duration_h = analysis.get("session_duration_hours", 0.0) or 0.0
-            for _mode, mode_data in mode_results.items():
-                if isinstance(mode_data, dict) and mode_data.get(
-                    "rera_detection_enabled"
-                ):
-                    reras_list = mode_data.get("reras", [])
-                    rdi_val = mode_data.get("rdi")
-                    if duration_h > 0 and reras_list is not None:
-                        rera_index = round(len(reras_list) / duration_h, 2)
-                    if rdi_val is not None:
-                        rdi = round(float(rdi_val), 2)
-                    break
+        if bs_night is not None:
+            if bs_night.rera_count is not None:
+                duration_h = day.total_therapy_hours or 0.0
+                rera_proxy_count = bs_night.rera_count
+                if duration_h > 0:
+                    rera_index = round(bs_night.rera_count / duration_h, 2)
+            elif bs_night.rera_reason is not None:
+                rera_index_reason = str(bs_night.rera_reason)
+                rera_proxy_reason = str(bs_night.rera_reason)
+
+            if bs_night.fl_median is not None:
+                fl_median = round(bs_night.fl_median, 4)
+            if bs_night.fl_reason is not None:
+                fl_median_reason = str(bs_night.fl_reason)
+                fl_p95_reason = str(bs_night.fl_reason)
+                fl_max_reason = str(bs_night.fl_reason)
+            if bs_night.fl_95th is not None:
+                fl_p95 = round(bs_night.fl_95th, 4)
+            if bs_night.fl_max is not None:
+                fl_max = round(bs_night.fl_max, 4)
         else:
             rera_index_reason = "analysis_not_run"
             rdi_reason = "analysis_not_run"
+            fl_median_reason = "analysis_not_run"
+            fl_p95_reason = "analysis_not_run"
+            fl_max_reason = "analysis_not_run"
+            rera_proxy_reason = "analysis_not_run"
 
         usage_h = day.total_therapy_hours
         if usage_h and usage_h >= compliance_threshold_hours:
-            days_compliant += 1
+            days_compliant_inline += 1
 
         nights.append(
             NightlyRow(
@@ -202,6 +211,18 @@ async def get_nightly_summary(
                 rera_index_reason=rera_index_reason,
                 rdi=rdi,
                 rdi_reason=rdi_reason,
+                fl_median=fl_median,
+                fl_median_reason=fl_median_reason,
+                fl_p95=fl_p95,
+                fl_p95_reason=fl_p95_reason,
+                fl_max=fl_max,
+                fl_max_reason=fl_max_reason,
+                rera_proxy_count=rera_proxy_count,
+                rera_proxy_reason=rera_proxy_reason,
+                ti_median_s=None,
+                ti_median_reason="not_available",
+                ie_ratio=None,
+                ie_ratio_reason="not_available",
                 pressure_median_cmh2o=day.pressure_median,
                 pressure_95th_cmh2o=day.pressure_95th,
                 epap_median_cmh2o=day.epap_median,
@@ -222,19 +243,25 @@ async def get_nightly_summary(
 
     compliance: ComplianceFields | None = None
     if len(day_rows) > 1 or (start != end):
-        # TODO(PR-A seam): replace this inline compliance calc with a call to
-        # BreathService.get_nightly_range_summary() once PR-A merges.
-        # This is a temporary implementation — the calc is simple arithmetic
-        # over Day.total_therapy_hours, but it belongs in the service layer
-        # per Thufir F5. Swap: one call → extract compliance_pct / days_compliant.
-        compliance = ComplianceFields(
-            threshold_hours=compliance_threshold_hours,
-            days_compliant=days_compliant,
-            days_total=len(day_rows),
-            compliance_pct=(
-                round(days_compliant / len(day_rows) * 100, 1) if day_rows else 0.0
-            ),
-        )
+        if bs_range is not None:
+            compliance = ComplianceFields(
+                threshold_hours=compliance_threshold_hours,
+                days_compliant=bs_range.days_compliant,
+                days_total=bs_range.n_nights,
+                compliance_pct=round(bs_range.compliance_pct, 1),
+            )
+        else:
+            # Inline fallback (range > 90 nights or device ambiguity)
+            compliance = ComplianceFields(
+                threshold_hours=compliance_threshold_hours,
+                days_compliant=days_compliant_inline,
+                days_total=len(day_rows),
+                compliance_pct=(
+                    round(days_compliant_inline / len(day_rows) * 100, 1)
+                    if day_rows
+                    else 0.0
+                ),
+            )
 
     return NightlySummaryResponse(
         nights=nights,

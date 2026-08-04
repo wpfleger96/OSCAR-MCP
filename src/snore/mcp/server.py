@@ -66,6 +66,11 @@ logger = logging.getLogger(__name__)
 _ScopeProvider = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 _scope_provider: _ScopeProvider = session_scope
 
+# Profile-id seam: tools pass this to BreathService / DeviceService / RxTracker.
+# Lifespan resolves the first live Profile from the DB and stores it here.
+# 0 is a sentinel meaning "not yet resolved" (no valid DB profile has id=0).
+_profile_id: int = 0
+
 RESPONSE_SIZE_LIMIT = 500_000  # bytes; tools return narrow-your-query guidance
 
 
@@ -118,7 +123,12 @@ async def _lifespan(
     runs even if tool errors occur during shutdown.  The ``_scope_provider`` seam
     is reset to the default (global ``session_scope``) on teardown.
     """
-    global _scope_provider
+    global _scope_provider, _profile_id
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from snore.database import models  # noqa: PLC0415
+    from snore.parsers.register_all import ensure_registered_parsers  # noqa: PLC0415
 
     target = DatabaseTarget.from_env_and_flags(db_flag=db_flag, warn_ignored=True)
     async_url = target.resolve_async_url()
@@ -130,8 +140,36 @@ async def _lifespan(
     # this with an actor-scoped factory at this exact assignment site.
     _scope_provider = session_scope
 
+    # Register vendor parsers once at startup (idempotent; tools must not call
+    # ensure_registered_parsers() themselves — this is the single call site).
+    ensure_registered_parsers()
+
+    # Resolve the active profile — required by BreathService, DeviceService,
+    # and RxTracker (all scoped to a profile_id since multiuser Phase 1).
+    async with session_scope() as _db:
+        _profile_row = (
+            (
+                await _db.execute(
+                    select(models.Profile)
+                    .where(models.Profile.deleting_at.is_(None))
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if _profile_row is None:
+            raise RuntimeError(
+                "No profile found in database — run 'snore db init' first "
+                "or import CPAP data to create a profile."
+            )
+        _profile_id = int(_profile_row.id)
+
     logger.info(
-        "SNORE MCP server started — db=%r profile=%s", target.location, profile_name
+        "SNORE MCP server started — db=%r profile=%s profile_id=%d",
+        target.location,
+        profile_name,
+        _profile_id,
     )
 
     try:
@@ -139,6 +177,7 @@ async def _lifespan(
     finally:
         await cleanup_database()
         _scope_provider = session_scope  # reset to safe default
+        _profile_id = 0
         logger.info("SNORE MCP server stopped")
 
 
@@ -246,14 +285,10 @@ def _register_resources(mcp: FastMCP) -> None:
         Parser registry is consulted for supported-vendor context only.
         """
         from snore.mcp.tools.overview import get_data_overview
-        from snore.parsers.register_all import register_all_parsers
         from snore.parsers.registry import parser_registry
 
-        # Idempotent: safe to call every time; noop if already registered.
-        register_all_parsers()
-
         async with _scope_provider() as db:
-            overview = await get_data_overview(db)
+            overview = await get_data_overview(db, profile_id=_profile_id)
 
         supported_parsers = [
             f"{p.manufacturer} ({p.parser_id})" for p in parser_registry.list_parsers()
@@ -326,7 +361,7 @@ def _register_tools(mcp: FastMCP) -> None:
         from snore.mcp.tools.overview import get_data_overview as _impl
 
         async with _scope_provider() as db:
-            result = await _impl(db)
+            result = await _impl(db, profile_id=_profile_id)
 
         payload = result.model_dump(mode="json")
         _check_response_size(payload, "get_data_overview")
@@ -359,7 +394,9 @@ def _register_tools(mcp: FastMCP) -> None:
         start_d, end_d = parse_date_range(start, end)
 
         async with _scope_provider() as db:
-            result = await _impl(db, start_d, end_d, device_id=device_id)
+            result = await _impl(
+                db, start_d, end_d, profile_id=_profile_id, device_id=device_id
+            )
 
         payload = result.model_dump(mode="json")
         _check_response_size(payload, "get_settings_timeline")
@@ -404,6 +441,7 @@ def _register_tools(mcp: FastMCP) -> None:
                 db,
                 start_d,
                 end_d,
+                profile_id=_profile_id,
                 device_id=device_id,
                 page=page,
                 page_size=capped_page_size,
@@ -418,23 +456,24 @@ def _register_tools(mcp: FastMCP) -> None:
     @tool_error_boundary
     async def get_events(
         date: str,
+        device_id: int | None = None,
         types: list[str] | None = None,
         min_duration: float | None = None,
         include_context: bool = True,
     ) -> dict[str, Any]:
-        """Return respiratory events for a single session date.
+        """Return respiratory events for a single session date with inline waveform context.
 
-        Includes per-event context: minutes since session start, and
-        offset_seconds (from session start). Pressure/leak at event and
-        MV-prior-120s context require waveform lookups and will be populated
-        in Phase 4 via BreathService.get_contextual_events() (PR-A seam).
+        Each event includes pressure/leak at the event time and MV in the prior
+        120 s (when waveform data is available), plus minutes since session start.
 
         Args:
             date: Session date in YYYY-MM-DD format.
+            device_id: Optional device ID filter. Required when multiple devices
+                       have data for the same date.
             types: Optional event type filter, e.g. ["CA", "OA", "H", "RERA"].
                    See docs://tools for common event_type values.
             min_duration: Minimum event duration in seconds (optional).
-            include_context: Attach per-event context block (default true).
+            include_context: Attach per-event waveform context block (default true).
 
         Returns:
             EventsResponse with events list and total_events count.
@@ -449,6 +488,8 @@ def _register_tools(mcp: FastMCP) -> None:
             result = await _impl(
                 db,
                 event_date,
+                profile_id=_profile_id,
+                device_id=device_id,
                 types=types,
                 min_duration=min_duration,
                 include_context=include_context,

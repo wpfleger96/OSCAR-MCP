@@ -22,10 +22,13 @@ from snore.database.models import Day, Device, Event, Session
 # ---------------------------------------------------------------------------
 
 
-async def _make_device(db: AsyncSession, manufacturer: str = "TestMfr") -> Device:
+async def _make_device(
+    db: AsyncSession, profile_id: int, manufacturer: str = "TestMfr"
+) -> Device:
     import uuid
 
     device = Device(
+        profile_id=profile_id,
         manufacturer=manufacturer,
         model="TestModel",
         serial_number=f"SN_{uuid.uuid4().hex[:8]}",
@@ -74,26 +77,30 @@ async def _make_day_session(
 
 class TestGetDataOverview:
     async def test_empty_database_returns_empty_devices(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.overview import get_data_overview
 
-        result = await get_data_overview(async_db_session)
+        result = await get_data_overview(
+            async_db_session, profile_id=async_test_profile.id
+        )
         assert result.devices == []
         assert result.total_sessions == 0
         assert not result.analysis_run
 
     async def test_device_and_sessions_appear_in_overview(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.overview import get_data_overview
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         today = date(2024, 8, 1)
         await _make_day_session(async_db_session, device, today)
         await _make_day_session(async_db_session, device, today + timedelta(days=1))
 
-        result = await get_data_overview(async_db_session)
+        result = await get_data_overview(
+            async_db_session, profile_id=async_test_profile.id
+        )
         assert len(result.devices) == 1
         assert result.devices[0].manufacturer == "TestMfr"
         assert result.devices[0].session_count == 2
@@ -102,14 +109,16 @@ class TestGetDataOverview:
         assert result.date_range_end == today + timedelta(days=1)
 
     async def test_analysis_run_false_when_no_analysis_results(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.overview import get_data_overview
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         await _make_day_session(async_db_session, device, date(2024, 8, 1))
 
-        result = await get_data_overview(async_db_session)
+        result = await get_data_overview(
+            async_db_session, profile_id=async_test_profile.id
+        )
         assert not result.analysis_run
         assert result.analysis_session_count == 0
 
@@ -121,7 +130,7 @@ class TestGetDataOverview:
 
 class TestGetSettingsTimeline:
     async def test_empty_database_returns_no_epochs(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.settings import get_settings_timeline
 
@@ -129,17 +138,18 @@ class TestGetSettingsTimeline:
             async_db_session,
             date(2024, 1, 1),
             date(2024, 12, 31),
+            profile_id=async_test_profile.id,
         )
         assert result.epochs == []
         assert result.total_epochs == 0
 
     async def test_epochs_filtered_to_date_range(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.database.models import Setting
         from snore.mcp.tools.settings import get_settings_timeline
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
 
         # Two sessions with settings — one inside range, one outside
         day1, sess1 = await _make_day_session(
@@ -160,6 +170,7 @@ class TestGetSettingsTimeline:
             async_db_session,
             date(2024, 1, 1),
             date(2024, 6, 30),
+            profile_id=async_test_profile.id,
         )
         # Only the March session epoch should appear
         assert result.total_epochs == 1
@@ -185,31 +196,31 @@ class TestGetNightlySummary:
         assert result.total_nights == 0
 
     async def test_rera_fields_null_with_reason_when_analysis_absent(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.summary import get_nightly_summary
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         await _make_day_session(async_db_session, device, date(2024, 8, 1), ahi=2.5)
 
         result = await get_nightly_summary(
             async_db_session,
             date(2024, 8, 1),
             date(2024, 8, 1),
+            profile_id=async_test_profile.id,
         )
         assert len(result.nights) == 1
         night = result.nights[0]
         assert night.rera_index is None
-        assert night.rera_index_reason == "analysis_not_run"
+        assert night.rera_index_reason == "not_available"
         assert night.rdi is None
-        assert night.rdi_reason == "analysis_not_run"
 
     async def test_ahi_populated_from_day_row(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.summary import get_nightly_summary
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         await _make_day_session(
             async_db_session, device, date(2024, 8, 1), ahi=5.2, oai=1.0, cai=0.5
         )
@@ -218,17 +229,18 @@ class TestGetNightlySummary:
             async_db_session,
             date(2024, 8, 1),
             date(2024, 8, 1),
+            profile_id=async_test_profile.id,
         )
         night = result.nights[0]
         assert night.ahi == pytest.approx(5.2, abs=0.01)
         assert night.oai == pytest.approx(1.0, abs=0.01)
 
     async def test_compliance_block_present_in_range_mode(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.summary import get_nightly_summary
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         for i in range(5):
             await _make_day_session(
                 async_db_session,
@@ -242,6 +254,7 @@ class TestGetNightlySummary:
             date(2024, 8, 1),
             date(2024, 8, 5),
             compliance_threshold_hours=4.0,
+            profile_id=async_test_profile.id,
         )
         assert result.compliance is not None
         assert result.compliance.days_total == 5
@@ -249,11 +262,11 @@ class TestGetNightlySummary:
         assert result.compliance.compliance_pct == 100.0
 
     async def test_compliance_below_threshold_counted_correctly(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.summary import get_nightly_summary
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         # 3 full nights, 2 short nights
         for i in range(3):
             await _make_day_session(
@@ -275,17 +288,18 @@ class TestGetNightlySummary:
             date(2024, 8, 1),
             date(2024, 8, 5),
             compliance_threshold_hours=4.0,
+            profile_id=async_test_profile.id,
         )
         assert result.compliance is not None
         assert result.compliance.days_compliant == 3
         assert result.compliance.days_total == 5
 
     async def test_pagination_returns_correct_page(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.summary import get_nightly_summary
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         for i in range(10):
             await _make_day_session(
                 async_db_session,
@@ -299,6 +313,7 @@ class TestGetNightlySummary:
             date(2024, 8, 10),
             page=1,
             page_size=5,
+            profile_id=async_test_profile.id,
         )
         page2 = await get_nightly_summary(
             async_db_session,
@@ -306,6 +321,7 @@ class TestGetNightlySummary:
             date(2024, 8, 10),
             page=2,
             page_size=5,
+            profile_id=async_test_profile.id,
         )
         assert len(page1.nights) == 5
         assert len(page2.nights) == 5
@@ -323,20 +339,22 @@ class TestGetNightlySummary:
 
 class TestGetEvents:
     async def test_missing_date_raises_validation_error(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.errors import ValidationError
         from snore.mcp.tools.events import get_events
 
         with pytest.raises(ValidationError, match="No therapy data"):
-            await get_events(async_db_session, date(2024, 1, 1))
+            await get_events(
+                async_db_session, date(2024, 1, 1), profile_id=async_test_profile.id
+            )
 
     async def test_events_returned_for_session_date(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.events import get_events
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         target_date = date(2024, 8, 15)
         day, sess = await _make_day_session(async_db_session, device, target_date)
 
@@ -353,17 +371,19 @@ class TestGetEvents:
             )
         await async_db_session.flush()
 
-        result = await get_events(async_db_session, target_date)
+        result = await get_events(
+            async_db_session, target_date, profile_id=async_test_profile.id
+        )
         assert result.total_events == 2
         types_returned = {e.event_type for e in result.events}
         assert types_returned == {"OA", "CA"}
 
     async def test_event_type_filter_applied(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.events import get_events
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         target_date = date(2024, 8, 16)
         day, sess = await _make_day_session(async_db_session, device, target_date)
         session_start = sess.start_time
@@ -379,16 +399,21 @@ class TestGetEvents:
             )
         await async_db_session.flush()
 
-        result = await get_events(async_db_session, target_date, types=["OA"])
+        result = await get_events(
+            async_db_session,
+            target_date,
+            types=["OA"],
+            profile_id=async_test_profile.id,
+        )
         assert result.total_events == 1
         assert result.events[0].event_type == "OA"
 
     async def test_min_duration_filter_applied(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.events import get_events
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         target_date = date(2024, 8, 17)
         day, sess = await _make_day_session(async_db_session, device, target_date)
         session_start = sess.start_time
@@ -411,16 +436,21 @@ class TestGetEvents:
         )
         await async_db_session.flush()
 
-        result = await get_events(async_db_session, target_date, min_duration=10.0)
+        result = await get_events(
+            async_db_session,
+            target_date,
+            min_duration=10.0,
+            profile_id=async_test_profile.id,
+        )
         assert result.total_events == 1
         assert result.events[0].duration_seconds == 30.0
 
     async def test_event_context_includes_minutes_since_start(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.events import get_events
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         target_date = date(2024, 8, 18)
         day, sess = await _make_day_session(async_db_session, device, target_date)
         session_start = sess.start_time
@@ -435,19 +465,24 @@ class TestGetEvents:
         )
         await async_db_session.flush()
 
-        result = await get_events(async_db_session, target_date, include_context=True)
+        result = await get_events(
+            async_db_session,
+            target_date,
+            include_context=True,
+            profile_id=async_test_profile.id,
+        )
         assert result.total_events == 1
         ctx = result.events[0].context
         assert ctx is not None
         assert ctx.minutes_since_session_start == pytest.approx(45.0, abs=0.1)
 
     async def test_event_row_a6_timestamp_contract(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """A6: EventRow uses offset-free ISO 8601 wall-clock + offset_seconds, not UTC-offset."""
         from snore.mcp.tools.events import get_events
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         target_date = date(2024, 8, 18)
         day, sess = await _make_day_session(async_db_session, device, target_date)
         session_start = sess.start_time
@@ -462,7 +497,12 @@ class TestGetEvents:
         )
         await async_db_session.flush()
 
-        result = await get_events(async_db_session, target_date, include_context=True)
+        result = await get_events(
+            async_db_session,
+            target_date,
+            include_context=True,
+            profile_id=async_test_profile.id,
+        )
         ev = result.events[0]
 
         # Tier-2: wall-clock must be offset-free (no +HH:MM, no Z)
@@ -476,11 +516,11 @@ class TestGetEvents:
         assert "+" not in result.session_start_wall_clock
 
     async def test_context_disabled_returns_no_context_block(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.events import get_events
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         target_date = date(2024, 8, 19)
         day, sess = await _make_day_session(async_db_session, device, target_date)
         session_start = sess.start_time
@@ -495,7 +535,12 @@ class TestGetEvents:
         )
         await async_db_session.flush()
 
-        result = await get_events(async_db_session, target_date, include_context=False)
+        result = await get_events(
+            async_db_session,
+            target_date,
+            include_context=False,
+            profile_id=async_test_profile.id,
+        )
         assert result.total_events == 1
         assert result.events[0].context is None
 
@@ -507,7 +552,7 @@ class TestGetEvents:
 
 class TestA6TimestampDeterminism:
     async def test_event_timestamps_identical_in_non_utc_host(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """A6: wall-clock timestamps must be identical regardless of host timezone.
 
@@ -522,7 +567,7 @@ class TestA6TimestampDeterminism:
 
         from snore.mcp.tools.events import get_events
 
-        device = await _make_device(async_db_session)
+        device = await _make_device(async_db_session, async_test_profile.id)
         target_date = date(2024, 8, 20)
         day, sess = await _make_day_session(async_db_session, device, target_date)
         session_start = sess.start_time
@@ -538,7 +583,9 @@ class TestA6TimestampDeterminism:
         await async_db_session.flush()
 
         # Capture result under current TZ
-        result = await get_events(async_db_session, target_date)
+        result = await get_events(
+            async_db_session, target_date, profile_id=async_test_profile.id
+        )
         ev = result.events[0]
         wall_clock_str = ev.start_time_wall_clock
 
@@ -565,7 +612,9 @@ class TestA6TimestampDeterminism:
             if hasattr(time, "tzset"):
                 time.tzset()
             # Re-run the same tool — output must be byte-identical
-            result2 = await get_events(async_db_session, target_date)
+            result2 = await get_events(
+                async_db_session, target_date, profile_id=async_test_profile.id
+            )
             assert result2.events[0].start_time_wall_clock == wall_clock_str
         finally:
             if original_tz is None:
@@ -583,13 +632,15 @@ class TestA6TimestampDeterminism:
 
 class TestCapabilitiesColdProcess:
     async def test_capabilities_returns_empty_lists_on_cold_db(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """M4: docs://capabilities on a fresh DB returns empty lists, not errors."""
         from snore.mcp.tools.overview import get_data_overview
 
         # Cold DB — no imports
-        result = await get_data_overview(async_db_session)
+        result = await get_data_overview(
+            async_db_session, profile_id=async_test_profile.id
+        )
 
         assert result.devices == []
         assert result.total_sessions == 0

@@ -54,6 +54,7 @@ class DeviceInfo(BaseModel):
     last_session_date: date | None = None
     session_count: int = 0
     therapy_modes: list[str] = []
+    device_capabilities: DeviceCapabilities | None = None
 
 
 class DataOverviewResponse(BaseModel):
@@ -133,6 +134,22 @@ class NightlyRow(BaseModel):
     # SpO₂ (%)
     spo2_mean_pct: float | None = None
 
+    # Breath-level FL/RERA fields (from BreathService.get_nightly_summary)
+    fl_median: float | None = None
+    fl_median_reason: str | None = None
+    fl_p95: float | None = None
+    fl_p95_reason: str | None = None
+    fl_max: float | None = None
+    fl_max_reason: str | None = None
+    rera_proxy_count: int | None = None
+    rera_proxy_reason: str | None = None
+
+    # Breath timing aggregates — not yet available from service; always null
+    ti_median_s: float | None = None
+    ti_median_reason: str | None = None
+    ie_ratio: float | None = None
+    ie_ratio_reason: str | None = None
+
     device_id: int | None = None
 
 
@@ -183,7 +200,7 @@ class EventRow(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: int
+    id: int | None = None  # internal DB id; not provided by BreathService seam
     event_type: str
     start_time_wall_clock: str  # offset-free ISO 8601 device wall-clock (tier 2)
     timezone_status: str = "unknown"  # always "unknown" for device wall-clock

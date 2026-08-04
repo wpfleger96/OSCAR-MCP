@@ -14,6 +14,7 @@ async def get_settings_timeline(
     db_session: AsyncSession,
     start: date,
     end: date,
+    profile_id: int = 0,
     device_id: int | None = None,
 ) -> SettingsTimelineResponse:
     """Return therapy settings epochs in [start, end].
@@ -22,7 +23,7 @@ async def get_settings_timeline(
     are flagged on the epoch where the change first appears.  Uses only the
     generic RX_KEYS; no vendor-specific branching (G4).
     """
-    tracker = RxTracker()
+    tracker = RxTracker(profile_id)
     all_periods = await tracker.get_history(db_session)
 
     # Filter to requested date range and optional device

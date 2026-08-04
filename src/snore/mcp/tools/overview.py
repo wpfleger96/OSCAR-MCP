@@ -2,31 +2,73 @@
 
 from __future__ import annotations
 
+from datetime import date
+from typing import Any
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
-from snore.mcp.schemas import DataOverviewResponse, DeviceInfo
+from snore.mcp.schemas import DataOverviewResponse, DeviceCapabilities, DeviceInfo
 from snore.services.device_service import DeviceService
 
 
-async def get_data_overview(db_session: AsyncSession) -> DataOverviewResponse:
+def _map_device_capabilities(
+    bs_caps: Any,
+    manufacturer: str,
+    model_name: str,
+    serial_number: str,
+    analysis_run: bool,
+) -> DeviceCapabilities:
+    """Map BreathService.DeviceCapabilities → MCP DeviceCapabilities."""
+    channels: set[str] = set(bs_caps.channels_present or [])
+    has_pressure = bool({"pressure", "therapy_pressure", "epap", "ipap"} & channels)
+    null_reason = bs_caps.null_reason
+    return DeviceCapabilities(
+        manufacturer=manufacturer,
+        model=model_name,
+        serial_number=serial_number,
+        has_flow_waveform="flow" in channels,
+        has_pressure_waveform=has_pressure,
+        has_leak_waveform="leak" in channels,
+        has_spo2="spo2" in channels,
+        has_events=bool(bs_caps.event_types_present),
+        has_analysis=analysis_run,
+        notes=[str(null_reason)] if null_reason is not None else [],
+    )
+
+
+async def get_data_overview(
+    db_session: AsyncSession, profile_id: int = 0
+) -> DataOverviewResponse:
     """Return a comprehensive overview of all imported data.
 
     Called by the get_data_overview MCP tool. Provides device inventory,
     date ranges, available waveform channels, event types, and analysis status
     — everything an LLM needs to orient itself to a cold database.
     """
-    device_svc = DeviceService(db_session)
+    from snore.services.breath_service import BreathService  # noqa: PLC0415
+
+    device_svc = DeviceService(db_session, profile_id)
     raw_devices = await device_svc.list_devices()
 
     if not raw_devices:
         return DataOverviewResponse(devices=[])
 
+    # Analysis status — count distinct sessions that have at least one AnalysisResult
+    analysis_session_count = (
+        await db_session.execute(
+            select(func.count(models.AnalysisResult.session_id.distinct()))
+        )
+    ).scalar_one()
+    analysis_run = analysis_session_count > 0
+
     device_infos: list[DeviceInfo] = []
     total_sessions = 0
-    global_min_date = None
-    global_max_date = None
+    global_min_date: date | None = None
+    global_max_date: date | None = None
+
+    bs = BreathService(db_session, profile_id) if profile_id else None
 
     for d in raw_devices:
         # Per-device session stats
@@ -71,6 +113,19 @@ async def get_data_overview(db_session: AsyncSession) -> DataOverviewResponse:
             .all()
         )
 
+        # Device capabilities from BreathService (G2 — capability-honest)
+        dev_caps: DeviceCapabilities | None = None
+        if bs is not None:
+            try:
+                bs_caps = await bs.get_device_capabilities(
+                    d.id, date_start=first_date, date_end=last_date
+                )
+                dev_caps = _map_device_capabilities(
+                    bs_caps, d.manufacturer, d.model, d.serial_number, analysis_run
+                )
+            except Exception:
+                pass  # capabilities are best-effort; don't fail the overview
+
         device_infos.append(
             DeviceInfo(
                 id=d.id,
@@ -81,6 +136,7 @@ async def get_data_overview(db_session: AsyncSession) -> DataOverviewResponse:
                 last_session_date=last_date,
                 session_count=count or 0,
                 therapy_modes=[m for m in mode_rows if m],
+                device_capabilities=dev_caps,
             )
         )
 
@@ -109,14 +165,6 @@ async def get_data_overview(db_session: AsyncSession) -> DataOverviewResponse:
         .scalars()
         .all()
     )
-
-    # Analysis status — count distinct sessions that have at least one AnalysisResult
-    analysis_session_count = (
-        await db_session.execute(
-            select(func.count(models.AnalysisResult.session_id.distinct()))
-        )
-    ).scalar_one()
-    analysis_run = analysis_session_count > 0
 
     return DataOverviewResponse(
         devices=device_infos,
