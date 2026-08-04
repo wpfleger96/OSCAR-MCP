@@ -21,6 +21,7 @@ from snore.api.deps import ActorDep
 from snore.api.guards import RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
+    JobPhase,
     JobType,
     cancel_job,
     create_job,
@@ -158,11 +159,35 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
 
     Ordering contract:
         1. Do the import work.
-        2. Publish terminal state (for SSE observers).
-        3. Clean parser spool + job temp.
-        4. Release capacity (slot owns the disk it admitted).
+        2. Call phase_complete(IMPORT) — non-terminal milestone for observers.
+        3. Run analysis phase (session IDs from import result).
+        4. Publish terminal state (always carries import_committed + import_result
+           when data was committed, even on analysis failure or cancellation).
+        5. Clean parser spool + job temp.
+        6. Release capacity (slot owns the disk it admitted).
     """
     import asyncio  # noqa: PLC0415
+
+    def _make_terminal(
+        event: str,
+        *,
+        message: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a terminal payload, injecting import_committed + import_result
+        when the import phase already committed."""
+        data: dict[str, Any] = {}
+        if message is not None:
+            data["message"] = message
+        if extra:
+            data.update(extra)
+        with job._lock:
+            committed = job._import_committed
+            import_result = job._import_result
+        if committed:
+            data["import_committed"] = True
+            data["import_result"] = import_result
+        return {"event": event, "data": data}
 
     try:
         service = ImportService()
@@ -206,17 +231,67 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         else:
             raise ValueError("Invalid job configuration")
 
+        # --- Phase 1 complete: import committed ---
+        import_result_dict = result.model_dump()
+        job.phase_complete(JobPhase.IMPORT, import_result_dict)
+
         if job.cancel_requested:
-            job._finish_cancelled()
+            job._finish(
+                succeeded=False,
+                terminal_msg=_make_terminal("error", message="Cancelled"),
+            )
             return
 
-        terminal_msg = {"event": "complete", "data": {"result": result.model_dump()}}
+        # --- Phase 2: analysis ---
+        imported_ids = result.imported_session_ids
+        if imported_ids:
+            job.report_progress(f"Analyzing {len(imported_ids)} imported session(s)...")
+            try:
+                from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
+                from snore.database.session import session_scope  # noqa: PLC0415
+                from snore.services.analysis_facade import (
+                    AnalysisFacade,  # noqa: PLC0415
+                )
+
+                async def _run_analysis() -> None:
+                    async with session_scope() as db:
+                        facade = AnalysisFacade(db, profile_id=target_profile_id)
+                        await facade.run_batch_analysis(
+                            session_ids=imported_ids,
+                            primary_mode=DEFAULT_MODE,
+                            progress_callback=lambda done, total: job.report_progress(
+                                f"Analyzed {done}/{total or '?'} sessions"
+                            ),
+                            # SQLite tolerates only one concurrent writer; keep sequential.
+                            max_workers=1,
+                        )
+
+                asyncio.run(_run_analysis())
+            except Exception as analysis_exc:
+                logger.warning(
+                    "Import job %s: analysis phase failed: %s",
+                    job.job_id,
+                    analysis_exc,
+                )
+                # Analysis failure does NOT roll back committed import data.
+                # Terminal payload includes import_committed so the client knows
+                # the data landed even though analysis failed.
+                job._finish(
+                    succeeded=False,
+                    terminal_msg=_make_terminal(
+                        "error",
+                        message=f"Analysis failed: {analysis_exc}",
+                    ),
+                )
+                return
+
+        terminal_msg = _make_terminal("complete", extra={"result": import_result_dict})
         job._finish(succeeded=True, terminal_msg=terminal_msg)
     except Exception as e:
         logger.exception("Import job %s failed", job.job_id)
         job._finish(
             succeeded=False,
-            terminal_msg={"event": "error", "data": {"message": str(e)}},
+            terminal_msg=_make_terminal("error", message=str(e)),
         )
     finally:
         # Ordering: publish terminal (done above), then clean, then release capacity.

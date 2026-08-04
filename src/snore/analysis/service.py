@@ -28,7 +28,7 @@ import logging
 import time
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -48,7 +48,19 @@ from snore.analysis.shared.feature_extractors import WaveformFeatureExtractor
 from snore.analysis.shared.flow_limitation import FlowLimitationClassifier
 from snore.analysis.shared.pattern_detector import ComplexPatternDetector
 from snore.analysis.shared.pulse_detector import PulseChangeDetector
-from snore.analysis.types import AnalysisEvent, AnalysisResult
+from snore.analysis.shared.versioning import (
+    LEAK_VALID_MAX_ALIGNMENT_GAP_S,
+    LEAK_VALID_THRESHOLD_LPM,
+    AlgorithmIdentity,
+    AlgoVersions,
+    AnalysisRunMetadata,
+)
+from snore.analysis.types import (
+    AnalysisComputation,
+    AnalysisEvent,
+    AnalysisResult,
+    ComputedBreath,
+)
 from snore.constants import BreathSegmentationConstants as BSC
 from snore.constants import FlowLimitationConstants as FLC
 from snore.constants import PatternDetectionConstants as PDC
@@ -57,7 +69,13 @@ from snore.database import models
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AnalysisInputs", "RawSessionBlobs", "AnalysisService", "AnalysisResult"]
+__all__ = [
+    "AnalysisInputs",
+    "AnalysisComputation",
+    "RawSessionBlobs",
+    "AnalysisService",
+    "AnalysisResult",
+]
 
 
 @dataclass
@@ -81,7 +99,16 @@ class RawSessionBlobs:
     pulse_blob: bytes | None = None
     pulse_sample_count: int = 0
     pulse_metadata: dict[str, Any] = field(default_factory=dict)
+    # Quality-flag inputs (plan step 3): leak channel for leak_valid derivation.
+    leak_blob: bytes | None = None
+    leak_sample_count: int = 0
+    leak_metadata: dict[str, Any] = field(default_factory=dict)
     modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
+    # Primary mode for RERA/recovery-marker storage (plan step 4).
+    primary_mode: str = DEFAULT_MODE
+    # Device manufacturer string from the Device row — used to gate
+    # vendor-specific heuristics (e.g. trigger/cycle inference).
+    device_manufacturer: str = "ResMed"
 
 
 @dataclass
@@ -101,7 +128,38 @@ class AnalysisInputs:
     spo2_values: np.ndarray | None = None
     pulse_timestamps: np.ndarray | None = None
     pulse_values: np.ndarray | None = None
+    # Quality-flag inputs: leak waveform (timestamps, values) for leak_valid derivation.
+    leak_timestamps: np.ndarray | None = None
+    leak_values: np.ndarray | None = None
     modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
+    # Primary mode for RERA/recovery-marker storage (plan step 4).
+    primary_mode: str = DEFAULT_MODE
+    # Device manufacturer string — gates vendor-specific heuristics.
+    device_manufacturer: str = "ResMed"
+
+
+def _resolve_primary_mode(modes: list[str], primary_mode: str | None) -> str:
+    """Resolve and validate primary_mode against modes list.
+
+    Rules (plan step 4):
+    - If primary_mode is supplied, it MUST be in modes → ValueError if not.
+    - If not supplied and DEFAULT_MODE is in modes → DEFAULT_MODE.
+    - If not supplied and DEFAULT_MODE is NOT in modes → ValueError (caller must
+      supply primary_mode explicitly for non-default mode sets).
+    """
+    if primary_mode is not None:
+        if primary_mode not in modes:
+            raise ValueError(
+                f"primary_mode {primary_mode!r} must be a member of modes {modes}"
+            )
+        return primary_mode
+    # No primary_mode supplied: default only when DEFAULT_MODE is present.
+    if DEFAULT_MODE in modes:
+        return DEFAULT_MODE
+    raise ValueError(
+        f"primary_mode must be supplied explicitly when modes {modes!r} "
+        f"exclude the DEFAULT_MODE {DEFAULT_MODE!r}"
+    )
 
 
 class AnalysisService:
@@ -246,6 +304,7 @@ class AnalysisService:
         self,
         session_id: int,
         modes: list[str] | None = None,
+        primary_mode: str | None = None,
     ) -> RawSessionBlobs:
         """Fetch all DB inputs for a session as raw bytes — **I/O phase only**.
 
@@ -256,17 +315,22 @@ class AnalysisService:
         Args:
             session_id: Database session ID.
             modes: Detection modes (``None`` = default mode).
+            primary_mode: Mode whose recovery markers are persisted (must be in
+                ``modes``; defaults to ``DEFAULT_MODE`` when it is present in
+                ``modes``).
 
         Returns:
             ``RawSessionBlobs`` DTO with raw bytes and scalar metadata.
 
         Raises:
-            ValueError: If session not found or has no flow waveform data.
+            ValueError: If session not found or has no flow waveform data, or
+                if ``primary_mode`` is not a member of ``modes``.
         """
         assert self.db_session is not None, (
             "load_session_inputs_raw requires a DB session"
         )
         modes_list = list(modes) if modes is not None else [DEFAULT_MODE]
+        resolved_primary = _resolve_primary_mode(modes_list, primary_mode)
 
         # Scope the session lookup to this profile so foreign IDs raise ValueError
         # rather than loading another profile's data.
@@ -278,6 +342,18 @@ class AnalysisService:
         session = (await self.db_session.execute(stmt)).scalars().first()
         if not session:
             raise ValueError(f"Session {session_id} not found")
+
+        # Fetch device manufacturer for vendor-applicability gating.
+        device_row = (
+            (
+                await self.db_session.execute(
+                    select(models.Device).where(models.Device.id == session.device_id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        device_manufacturer: str = device_row.manufacturer if device_row else "unknown"
 
         try:
             flow_blob, flow_sample_count, flow_metadata = await fetch_waveform_blob(
@@ -314,6 +390,17 @@ class AnalysisService:
         except Exception as e:
             logger.debug(f"Pulse waveform not available: {e}")
 
+        # Leak channel for quality-flag derivation (plan step 3).
+        leak_blob: bytes | None = None
+        leak_sample_count = 0
+        leak_metadata: dict[str, Any] = {}
+        try:
+            leak_blob, leak_sample_count, leak_metadata = await fetch_waveform_blob(
+                self.db_session, session_id, "leak"
+            )
+        except Exception as e:
+            logger.debug(f"Leak waveform not available: {e}")
+
         return RawSessionBlobs(
             session_id=session_id,
             flow_blob=flow_blob,
@@ -326,7 +413,12 @@ class AnalysisService:
             pulse_blob=pulse_blob,
             pulse_sample_count=pulse_sample_count,
             pulse_metadata=pulse_metadata,
+            leak_blob=leak_blob,
+            leak_sample_count=leak_sample_count,
+            leak_metadata=leak_metadata,
             modes=modes_list,
+            primary_mode=resolved_primary,
+            device_manufacturer=device_manufacturer,
         )
 
     @staticmethod
@@ -380,6 +472,17 @@ class AnalysisService:
             except Exception as e:
                 logger.debug(f"Failed to deserialise pulse blob: {e}")
 
+        # Leak waveform for quality-flag derivation.
+        leak_timestamps: np.ndarray | None = None
+        leak_values: np.ndarray | None = None
+        if raw.leak_blob is not None and raw.leak_sample_count > 0:
+            try:
+                lt, lv = deserialize_waveform_blob(raw.leak_blob, raw.leak_sample_count)
+                leak_timestamps = lt.copy()
+                leak_values = lv.copy()
+            except Exception as e:
+                logger.debug(f"Failed to deserialise leak blob: {e}")
+
         return AnalysisInputs(
             session_id=raw.session_id,
             flow_timestamps=flow_timestamps.copy(),
@@ -389,20 +492,33 @@ class AnalysisService:
             spo2_values=spo2_values,
             pulse_timestamps=pulse_timestamps,
             pulse_values=pulse_values,
+            leak_timestamps=leak_timestamps,
+            leak_values=leak_values,
             modes=raw.modes,
+            primary_mode=raw.primary_mode,
+            device_manufacturer=raw.device_manufacturer,
         )
 
-    def compute_analysis(self, inputs: AnalysisInputs) -> AnalysisResult:
+    def compute_analysis(self, inputs: AnalysisInputs) -> AnalysisComputation:
         """Run pure analysis compute on a detached ``AnalysisInputs`` DTO.
 
         **No database access** — all inputs come from the DTO.  Safe to call
         after the ORM session has been closed.
 
+        Returns an ``AnalysisComputation`` private envelope containing:
+        - ``summary``: the public ``AnalysisResult`` (stored in
+          ``programmatic_result_json``) — unchanged shape, no breath rows.
+        - ``breaths``: per-breath ``ComputedBreath`` list (persisted as
+          ``models.Breath`` children of the ``AnalysisResult`` row).
+
+        Breaths NEVER enter ``summary``; ``programmatic_result_json`` stays
+        exactly the same size as before.
+
         Args:
             inputs: Detached DTO from ``load_session_inputs()``.
 
         Returns:
-            ``AnalysisResult`` (Pydantic model).
+            ``AnalysisComputation`` envelope.
 
         Raises:
             ValueError: If no breaths can be segmented.
@@ -411,6 +527,7 @@ class AnalysisService:
         flow_values = inputs.flow_values
         sample_rate = inputs.sample_rate
         session_id = inputs.session_id
+        primary_mode = inputs.primary_mode
 
         session_duration_hours = len(timestamps) / sample_rate / 3600
         logger.info(
@@ -446,6 +563,11 @@ class AnalysisService:
 
         flow_analysis = self.flow_classifier.analyze_session(breath_features)
         logger.info(f"Flow limitation index: {flow_analysis.flow_limitation_index:.3f}")
+
+        # Map breath_number → FlowPattern for per-breath ComputedBreath assembly.
+        flow_pattern_by_number: dict[int, Any] = {
+            p.breath_number: p for p in flow_analysis.patterns
+        }
 
         tidal_volumes = np.array([b.tidal_volume for b in breaths])
         breath_timestamps = np.array([b.start_time for b in breaths])
@@ -513,7 +635,7 @@ class AnalysisService:
                 logger.error(f"Failed to run mode '{mode_name}': {e}")
                 continue
 
-        return AnalysisResult(
+        summary = AnalysisResult(
             session_id=session_id,
             session_duration_hours=session_duration_hours,
             total_breaths=len(breaths),
@@ -530,6 +652,27 @@ class AnalysisService:
             pulse_change_index=pulse_change_index,
             timestamp_start=float(timestamps[0]) if len(timestamps) > 0 else 0.0,
             timestamp_end=float(timestamps[-1]) if len(timestamps) > 0 else 0.0,
+        )
+
+        # Build per-breath ComputedBreath objects (plan step 5).
+        # Recovery breaths are sourced from the primary mode's RERA detector only.
+        recovery_breath_indices = _collect_recovery_breath_indices(
+            breaths, mode_results.get(primary_mode)
+        )
+
+        computed_breaths = _build_computed_breaths(
+            breaths=breaths,
+            timestamps=timestamps,
+            flow_values=flow_values,
+            flow_pattern_by_number=flow_pattern_by_number,
+            recovery_breath_indices=recovery_breath_indices,
+            leak_timestamps=inputs.leak_timestamps,
+            leak_values=inputs.leak_values,
+            device_manufacturer=inputs.device_manufacturer,
+        )
+
+        return AnalysisComputation(
+            summary=summary, breaths=computed_breaths, primary_mode=primary_mode
         )
 
     async def analyze_session(
@@ -569,15 +712,15 @@ class AnalysisService:
         raw = await self.load_session_inputs_raw(session_id, modes=modes_list)
         # Compute phase: deserialization + NumPy work — no session needed.
         inputs = AnalysisService.prepare_inputs(raw)
-        result = self.compute_analysis(inputs)
+        computation = self.compute_analysis(inputs)
 
         processing_time_ms = int((time.time() - start_time) * 1000)
         logger.info(f"Analysis complete in {processing_time_ms}ms")
 
         if store_results:
-            await self.store_result(result, processing_time_ms)
+            await self.store_result(computation, processing_time_ms)
 
-        return result
+        return computation.summary
 
     async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """
@@ -613,7 +756,10 @@ class AnalysisService:
                 await self.db_session.execute(
                     select(models.AnalysisResult)
                     .filter_by(session_id=session_id)
-                    .order_by(models.AnalysisResult.created_at.desc())
+                    .order_by(
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    )
                 )
             )
             .scalars()
@@ -626,10 +772,9 @@ class AnalysisService:
         return AnalysisResult.model_validate(analysis.programmatic_result_json)
 
     async def store_result(
-        self, result: AnalysisResult, processing_time_ms: int
+        self, computation: AnalysisComputation, processing_time_ms: int
     ) -> int:
-        """
-        Store analysis result to database.
+        """Store analysis result + breath children to database atomically.
 
         Public write seam — callers (including ``BatchAnalysisCoordinator``) use
         this method so the write phase is not tied to a private implementation detail.
@@ -638,19 +783,29 @@ class AnalysisService:
         session does not belong to ``self.profile_id``, preventing cross-profile
         writes.
 
+        Persistence contract (plan step 2):
+        - ``AnalysisResult`` parent row is added and flushed to assign its PK.
+        - ``Breath`` children are added with the flushed parent ID in one transaction.
+        - ``programmatic_result_json`` contains only the public ``AnalysisResult``
+          summary — breaths are NEVER stored there (plan step 5, no duplication).
+        - ``engine_versions_json`` uses the nested
+          ``{"identity": ..., "run": ...}`` shape (plan step 4, §14 note 5).
+
         Args:
-            result: Analysis result to store
-            processing_time_ms: Processing time in milliseconds
+            computation: AnalysisComputation envelope (summary + breaths).
+            processing_time_ms: Processing time in milliseconds.
 
         Returns:
-            Database analysis result ID
+            Database analysis result ID.
 
         Raises:
-            NotFoundError: If ``result.session_id`` does not belong to this profile.
+            NotFoundError: If the session does not belong to this profile.
         """
         from snore.exceptions import NotFoundError as _NotFoundError  # noqa: PLC0415
 
         assert self.db_session is not None, "store_result requires a DB session"
+
+        result = computation.summary
 
         # Verify the target session is owned by this profile before writing.
         owned = (
@@ -668,19 +823,290 @@ class AnalysisService:
                 f"Session {result.session_id} not found or not owned by profile {self.profile_id}"
             )
 
+        # Build the nested engine_versions_json (plan step 4 / §14 note 5).
+        mode_keys = list(result.mode_results.keys())
+        identity = AlgorithmIdentity.current()
+        run_metadata = AnalysisRunMetadata(
+            primary_mode=computation.primary_mode,
+            modes=mode_keys,
+        )
+        algo_versions = AlgoVersions(identity=identity, run=run_metadata)
+
         analysis = models.AnalysisResult(
             session_id=result.session_id,
-            timestamp_start=datetime.fromtimestamp(result.timestamp_start),
-            timestamp_end=datetime.fromtimestamp(result.timestamp_end),
+            timestamp_start=datetime.fromtimestamp(
+                result.timestamp_start, tz=UTC
+            ).replace(tzinfo=None),
+            timestamp_end=datetime.fromtimestamp(result.timestamp_end, tz=UTC).replace(
+                tzinfo=None
+            ),
             programmatic_result_json=result.model_dump(),
             processing_time_ms=processing_time_ms,
-            engine_versions_json={
-                "format_version": 2,
-                "modes": list(result.mode_results.keys()),
-            },
+            engine_versions_json=algo_versions.model_dump(),
         )
 
         self.db_session.add(analysis)
+        # Flush to assign analysis.id so Breath children can reference it.
+        await self.db_session.flush()
 
-        logger.info(f"Stored analysis result with ID {analysis.id}")
+        # Persist breath children atomically in the same transaction (plan step 2).
+        if computation.breaths:
+            breath_rows = [
+                models.Breath(
+                    analysis_result_id=analysis.id,
+                    session_id=result.session_id,
+                    breath_number=cb.breath_number,
+                    start_offset_s=cb.start_offset_s,
+                    end_offset_s=cb.end_offset_s,
+                    inspiration_time_s=cb.inspiration_time_s,
+                    expiration_time_s=cb.expiration_time_s,
+                    total_time_s=cb.total_time_s,
+                    i_e_ratio=cb.i_e_ratio,
+                    duty_cycle=cb.duty_cycle,
+                    peak_flow_lpm=cb.peak_flow_lpm,
+                    peak_exp_flow_lpm=cb.peak_exp_flow_lpm,
+                    tidal_volume_ml=cb.tidal_volume_ml,
+                    respiratory_rate_rolling=cb.respiratory_rate_rolling,
+                    flatness_index=cb.flatness_index,
+                    mid_insp_flattening=cb.mid_insp_flattening,
+                    flow_class=cb.flow_class,
+                    flow_confidence=cb.flow_confidence,
+                    is_recovery_breath=cb.is_recovery_breath,
+                    inferred_trigger_type=cb.inferred_trigger_type,
+                    trigger_confidence=cb.trigger_confidence,
+                    inferred_cycle_type=cb.inferred_cycle_type,
+                    cycle_confidence=cb.cycle_confidence,
+                    trigger_cycle_applicable=cb.trigger_cycle_applicable,
+                    trigger_cycle_reason=cb.trigger_cycle_reason,
+                    leak_valid=cb.leak_valid,
+                    leak_valid_reason=cb.leak_valid_reason,
+                    ramp_active=cb.ramp_active,
+                    ramp_active_reason=cb.ramp_active_reason,
+                    mask_off=cb.mask_off,
+                    mask_off_reason=cb.mask_off_reason,
+                )
+                for cb in computation.breaths
+            ]
+            try:
+                self.db_session.add_all(breath_rows)
+                await self.db_session.flush()
+            except Exception as exc:
+                exc_msg = str(exc).lower()
+                if "no such table" in exc_msg and "breath" in exc_msg:
+                    raise RuntimeError(
+                        "The 'breaths' table is missing from the database. "
+                        "This happens when connecting to a database created before "
+                        "breath-feature support was added. Drop the database and "
+                        "re-import to populate it with the current schema."
+                    ) from exc
+                raise
+
+        logger.info(
+            f"Stored analysis result {analysis.id} with {len(computation.breaths)} breath rows"
+        )
         return analysis.id
+
+
+# ---------------------------------------------------------------------------
+# Module-level compute helpers (private to this module)
+# ---------------------------------------------------------------------------
+
+
+def _collect_recovery_breath_indices(
+    breaths: list[Any],
+    primary_mode_result: Any | None,
+) -> set[int]:
+    """Return breath_numbers that are recovery breaths in the primary mode's RERAs.
+
+    A recovery breath ends a RERA — it is the last breath in the sequence,
+    identified by end_time proximity to the RERA's end_time.
+    """
+    if primary_mode_result is None:
+        return set()
+    recovery_numbers: set[int] = set()
+    for rera in getattr(primary_mode_result, "reras", []):
+        for b in breaths:
+            if abs(b.end_time - rera.end_time) < 0.5:
+                recovery_numbers.add(b.breath_number)
+    return recovery_numbers
+
+
+def _build_computed_breaths(
+    *,
+    breaths: list[Any],
+    timestamps: Any,
+    flow_values: Any,
+    flow_pattern_by_number: dict[int, Any],
+    recovery_breath_indices: set[int],
+    leak_timestamps: Any | None,
+    leak_values: Any | None,
+    device_manufacturer: str = "ResMed",
+) -> list[ComputedBreath]:
+    """Build the list of ComputedBreath for one session's analysis.
+
+    Args:
+        breaths: List of BreathMetrics from the segmenter.
+        timestamps: Flow timestamps array (unused here; kept for signature symmetry).
+        flow_values: Full session flow array — used to extract per-breath insp flow.
+        flow_pattern_by_number: Maps breath_number → FlowPattern (from classifier).
+        recovery_breath_indices: Set of breath_numbers identified as recovery breaths.
+        leak_timestamps: Leak waveform timestamps (may be None).
+        leak_values: Leak waveform values (may be None).
+        device_manufacturer: Manufacturer string from the Device row.  Trigger/cycle
+            inference is only validated on ResMed devices; other vendors receive
+            ``vendor_applicability="unvalidated_device"``.
+
+    Returns:
+        list of ComputedBreath (same length as breaths).
+    """
+    from snore.analysis.shared.feature_extractors import (  # noqa: PLC0415
+        WaveformFeatureExtractor,
+        compute_mid_insp_flattening,
+    )
+    from snore.analysis.shared.trigger_cycle import (  # noqa: PLC0415
+        APPLICABILITY_UNVALIDATED_DEVICE,
+        APPLICABILITY_VALIDATED,
+        infer_trigger_cycle,
+    )
+
+    extractor = WaveformFeatureExtractor()
+    sample_rate: float = (
+        25.0  # default; the exact rate doesn't affect per-breath slicing
+    )
+    # Gate vendor-specific heuristic: trigger/cycle inference is tuned on ResMed
+    # flow waveforms only.  Other vendors get confidence=null + unvalidated_device.
+    tc_vendor_applicability = (
+        APPLICABILITY_VALIDATED
+        if device_manufacturer == "ResMed"
+        else APPLICABILITY_UNVALIDATED_DEVICE
+    )
+
+    computed: list[ComputedBreath] = []
+    for idx, breath in enumerate(breaths):
+        # Slice the inspiratory flow for shape features.
+        b_start = np.searchsorted(timestamps, breath.start_time)
+        b_end = np.searchsorted(timestamps, breath.end_time)
+        breath_flow = flow_values[b_start:b_end]
+        insp_flow: np.ndarray = breath_flow[breath_flow > 0]
+
+        flatness_idx: float | None = None
+        mid_insp: float | None = None
+        if len(insp_flow) > 10:
+            shape = extractor.extract_shape_features(insp_flow, sample_rate)
+            flatness_idx = shape.flatness_index
+            mid_insp = compute_mid_insp_flattening(insp_flow)
+
+        fl = flow_pattern_by_number.get(breath.breath_number)
+        flow_cls = fl.flow_class if fl is not None else None
+        flow_conf = fl.confidence if fl is not None else None
+
+        gap_before: float | None = None
+        if idx > 0:
+            gap_before = breath.start_time - breaths[idx - 1].end_time
+
+        insp_arr = insp_flow if len(insp_flow) > 0 else None
+        tc = infer_trigger_cycle(
+            inspiration_time_s=breath.inspiration_time,
+            gap_before_s=gap_before,
+            insp_flow_array=insp_arr,
+            vendor_applicability=tc_vendor_applicability,
+        )
+
+        leak_valid, leak_valid_reason = _compute_leak_valid(
+            breath_start=breath.start_time,
+            breath_end=breath.end_time,
+            leak_timestamps=leak_timestamps,
+            leak_values=leak_values,
+        )
+
+        duty_cycle: float | None = None
+        if (
+            breath.duration is not None
+            and breath.duration > 0
+            and breath.inspiration_time is not None
+        ):
+            duty_cycle = float(breath.inspiration_time / breath.duration)
+
+        computed.append(
+            ComputedBreath(
+                breath_number=breath.breath_number,
+                start_offset_s=float(breath.start_time),
+                end_offset_s=float(breath.end_time),
+                inspiration_time_s=(
+                    float(breath.inspiration_time)
+                    if breath.inspiration_time is not None
+                    else None
+                ),
+                expiration_time_s=(
+                    float(breath.expiration_time)
+                    if breath.expiration_time is not None
+                    else None
+                ),
+                total_time_s=float(breath.duration),
+                i_e_ratio=float(breath.i_e_ratio),
+                duty_cycle=duty_cycle,
+                peak_flow_lpm=float(breath.peak_inspiratory_flow),
+                peak_exp_flow_lpm=float(breath.peak_expiratory_flow),
+                tidal_volume_ml=float(breath.tidal_volume),
+                respiratory_rate_rolling=float(breath.respiratory_rate_rolling),
+                flatness_index=flatness_idx,
+                mid_insp_flattening=mid_insp,
+                flow_class=flow_cls,
+                flow_confidence=flow_conf,
+                is_recovery_breath=(breath.breath_number in recovery_breath_indices),
+                inferred_trigger_type=tc.inferred_trigger_type,
+                trigger_confidence=tc.trigger_confidence,
+                inferred_cycle_type=tc.inferred_cycle_type,
+                cycle_confidence=tc.cycle_confidence,
+                trigger_cycle_applicable=tc.trigger_cycle_applicable,
+                trigger_cycle_reason=tc.trigger_cycle_reason,
+                leak_valid=leak_valid,
+                leak_valid_reason=leak_valid_reason,
+                ramp_active=None,
+                ramp_active_reason="not_available",
+                mask_off=None,
+                mask_off_reason="not_available",
+            )
+        )
+    return computed
+
+
+def _compute_leak_valid(
+    *,
+    breath_start: float,
+    breath_end: float,
+    leak_timestamps: Any | None,
+    leak_values: Any | None,
+) -> tuple[bool | None, str | None]:
+    """Derive the ``leak_valid`` quality flag for one breath.
+
+    Logic (plan step 3, v1 spec):
+    - No leak channel present  →  (None, "channel_absent")
+    - Overlapping samples found →  mean of overlapping samples < threshold
+    - No overlap, nearest neighbour ≤ 5 s away  →  that sample's value < threshold
+    - No overlap, nearest neighbour > 5 s away  →  (None, "channel_unaligned")
+
+    Returns:
+        (leak_valid: bool | None, reason: str | None)
+    """
+
+    if leak_timestamps is None or leak_values is None or len(leak_timestamps) == 0:
+        return None, "channel_absent"
+
+    # Find overlapping samples: leak_timestamps within [breath_start, breath_end).
+    mask = (leak_timestamps >= breath_start) & (leak_timestamps < breath_end)
+    if mask.any():
+        mean_leak = float(np.mean(leak_values[mask]))
+        return mean_leak < LEAK_VALID_THRESHOLD_LPM, None
+
+    # No overlap — nearest neighbour.
+    breath_mid = (breath_start + breath_end) / 2.0
+    dists = np.abs(leak_timestamps - breath_mid)
+    nearest_idx = int(np.argmin(dists))
+    nearest_dist = float(dists[nearest_idx])
+
+    if nearest_dist <= LEAK_VALID_MAX_ALIGNMENT_GAP_S:
+        leak_sample = float(leak_values[nearest_idx])
+        return leak_sample < LEAK_VALID_THRESHOLD_LPM, None
+
+    return None, "channel_unaligned"

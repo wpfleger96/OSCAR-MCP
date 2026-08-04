@@ -101,7 +101,11 @@ def import_fixture(
     Defaults to ``--all`` (no source prompt) and ``--no-backup`` (no writes to
     ``~/.snore/raw``) unless the caller overrides those via ``extra_args``.
     """
-    args = ["import", str(source)]
+    args = [
+        "import",
+        str(source),
+        "--no-analyze",  # base fixtures skip import-time analysis; explicit tests opt in
+    ]
     if "--no-backup" not in extra_args:
         args.append("--no-backup")
     if "--all" not in extra_args:

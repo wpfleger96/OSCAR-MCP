@@ -545,6 +545,10 @@ class ImportSourceResult(BaseModel):
     skipped: int = Field(default=0, description="Sessions skipped (already exist)")
     failed: int = Field(default=0, description="Sessions that failed to import")
     warnings: list[str] = Field(default_factory=list, description="Non-fatal warnings")
+    imported_session_ids: list[int] = Field(
+        default_factory=list,
+        description="DB Session.id values for sessions that were successfully imported",
+    )
 
 
 class ImportResult(BaseModel):
@@ -557,6 +561,10 @@ class ImportResult(BaseModel):
         default_factory=list, description="Per-source results"
     )
     warnings: list[str] = Field(default_factory=list, description="Global warnings")
+    imported_session_ids: list[int] = Field(
+        default_factory=list,
+        description="All successfully imported Session.id values across all sources",
+    )
 
 
 class BatchSessionResult(BaseModel):

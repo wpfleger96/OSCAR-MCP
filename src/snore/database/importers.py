@@ -128,9 +128,9 @@ class SessionImporter:
         db: AsyncSession,
         session_data: UnifiedSession,
         force: bool = False,
-    ) -> tuple[bool, int | None]:
+    ) -> tuple[bool, int | None, int | None]:
         """
-        Import a single session. Returns (imported, day_id).
+        Import a single session. Returns (imported, day_id, session_id).
 
         This method NEVER aggregates - aggregation is handled by the caller.
         It does NOT open its own savepoint; callers that want per-session
@@ -142,7 +142,9 @@ class SessionImporter:
             force: If True, re-import existing sessions
 
         Returns:
-            Tuple of (was_imported, day_id)
+            Tuple of (was_imported, day_id, session_id).  session_id is the
+            PK of the newly inserted (or replaced-on-force) Session row;
+            None when was_imported is False.
         """
         profile_id = self.profile_id
         stmt = select(models.Device).where(
@@ -181,7 +183,7 @@ class SessionImporter:
             logger.debug(
                 f"Session {session_data.device_session_id} already exists, skipping"
             )
-            return False, None
+            return False, None, None
 
         if existing and force:
             logger.debug(f"Force re-importing session {session_data.device_session_id}")
@@ -233,7 +235,7 @@ class SessionImporter:
         logger.debug(
             f"Imported session {session_data.device_session_id} from {session_data.start_time}"
         )
-        return True, day_id
+        return True, day_id, new_session.id
 
     async def import_session(
         self,
@@ -257,7 +259,7 @@ class SessionImporter:
         Returns:
             True if imported, False if skipped (already exists)
         """
-        imported, _skipped, _failed = await self.import_sessions_batch(
+        imported, _skipped, _failed, _ids = await self.import_sessions_batch(
             [session_data],
             force=force,
             batch_size=1,
@@ -274,7 +276,7 @@ class SessionImporter:
         cancel_predicate: Callable[[], bool] | None = None,
         *,
         db: AsyncSession,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, list[int]]:
         """
         Import multiple sessions in batched transactions with per-session savepoints.
 
@@ -308,11 +310,13 @@ class SessionImporter:
                 commit/rollback of the outer transaction.
 
         Returns:
-            Tuple of (imported_count, skipped_count, failed_count)
+            Tuple of (imported_count, skipped_count, failed_count, imported_session_ids).
+            imported_session_ids are DB Session.id values for each successfully imported row.
         """
         imported = 0
         skipped = 0
         failed = 0
+        all_imported_ids: list[int] = []
 
         session_iter = iter(sessions)
 
@@ -335,6 +339,7 @@ class SessionImporter:
                 skipped,
                 failed,
                 batch_day_ids,
+                batch_ids,
             ) = await self._import_batch_with_session(
                 db,
                 batch,
@@ -344,14 +349,16 @@ class SessionImporter:
                 failed,
                 batch_day_ids,
                 progress_callback,
+                all_imported_ids,
             )
+            all_imported_ids = batch_ids  # batch mutates the list in-place; keep ref
             if batch_day_ids:
                 for day_id in batch_day_ids:
                     day_record = await db.get(models.Day, day_id)
                     if day_record:
                         await DayManager._aggregate_day_statistics(day_record, db)
 
-        return imported, skipped, failed
+        return imported, skipped, failed, all_imported_ids
 
     async def _import_batch_with_session(
         self,
@@ -363,21 +370,30 @@ class SessionImporter:
         failed: int,
         batch_day_ids: set[int],
         progress_callback: Callable[[str], None] | None,
-    ) -> tuple[int, int, int, set[int]]:
+        batch_session_ids: list[int] | None = None,
+    ) -> tuple[int, int, int, set[int], list[int]]:
         """Import one batch of sessions within a caller-provided session.
 
-        Returns updated (imported, skipped, failed, batch_day_ids).
+        Returns updated (imported, skipped, failed, batch_day_ids, imported_ids).
+        imported_ids are the DB Session.id values for successfully imported sessions.
         """
+        if batch_session_ids is None:
+            batch_session_ids = []
+
         for session_data in batch:
             try:
                 async with db.begin_nested():
-                    was_imported, day_id = await self._import_single_session(
-                        db, session_data, force
-                    )
+                    (
+                        was_imported,
+                        day_id,
+                        new_session_id,
+                    ) = await self._import_single_session(db, session_data, force)
                 if was_imported:
                     imported += 1
                     if day_id:
                         batch_day_ids.add(day_id)
+                    if new_session_id is not None:
+                        batch_session_ids.append(new_session_id)
                 else:
                     skipped += 1
             except Exception as e:
@@ -395,7 +411,7 @@ class SessionImporter:
                 sessions_done = imported + skipped + failed
                 progress_callback(f"Importing session {sessions_done}...")
 
-        return imported, skipped, failed, batch_day_ids
+        return imported, skipped, failed, batch_day_ids, batch_session_ids
 
     async def _import_waveforms(
         self, db: AsyncSession, session_id: int, session_data: UnifiedSession

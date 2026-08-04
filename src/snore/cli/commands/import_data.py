@@ -110,6 +110,11 @@ async def _resolve_and_import(
     is_flag=True,
     help="Skip raw file backup (not recommended — SD card will be needed again)",
 )
+@click.option(
+    "--no-analyze",
+    is_flag=True,
+    help="Skip post-import analysis phase (breaths will not be computed)",
+)
 def import_data(
     path: str,
     force: bool,
@@ -125,6 +130,7 @@ def import_data(
     batch_size: int,
     select_all: bool,
     no_backup: bool,
+    no_analyze: bool,
 ) -> None:
     """Import CPAP data from device SD card or directory."""
     data_path = Path(path)
@@ -189,6 +195,7 @@ def import_data(
     total_imported = 0
     total_skipped = 0
     total_failed = 0
+    all_imported_session_ids: list[int] = []
 
     parser_map = {p.parser_id: p for p in parser_registry.list_parsers()}
 
@@ -383,6 +390,7 @@ def import_data(
         total_imported += imported
         total_skipped += skipped
         total_failed += failed
+        all_imported_session_ids.extend(result.imported_session_ids)
 
         if len(selected_sources) > 1:
             print_header(f"Summary for {source_desc}", ICON_STATS)
@@ -413,3 +421,70 @@ def import_data(
 
     if total_failed > 0:
         raise click.ClickException(f"{total_failed} session(s) failed to import")
+
+    # Analysis phase — post-commit, separate from import transaction.
+    # Import data is fully committed before this phase begins (plan §A1).
+    if not no_analyze and all_imported_session_ids:
+        from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
+        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
+
+        print_header("Analysis Phase", ICON_SCAN)
+        print_info(
+            f"Analyzing {len(all_imported_session_ids)} session(s) for breath features...",
+            indent=1,
+        )
+
+        async def _run_analysis_phase() -> None:
+            async with session_scope() as db:
+                profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
+
+            async with session_scope() as db:
+                facade = AnalysisFacade(db, profile_id=profile_id)
+
+                import time as _time  # noqa: PLC0415
+
+                _phase_start = _time.monotonic()
+                _prev_elapsed: list[float] = [0.0]
+
+                def _on_progress(completed: int, total: int | None) -> None:
+                    now = _time.monotonic()
+                    elapsed = now - _phase_start
+                    session_elapsed = elapsed - _prev_elapsed[0]
+                    _prev_elapsed[0] = elapsed
+                    print_info(
+                        f"Analyzed {completed}/{total or '?'} sessions "
+                        f"(session: {session_elapsed:.1f}s, total: {elapsed:.1f}s)",
+                        indent=1,
+                    )
+
+                batch_result = await facade.run_batch_analysis(
+                    session_ids=all_imported_session_ids,
+                    primary_mode=DEFAULT_MODE,
+                    progress_callback=_on_progress,
+                    # SQLite tolerates only one concurrent writer; keep sequential.
+                    max_workers=1,
+                )
+
+            ok = batch_result.successful
+            failed_analysis = batch_result.failed
+            cancelled_analysis = batch_result.cancelled
+
+            print_success(f"Analyzed:  {ok} sessions")
+            if failed_analysis:
+                print_error(f"Failed:    {failed_analysis} sessions")
+            if cancelled_analysis:
+                print_warning(f"Cancelled: {cancelled_analysis} sessions")
+
+        try:
+            asyncio.run(_run_analysis_phase())
+        except Exception as e:
+            # Analysis failure must not hide a successful import.
+            print_warning(f"Analysis phase failed: {e}")
+            print_info(
+                "Import data was committed. Re-run 'snore analysis run' to retry analysis.",
+                indent=1,
+            )
+
+        print_footer()

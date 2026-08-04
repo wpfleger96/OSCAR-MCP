@@ -105,3 +105,55 @@ def test_multi_segment_discontinuous_import(snore, multi_segment_sd, tmp_path):
 
     analyze = snore("analysis", "run", "--session-id", "1", db=db)
     assert analyze.returncode == 0, analyze.stderr or analyze.stdout
+
+
+def test_no_analyze_skips_analysis_phase(snore, resmed_sd, tmp_path):
+    """`--no-analyze` completes import without running the analysis phase.
+
+    The import succeeds and a session exists in the DB, but no analysis result
+    is stored — `analysis show` reports "no analysis found" for that session.
+    """
+    db = tmp_path / "no_analyze.db"
+    result = snore(
+        "import", str(resmed_sd), "--no-backup", "--all", "--no-analyze", db=db
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert db.exists()
+
+    # Session landed in DB.
+    stats = snore("db", "stats", db=db)
+    assert "Sessions: 1" in stats.stdout
+
+    # No analysis result — analysis show must fail (no stored result for session 1).
+    shown = snore("analysis", "show", "--session-id", "1", db=db)
+    assert shown.returncode != 0
+    assert "no analysis found" in (shown.stdout + shown.stderr).lower()
+
+
+def test_import_without_no_analyze_runs_analysis_phase(snore, resmed_sd, tmp_path):
+    """A default import (no --no-analyze) runs analysis and stores a result.
+
+    After `snore import`, `analysis show --session-id 1` must succeed — the
+    import-time analysis phase populated the analysis_results table.  The
+    breaths table must also be non-empty: if the segmenter wiring were broken
+    and produced zero breaths, the analysis_results row would still exist but
+    no breath rows would.
+    """
+    import sqlite3
+
+    db = tmp_path / "with_analyze.db"
+    result = snore("import", str(resmed_sd), "--no-backup", "--all", db=db)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    # Analysis result must be present (import-time analysis ran).
+    shown = snore("analysis", "show", "--session-id", "1", db=db)
+    assert shown.returncode == 0, shown.stderr or shown.stdout
+
+    # breaths table must be non-empty — proves segmenter ran and wrote rows.
+    con = sqlite3.connect(str(db))
+    breath_count = con.execute("SELECT COUNT(*) FROM breaths").fetchone()[0]
+    con.close()
+    assert breath_count > 0, (
+        f"Expected at least one breath row after real import; got {breath_count}. "
+        "Segmenter wiring may be broken."
+    )
