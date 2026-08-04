@@ -96,3 +96,17 @@ def validate_max_events(max_events: int) -> None:
     """Raise ValidationError if max_events is less than 1."""
     if max_events < 1:
         raise ValidationError("max_events must be >= 1")
+
+
+def validate_window_count(n: int) -> None:
+    """Raise ValidationError unless 1 <= n <= 50."""
+    if n < 1 or n > 50:
+        raise ValidationError(f"n must be between 1 and 50 (got {n})")
+
+
+def validate_epoch_count(count: int) -> None:
+    """Raise ValidationError unless 1 <= count <= 6."""
+    if count < 1 or count > 6:
+        raise ValidationError(
+            f"epochs must contain between 1 and 6 entries (got {count})"
+        )

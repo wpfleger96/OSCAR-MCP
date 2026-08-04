@@ -49,14 +49,16 @@ from snore.database.session import (
 from snore.database.target import DatabaseTarget
 from snore.mcp.errors import ValidationError
 from snore.mcp.profiles import ClinicalProfile, get_profile
-from snore.mcp.schemas import SCHEMA_MODEL_MAP, model_to_schema
+from snore.mcp.schemas import SCHEMA_MODEL_MAP, EpochSpec, model_to_schema
 from snore.mcp.validation import (
     parse_date,
     parse_date_range,
     validate_compliance_threshold,
+    validate_epoch_count,
     validate_max_events,
     validate_min_duration,
     validate_page_args,
+    validate_window_count,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +115,7 @@ WORKFLOW:
 2. get_nightly_summary → identify nights of interest (30 nights/page)
 3. get_settings_timeline → understand settings epochs
 4. get_events (date) → event-level detail for a night
-5. (Phase 2) get_breath_table, find_windows, compare_epochs for morphology tuning
+5. get_breath_table, find_windows, compare_epochs for breath morphology tuning
 6. (Phase 3) render_window, get_waveform for visual inspection
 
 DATA TIERS (progressive disclosure):
@@ -293,7 +295,10 @@ def _register_resources(mcp: FastMCP) -> None:
 
         Available schema_types: device_capabilities, device_info, data_overview,
         settings_epoch, settings_timeline, nightly_row, compliance_fields,
-        nightly_summary, event_context, event_row, events_response, capability_entry.
+        nightly_summary, event_context, event_row, events_response, capability_entry,
+        breath_table_query, breath_table_row, breath_table_bin, breath_table_response,
+        window_row, session_coverage_entry, find_windows_response, epoch_spec,
+        epoch_distribution, epoch_stats, epoch_rx_violation, compare_epochs_response.
         """
         model = SCHEMA_MODEL_MAP.get(schema_type)
         if model is None:
@@ -551,4 +556,259 @@ def _register_tools(mcp: FastMCP) -> None:
 
         payload = result.model_dump(mode="json")
         _check_response_size(payload, "get_events")
+        return payload
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_breath_table(
+        ctx: Context,
+        date: str,
+        offset_start: float,
+        offset_end: float,
+        device_id: int | None = None,
+        session_id: int | None = None,
+        page: int = 1,
+        page_size: int = 500,
+        bin_minutes: float | None = None,
+    ) -> dict[str, Any]:
+        """Paginated breath-level table for a single therapy night.
+
+        Use this tool to inspect individual breath waveform features (flow class,
+        flattening index, timing, tidal volume) within a time window of a therapy session.
+        Call ``get_data_overview`` first to confirm analysis has been run; this tool
+        requires breath-level analysis results.
+
+        Raw windows are capped at 15 minutes (offset_end - offset_start ≤ 900 s).
+        For longer windows set ``bin_minutes`` to aggregate into time bins — the response
+        then populates ``bins`` instead of ``rows``.  ``page_size`` is capped at 2000.
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            offset_start: Window start in seconds from session start (≥ 0).
+            offset_end: Window end in seconds from session start (> offset_start).
+                        Raw window must be ≤ 900 s unless ``bin_minutes`` is set.
+            device_id: Filter to a specific device.  Required when multiple devices
+                       have data for the same date.
+            session_id: Filter to a specific session.  Required when the device had
+                        multiple sessions on the date.  Pass ``device_id`` too when
+                        both are given to validate consistency.
+            page: Page number for raw rows (1-based, default 1).
+            page_size: Rows per page for raw fetch (default 500, max 2000).
+            bin_minutes: When set (≥ 1.0), aggregate breaths into bins of this width
+                         instead of returning raw rows.  Required for windows > 15 min.
+
+        Returns:
+            BreathTableResponse.  ``is_binned`` indicates raw vs binned mode.
+            ``analysis_status`` / ``null_reason`` describe coverage.
+            ``device_capabilities`` describes what the device records.
+
+        Refusal semantics:
+            When ``analysis_status`` is ``"not_run"`` or ``"stale"``, ``null_reason``
+            explains why (``"analysis_not_run"``, ``"analysis_stale"``).
+            These are successful responses with ``total_breaths=0``, not tool errors.
+
+        Error conditions:
+            - No sessions found for date → tool error; use ``get_data_overview``.
+            - Multiple devices on date and no ``device_id`` → tool error listing device IDs.
+            - Multiple sessions on date and no ``session_id`` → tool error listing session IDs.
+            - Raw window > 15 min without ``bin_minutes`` → tool error; set ``bin_minutes``.
+            - Breath-level tables missing → tool error; run ``snore analysis run``.
+        """
+        from snore.mcp.tools.breath_table import (
+            get_breath_table as _impl,  # noqa: PLC0415
+        )
+
+        runtime = _runtime(ctx)
+        therapy_date = parse_date(date, "date")
+
+        async with runtime.scope_provider() as db:
+            result = await _impl(
+                db,
+                therapy_date,
+                profile_id=runtime.profile_id,
+                device_id=device_id,
+                session_id=session_id,
+                offset_start=offset_start,
+                offset_end=offset_end,
+                page=page,
+                page_size=page_size,
+                bin_minutes=bin_minutes,
+            )
+
+        payload: dict[str, Any] = result.model_dump(mode="json")
+        _check_response_size(payload, "get_breath_table")
+        return payload
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def find_windows(
+        ctx: Context,
+        date: str,
+        criterion: str,
+        n: int = 5,
+        device_id: int | None = None,
+        include_unknown_leak: bool = False,
+        flattening_threshold: float | None = None,
+        min_window_breaths: int = 3,
+        context_breaths_before: int = 3,
+        context_breaths_after: int = 3,
+        context_seconds: float = 120.0,
+        min_fl_run_length: int = 2,
+        fl_class_threshold: int = 4,
+    ) -> dict[str, Any]:
+        """Find the N worst breath windows matching a flow-limitation criterion for a night.
+
+        Use this tool to locate specific regions in a therapy session worth reviewing in
+        detail (e.g. in ``get_breath_table`` or Phase-3 ``render_window``).  Each window
+        is a contiguous breath sequence ranked by severity; windows with >50% overlap
+        (relative to the shorter) are deduped, keeping the worst.  Results are ordered
+        worst-first.
+
+        Requires breath-level analysis results (``get_data_overview`` → ``analysis_run``
+        must be true).
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            criterion: Window selection criterion.  One of:
+                ``"worst_flattening_leak_valid"`` — worst mean mid-inspiratory flattening
+                    among leak-valid breaths; use to find FL hotspots.
+                ``"ca_centered"`` — context window around each CA event; works even when
+                    the day mixes algorithm versions.
+                ``"fl_run_ending_in_recovery"`` — FL runs immediately followed by a
+                    recovery breath; requires uniform primary_mode across sessions.
+            n: Number of windows to return (1–50, default 5).
+            device_id: Filter to a specific device.  Required when multiple devices
+                       have data for the same date.
+            include_unknown_leak: Include breaths where leak validity is unknown
+                (default false).  Only relevant for ``worst_flattening_leak_valid``.
+            flattening_threshold: Minimum mid-inspiratory flattening score for a breath
+                to anchor a window.  Service default when omitted.
+            min_window_breaths: Minimum breaths per window (default 3).
+            context_breaths_before: Context breaths before the anchor (default 3).
+            context_breaths_after: Context breaths after the anchor (default 3).
+            context_seconds: Context window duration in seconds (default 120.0).
+                Only relevant for ``ca_centered``.
+            min_fl_run_length: Minimum FL-class run length (default 2).
+                Only relevant for ``fl_run_ending_in_recovery``.
+            fl_class_threshold: Minimum flow class to count as FL (default 4).
+                Only relevant for ``fl_run_ending_in_recovery``.
+
+        Returns:
+            FindWindowsResponse.  ``windows`` is ordered worst-first.
+            ``session_coverage`` lists per-session analysis status.
+            ``device_capabilities`` describes what the device records.
+
+        Refusal semantics (successful responses with empty ``windows`` list):
+            ``null_reason: "algo_version_mismatch"`` — the day has sessions analysed
+                with different algorithm versions; FL-ranked criteria
+                (``worst_flattening_leak_valid``, ``fl_run_ending_in_recovery``)
+                refuse comparison.  ``ca_centered`` is unaffected — it still works.
+            ``null_reason: "primary_mode_mismatch"`` — sessions differ in primary mode;
+                only ``fl_run_ending_in_recovery`` refuses; other criteria are unaffected.
+            ``null_reason: "analysis_not_run"`` — no analysis results for this date.
+
+        Error conditions:
+            - Unknown ``criterion`` value → tool error listing valid criteria.
+            - ``n`` outside 1–50 → tool error.
+            - Multiple devices on date and no ``device_id`` → tool error listing device IDs.
+            - Options irrelevant to the chosen criterion passed with non-default values
+              → tool error; omit those options or use their defaults.
+        """
+        from snore.mcp.tools.windows import find_windows as _impl  # noqa: PLC0415
+
+        runtime = _runtime(ctx)
+        therapy_date = parse_date(date, "date")
+        validate_window_count(n)
+
+        async with runtime.scope_provider() as db:
+            result = await _impl(
+                db,
+                therapy_date,
+                profile_id=runtime.profile_id,
+                criterion=criterion,
+                n=n,
+                device_id=device_id,
+                include_unknown_leak=include_unknown_leak,
+                flattening_threshold=flattening_threshold,
+                min_window_breaths=min_window_breaths,
+                context_breaths_before=context_breaths_before,
+                context_breaths_after=context_breaths_after,
+                context_seconds=context_seconds,
+                min_fl_run_length=min_fl_run_length,
+                fl_class_threshold=fl_class_threshold,
+            )
+
+        payload: dict[str, Any] = result.model_dump(mode="json")
+        _check_response_size(payload, "find_windows")
+        return payload
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def compare_epochs(
+        ctx: Context,
+        epochs: list[EpochSpec],
+        metrics: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Compare breath-feature distributions across up to 6 therapy settings epochs.
+
+        Use this tool to detect whether a settings change improved or worsened
+        flow-limitation metrics.  Each epoch is a labelled date range; the tool returns
+        descriptive statistics (median, IQR, P95) of leak-valid breaths for each epoch.
+        Only nights with OK analysis results contribute to an epoch's distributions.
+
+        Call ``get_settings_timeline`` first to identify meaningful epoch boundaries,
+        then ``compare_epochs`` to quantify the difference.
+
+        Requires breath-level analysis results (``get_data_overview`` → ``analysis_run``
+        must be true).
+
+        Args:
+            epochs: List of 1–6 epoch specs.  Each spec has:
+                ``label`` — human-readable epoch name (appears in response).
+                ``date_start`` — epoch start in YYYY-MM-DD format (inclusive).
+                ``date_end`` — epoch end in YYYY-MM-DD format (inclusive).
+                ``device_id`` — optional; all epochs must target the same device.
+            metrics: Optional subset of distribution metrics to compute.  Defaults
+                to all four: ``"mid_insp_flattening"``, ``"flatness_index"``,
+                ``"tidal_volume_ml"``, ``"ie_ratio"``.
+
+        Returns:
+            CompareEpochsResponse.  Each entry in ``epochs`` contains distributions
+            and coverage metadata (``nights_with_data``, ``nights_missing_analysis``).
+            ``rx_violations`` lists any therapy-settings changes detected within an
+            epoch's date range; callers should split affected epochs at those dates.
+
+        Refusal semantics (ALL epoch distributions set to null):
+            ``null_reason: "algo_version_mismatch"`` — epochs span sessions analysed
+                with incompatible algorithm versions (cross-version refusal keys differ);
+                re-run analysis with a uniform version before comparing.
+            ``null_reason: "rx_changed_within_epoch"`` — therapy settings changed within
+                at least one epoch; ``rx_violations`` lists the epoch label, changed keys,
+                and change dates so the caller can split the range.
+            Partial degradation: ``null_reason: "primary_mode_mismatch"`` on individual
+                epochs nulls only RERA-related fields (``rera_proxy_count``,
+                ``rera_reason``); the FL distributions remain populated.
+
+        Error conditions:
+            - Epochs list empty or >6 entries → tool error.
+            - Multiple device IDs across epoch specs → tool error.
+            - Device not owned → tool error.
+            - Multiple devices on the date range and no ``device_id`` → tool error
+              listing device IDs so the caller can re-issue with ``device_id``.
+        """
+        from snore.mcp.tools.epochs import compare_epochs as _impl  # noqa: PLC0415
+
+        runtime = _runtime(ctx)
+        validate_epoch_count(len(epochs))
+
+        async with runtime.scope_provider() as db:
+            result = await _impl(
+                db,
+                profile_id=runtime.profile_id,
+                epochs=epochs,
+                metrics=metrics,
+            )
+
+        payload: dict[str, Any] = result.model_dump(mode="json")
+        _check_response_size(payload, "compare_epochs")
         return payload

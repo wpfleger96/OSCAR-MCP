@@ -36,7 +36,7 @@ multi-user deployments each server process sees exactly one user's data.
 2. **Summarize** — call `get_nightly_summary` over a range to identify nights of interest.
 3. **Settings** — call `get_settings_timeline` to understand settings epochs.
 4. **Events** — call `get_events` on a specific date for event-level detail.
-5. (Phase 2+) `get_breath_table`, `find_windows`, `compare_epochs` for flow morphology tuning.
+5. **Morphology** — call `get_breath_table`, `find_windows`, or `compare_epochs` for breath-level flow morphology tuning.
 6. (Phase 3+) `render_window`, `get_waveform` for visual inspection and raw escape hatch.
 
 ## Tools
@@ -159,3 +159,174 @@ Respiratory events for a single session date with per-event context.
 
 **Common event_type values:** `OA` (obstructive apnea), `CA` (central apnea),
 `H` (hypopnea), `RERA`, `FL` (flow limitation), `VS` (vibratory snore).
+
+---
+
+### get_breath_table
+
+Paginated breath-level table for a single therapy night.  Use to inspect individual
+breath features (flow class, flattening index, timing, tidal volume) within a time
+window.  Requires breath-level analysis results (`get_data_overview` →
+`analysis_run: true`).
+
+**Raw windows are capped at 15 minutes** (`offset_end - offset_start ≤ 900 s`).
+For longer windows, set `bin_minutes` to aggregate into time bins — the response then
+populates `bins` instead of `rows`.  `page_size` is capped at 2000 rows per page.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| date | str (YYYY-MM-DD) | Yes | Session date |
+| offset_start | float | Yes | Window start in seconds from session start (≥ 0) |
+| offset_end | float | Yes | Window end in seconds (> offset_start; raw window ≤ 900 s unless bin_minutes set) |
+| device_id | int | No | Filter to a specific device; required when multiple devices share the date |
+| session_id | int | No | Filter to a specific session; required when the device had multiple sessions that day |
+| page | int | No | Page number for raw rows (1-based, default 1) |
+| page_size | int | No | Rows per page for raw fetch (default 500, max 2000) |
+| bin_minutes | float | No | Aggregate into bins of this width (min 1.0); required for windows > 15 min |
+
+**Returns:** `BreathTableResponse`
+- `query` — echo of the resolved query parameters
+- `session_id`, `session_start_wall_clock`, `timezone_status` — response-level session anchor (tier-2 wall-clock; `timezone_status` always `"unknown"`)
+- `analysis_status` — `"ok"`, `"not_run"`, or `"stale"`
+- `algo_versions` — algorithm identity and run metadata; null when analysis not run
+- `null_reason` — explains absent data; `"analysis_not_run"` or `"analysis_stale"`
+- `is_binned` — true when `bin_minutes` was set; `rows` or `bins` is populated, never both
+- `total_breaths`, `page`, `page_size` — pagination metadata
+- `rows` — list of `BreathTableRow` (raw mode): per-breath offsets, timing, amplitude, flow class, quality flags
+- `bins` — list of `BreathTableBin` (binned mode): aggregated medians/modes per time bin
+- `device_capabilities` — device/dataset capability block for the queried date
+
+**Error conditions:**
+- No sessions found for date → tool error; use `get_data_overview` to check imported dates.
+- Multiple devices on date and no `device_id` → tool error listing device IDs; add `device_id`.
+- Multiple sessions on date and no `session_id` → tool error listing session IDs; add `session_id`.
+- Raw window > 15 min without `bin_minutes` → tool error; set `bin_minutes` to aggregate.
+- Breath-level data tables missing → tool error; run `snore analysis run`.
+
+---
+
+### find_windows
+
+Find the N worst breath windows matching a flow-limitation criterion for a single
+therapy night.  Use to locate specific regions worth reviewing in `get_breath_table`
+or (Phase 3) `render_window`.
+
+**Window construction:** For each candidate anchor breath, a context window is built
+using the configured `context_breaths_before` / `context_breaths_after` /
+`context_seconds` bounds.  Windows with overlapping regions >50% of the shorter
+window's length are deduped, keeping the worst-ranked.  Results are returned
+ordered worst-first.
+
+**Epoch contribution:** Only OK-analysis sessions contribute window candidates.
+Sessions with `not_run` or `stale` analysis are skipped; their status appears in
+`session_coverage`.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| date | str (YYYY-MM-DD) | Yes | Session date |
+| criterion | str | Yes | Selection criterion (see below) |
+| n | int | No | Number of windows to return (1–50, default 5) |
+| device_id | int | No | Filter to a specific device; required when multiple devices share the date |
+| include_unknown_leak | bool | No | Include breaths with unknown leak validity (default false); only for `worst_flattening_leak_valid` |
+| flattening_threshold | float | No | Minimum mid-inspiratory flattening to anchor a window; service default when omitted |
+| min_window_breaths | int | No | Minimum breaths per window (default 3) |
+| context_breaths_before | int | No | Context breaths before the anchor (default 3) |
+| context_breaths_after | int | No | Context breaths after the anchor (default 3) |
+| context_seconds | float | No | Context window duration in seconds (default 120.0); only for `ca_centered` |
+| min_fl_run_length | int | No | Minimum FL-class run length (default 2); only for `fl_run_ending_in_recovery` |
+| fl_class_threshold | int | No | Minimum flow class to count as FL (default 4); only for `fl_run_ending_in_recovery` |
+
+**Valid criteria:**
+- `"worst_flattening_leak_valid"` — windows ranked by worst mean mid-inspiratory
+  flattening among leak-valid breaths; best for locating FL hotspots.
+- `"ca_centered"` — context window centred on each CA event; works even when the
+  day mixes algorithm versions (no cross-version refusal for this criterion).
+- `"fl_run_ending_in_recovery"` — FL runs immediately followed by a recovery
+  breath; requires uniform primary_mode across all sessions of the day.
+
+**Returns:** `FindWindowsResponse`
+- `query_date` — queried date in YYYY-MM-DD
+- `device_id` — resolved device ID; null when no sessions found (service uses 0 as a no-device sentinel — the MCP layer never emits 0)
+- `criterion` — echoed criterion string
+- `day_status` — `"ok"`, `"partial"`, `"mixed_version"`, `"not_run"`, or `"stale"`
+- `session_coverage` — per-session analysis status list
+- `algorithm_identity` — shared algorithm identity across sessions; null on mixed-version days
+- `null_reason` — present when `windows` is empty due to a refusal
+- `primary_mode` — present only for `fl_run_ending_in_recovery` when mode is uniform
+- `windows` — list of `WindowRow`, worst-first
+- `device_capabilities` — device/dataset capability block
+
+**Refusal semantics (successful responses with empty `windows`):**
+- `null_reason: "algo_version_mismatch"` — the day has sessions analysed with different
+  algorithm versions.  FL-ranked criteria (`worst_flattening_leak_valid` and
+  `fl_run_ending_in_recovery`) refuse comparison; `ca_centered` is unaffected and
+  continues to work normally, even with no analysis run on some sessions.
+- `null_reason: "primary_mode_mismatch"` — sessions differ in primary mode; only
+  `fl_run_ending_in_recovery` refuses; other criteria are unaffected.
+- `null_reason: "analysis_not_run"` — no analysis results exist for this date.
+
+**Error conditions:**
+- Unknown `criterion` → tool error listing `worst_flattening_leak_valid`, `ca_centered`, `fl_run_ending_in_recovery`.
+- `n` outside 1–50 → tool error.
+- Multiple devices on date and no `device_id` → tool error listing device IDs.
+- Criterion-irrelevant options passed with non-default values → tool error naming the fields.
+
+---
+
+### compare_epochs
+
+Compare breath-feature distributions across up to 6 labelled therapy date ranges.
+Use to detect whether a settings change improved or worsened flow-limitation metrics.
+Only nights with OK analysis results and leak-valid breaths contribute to each epoch's
+distributions.
+
+Call `get_settings_timeline` first to identify meaningful epoch boundaries, then
+`compare_epochs` to quantify differences.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| epochs | list[EpochSpec] | Yes | 1–6 epoch specs, each with `label`, `date_start`, `date_end`, and optional `device_id` |
+| metrics | list[str] | No | Metrics to compute (default: all four; see valid values below) |
+
+Each `EpochSpec`:
+- `label` — human-readable epoch name (appears in response)
+- `date_start` — epoch start in YYYY-MM-DD (inclusive)
+- `date_end` — epoch end in YYYY-MM-DD (inclusive)
+- `device_id` — optional; all epochs must target the same device
+
+**Valid metrics:** `"mid_insp_flattening"`, `"flatness_index"`, `"tidal_volume_ml"`, `"ie_ratio"`
+
+**Returns:** `CompareEpochsResponse`
+- `epochs` — list of `EpochStats`, one per input epoch:
+  - `label`, `date_start`, `date_end` — echoed spec
+  - `nights_with_data` — nights that had at least one OK-analysis session
+  - `nights_missing_analysis` — nights in range lacking OK analysis (skipped)
+  - `algorithm_identity` — shared algorithm identity across contributing sessions
+  - `null_reason` — present when distributions are null
+  - `primary_mode` — uniform primary mode (when applicable)
+  - `mid_insp_flattening`, `flatness_index`, `tidal_volume_ml`, `ie_ratio` — `EpochDistribution` with `median`, `iqr`, `p95`, `n_breaths`, `n_nights`
+  - `flow_class_distribution` — count of breaths per flow class (`{"0": n, "1": n, ...}`)
+  - `rera_proxy_count` — RERA-proxy breath count; null + `rera_reason` when unavailable
+  - `rx_settings` — representative therapy settings for this epoch
+- `null_reason` — present when ALL epoch distributions are null (cross-epoch refusal)
+- `rx_violations` — list of `EpochRxViolationRow`: therapy-settings changes detected within an epoch (use to split the range at `change_dates`)
+
+**Refusal semantics:**
+- `null_reason: "algo_version_mismatch"` (cross-epoch, ALL distributions null) — epochs
+  span sessions with incompatible algorithm versions; re-run analysis with a uniform
+  version.
+- `null_reason: "rx_changed_within_epoch"` (cross-epoch, ALL distributions null) —
+  therapy settings changed within at least one epoch; `rx_violations` lists the epoch
+  label, `changed_keys`, and `change_dates` so the caller can split the range.
+- Per-epoch degradation: `null_reason: "primary_mode_mismatch"` on individual epochs
+  nulls only RERA-related fields (`rera_proxy_count`, `rera_reason`); FL distributions
+  remain populated.
+
+**Error conditions:**
+- `epochs` empty or >6 entries → tool error.
+- Multiple device IDs across epoch specs → tool error.
+- Device not owned by the active profile → tool error.
+- Multiple devices in the date union and no `device_id` → tool error listing device IDs so the caller can re-issue with `device_id`.
