@@ -1851,6 +1851,8 @@ export interface components {
         ImportPathRequest: {
             /** Sources */
             sources: components['schemas']['ImportSource'][]
+            /** Profile Id */
+            profile_id?: number | null
         }
         /**
          * ImportSource
