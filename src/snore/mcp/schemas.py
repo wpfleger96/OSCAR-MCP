@@ -144,7 +144,7 @@ class NightlyRow(BaseModel):
     rera_proxy_count: int | None = None
     rera_proxy_reason: str | None = None
 
-    # Breath timing aggregates — not yet available from service; always null
+    # Breath timing aggregates — from breath-level analysis; null + reason when analysis hasn't run
     ti_median_s: float | None = None
     ti_median_reason: str | None = None
     ie_ratio: float | None = None
@@ -194,35 +194,45 @@ class EventRow(BaseModel):
 
     Timestamp contract (A6):
     - ``start_time_wall_clock``: device wall-clock, offset-free ISO 8601 (tier 2).
+    - ``session_start_wall_clock``: per-event session anchor, offset-free ISO 8601 (tier 2).
     - ``timezone_status``: always ``"unknown"`` — no TZ is recorded for device times.
-    - ``offset_seconds``: position from session start (tier 3).
+    - ``offset_seconds``: position from this event's session start (tier 3).
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     id: int | None = None  # internal DB id; not provided by BreathService seam
+    session_id: int  # session that produced this event (per-event anchor)
+    session_start_wall_clock: (
+        str  # offset-free ISO 8601 device wall-clock for this event's session
+    )
     event_type: str
     start_time_wall_clock: str  # offset-free ISO 8601 device wall-clock (tier 2)
     timezone_status: str = "unknown"  # always "unknown" for device wall-clock
-    offset_seconds: float  # seconds from Session.start_time (tier 3)
+    offset_seconds: float  # seconds from this event's Session.start_time (tier 3)
     duration_seconds: float | None = None
     spo2_drop_pct: float | None = None
     peak_flow_limitation: float | None = None
+    pressure_reason: str | None = None
+    leak_reason: str | None = None
+    mv_reason: str | None = None
     context: EventContext | None = None
 
 
 class EventsResponse(BaseModel):
     """Response from get_events.
 
-    ``session_start_wall_clock`` is the tier-2 device wall-clock for the
-    session, so callers can convert ``offset_seconds`` to absolute positions.
+    ``session_id`` and ``session_start_wall_clock`` are the response-level anchors.
+    They are null when no events were returned or when events span multiple sessions.
+    Per-event anchors (``EventRow.session_id`` and ``EventRow.session_start_wall_clock``)
+    are always populated on individual events.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     date: str
-    session_id: int
-    session_start_wall_clock: str  # offset-free ISO 8601 (tier 2)
+    session_id: int | None = None  # null when empty or multi-session
+    session_start_wall_clock: str | None = None  # null when empty or multi-session
     timezone_status: str = "unknown"
     events: list[EventRow]
     total_events: int

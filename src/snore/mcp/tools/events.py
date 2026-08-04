@@ -15,12 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import EventContext, EventRow, EventsResponse
+from snore.mcp.tools._capabilities import build_device_capabilities
 
 
 async def get_events(
     db_session: AsyncSession,
     event_date: date,
-    profile_id: int = 0,
+    profile_id: int,
     device_id: int | None = None,
     types: list[str] | None = None,
     min_duration: float | None = None,
@@ -34,7 +35,7 @@ async def get_events(
     Args:
         db_session: Async database session.
         event_date: The date to query (YYYY-MM-DD).
-        profile_id: Profile scope for BreathService ownership checks.
+        profile_id: Profile scope for BreathService ownership checks (required).
         device_id: Optional device filter; required when multiple devices share a date.
         types: Optional list of event types to filter (e.g. ["OA", "CA", "H"]).
         min_duration: Minimum event duration in seconds (optional filter).
@@ -45,17 +46,6 @@ async def get_events(
         DeviceAmbiguityError,
         DeviceNotOwnedError,
     )
-
-    if not profile_id:
-        # profile_id not yet resolved (lifespan not started) — fall back to
-        # the legacy direct query path so unit tests without a lifespan still work.
-        return await _legacy_get_events(
-            db_session,
-            event_date,
-            types=types,
-            min_duration=min_duration,
-            include_context=include_context,
-        )
 
     bs = BreathService(db_session, profile_id)
     try:
@@ -74,17 +64,26 @@ async def get_events(
         ) from exc
 
     if not contextual_events:
-        # No events — still return a well-formed response with session anchor.
-        return await _legacy_get_events(
-            db_session,
-            event_date,
-            types=types,
-            min_duration=min_duration,
-            include_context=False,
+        caps = (
+            await build_device_capabilities(
+                db_session,
+                profile_id,
+                device_id,
+                date_start=event_date,
+                date_end=event_date,
+            )
+            if device_id is not None
+            else None
         )
-
-    session_id = contextual_events[0].session_id
-    session_start = contextual_events[0].session_start_wall_clock
+        return EventsResponse(
+            date=event_date.isoformat(),
+            session_id=None,
+            session_start_wall_clock=None,
+            timezone_status="unknown",
+            events=[],
+            total_events=0,
+            device_capabilities=caps,
+        )
 
     rows: list[EventRow] = []
     for ev in contextual_events:
@@ -100,6 +99,8 @@ async def get_events(
         rows.append(
             EventRow(
                 id=None,  # BreathService seam does not expose internal event IDs
+                session_id=ev.session_id,
+                session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
                 event_type=ev.event_type,
                 start_time_wall_clock=ev.event_start_wall_clock.isoformat(),
                 timezone_status="unknown",
@@ -107,120 +108,62 @@ async def get_events(
                 duration_seconds=ev.duration_seconds,
                 spo2_drop_pct=None,
                 peak_flow_limitation=None,
+                pressure_reason=str(ev.pressure_reason)
+                if ev.pressure_reason is not None
+                else None,
+                leak_reason=str(ev.leak_reason) if ev.leak_reason is not None else None,
+                mv_reason=str(ev.mv_reason) if ev.mv_reason is not None else None,
                 context=context,
             )
         )
 
-    return EventsResponse(
-        date=event_date.isoformat(),
-        session_id=session_id,
-        session_start_wall_clock=session_start.isoformat(),
-        timezone_status="unknown",
-        events=rows,
-        total_events=len(rows),
-    )
+    # Response-level session anchor: populated only when all events share one session.
+    session_ids = {ev.session_id for ev in contextual_events}
+    if len(session_ids) == 1:
+        anchor_session_id: int | None = contextual_events[0].session_id
+        anchor_session_start: str | None = contextual_events[
+            0
+        ].session_start_wall_clock.isoformat()
+    else:
+        anchor_session_id = None
+        anchor_session_start = None
 
+    # Resolve device_id for capabilities: use the explicit arg when given;
+    # otherwise query the session's device, scoped to the profile for ownership.
+    resolved_device_id = device_id
+    if resolved_device_id is None:
+        from sqlalchemy import select  # noqa: PLC0415
 
-# ---------------------------------------------------------------------------
-# Legacy fallback (no profile_id / empty events result)
-# ---------------------------------------------------------------------------
+        from snore.database import models  # noqa: PLC0415
 
-
-async def _legacy_get_events(
-    db_session: AsyncSession,
-    event_date: date,
-    types: list[str] | None = None,
-    min_duration: float | None = None,
-    include_context: bool = True,
-) -> EventsResponse:
-    """Direct DB query path — used when profile_id is 0 or events list is empty."""
-    from datetime import datetime  # noqa: PLC0415
-
-    from sqlalchemy import select  # noqa: PLC0415
-
-    from snore.database import models  # noqa: PLC0415
-
-    day_row = (
-        (
-            await db_session.execute(
-                select(models.Day).where(models.Day.date == event_date)
+        result = await db_session.execute(
+            select(models.Session.device_id)
+            .join(models.Device, models.Device.id == models.Session.device_id)
+            .where(
+                models.Session.id == contextual_events[0].session_id,
+                models.Device.profile_id == profile_id,
             )
         )
-        .scalars()
-        .first()
-    )
+        resolved_device_id = result.scalar_one_or_none()
 
-    if day_row is None:
-        raise ValidationError(
-            f"No therapy data found for date {event_date}. "
-            "Use get_data_overview to check which dates have imported data."
+    caps = (
+        await build_device_capabilities(
+            db_session,
+            profile_id,
+            resolved_device_id,
+            date_start=event_date,
+            date_end=event_date,
         )
-
-    session_row = (
-        (
-            await db_session.execute(
-                select(models.Session)
-                .where(
-                    models.Session.day_id == day_row.id,
-                    models.Session.enabled.is_(True),
-                )
-                .order_by(models.Session.start_time)
-                .limit(1)
-            )
-        )
-        .scalars()
-        .first()
+        if resolved_device_id is not None
+        else None
     )
-
-    if session_row is None:
-        raise ValidationError(f"No enabled session found for date {event_date}.")
-
-    session_id = int(session_row.id)
-    session_start: datetime = session_row.start_time
-
-    event_q = (
-        select(models.Event)
-        .where(models.Event.session_id == session_id)
-        .order_by(models.Event.start_time)
-    )
-    if types:
-        event_q = event_q.where(models.Event.event_type.in_(types))
-    if min_duration is not None:
-        event_q = event_q.where(models.Event.duration_seconds >= min_duration)
-
-    event_rows = (await db_session.execute(event_q)).scalars().all()
-
-    rows: list[EventRow] = []
-    for ev in event_rows:
-        context: EventContext | None = None
-        if include_context:
-            offset_seconds = (ev.start_time - session_start).total_seconds()
-            context = EventContext(
-                pressure_at_event_cmh2o=None,
-                leak_at_event_lpm=None,
-                mv_prior_120s_lpm=None,
-                minutes_since_session_start=round(offset_seconds / 60.0, 2),
-            )
-
-        rows.append(
-            EventRow(
-                id=int(ev.id),
-                event_type=ev.event_type,
-                start_time_wall_clock=ev.start_time.isoformat(),
-                timezone_status="unknown",
-                offset_seconds=(ev.start_time - session_start).total_seconds(),
-                duration_seconds=ev.duration_seconds,
-                spo2_drop_pct=ev.spo2_drop,
-                peak_flow_limitation=ev.peak_flow_limitation,
-                context=context,
-            )
-        )
 
     return EventsResponse(
         date=event_date.isoformat(),
-        session_id=session_id,
-        session_start_wall_clock=session_start.isoformat(),
+        session_id=anchor_session_id,
+        session_start_wall_clock=anchor_session_start,
         timezone_status="unknown",
         events=rows,
         total_events=len(rows),
+        device_capabilities=caps,
     )

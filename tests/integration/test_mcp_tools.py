@@ -183,7 +183,7 @@ class TestGetSettingsTimeline:
 
 class TestGetNightlySummary:
     async def test_empty_database_returns_empty_nights(
-        self, async_db_session: AsyncSession
+        self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         from snore.mcp.tools.summary import get_nightly_summary
 
@@ -191,6 +191,7 @@ class TestGetNightlySummary:
             async_db_session,
             date(2024, 1, 1),
             date(2024, 1, 31),
+            profile_id=async_test_profile.id,
         )
         assert result.nights == []
         assert result.total_nights == 0

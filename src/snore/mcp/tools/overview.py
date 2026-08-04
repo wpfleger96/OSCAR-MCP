@@ -3,62 +3,51 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
-from snore.mcp.schemas import DataOverviewResponse, DeviceCapabilities, DeviceInfo
+from snore.mcp.schemas import DataOverviewResponse, DeviceInfo
+from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.services.device_service import DeviceService
 
 
-def _map_device_capabilities(
-    bs_caps: Any,
-    manufacturer: str,
-    model_name: str,
-    serial_number: str,
-    analysis_run: bool,
-) -> DeviceCapabilities:
-    """Map BreathService.DeviceCapabilities → MCP DeviceCapabilities."""
-    channels: set[str] = set(bs_caps.channels_present or [])
-    has_pressure = bool({"pressure", "therapy_pressure", "epap", "ipap"} & channels)
-    null_reason = bs_caps.null_reason
-    return DeviceCapabilities(
-        manufacturer=manufacturer,
-        model=model_name,
-        serial_number=serial_number,
-        has_flow_waveform="flow" in channels,
-        has_pressure_waveform=has_pressure,
-        has_leak_waveform="leak" in channels,
-        has_spo2="spo2" in channels,
-        has_events=bool(bs_caps.event_types_present),
-        has_analysis=analysis_run,
-        notes=[str(null_reason)] if null_reason is not None else [],
-    )
-
-
 async def get_data_overview(
-    db_session: AsyncSession, profile_id: int = 0
+    db_session: AsyncSession, profile_id: int
 ) -> DataOverviewResponse:
     """Return a comprehensive overview of all imported data.
 
     Called by the get_data_overview MCP tool. Provides device inventory,
     date ranges, available waveform channels, event types, and analysis status
     — everything an LLM needs to orient itself to a cold database.
-    """
-    from snore.services.breath_service import BreathService  # noqa: PLC0415
 
+    All queries are scoped through Device.profile_id so no cross-profile data
+    leaks into the response.
+    """
     device_svc = DeviceService(db_session, profile_id)
     raw_devices = await device_svc.list_devices()
 
     if not raw_devices:
         return DataOverviewResponse(devices=[])
 
-    # Analysis status — count distinct sessions that have at least one AnalysisResult
+    # Analysis status — count distinct sessions with at least one AnalysisResult,
+    # scoped to this profile via Session → Device.
     analysis_session_count = (
         await db_session.execute(
             select(func.count(models.AnalysisResult.session_id.distinct()))
+            .join(
+                models.Session,
+                models.AnalysisResult.session_id == models.Session.id,
+            )
+            .join(
+                models.Device,
+                models.Session.device_id == models.Device.id,
+            )
+            .where(
+                models.Device.profile_id == profile_id,
+                models.Session.enabled.is_(True),
+            )
         )
     ).scalar_one()
     analysis_run = analysis_session_count > 0
@@ -67,8 +56,6 @@ async def get_data_overview(
     total_sessions = 0
     global_min_date: date | None = None
     global_max_date: date | None = None
-
-    bs = BreathService(db_session, profile_id) if profile_id else None
 
     for d in raw_devices:
         # Per-device session stats
@@ -113,18 +100,15 @@ async def get_data_overview(
             .all()
         )
 
-        # Device capabilities from BreathService (G2 — capability-honest)
-        dev_caps: DeviceCapabilities | None = None
-        if bs is not None:
-            try:
-                bs_caps = await bs.get_device_capabilities(
-                    d.id, date_start=first_date, date_end=last_date
-                )
-                dev_caps = _map_device_capabilities(
-                    bs_caps, d.manufacturer, d.model, d.serial_number, analysis_run
-                )
-            except Exception:
-                pass  # capabilities are best-effort; don't fail the overview
+        # Device capabilities — profile-scoped; exceptions propagate (no swallowing)
+        dev_caps = await build_device_capabilities(
+            db_session,
+            profile_id,
+            d.id,
+            date_start=first_date,
+            date_end=last_date,
+            analysis_run=analysis_run,
+        )
 
         device_infos.append(
             DeviceInfo(
@@ -140,11 +124,23 @@ async def get_data_overview(
             )
         )
 
-    # Available waveform channel types across all sessions
+    # Available waveform channel types scoped to this profile via Session → Device
     waveform_types = (
         (
             await db_session.execute(
                 select(models.Waveform.waveform_type)
+                .join(
+                    models.Session,
+                    models.Waveform.session_id == models.Session.id,
+                )
+                .join(
+                    models.Device,
+                    models.Session.device_id == models.Device.id,
+                )
+                .where(
+                    models.Device.profile_id == profile_id,
+                    models.Session.enabled.is_(True),
+                )
                 .distinct()
                 .order_by(models.Waveform.waveform_type)
             )
@@ -153,11 +149,23 @@ async def get_data_overview(
         .all()
     )
 
-    # Available event types
+    # Available event types scoped to this profile via Session → Device
     event_types = (
         (
             await db_session.execute(
                 select(models.Event.event_type)
+                .join(
+                    models.Session,
+                    models.Event.session_id == models.Session.id,
+                )
+                .join(
+                    models.Device,
+                    models.Session.device_id == models.Device.id,
+                )
+                .where(
+                    models.Device.profile_id == profile_id,
+                    models.Session.enabled.is_(True),
+                )
                 .distinct()
                 .order_by(models.Event.event_type)
             )

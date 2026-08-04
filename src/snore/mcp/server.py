@@ -7,21 +7,21 @@ Design doctrine:
   - Tiered data access: overview → summary → events → breath table → raw waveform
   - Compute server-side, return compact JSON; units on every field
   - Data-quality flags / null + reason everywhere (G2)
-  - Stateless: no module-global state beyond the active profile; DB access via
-    _scope_provider seam (G3) — see ``_scope_provider`` below
+  - Stateless: no module-global state; DB access injected via SNORERuntime (G3)
   - Profile-parameterized: profiles shape instructions only, not data (G1)
   - Vendor dispatch stays in the parser/service layer (G4)
 
 DB-access pattern (M2 / Thufir MINOR):
-  Tools call the module-level ``_scope_provider()`` function, NOT ``session_scope``
-  directly.  ``_scope_provider`` is installed by ``_lifespan`` and currently
-  delegates to the global ``session_scope()`` (which relies on the global
-  ``_AsyncSessionFactory`` populated by ``init_database_from_url``).
+  ``_lifespan`` builds a ``SNORERuntime`` and yields it as the FastMCP lifespan
+  context.  Every tool and resource receives a ``ctx: Context`` parameter;
+  FastMCP injects it by type annotation and excludes it from the client-facing
+  schema.  Tools call ``runtime = _runtime(ctx)`` to extract it and then
+  ``runtime.scope_provider()`` instead of ``session_scope()`` directly.
 
-  This seam exists so PR-C can swap in an actor-scoped session factory without
-  touching any tool code.  Do NOT call ``session_scope()`` directly from tools.
-  Do NOT describe this as lifespan factory injection — the factory is global state
-  that lifespan initializes; the seam is a thin callable wrapper.
+  The swap site for PR-C (actor-scoped session factory) is the
+  ``SNORERuntime(scope_provider=...)`` construction inside ``_lifespan`` — no
+  tool code needs to change.  Do NOT call ``session_scope()`` directly from
+  tools.
 """
 
 from __future__ import annotations
@@ -31,12 +31,13 @@ import logging
 
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from functools import wraps
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,17 +60,35 @@ from snore.mcp.validation import (
 
 logger = logging.getLogger(__name__)
 
-# DB-access seam (M2): tools call _scope_provider(), never session_scope() directly.
-# Lifespan installs the concrete implementation; PR-C swaps in an actor-scoped version.
-# Default delegates to the global session_scope() (populated by init_database_from_url).
+# DB-access seam (M2): tools call runtime.scope_provider(), never session_scope()
+# directly.  SNORERuntime is built in _lifespan and injected via FastMCP's
+# lifespan context; PR-C swaps in an actor-scoped factory at the construction
+# site in _lifespan without touching any tool code.
 # Type: a zero-arg callable returning an async context manager that yields AsyncSession.
 _ScopeProvider = Callable[[], AbstractAsyncContextManager[AsyncSession]]
-_scope_provider: _ScopeProvider = session_scope
 
-# Profile-id seam: tools pass this to BreathService / DeviceService / RxTracker.
-# Lifespan resolves the first live Profile from the DB and stores it here.
-# 0 is a sentinel meaning "not yet resolved" (no valid DB profile has id=0).
-_profile_id: int = 0
+
+@dataclass(frozen=True)
+class SNORERuntime:
+    """Lifespan-scoped runtime state injected into every tool and resource.
+
+    FastMCP yields this from ``_lifespan`` and makes it available as
+    ``ctx.lifespan_context``.  Frozen to prevent accidental mutation across
+    concurrent requests sharing the same lifespan.
+    """
+
+    scope_provider: _ScopeProvider
+    profile_id: int
+
+
+def _runtime(ctx: Context) -> SNORERuntime:
+    """Extract the SNORERuntime from the FastMCP context.
+
+    fastmcp types ``ctx.lifespan_context`` as ``dict[str, Any]``; cast narrows
+    it to the actual yielded type without changing runtime behaviour.
+    """
+    return cast("SNORERuntime", ctx.lifespan_context)
+
 
 RESPONSE_SIZE_LIMIT = 500_000  # bytes; tools return narrow-your-query guidance
 
@@ -116,15 +135,17 @@ See docs://capabilities for dataset-specific channel availability.
 @asynccontextmanager
 async def _lifespan(
     app: Any, db_flag: str | None = None, profile_name: str = "neutral"
-) -> AsyncGenerator[None]:
-    """FastMCP lifespan: initialize DB, install scope-provider seam, set active profile.
+) -> AsyncGenerator[SNORERuntime]:
+    """FastMCP lifespan: initialize DB, build SNORERuntime, resolve active profile.
 
-    Lifespan teardown calls ``cleanup_database()`` in a ``finally`` block so it
-    runs even if tool errors occur during shutdown.  The ``_scope_provider`` seam
-    is reset to the default (global ``session_scope``) on teardown.
+    Yields a ``SNORERuntime`` as the lifespan context so every tool and resource
+    can access the scope-provider seam and profile_id without module globals.
+    Teardown calls ``cleanup_database()`` in a ``finally`` block so it runs even
+    if tool errors occur during shutdown.
+
+    PR-C's actor-scoped session factory swap happens at the ``SNORERuntime(...)``
+    construction below — nothing else in this file changes for that swap.
     """
-    global _scope_provider, _profile_id
-
     from sqlalchemy import select  # noqa: PLC0415
 
     from snore.database import models  # noqa: PLC0415
@@ -134,11 +155,6 @@ async def _lifespan(
     async_url = target.resolve_async_url()
 
     await init_database_from_url(async_url)
-
-    # Install the scope-provider seam: currently delegates to the global
-    # session_scope() that init_database_from_url populated.  PR-C replaces
-    # this with an actor-scoped factory at this exact assignment site.
-    _scope_provider = session_scope
 
     # Register vendor parsers once at startup (idempotent; tools must not call
     # ensure_registered_parsers() themselves — this is the single call site).
@@ -163,21 +179,22 @@ async def _lifespan(
                 "No profile found in database — run 'snore db init' first "
                 "or import CPAP data to create a profile."
             )
-        _profile_id = int(_profile_row.id)
+        profile_id = int(_profile_row.id)
+
+    # PR-C swap site: replace session_scope with an actor-scoped factory here.
+    runtime = SNORERuntime(scope_provider=session_scope, profile_id=profile_id)
 
     logger.info(
         "SNORE MCP server started — db=%r profile=%s profile_id=%d",
         target.location,
         profile_name,
-        _profile_id,
+        runtime.profile_id,
     )
 
     try:
-        yield
+        yield runtime
     finally:
         await cleanup_database()
-        _scope_provider = session_scope  # reset to safe default
-        _profile_id = 0
         logger.info("SNORE MCP server stopped")
 
 
@@ -186,9 +203,9 @@ def make_server(db_flag: str | None = None, profile_name: str = "neutral") -> Fa
     profile = get_profile(profile_name)
 
     @asynccontextmanager
-    async def _bound_lifespan(app: Any) -> AsyncGenerator[None]:
-        async with _lifespan(app, db_flag=db_flag, profile_name=profile_name):
-            yield
+    async def _bound_lifespan(app: Any) -> AsyncGenerator[SNORERuntime]:
+        async with _lifespan(app, db_flag=db_flag, profile_name=profile_name) as rt:
+            yield rt
 
     mcp = FastMCP(
         name="snore",
@@ -274,7 +291,7 @@ def _register_resources(mcp: FastMCP) -> None:
         return json.dumps(model_to_schema(model), indent=2)
 
     @mcp.resource("docs://capabilities")
-    async def get_capabilities() -> str:
+    async def get_capabilities(ctx: Context) -> str:
         """Dataset capabilities — dynamically generated from imported data.
 
         Lists which waveform channels, event types, and analysis features are
@@ -287,8 +304,10 @@ def _register_resources(mcp: FastMCP) -> None:
         from snore.mcp.tools.overview import get_data_overview
         from snore.parsers.registry import parser_registry
 
-        async with _scope_provider() as db:
-            overview = await get_data_overview(db, profile_id=_profile_id)
+        runtime = _runtime(ctx)
+
+        async with runtime.scope_provider() as db:
+            overview = await get_data_overview(db, profile_id=runtime.profile_id)
 
         supported_parsers = [
             f"{p.manufacturer} ({p.parser_id})" for p in parser_registry.list_parsers()
@@ -348,7 +367,7 @@ def _register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_boundary
-    async def get_data_overview() -> dict[str, Any]:
+    async def get_data_overview(ctx: Context) -> dict[str, Any]:
         """Orient to the imported dataset: devices, date ranges, channels, analysis status.
 
         Call this first before any other tool. Returns everything needed to understand
@@ -360,8 +379,10 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         from snore.mcp.tools.overview import get_data_overview as _impl
 
-        async with _scope_provider() as db:
-            result = await _impl(db, profile_id=_profile_id)
+        runtime = _runtime(ctx)
+
+        async with runtime.scope_provider() as db:
+            result = await _impl(db, profile_id=runtime.profile_id)
 
         payload = result.model_dump(mode="json")
         _check_response_size(payload, "get_data_overview")
@@ -370,6 +391,7 @@ def _register_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     @tool_error_boundary
     async def get_settings_timeline(
+        ctx: Context,
         start: str,
         end: str,
         device_id: int | None = None,
@@ -391,11 +413,12 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         from snore.mcp.tools.settings import get_settings_timeline as _impl
 
+        runtime = _runtime(ctx)
         start_d, end_d = parse_date_range(start, end)
 
-        async with _scope_provider() as db:
+        async with runtime.scope_provider() as db:
             result = await _impl(
-                db, start_d, end_d, profile_id=_profile_id, device_id=device_id
+                db, start_d, end_d, profile_id=runtime.profile_id, device_id=device_id
             )
 
         payload = result.model_dump(mode="json")
@@ -405,6 +428,7 @@ def _register_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     @tool_error_boundary
     async def get_nightly_summary(
+        ctx: Context,
         start: str,
         end: str,
         device_id: int | None = None,
@@ -431,17 +455,25 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         from snore.mcp.tools.summary import get_nightly_summary as _impl
 
+        runtime = _runtime(ctx)
         start_d, end_d = parse_date_range(start, end)
+
+        n_calendar = (end_d - start_d).days + 1
+        if n_calendar > 90:
+            raise ValidationError(
+                f"Date range spans {n_calendar} nights; maximum per call is 90. "
+                "Use multiple calls to page over longer ranges."
+            )
 
         capped_page_size = validate_page_args(page, page_size)
         validate_compliance_threshold(compliance_threshold_hours)
 
-        async with _scope_provider() as db:
+        async with runtime.scope_provider() as db:
             result = await _impl(
                 db,
                 start_d,
                 end_d,
-                profile_id=_profile_id,
+                profile_id=runtime.profile_id,
                 device_id=device_id,
                 page=page,
                 page_size=capped_page_size,
@@ -455,6 +487,7 @@ def _register_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     @tool_error_boundary
     async def get_events(
+        ctx: Context,
         date: str,
         device_id: int | None = None,
         types: list[str] | None = None,
@@ -480,15 +513,16 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         from snore.mcp.tools.events import get_events as _impl
 
+        runtime = _runtime(ctx)
         event_date = parse_date(date, "date")
 
         validate_min_duration(min_duration)
 
-        async with _scope_provider() as db:
+        async with runtime.scope_provider() as db:
             result = await _impl(
                 db,
                 event_date,
-                profile_id=_profile_id,
+                profile_id=runtime.profile_id,
                 device_id=device_id,
                 types=types,
                 min_duration=min_duration,

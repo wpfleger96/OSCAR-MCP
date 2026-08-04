@@ -3,11 +3,11 @@
 Timestamp contract (A6): date fields are Python ``date`` objects serialized as
 ``YYYY-MM-DD`` — no timezone issue since dates have no time component.
 
-Compliance and breath-level FL/RERA fields are populated via
-BreathService.get_nightly_range_summary() when available (ranges ≤ 90 nights and
-no device ambiguity).  For ranges > 90 nights or when BreathService cannot
-resolve the device, compliance falls back to inline arithmetic over
-Day.total_therapy_hours and FL/RERA fields are null + reason.
+Compliance and breath-level FL/RERA/Ti/IE fields are populated via
+BreathService.get_nightly_range_summary().  Compliance denominator is
+``n_calendar_nights`` (the full calendar span, not just nights with data).
+All Day and Session queries are profile-scoped through Device.profile_id to
+prevent cross-profile data leaks.
 """
 
 from __future__ import annotations
@@ -18,11 +18,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
+from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import (
     ComplianceFields,
     NightlyRow,
     NightlySummaryResponse,
 )
+from snore.mcp.tools._capabilities import build_device_capabilities
 
 _DEFAULT_PAGE_SIZE = 30
 _DEFAULT_COMPLIANCE_THRESHOLD_HOURS = 4.0
@@ -32,7 +34,7 @@ async def get_nightly_summary(
     db_session: AsyncSession,
     start: date,
     end: date,
-    profile_id: int = 0,
+    profile_id: int,
     device_id: int | None = None,
     page: int = 1,
     page_size: int = _DEFAULT_PAGE_SIZE,
@@ -40,34 +42,36 @@ async def get_nightly_summary(
 ) -> NightlySummaryResponse:
     """Return per-night therapy summary for a date range.
 
-    Analysis-derived fields (RERA index, RDI, FL) are populated from
-    BreathService.get_nightly_range_summary() when possible; absent entries are
-    null with reason (A2).  Compliance fields use the same seam.
+    Analysis-derived fields (RERA index, RDI, Ti, I:E, FL) are populated from
+    BreathService.get_nightly_range_summary(); absent entries are null with
+    reason (A2).  Compliance uses n_calendar_nights as denominator.
+
+    Raises ValidationError when BreathService reports device ownership problems
+    (DeviceAmbiguityError, DeviceNotOwnedError).  The server boundary converts
+    ValidationError to a ToolError before it reaches the client.
     """
     from snore.services.breath_service import (  # noqa: PLC0415
         BreathService,
         DeviceAmbiguityError,
+        DeviceNotOwnedError,
         NightlyAnalysisSummary,
         NightlyRangeSummary,
     )
 
-    # Attempt BreathService range summary for compliance + FL/RERA.
-    # Falls back gracefully on: range > 90 nights, device ambiguity, no profile.
+    # Fetch BreathService range summary — always called when profile_id is set.
+    # ValueError (end < start or > 90 nights) is pre-validated/rejected upstream.
     bs_range: NightlyRangeSummary | None = None
-    if profile_id:
-        n_calendar = (end - start).days + 1
-        if n_calendar <= 90:
-            try:
-                bs_range = await BreathService(
-                    db_session, profile_id
-                ).get_nightly_range_summary(
-                    start,
-                    end,
-                    device_id=device_id,
-                    compliance_threshold_hours=compliance_threshold_hours,
-                )
-            except (ValueError, DeviceAmbiguityError):
-                bs_range = None
+    try:
+        bs_range = await BreathService(
+            db_session, profile_id
+        ).get_nightly_range_summary(
+            start,
+            end,
+            device_id=device_id,
+            compliance_threshold_hours=compliance_threshold_hours,
+        )
+    except (DeviceAmbiguityError, DeviceNotOwnedError) as exc:
+        raise ValidationError(str(exc)) from exc
 
     # Index per-night analysis summaries by therapy_date for O(1) lookup.
     bs_by_date: dict[date, NightlyAnalysisSummary] = {}
@@ -75,19 +79,29 @@ async def get_nightly_summary(
         for night in bs_range.nights:
             bs_by_date[night.therapy_date] = night
 
-    # Count total matching days for pagination
-    count_q = select(func.count(models.Day.id)).where(
-        models.Day.date >= start,
-        models.Day.date <= end,
+    # Count total matching days for pagination — scoped via Device.profile_id
+    count_q = (
+        select(func.count(models.Day.id))
+        .join(models.Device, models.Day.device_id == models.Device.id)
+        .where(
+            models.Day.date >= start,
+            models.Day.date <= end,
+            models.Device.profile_id == profile_id,
+        )
     )
     if device_id is not None:
         count_q = count_q.where(models.Day.device_id == device_id)
     total = (await db_session.execute(count_q)).scalar_one()
 
-    # Fetch the page of Day rows directly for full field access
+    # Fetch the page of Day rows — scoped via Device.profile_id
     day_q = (
         select(models.Day)
-        .where(models.Day.date >= start, models.Day.date <= end)
+        .join(models.Device, models.Day.device_id == models.Device.id)
+        .where(
+            models.Day.date >= start,
+            models.Day.date <= end,
+            models.Device.profile_id == profile_id,
+        )
         .order_by(models.Day.date.desc())
         .limit(page_size)
         .offset((page - 1) * page_size)
@@ -144,7 +158,6 @@ async def get_nightly_summary(
             stats_by_session[int(stat.session_id)] = stat
 
     nights: list[NightlyRow] = []
-    days_compliant_inline = 0
 
     for day in day_rows:
         day_id = int(day.id)
@@ -165,6 +178,10 @@ async def get_nightly_summary(
         fl_max_reason: str | None = None
         rera_proxy_count: int | None = None
         rera_proxy_reason: str | None = None
+        ti_median_s: float | None = None
+        ti_median_reason: str | None = None
+        ie_ratio: float | None = None
+        ie_ratio_reason: str | None = None
 
         if bs_night is not None:
             if bs_night.rera_count is not None:
@@ -186,6 +203,24 @@ async def get_nightly_summary(
                 fl_p95 = round(bs_night.fl_95th, 4)
             if bs_night.fl_max is not None:
                 fl_max = round(bs_night.fl_max, 4)
+
+            # Ti and I:E from BreathService
+            if bs_night.ti_median_s is not None:
+                ti_median_s = round(bs_night.ti_median_s, 3)
+            if bs_night.ti_median_reason is not None:
+                ti_median_reason = str(bs_night.ti_median_reason)
+            if bs_night.ie_ratio_median is not None:
+                ie_ratio = round(bs_night.ie_ratio_median, 3)
+            if bs_night.ie_ratio_reason is not None:
+                ie_ratio_reason = str(bs_night.ie_ratio_reason)
+
+            # RDI = AHI + RERA index (events/hr, same unit)
+            if day.ahi is not None and rera_index is not None:
+                rdi = round(day.ahi + rera_index, 2)
+            elif rera_index is None and rera_index_reason is not None:
+                rdi_reason = rera_index_reason
+            else:
+                rdi_reason = "not_available"
         else:
             rera_index_reason = "analysis_not_run"
             rdi_reason = "analysis_not_run"
@@ -193,10 +228,10 @@ async def get_nightly_summary(
             fl_p95_reason = "analysis_not_run"
             fl_max_reason = "analysis_not_run"
             rera_proxy_reason = "analysis_not_run"
+            ti_median_reason = "analysis_not_run"
+            ie_ratio_reason = "analysis_not_run"
 
         usage_h = day.total_therapy_hours
-        if usage_h and usage_h >= compliance_threshold_hours:
-            days_compliant_inline += 1
 
         nights.append(
             NightlyRow(
@@ -219,10 +254,10 @@ async def get_nightly_summary(
                 fl_max_reason=fl_max_reason,
                 rera_proxy_count=rera_proxy_count,
                 rera_proxy_reason=rera_proxy_reason,
-                ti_median_s=None,
-                ti_median_reason="not_available",
-                ie_ratio=None,
-                ie_ratio_reason="not_available",
+                ti_median_s=ti_median_s,
+                ti_median_reason=ti_median_reason,
+                ie_ratio=ie_ratio,
+                ie_ratio_reason=ie_ratio_reason,
                 pressure_median_cmh2o=day.pressure_median,
                 pressure_95th_cmh2o=day.pressure_95th,
                 epap_median_cmh2o=day.epap_median,
@@ -247,21 +282,20 @@ async def get_nightly_summary(
             compliance = ComplianceFields(
                 threshold_hours=compliance_threshold_hours,
                 days_compliant=bs_range.days_compliant,
-                days_total=bs_range.n_nights,
+                days_total=bs_range.n_calendar_nights,
                 compliance_pct=round(bs_range.compliance_pct, 1),
             )
-        else:
-            # Inline fallback (range > 90 nights or device ambiguity)
-            compliance = ComplianceFields(
-                threshold_hours=compliance_threshold_hours,
-                days_compliant=days_compliant_inline,
-                days_total=len(day_rows),
-                compliance_pct=(
-                    round(days_compliant_inline / len(day_rows) * 100, 1)
-                    if day_rows
-                    else 0.0
-                ),
-            )
+
+    # Device capabilities block — populated when BreathService resolved a device
+    dev_caps = None
+    if bs_range is not None and bs_range.device_id and bs_range.device_id > 0:
+        dev_caps = await build_device_capabilities(
+            db_session,
+            profile_id,
+            bs_range.device_id,
+            date_start=start,
+            date_end=end,
+        )
 
     return NightlySummaryResponse(
         nights=nights,
@@ -269,4 +303,5 @@ async def get_nightly_summary(
         page=page,
         page_size=page_size,
         compliance=compliance,
+        device_capabilities=dev_caps,
     )

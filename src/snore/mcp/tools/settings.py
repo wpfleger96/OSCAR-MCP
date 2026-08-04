@@ -7,14 +7,19 @@ from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.rx_tracker import RX_KEYS, RxTracker
-from snore.mcp.schemas import SettingsEpoch, SettingsTimelineResponse
+from snore.mcp.schemas import (
+    DeviceCapabilities,
+    SettingsEpoch,
+    SettingsTimelineResponse,
+)
+from snore.mcp.tools._capabilities import build_device_capabilities
 
 
 async def get_settings_timeline(
     db_session: AsyncSession,
     start: date,
     end: date,
-    profile_id: int = 0,
+    profile_id: int,
     device_id: int | None = None,
 ) -> SettingsTimelineResponse:
     """Return therapy settings epochs in [start, end].
@@ -22,6 +27,9 @@ async def get_settings_timeline(
     Each epoch covers a contiguous period of identical settings.  Changed keys
     are flagged on the epoch where the change first appears.  Uses only the
     generic RX_KEYS; no vendor-specific branching (G4).
+
+    Device capabilities are populated per distinct device_id across the filtered
+    epochs, scoped through build_device_capabilities (profile-safe).
     """
     tracker = RxTracker(profile_id)
     all_periods = await tracker.get_history(db_session)
@@ -35,6 +43,19 @@ async def get_settings_timeline(
         and (device_id is None or p.device_id == device_id)
     ]
     filtered.sort(key=lambda p: (p.device_id or 0, p.start_date))
+
+    # Build capabilities once per real device id across the filtered epochs
+    caps_cache: dict[int, DeviceCapabilities | None] = {}
+    for period in filtered:
+        dev_id = period.device_id or 0
+        if dev_id > 0 and dev_id not in caps_cache:
+            caps_cache[dev_id] = await build_device_capabilities(
+                db_session,
+                profile_id,
+                dev_id,
+                date_start=start,
+                date_end=end,
+            )
 
     epochs: list[SettingsEpoch] = []
     prev_settings: dict[int, dict[str, str | None]] = {}
@@ -64,6 +85,7 @@ async def get_settings_timeline(
                 settings=settings,
                 changed_keys=changed_keys if prev else [],
                 device_id=dev_id,
+                device_capabilities=caps_cache.get(dev_id),
             )
         )
 

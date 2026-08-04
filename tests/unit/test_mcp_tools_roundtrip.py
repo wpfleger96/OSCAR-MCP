@@ -1,29 +1,33 @@
 """FastMCP in-memory roundtrip tests for SNORE MCP tools.
 
-Each test exercises the tool → BreathService / service layer → mock DB path
-by calling mcp.call_tool() with _scope_provider and _profile_id overridden
-at the module level.  This verifies the full server wiring (error boundary,
-size guard, JSON serialization) not just the tool impl functions.
+Each test exercises the full server wiring — error boundary, size guard, JSON
+serialization — by calling tools through a real ``fastmcp.Client`` connected
+in-memory to the server returned by ``make_server()``.
 
-Pattern:
-  1. Build the server via make_server() (no lifespan starts).
-  2. Patch snore.mcp.server._scope_provider to return a mock AsyncSession.
-  3. Patch snore.mcp.server._profile_id to a test profile id.
-  4. Patch BreathService / DeviceService / RxTracker methods to return
-     predetermined data.
-  5. Call await mcp.call_tool("tool_name", {...}).
-  6. Assert is_error == False and result content is parseable JSON.
+Patching pattern:
+  - ``snore.mcp.server._lifespan`` is replaced with a mock asynccontextmanager
+    that yields a ``SNORERuntime(scope_provider=..., profile_id=1)`` backed by a
+    mock ``AsyncSession``.  The patch must be active while the ``fastmcp.Client``
+    context is open because ``_bound_lifespan`` inside ``make_server()`` calls
+    ``_lifespan`` by module-level name at connect time.
+  - BreathService / DeviceService / RxTracker methods are patched via
+    ``unittest.mock.patch`` as in the old suite.
 """
 
 from __future__ import annotations
 
 import json
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import fastmcp
 import pytest
+
+from snore.mcp.server import SNORERuntime
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -33,7 +37,6 @@ import pytest
 def _make_mock_session() -> MagicMock:
     """Return a minimal AsyncSession mock that satisfies scalar queries."""
     session = MagicMock()
-    # scalar_one / scalar_one_or_none / scalars().all()
     result_mock = MagicMock()
     result_mock.scalar_one.return_value = 0
     result_mock.scalar_one_or_none.return_value = None
@@ -56,6 +59,38 @@ def _make_server() -> Any:
     return make_server()
 
 
+@asynccontextmanager
+async def _patched_client(
+    session: MagicMock, extra_patches: list[Any] | None = None
+) -> AsyncIterator[fastmcp.Client]:
+    """Context manager yielding a connected fastmcp.Client with lifespan mocked.
+
+    ``_lifespan`` is replaced with a stub that yields a ``SNORERuntime``
+    backed by ``session``.  Any additional ``unittest.mock.patch`` context
+    managers can be passed via ``extra_patches`` and are entered alongside
+    the lifespan patch.
+    """
+
+    @asynccontextmanager
+    async def _fake_lifespan(
+        app: Any, db_flag: str | None = None, profile_name: str = "neutral"
+    ) -> Any:  # noqa: RUF029
+        yield SNORERuntime(scope_provider=lambda: _mock_scope(session), profile_id=1)
+
+    mcp = _make_server()
+    with patch("snore.mcp.server._lifespan", _fake_lifespan):
+        cm_stack = list(extra_patches or [])
+        # Enter all extra patch context managers
+        for cm in cm_stack:
+            cm.__enter__()
+        try:
+            async with fastmcp.Client(mcp) as client:
+                yield client
+        finally:
+            for cm in reversed(cm_stack):
+                cm.__exit__(None, None, None)
+
+
 # ---------------------------------------------------------------------------
 # get_data_overview
 # ---------------------------------------------------------------------------
@@ -64,22 +99,15 @@ def _make_server() -> Any:
 class TestGetDataOverviewRoundtrip:
     async def test_empty_db_returns_empty_overview(self) -> None:
         """get_data_overview on empty DB: no error, devices=[]."""
-        import snore.mcp.server as srv
-
-        mcp = _make_server()
         session = _make_mock_session()
 
-        # DeviceService.list_devices() returns [] → overview returns empty
-        with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
-            patch(
-                "snore.services.device_service.DeviceService.list_devices",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
+        with patch(
+            "snore.services.device_service.DeviceService.list_devices",
+            new_callable=AsyncMock,
+            return_value=[],
         ):
-            result = await mcp.call_tool("get_data_overview", {})
+            async with _patched_client(session) as client:
+                result = await client.call_tool("get_data_overview", {})
 
         assert not result.is_error
         payload = json.loads(result.content[0].text)
@@ -89,9 +117,6 @@ class TestGetDataOverviewRoundtrip:
 
     async def test_single_device_appears_in_overview(self) -> None:
         """get_data_overview with one device returns device info."""
-        import snore.mcp.server as srv
-
-        mcp = _make_server()
         session = _make_mock_session()
 
         mock_device = MagicMock()
@@ -100,7 +125,6 @@ class TestGetDataOverviewRoundtrip:
         mock_device.model = "AirCurve 11"
         mock_device.serial_number = "SN123"
 
-        # scalar_one for analysis count = 0, one() for per-device stats
         count_result = MagicMock()
         count_result.scalar_one.return_value = 0
 
@@ -118,29 +142,30 @@ class TestGetDataOverviewRoundtrip:
 
         session.execute = AsyncMock(
             side_effect=[
-                count_result,  # analysis count
-                stats_result,  # per-device stats
-                mode_result,  # therapy modes
-                waveform_result,  # waveform types
-                event_result,  # event types
+                count_result,
+                stats_result,
+                mode_result,
+                waveform_result,
+                event_result,
             ]
         )
 
         with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
             patch(
                 "snore.services.device_service.DeviceService.list_devices",
                 new_callable=AsyncMock,
                 return_value=[mock_device],
             ),
+            # Patch build_device_capabilities directly: overview.py lets exceptions
+            # propagate, so return None (no capabilities) rather than raising.
             patch(
-                "snore.services.breath_service.BreathService.get_device_capabilities",
+                "snore.mcp.tools.overview.build_device_capabilities",
                 new_callable=AsyncMock,
-                side_effect=Exception("no breaths"),
+                return_value=None,
             ),
         ):
-            result = await mcp.call_tool("get_data_overview", {})
+            async with _patched_client(session) as client:
+                result = await client.call_tool("get_data_overview", {})
 
         assert not result.is_error
         payload = json.loads(result.content[0].text)
@@ -156,24 +181,18 @@ class TestGetDataOverviewRoundtrip:
 class TestGetSettingsTimelineRoundtrip:
     async def test_empty_range_returns_no_epochs(self) -> None:
         """get_settings_timeline with no data: no error, epochs=[]."""
-        import snore.mcp.server as srv
-
-        mcp = _make_server()
         session = _make_mock_session()
 
-        with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
-            patch(
-                "snore.analysis.rx_tracker.RxTracker.get_history",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
+        with patch(
+            "snore.analysis.rx_tracker.RxTracker.get_history",
+            new_callable=AsyncMock,
+            return_value=[],
         ):
-            result = await mcp.call_tool(
-                "get_settings_timeline",
-                {"start": "2024-01-01", "end": "2024-12-31"},
-            )
+            async with _patched_client(session) as client:
+                result = await client.call_tool(
+                    "get_settings_timeline",
+                    {"start": "2024-01-01", "end": "2024-12-31"},
+                )
 
         assert not result.is_error
         payload = json.loads(result.content[0].text)
@@ -182,22 +201,16 @@ class TestGetSettingsTimelineRoundtrip:
 
     async def test_invalid_date_range_returns_error(self) -> None:
         """get_settings_timeline with end < start: ToolError raised."""
-        from fastmcp.exceptions import ToolError
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        import snore.mcp.server as srv
-
-        mcp = _make_server()
         session = _make_mock_session()
 
-        with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
-            pytest.raises(ToolError),
-        ):
-            await mcp.call_tool(
-                "get_settings_timeline",
-                {"start": "2024-12-31", "end": "2024-01-01"},
-            )
+        async with _patched_client(session) as client:
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "get_settings_timeline",
+                    {"start": "2024-12-31", "end": "2024-01-01"},
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -208,24 +221,20 @@ class TestGetSettingsTimelineRoundtrip:
 class TestGetNightlySummaryRoundtrip:
     async def test_empty_range_returns_empty_nights(self) -> None:
         """get_nightly_summary with no Day rows: no error, nights=[]."""
-        import snore.mcp.server as srv
-
-        mcp = _make_server()
         session = _make_mock_session()
 
-        with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
-            patch(
-                "snore.services.breath_service.BreathService.get_nightly_range_summary",
-                new_callable=AsyncMock,
-                side_effect=ValueError("no sessions"),
-            ),
+        # Return None (no range summary) rather than raising — summary.py leaves
+        # bs_range as None and falls through to empty DB result → nights=[].
+        with patch(
+            "snore.services.breath_service.BreathService.get_nightly_range_summary",
+            new_callable=AsyncMock,
+            return_value=None,
         ):
-            result = await mcp.call_tool(
-                "get_nightly_summary",
-                {"start": "2024-01-01", "end": "2024-01-31"},
-            )
+            async with _patched_client(session) as client:
+                result = await client.call_tool(
+                    "get_nightly_summary",
+                    {"start": "2024-01-01", "end": "2024-01-31"},
+                )
 
         assert not result.is_error
         payload = json.loads(result.content[0].text)
@@ -234,22 +243,33 @@ class TestGetNightlySummaryRoundtrip:
 
     async def test_invalid_page_returns_error(self) -> None:
         """get_nightly_summary with page=0: ToolError raised."""
-        from fastmcp.exceptions import ToolError
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        import snore.mcp.server as srv
-
-        mcp = _make_server()
         session = _make_mock_session()
 
-        with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
-            pytest.raises(ToolError),
-        ):
-            await mcp.call_tool(
-                "get_nightly_summary",
-                {"start": "2024-01-01", "end": "2024-01-31", "page": 0},
-            )
+        async with _patched_client(session) as client:
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "get_nightly_summary",
+                    {"start": "2024-01-01", "end": "2024-01-31", "page": 0},
+                )
+
+    async def test_over_90_nights_raises_tool_error_without_db(self) -> None:
+        """get_nightly_summary spanning >90 calendar nights raises ToolError before any DB call."""
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        session = _make_mock_session()
+
+        async with _patched_client(session) as client:
+            with pytest.raises(ToolError, match="maximum per call is 90"):
+                await client.call_tool(
+                    "get_nightly_summary",
+                    # 2024-01-01 → 2024-04-30 = 121 calendar nights
+                    {"start": "2024-01-01", "end": "2024-04-30"},
+                )
+
+        # DB was never touched — scope_provider was never called
+        session.execute.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -258,39 +278,28 @@ class TestGetNightlySummaryRoundtrip:
 
 
 class TestGetEventsRoundtrip:
-    async def test_missing_date_returns_error(self) -> None:
-        """get_events for a date with no data: ToolError raised."""
-        from fastmcp.exceptions import ToolError
+    async def test_missing_date_raises_tool_error(self) -> None:
+        """get_events for a date with no data: ToolError with no-data message."""
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        import snore.mcp.server as srv
-
-        mcp = _make_server()
         session = _make_mock_session()
 
-        with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
-            patch(
-                "snore.services.breath_service.BreathService.get_contextual_events",
-                new_callable=AsyncMock,
-                side_effect=ValueError("no sessions for date"),
-            ),
-            pytest.raises(ToolError, match="No therapy data"),
+        with patch(
+            "snore.services.breath_service.BreathService.get_contextual_events",
+            new_callable=AsyncMock,
+            side_effect=ValueError("no sessions for date"),
         ):
-            await mcp.call_tool("get_events", {"date": "2024-01-01"})
+            async with _patched_client(session) as client:
+                with pytest.raises(ToolError, match="No therapy data"):
+                    await client.call_tool("get_events", {"date": "2024-01-01"})
 
     async def test_events_returned_for_date(self) -> None:
         """get_events with contextual events: no error, events list populated."""
-        from datetime import datetime
-
-        import snore.mcp.server as srv
-
-        from snore.services.breath_service import (
+        from snore.services.breath_service import (  # noqa: PLC0415
             ContextualEvent,
             TimezoneStatus,
         )
 
-        mcp = _make_server()
         session = _make_mock_session()
 
         ev = ContextualEvent(
@@ -311,40 +320,138 @@ class TestGetEventsRoundtrip:
         )
 
         with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
             patch(
                 "snore.services.breath_service.BreathService.get_contextual_events",
                 new_callable=AsyncMock,
                 return_value=[ev],
             ),
+            patch(
+                "snore.mcp.tools._capabilities.build_device_capabilities",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
-            result = await mcp.call_tool(
-                "get_events", {"date": "2024-01-01", "include_context": True}
-            )
+            async with _patched_client(session) as client:
+                result = await client.call_tool(
+                    "get_events", {"date": "2024-01-01", "include_context": True}
+                )
 
         assert not result.is_error
         payload = json.loads(result.content[0].text)
         assert payload["total_events"] == 1
         assert payload["events"][0]["event_type"] == "CA"
         assert payload["events"][0]["offset_seconds"] == 1800.0
+        assert payload["events"][0]["session_id"] == 42
         ctx = payload["events"][0]["context"]
         assert ctx is not None
         assert ctx["pressure_at_event_cmh2o"] == pytest.approx(8.2)
         assert ctx["mv_prior_120s_lpm"] == pytest.approx(5.8)
 
-    async def test_invalid_date_format_returns_error(self) -> None:
+    async def test_invalid_date_format_raises_tool_error(self) -> None:
         """get_events with non-ISO date: ToolError raised."""
-        from fastmcp.exceptions import ToolError
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        import snore.mcp.server as srv
+        session = _make_mock_session()
 
-        mcp = _make_server()
+        async with _patched_client(session) as client:
+            with pytest.raises(ToolError):
+                await client.call_tool("get_events", {"date": "not-a-date"})
+
+    async def test_empty_events_returns_null_response_anchors(self) -> None:
+        """get_events with no events for a valid date: empty list and null response-level anchors."""
         session = _make_mock_session()
 
         with (
-            patch.object(srv, "_scope_provider", lambda: _mock_scope(session)),
-            patch.object(srv, "_profile_id", 1),
-            pytest.raises(ToolError),
+            patch(
+                "snore.services.breath_service.BreathService.get_contextual_events",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "snore.mcp.tools._capabilities.build_device_capabilities",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
-            await mcp.call_tool("get_events", {"date": "not-a-date"})
+            async with _patched_client(session) as client:
+                result = await client.call_tool("get_events", {"date": "2024-01-01"})
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert payload["events"] == []
+        assert payload["total_events"] == 0
+        assert payload["session_id"] is None
+        assert payload["session_start_wall_clock"] is None
+
+    async def test_multi_session_events_null_response_anchors(self) -> None:
+        """Events spanning two sessions: response-level anchors null, per-event anchors populated."""
+        from snore.services.breath_service import (  # noqa: PLC0415
+            ContextualEvent,
+            TimezoneStatus,
+        )
+
+        session = _make_mock_session()
+
+        # Two events from different sessions
+        ev1 = ContextualEvent(
+            session_id=10,
+            session_start_wall_clock=datetime(2024, 1, 1, 21, 0, 0),
+            event_type="OA",
+            event_start_wall_clock=datetime(2024, 1, 1, 21, 30, 0),
+            timezone_status=TimezoneStatus.UNKNOWN,
+            offset_seconds=1800.0,
+            duration_seconds=15.0,
+            pressure_at_event_cmh2o=9.0,
+            pressure_reason=None,
+            leak_at_event_lpm=1.0,
+            leak_reason=None,
+            mv_prior_120s_lpm=6.0,
+            mv_reason=None,
+            minutes_since_session_start=30.0,
+        )
+        ev2 = ContextualEvent(
+            session_id=11,  # different session
+            session_start_wall_clock=datetime(2024, 1, 2, 0, 0, 0),
+            event_type="CA",
+            event_start_wall_clock=datetime(2024, 1, 2, 1, 0, 0),
+            timezone_status=TimezoneStatus.UNKNOWN,
+            offset_seconds=3600.0,
+            duration_seconds=25.0,
+            pressure_at_event_cmh2o=10.0,
+            pressure_reason=None,
+            leak_at_event_lpm=2.0,
+            leak_reason=None,
+            mv_prior_120s_lpm=5.5,
+            mv_reason=None,
+            minutes_since_session_start=60.0,
+        )
+
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.get_contextual_events",
+                new_callable=AsyncMock,
+                return_value=[ev1, ev2],
+            ),
+            patch(
+                "snore.mcp.tools._capabilities.build_device_capabilities",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            async with _patched_client(session) as client:
+                result = await client.call_tool("get_events", {"date": "2024-01-01"})
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+
+        # Response-level anchors null because events span two sessions
+        assert payload["session_id"] is None
+        assert payload["session_start_wall_clock"] is None
+        assert payload["total_events"] == 2
+
+        # Per-event anchors always populated
+        events = payload["events"]
+        assert events[0]["session_id"] == 10
+        assert events[0]["session_start_wall_clock"] == "2024-01-01T21:00:00"
+        assert events[1]["session_id"] == 11
+        assert events[1]["session_start_wall_clock"] == "2024-01-02T00:00:00"
