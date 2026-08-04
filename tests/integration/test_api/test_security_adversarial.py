@@ -1869,7 +1869,13 @@ class TestP3DevOriginStrictValidation:
 
 
 class TestP3AuthBodyCeiling413:
-    """The 16 KiB auth-body ceiling must return 413 to the client, not 400."""
+    """The 16 KiB auth-body ceiling must return 413 regardless of encoding.
+
+    The pre-read buffer in CsrfMiddleware.dispatch consumes the full ASGI
+    stream before call_next, making Content-Length presence, accuracy, and
+    chunked encoding irrelevant.  Tests use httpx.AsyncClient + ASGITransport
+    for chunked/generator bodies that TestClient cannot model.
+    """
 
     @pytest.fixture(autouse=True)
     def _setup(self, monkeypatch):
@@ -1878,11 +1884,28 @@ class TestP3AuthBodyCeiling413:
             load_config(auth_mode_override="multiuser", bind_host_override="127.0.0.1")
         )
 
-    def test_oversized_auth_body_returns_413(self, async_db_session):
-        """A body > 16 KiB sent to an auth endpoint must return 413, not 400."""
-        client = _make_client(async_db_session)
+    def _make_async_app(self, async_db_session: AsyncSession) -> object:
+        """Build the real app with get_db/get_actor overrides for async tests."""
+        from collections.abc import AsyncGenerator  # noqa: PLC0415
 
-        # Craft a JSON body just over 16 KiB.
+        app = create_app()
+
+        async def override_db() -> AsyncGenerator[AsyncSession]:
+            async with async_db_session.begin():
+                yield async_db_session
+
+        async def override_actor(
+            db: Annotated[AsyncSession, Depends(get_db)],
+        ) -> ActorContext:
+            return await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[get_actor] = override_actor
+        return app
+
+    def test_oversized_auth_body_returns_413(self, async_db_session):
+        """Fixed-length oversized body (Content-Length set by client) → 413."""
+        client = _make_client(async_db_session)
         big_password = "x" * (17 * 1024)
         resp = client.post(
             "/api/v1/auth/login",
@@ -1897,14 +1920,155 @@ class TestP3AuthBodyCeiling413:
     def test_body_just_below_ceiling_passes(self, async_db_session):
         """A body just under 16 KiB must not be rejected by the ceiling."""
         client = _make_client(async_db_session)
-
-        small_password = "x" * 10  # well under 16 KiB
+        small_password = "x" * 10
         resp = client.post(
             "/api/v1/auth/login",
             json={"email": "test@example.com", "password": small_password},
             headers={"origin": "http://127.0.0.1:8000"},
         )
-        # 401 = auth rejected (expected); 413/400 = ceiling hit (unexpected).
         assert resp.status_code not in (400, 413), (
             f"Body ceiling fired prematurely on small body: {resp.status_code}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_chunked_no_content_length_returns_413(self, async_db_session):
+        """Chunked body, no Content-Length, total > 16 KiB → 413.
+
+        **Falsifiability:** reverting to a Content-Length-only shortcut means
+        chunked bodies without the header are never intercepted and reach the
+        JSON parser, which converts the streaming error to
+        400 {"detail":"There was an error parsing the body"}.
+        The pre-read buffer closes this gap.
+        """
+        import asyncio  # noqa: PLC0415
+
+        import httpx  # noqa: PLC0415
+
+        from snore.api.middleware import _AUTH_BODY_LIMIT  # noqa: PLC0415
+
+        app = self._make_async_app(async_db_session)
+
+        from collections.abc import AsyncIterator  # noqa: PLC0415
+
+        async def chunked_body() -> AsyncIterator[bytes]:
+            """Yield 17 one-KiB chunks — httpx sends as chunked (no CL)."""
+            for _ in range(17):
+                yield b"x" * 1024
+                await asyncio.sleep(0)  # yield to event loop between chunks
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/api/v1/auth/login",
+                content=chunked_body(),
+                headers={
+                    "content-type": "application/json",
+                    "origin": "http://127.0.0.1:8000",
+                },
+            )
+
+        assert resp.status_code == 413, (
+            f"Expected 413 for chunked body > {_AUTH_BODY_LIMIT} bytes "
+            f"without Content-Length, got {resp.status_code}: {resp.text[:200]}.\n"
+            f"If 400: the pre-read buffer was replaced by a Content-Length-only "
+            f"shortcut that misses chunked requests."
+        )
+
+    @pytest.mark.asyncio
+    async def test_body_exactly_at_limit_is_not_rejected(self, async_db_session):
+        """A body of exactly _AUTH_BODY_LIMIT bytes passes through the ceiling."""
+        import httpx  # noqa: PLC0415
+
+        from snore.api.middleware import _AUTH_BODY_LIMIT  # noqa: PLC0415
+
+        app = self._make_async_app(async_db_session)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/api/v1/auth/login",
+                content=b"x" * _AUTH_BODY_LIMIT,
+                headers={
+                    "content-type": "application/json",
+                    "origin": "http://127.0.0.1:8000",
+                },
+            )
+
+        # Auth will reject (401/422 — body is not valid JSON), but NOT 413.
+        assert resp.status_code not in (400, 413), (
+            f"Ceiling fired at exactly {_AUTH_BODY_LIMIT} bytes; "
+            f"expected off-by-one boundary, got {resp.status_code}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_body_one_byte_over_limit_returns_413(self, async_db_session):
+        """A body of _AUTH_BODY_LIMIT + 1 bytes is rejected with 413."""
+        import httpx  # noqa: PLC0415
+
+        from snore.api.middleware import _AUTH_BODY_LIMIT  # noqa: PLC0415
+
+        app = self._make_async_app(async_db_session)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/api/v1/auth/login",
+                content=b"x" * (_AUTH_BODY_LIMIT + 1),
+                headers={
+                    "content-type": "application/json",
+                    "origin": "http://127.0.0.1:8000",
+                },
+            )
+
+        assert resp.status_code == 413, (
+            f"Expected 413 for {_AUTH_BODY_LIMIT + 1}-byte body, got {resp.status_code}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_lying_content_length_returns_413(self, async_db_session):
+        """Lying Content-Length (10) with 17 KiB actual body → 413.
+
+        The pre-read buffer counts actual bytes, not the declared header, so
+        a fraudulent small Content-Length cannot bypass the ceiling.
+        """
+        import asyncio  # noqa: PLC0415
+
+        import httpx  # noqa: PLC0415
+
+        from snore.api.middleware import _AUTH_BODY_LIMIT  # noqa: PLC0415
+
+        app = self._make_async_app(async_db_session)
+        big_body = b"x" * (_AUTH_BODY_LIMIT + 1024)
+
+        from collections.abc import AsyncIterator  # noqa: PLC0415
+
+        async def lying_body() -> AsyncIterator[bytes]:
+            chunk = 1024
+            for i in range(0, len(big_body), chunk):
+                yield big_body[i : i + chunk]
+                await asyncio.sleep(0)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/api/v1/auth/login",
+                content=lying_body(),
+                headers={
+                    "content-type": "application/json",
+                    "content-length": "10",  # declared small, actual is large
+                    "origin": "http://127.0.0.1:8000",
+                },
+            )
+
+        assert resp.status_code == 413, (
+            f"Expected 413 even with lying Content-Length: 10, "
+            f"got {resp.status_code}. Pre-read buffer must count actual bytes."
         )
