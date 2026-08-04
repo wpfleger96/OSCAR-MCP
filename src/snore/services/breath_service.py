@@ -762,9 +762,19 @@ class NightlyAnalysisSummary(BaseModel):
     fl_max: float | None
     fl_reason: NullReason | None
 
+    ti_median_s: float | None
+    ti_median_reason: NullReason | None
+    ie_ratio_median: float | None
+    ie_ratio_reason: NullReason | None
+
     total_therapy_hours: float
     compliance_threshold_hours: float
     is_compliant: bool
+
+    rera_index: float | None = None
+    rera_index_reason: NullReason | None = None
+    rdi: float | None = None
+    rdi_reason: NullReason | None = None
 
 
 class NightlyRangeSummary(BaseModel):
@@ -802,6 +812,10 @@ class DeviceCapabilities(BaseModel):
     session_count: int
     nights_with_data: int
     supported_vendor_models: list[str]
+
+    manufacturer: str | None = None
+    model: str | None = None
+    serial_number: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -930,21 +944,28 @@ class BreathService:
         )
         if row is None:
             return AnalysisStatus.NOT_RUN, None, None
+        status, algo = self._classify_analysis_row(row)
+        return status, algo, row.id
 
+    @staticmethod
+    def _classify_analysis_row(
+        row: Any,
+    ) -> tuple[AnalysisStatus, AlgoVersions | None]:
+        """Classify an AnalysisResult ORM row: (status, algo|None).
+
+        Precondition: row is not None (callers verify before calling).
+        """
         stored = row.engine_versions_json
         if not stored or "identity" not in stored:
-            return AnalysisStatus.STALE_VERSION, None, row.id
-
+            return AnalysisStatus.STALE_VERSION, None
         try:
             algo = AlgoVersions.model_validate(stored)
         except Exception:
-            return AnalysisStatus.STALE_VERSION, None, row.id
-
-        current = self._current_algorithm_identity()
+            return AnalysisStatus.STALE_VERSION, None
+        current = BreathService._current_algorithm_identity()
         if algo.identity.model_dump() != current.model_dump():
-            return AnalysisStatus.STALE_VERSION, algo, row.id
-
-        return AnalysisStatus.OK, algo, row.id
+            return AnalysisStatus.STALE_VERSION, algo
+        return AnalysisStatus.OK, algo
 
     # ------------------------------------------------------------------
     # Single range-aware resolver (replaces _resolve_device, _resolve_session_for_date,
@@ -2409,6 +2430,217 @@ class BreathService:
 
         return AnalysisStatus.OK, algo
 
+    @staticmethod
+    def _build_nightly_summary(
+        *,
+        therapy_date: date,
+        device_id: int,
+        day_sessions: list[Any],
+        day_row: Any | None,
+        ar_classification: dict[
+            int, tuple[AnalysisStatus, AlgoVersions | None, int | None]
+        ],
+        breath_rows_by_ar_id: dict[int, list[Any]],
+        compliance_threshold_hours: float,
+    ) -> NightlyAnalysisSummary:
+        """Build a NightlyAnalysisSummary from pre-fetched data. No I/O."""
+        import statistics  # noqa: PLC0415
+
+        if day_row is not None and day_row.total_therapy_hours is not None:
+            total_therapy_hours = float(day_row.total_therapy_hours)
+        else:
+            total_therapy_hours = (
+                sum(s.duration_seconds or 0.0 for s in day_sessions) / 3600.0
+            )
+
+        session_coverages: list[SessionCoverage] = []
+        ok_sessions: list[tuple[int, AlgoVersions]] = []
+        identities_for_reduce: list[AlgorithmIdentity] = []
+        missing_or_stale: list[int] = []
+        algo_identity: AlgorithmIdentity | None = None
+
+        for s in day_sessions:
+            sid = s.id
+            status, algo, _ar_id = ar_classification.get(
+                sid, (AnalysisStatus.NOT_RUN, None, None)
+            )
+            session_coverages.append(
+                SessionCoverage(
+                    session_id=sid, analysis_status=status, algo_versions=algo
+                )
+            )
+            if status == AnalysisStatus.OK and algo is not None:
+                ok_sessions.append((sid, algo))
+                identities_for_reduce.append(algo.identity)
+                algo_identity = algo.identity
+            else:
+                missing_or_stale.append(sid)
+
+        eligible = len(day_sessions)
+        analyzed = len(ok_sessions)
+
+        day_status = BreathService._reduce_day_status(
+            session_coverages, identities_for_reduce
+        )
+        day_ahi = day_row.ahi if day_row is not None else None
+
+        if not ok_sessions:
+            return NightlyAnalysisSummary(
+                therapy_date=therapy_date,
+                device_id=device_id,
+                day_status=day_status,
+                session_coverage=session_coverages,
+                eligible_session_count=eligible,
+                analyzed_session_count=0,
+                missing_or_stale_session_ids=missing_or_stale,
+                algorithm_identity=None,
+                rera_count=None,
+                rera_reason=NullReason.NOT_AVAILABLE,
+                primary_mode=None,
+                fl_median=None,
+                fl_95th=None,
+                fl_max=None,
+                fl_reason=NullReason.NOT_AVAILABLE,
+                ti_median_s=None,
+                ti_median_reason=NullReason.NOT_AVAILABLE,
+                ie_ratio_median=None,
+                ie_ratio_reason=NullReason.NOT_AVAILABLE,
+                total_therapy_hours=total_therapy_hours,
+                compliance_threshold_hours=compliance_threshold_hours,
+                is_compliant=total_therapy_hours >= compliance_threshold_hours,
+                rera_index=None,
+                rera_index_reason=NullReason.NOT_AVAILABLE,
+                rdi=None,
+                rdi_reason=NullReason.NOT_AVAILABLE,
+            )
+
+        # MIXED_VERSION within a day is handled by _reduce_day_status; under current
+        # _latest_analysis_for_session semantics all OK sessions share the current identity.
+
+        modes_seen = {algo.run.primary_mode for _, algo in ok_sessions}
+        uniform_primary_mode = next(iter(modes_seen)) if len(modes_seen) == 1 else None
+
+        fl_vals: list[float] = []
+        ti_vals: list[float] = []
+        ie_vals: list[float] = []
+        rera_count = 0
+
+        for sid, _algo in ok_sessions:
+            _status, _a, ar_id = ar_classification.get(sid, (None, None, None))
+            if ar_id is None:
+                continue
+            breath_rows = breath_rows_by_ar_id.get(ar_id, [])
+            for b in breath_rows:
+                if b.leak_valid is True:
+                    if b.mid_insp_flattening is not None:
+                        fl_vals.append(b.mid_insp_flattening)
+                    if b.inspiration_time_s is not None:
+                        ti_vals.append(b.inspiration_time_s)
+                    if b.i_e_ratio is not None:
+                        ie_vals.append(b.i_e_ratio)
+            # RERA proxy: FL runs ending in recovery breath
+            rera_count += _count_fl_run_reras(breath_rows)
+
+        fl_median: float | None
+        fl_95th: float | None
+        fl_max: float | None
+        fl_reason: NullReason | None
+
+        if fl_vals:
+            sorted_fl = sorted(fl_vals)
+            n = len(sorted_fl)
+            fl_median = float(statistics.median(sorted_fl))
+            p95_idx = min(int(n * 0.95), n - 1)
+            fl_95th = sorted_fl[p95_idx]
+            fl_max = sorted_fl[-1]
+            fl_reason = None
+        else:
+            fl_median = fl_95th = fl_max = None
+            fl_reason = NullReason.NOT_AVAILABLE
+
+        ti_median_s: float | None
+        ti_median_reason: NullReason | None
+        ie_ratio_median: float | None
+        ie_ratio_reason: NullReason | None
+
+        if ti_vals:
+            ti_median_s = float(statistics.median(ti_vals))
+            ti_median_reason = None
+        else:
+            ti_median_s = None
+            ti_median_reason = NullReason.NOT_AVAILABLE
+
+        if ie_vals:
+            ie_ratio_median = float(statistics.median(ie_vals))
+            ie_ratio_reason = None
+        else:
+            ie_ratio_median = None
+            ie_ratio_reason = NullReason.NOT_AVAILABLE
+
+        # rera_index / rdi arithmetic (finding 7 — moves into service)
+        rera_reason: NullReason | None = (
+            None if uniform_primary_mode is not None else NullReason.NOT_AVAILABLE
+        )
+        final_rera_count = rera_count if uniform_primary_mode is not None else None
+
+        rera_index: float | None
+        rera_index_reason: NullReason | None
+        rdi: float | None
+        rdi_reason: NullReason | None
+
+        if final_rera_count is not None:
+            if total_therapy_hours > 0:
+                rera_index = round(final_rera_count / total_therapy_hours, 2)
+                rera_index_reason = None
+            else:
+                rera_index = None
+                rera_index_reason = NullReason.DURATION_ZERO
+        elif rera_reason is not None:
+            rera_index = None
+            rera_index_reason = rera_reason
+        else:
+            rera_index = None
+            rera_index_reason = None
+
+        if day_ahi is not None and rera_index is not None:
+            rdi = round(day_ahi + rera_index, 2)
+            rdi_reason = None
+        elif rera_index is None and rera_index_reason is not None:
+            rdi = None
+            rdi_reason = rera_index_reason
+        else:
+            rdi = None
+            rdi_reason = NullReason.NOT_AVAILABLE
+
+        return NightlyAnalysisSummary(
+            therapy_date=therapy_date,
+            device_id=device_id,
+            day_status=day_status,
+            session_coverage=session_coverages,
+            eligible_session_count=eligible,
+            analyzed_session_count=analyzed,
+            missing_or_stale_session_ids=missing_or_stale,
+            algorithm_identity=algo_identity,
+            rera_count=final_rera_count,
+            rera_reason=rera_reason,
+            primary_mode=uniform_primary_mode,
+            fl_median=fl_median,
+            fl_95th=fl_95th,
+            fl_max=fl_max,
+            fl_reason=fl_reason,
+            ti_median_s=ti_median_s,
+            ti_median_reason=ti_median_reason,
+            ie_ratio_median=ie_ratio_median,
+            ie_ratio_reason=ie_ratio_reason,
+            total_therapy_hours=total_therapy_hours,
+            compliance_threshold_hours=compliance_threshold_hours,
+            is_compliant=total_therapy_hours >= compliance_threshold_hours,
+            rera_index=rera_index,
+            rera_index_reason=rera_index_reason,
+            rdi=rdi,
+            rdi_reason=rdi_reason,
+        )
+
     async def get_nightly_summary(
         self,
         therapy_date: date,
@@ -2428,7 +2660,6 @@ class BreathService:
         if not day_sessions:
             raise ValueError(f"No sessions found for date {therapy_date}")
 
-        # Compliance: use Day.total_therapy_hours (plan IMPORTANT-5)
         day_row = (
             (
                 await self._db.execute(
@@ -2441,137 +2672,43 @@ class BreathService:
             .scalars()
             .first()
         )
-        if day_row is not None and day_row.total_therapy_hours is not None:
-            total_therapy_hours = float(day_row.total_therapy_hours)
-        else:
-            total_therapy_hours = (
-                sum(s.duration_seconds or 0.0 for s in day_sessions) / 3600.0
-            )
 
-        session_coverages: list[SessionCoverage] = []
-        ok_sessions: list[tuple[int, AlgoVersions]] = []
-        identities_for_reduce: list[AlgorithmIdentity] = []
-        missing_or_stale: list[int] = []
-        algo_identity: AlgorithmIdentity | None = None
-        ar_id_by_session: dict[int, int | None] = {}
-
+        # Per-session classification (single-night path keeps per-session queries)
+        ar_classification: dict[
+            int, tuple[AnalysisStatus, AlgoVersions | None, int | None]
+        ] = {}
         for s in day_sessions:
             sid = s.id
             status, algo, ar_id = await self._latest_analysis_for_session(sid)
-            session_coverages.append(
-                SessionCoverage(
-                    session_id=sid, analysis_status=status, algo_versions=algo
-                )
-            )
-            if status == AnalysisStatus.OK and algo is not None:
-                ok_sessions.append((sid, algo))
-                identities_for_reduce.append(algo.identity)
-                algo_identity = algo.identity
-                ar_id_by_session[sid] = ar_id
-            else:
-                missing_or_stale.append(sid)
+            ar_classification[sid] = (status, algo, ar_id)
 
-        eligible = len(day_sessions)
-        analyzed = len(ok_sessions)
-
-        # Centralized status reducer (plan §1 line 864)
-        day_status = self._reduce_day_status(session_coverages, identities_for_reduce)
-
-        if not ok_sessions:
-            return NightlyAnalysisSummary(
-                therapy_date=therapy_date,
-                device_id=resolved_device_id,
-                day_status=day_status,
-                session_coverage=session_coverages,
-                eligible_session_count=eligible,
-                analyzed_session_count=0,
-                missing_or_stale_session_ids=missing_or_stale,
-                algorithm_identity=None,
-                rera_count=None,
-                rera_reason=NullReason.NOT_AVAILABLE,
-                primary_mode=None,
-                fl_median=None,
-                fl_95th=None,
-                fl_max=None,
-                fl_reason=NullReason.NOT_AVAILABLE,
-                total_therapy_hours=total_therapy_hours,
-                compliance_threshold_hours=compliance_threshold_hours,
-                is_compliant=total_therapy_hours >= compliance_threshold_hours,
-            )
-
-        # MIXED_VERSION within a day is handled by _reduce_day_status; under current
-        # _latest_analysis_for_session semantics all OK sessions share the current identity.
-
-        # Determine primary_mode uniformity
-        modes_seen = {algo.run.primary_mode for _, algo in ok_sessions}
-        uniform_primary_mode = next(iter(modes_seen)) if len(modes_seen) == 1 else None
-
-        # Gather FL (mid_insp_flattening) values across leak-valid breaths
-        fl_vals: list[float] = []
-        rera_count = 0
-        for sid, _algo in ok_sessions:
-            ar_id = ar_id_by_session.get(sid)
-            if ar_id is None:
-                continue
-            breath_rows = (
-                (
-                    await self._db.execute(
-                        select(models.Breath)
-                        .where(models.Breath.analysis_result_id == ar_id)
-                        .order_by(models.Breath.breath_number)
+        # Fetch breath rows for OK sessions
+        breath_rows_by_ar_id: dict[int, list[Any]] = {}
+        for s in day_sessions:
+            sid = s.id
+            status, _algo, ar_id = ar_classification[sid]
+            if status == AnalysisStatus.OK and ar_id is not None:
+                breath_rows = (
+                    (
+                        await self._db.execute(
+                            select(models.Breath)
+                            .where(models.Breath.analysis_result_id == ar_id)
+                            .order_by(models.Breath.breath_number)
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            for b in breath_rows:
-                if b.leak_valid is True and b.mid_insp_flattening is not None:
-                    fl_vals.append(b.mid_insp_flattening)
+                breath_rows_by_ar_id[ar_id] = list(breath_rows)
 
-            # RERA proxy: FL runs ending in recovery breath
-            rera_count += _count_fl_run_reras(breath_rows)
-
-        fl_median: float | None
-        fl_95th: float | None
-        fl_max: float | None
-        fl_reason: NullReason | None
-
-        if fl_vals:
-            import statistics  # noqa: PLC0415
-
-            sorted_fl = sorted(fl_vals)
-            n = len(sorted_fl)
-            fl_median = float(statistics.median(sorted_fl))
-            p95_idx = min(int(n * 0.95), n - 1)
-            fl_95th = sorted_fl[p95_idx]
-            fl_max = sorted_fl[-1]
-            fl_reason = None
-        else:
-            fl_median = fl_95th = fl_max = None
-            fl_reason = NullReason.NOT_AVAILABLE
-
-        # day_status already set by _reduce_day_status above; use it directly
-        return NightlyAnalysisSummary(
+        return self._build_nightly_summary(
             therapy_date=therapy_date,
             device_id=resolved_device_id,
-            day_status=day_status,
-            session_coverage=session_coverages,
-            eligible_session_count=eligible,
-            analyzed_session_count=analyzed,
-            missing_or_stale_session_ids=missing_or_stale,
-            algorithm_identity=algo_identity,
-            rera_count=rera_count if uniform_primary_mode is not None else None,
-            rera_reason=None
-            if uniform_primary_mode is not None
-            else NullReason.NOT_AVAILABLE,
-            primary_mode=uniform_primary_mode,
-            fl_median=fl_median,
-            fl_95th=fl_95th,
-            fl_max=fl_max,
-            fl_reason=fl_reason,
-            total_therapy_hours=total_therapy_hours,
+            day_sessions=day_sessions,
+            day_row=day_row,
+            ar_classification=ar_classification,
+            breath_rows_by_ar_id=breath_rows_by_ar_id,
             compliance_threshold_hours=compliance_threshold_hours,
-            is_compliant=total_therapy_hours >= compliance_threshold_hours,
         )
 
     async def get_nightly_range_summary(
@@ -2581,8 +2718,12 @@ class BreathService:
         device_id: int | None = None,
         compliance_threshold_hours: float = 4.0,
     ) -> NightlyRangeSummary:
-        """Per-night summaries + aggregate compliance."""
+        """Per-night summaries + aggregate compliance (bulk-query path)."""
         from datetime import timedelta  # noqa: PLC0415
+
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
 
         if date_end < date_start:
             raise ValueError(
@@ -2603,7 +2744,7 @@ class BreathService:
         # DeviceAmbiguityError and DeviceNotOwnedError propagate (ownership failures).
         # ValueError (no sessions, device_id=None auto-select found nothing) → empty summary.
         try:
-            resolved_device_id, _ = await self._resolve_range(
+            resolved_device_id, sessions_by_date = await self._resolve_range(
                 date_start, date_end, device_id
             )
         except (DeviceAmbiguityError, DeviceNotOwnedError):
@@ -2620,22 +2761,114 @@ class BreathService:
                 compliance_pct=0.0,
                 nights=[],
             )
+
+        # Bulk Day query for all dates that have sessions
+        all_dates = list(sessions_by_date.keys())
+        day_rows = (
+            (
+                await self._db.execute(
+                    select(models.Day).where(
+                        models.Day.device_id == resolved_device_id,
+                        models.Day.date.in_(all_dates),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        day_by_date: dict[date, Any] = {d.date: d for d in day_rows}
+
+        # Collect all session IDs across the range
+        all_sessions: list[Any] = []
+        for sessions in sessions_by_date.values():
+            all_sessions.extend(sessions)
+        all_session_ids = [s.id for s in all_sessions]
+
+        # Bulk AnalysisResult query + Python reduction to latest-per-session
+        ar_rows = (
+            (
+                await self._db.execute(
+                    select(models.AnalysisResult)
+                    .where(models.AnalysisResult.session_id.in_(all_session_ids))
+                    .order_by(
+                        models.AnalysisResult.session_id,
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        latest_ar_by_session: dict[int, Any] = {}
+        for ar in ar_rows:
+            if ar.session_id not in latest_ar_by_session:
+                latest_ar_by_session[ar.session_id] = ar
+
+        # Classify each session
+        ar_classification: dict[
+            int, tuple[AnalysisStatus, AlgoVersions | None, int | None]
+        ] = {}
+        for sid in all_session_ids:
+            ar_row = latest_ar_by_session.get(sid)
+            if ar_row is None:
+                ar_classification[sid] = (AnalysisStatus.NOT_RUN, None, None)
+            else:
+                status, algo = self._classify_analysis_row(ar_row)
+                ar_classification[sid] = (status, algo, ar_row.id)
+
+        # Bulk Breath query for all OK ar_ids (8 columns only)
+        ok_ar_ids = [
+            ar_id
+            for (_status, _algo, ar_id) in ar_classification.values()
+            if _status == AnalysisStatus.OK and ar_id is not None
+        ]
+        breath_rows_by_ar_id: dict[int, list[Any]] = {ar_id: [] for ar_id in ok_ar_ids}
+
+        if ok_ar_ids:
+            breath_cols = (
+                models.Breath.analysis_result_id,
+                models.Breath.breath_number,
+                models.Breath.leak_valid,
+                models.Breath.mid_insp_flattening,
+                models.Breath.inspiration_time_s,
+                models.Breath.i_e_ratio,
+                models.Breath.flow_class,
+                models.Breath.is_recovery_breath,
+            )
+            breath_result = await self._db.execute(
+                select(*breath_cols)
+                .where(models.Breath.analysis_result_id.in_(ok_ar_ids))
+                .order_by(
+                    models.Breath.analysis_result_id,
+                    models.Breath.breath_number,
+                )
+            )
+            for row in breath_result:
+                breath_rows_by_ar_id[row.analysis_result_id].append(row)
+
+        # Per-night builder loop (nights without sessions are skipped)
         nights: list[NightlyAnalysisSummary] = []
         days_compliant = 0
         current = date_start
         while current <= date_end:
-            try:
-                summary = await self.get_nightly_summary(
-                    current,
+            day_sessions = sessions_by_date.get(current, [])
+            if day_sessions:
+                summary = self._build_nightly_summary(
+                    therapy_date=current,
                     device_id=resolved_device_id,
+                    day_sessions=day_sessions,
+                    day_row=day_by_date.get(current),
+                    ar_classification=ar_classification,
+                    breath_rows_by_ar_id=breath_rows_by_ar_id,
                     compliance_threshold_hours=compliance_threshold_hours,
                 )
                 nights.append(summary)
                 if summary.is_compliant:
                     days_compliant += 1
-            except ValueError:
-                pass  # no sessions on this day
             current += timedelta(days=1)
+
         n_nights = len(nights)
         compliance_pct = (
             (days_compliant / n_calendar * 100.0) if n_calendar > 0 else 0.0
@@ -2669,15 +2902,19 @@ class BreathService:
 
         ensure_registered_parsers()
 
-        # Verify device ownership before querying
+        # Verify device ownership before querying (fetch full row for identity fields)
         owned_device = (
-            await self._db.execute(
-                select(models.Device.id).where(
-                    models.Device.id == device_id,
-                    models.Device.profile_id == self._profile_id,
+            (
+                await self._db.execute(
+                    select(models.Device).where(
+                        models.Device.id == device_id,
+                        models.Device.profile_id == self._profile_id,
+                    )
                 )
             )
-        ).scalar_one_or_none()
+            .scalars()
+            .first()
+        )
         if owned_device is None:
             return DeviceCapabilities(
                 device_id=device_id,
@@ -2693,6 +2930,9 @@ class BreathService:
                 session_count=0,
                 nights_with_data=0,
                 supported_vendor_models=[],
+                manufacturer=None,
+                model=None,
+                serial_number=None,
             )
 
         # Date range of actual data — only days with at least one Session count
@@ -2830,6 +3070,9 @@ class BreathService:
             session_count=session_count,
             nights_with_data=nights_with_data,
             supported_vendor_models=supported_models,
+            manufacturer=owned_device.manufacturer,
+            model=owned_device.model,
+            serial_number=owned_device.serial_number,
         )
 
     async def get_contextual_events(
