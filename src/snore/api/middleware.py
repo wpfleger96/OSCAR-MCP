@@ -4,7 +4,7 @@
     Resolves ``request.state.actor`` on every request.  Local mode auto-
     provisions; multiuser mode validates the signed session cookie.
 
-``CsrfMiddleware``
+``AuthPathMiddleware``
     In multiuser mode, all unsafe-method (POST/PUT/PATCH/DELETE) requests must
     carry an ``Origin`` or ``Referer`` header whose parsed origin exactly
     matches ``AppConfig.public_origin`` or a pre-parsed ``dev_origins`` entry.
@@ -24,19 +24,17 @@
 ``RateLimitMiddleware``
     Per-IP sliding-window rate limiter (30 req/60 s) on ``/api/v1/auth/``
     in multiuser mode.  Uses the canonical trusted-client-IP helper.
-
-``_ByteCeilingReceive``
-    ASGI receive wrapper that raises ``HTTPException(413)`` once a cumulative
-    byte ceiling is crossed.  Used only for the upload ingress ceiling
-    (import_data.py); the auth-body ceiling uses a pre-read buffer instead.
 """
 
 from __future__ import annotations
 
 import logging
 
-from collections.abc import Awaitable, Callable, MutableMapping
-from typing import Any
+from collections.abc import MutableMapping
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from snore.api.config import AppConfig
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -51,44 +49,6 @@ _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # Conservative body ceiling for all /api/v1/auth/ endpoints.
 _AUTH_BODY_LIMIT = 16 * 1024  # 16 KiB
-
-
-# ---------------------------------------------------------------------------
-# Shared ASGI receive wrapper
-# ---------------------------------------------------------------------------
-
-
-class _ByteCeilingReceive:
-    """ASGI receive wrapper that raises HTTPException(413) on byte-ceiling breach.
-
-    Used only for the upload ingress ceiling (import_data.py).  The auth-body
-    ceiling uses a pre-read buffer in CsrfMiddleware instead, which avoids the
-    Starlette body-parser translating the 413 to 400.
-    """
-
-    def __init__(
-        self,
-        inner: Callable[[], Awaitable[MutableMapping[str, Any]]],
-        max_bytes: int,
-        detail: str | None = None,
-    ) -> None:
-        self._inner = inner
-        self._max = max_bytes
-        self._detail = (
-            detail or f"Request body exceeds the {max_bytes // 1024} KiB limit"
-        )
-        self._seen = 0
-
-    async def __call__(self) -> MutableMapping[str, Any]:
-        from fastapi import HTTPException  # noqa: PLC0415
-
-        msg = await self._inner()
-        if msg.get("type") == "http.request":
-            chunk: bytes = msg.get("body", b"")
-            self._seen += len(chunk)
-            if self._seen > self._max:
-                raise HTTPException(status_code=413, detail=self._detail)
-        return msg
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +142,11 @@ async def _resolve_multiuser_actor(request: Request) -> ActorContext | None:
 
 
 # ---------------------------------------------------------------------------
-# CsrfMiddleware
+# AuthPathMiddleware
 # ---------------------------------------------------------------------------
 
 
-class CsrfMiddleware(BaseHTTPMiddleware):
+class AuthPathMiddleware(BaseHTTPMiddleware):
     """CSRF origin check + auth-path no-store + auth-body ceiling.
 
     In multiuser mode, rejects any unsafe-method request whose parsed origin
@@ -303,11 +263,10 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         return inner_response
 
     @staticmethod
-    def _check_origin(request: Request, cfg: object) -> str | None:
+    def _check_origin(request: Request, cfg: AppConfig) -> str | None:
         """Return an error string if the origin fails the check, or None if OK."""
-        from snore.api.config import AppConfig, parse_origin  # noqa: PLC0415
+        from snore.api.config import parse_origin  # noqa: PLC0415
 
-        assert isinstance(cfg, AppConfig)
         public_origin = cfg.public_origin
 
         if public_origin is None:
@@ -343,6 +302,10 @@ class CsrfMiddleware(BaseHTTPMiddleware):
 
         logger.warning("CSRF check: %r (%s) not in allowed origins", raw, incoming)
         return "Origin not allowed"
+
+
+# Backward-compat alias — app.py imports this name; remove once app.py is updated.
+CsrfMiddleware = AuthPathMiddleware
 
 
 # ---------------------------------------------------------------------------

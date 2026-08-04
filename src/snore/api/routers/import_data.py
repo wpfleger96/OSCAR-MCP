@@ -8,9 +8,9 @@ import shutil
 import tempfile
 import threading
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -28,11 +28,44 @@ from snore.api.import_jobs import (
     remove_job,
     reserve_slot,
 )
-from snore.api.middleware import _ByteCeilingReceive
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
 logger = logging.getLogger(__name__)
+
+
+class _ByteCeilingReceive:
+    """ASGI receive wrapper that raises HTTPException(413) on byte-ceiling breach.
+
+    Used for the upload ingress ceiling.  The auth-body ceiling uses a
+    pre-read buffer in AuthPathMiddleware instead, which avoids the Starlette
+    body-parser translating the 413 to 400.
+    """
+
+    def __init__(
+        self,
+        inner: Callable[[], Awaitable[MutableMapping[str, Any]]],
+        max_bytes: int,
+        detail: str | None = None,
+    ) -> None:
+        self._inner = inner
+        self._max = max_bytes
+        self._detail = (
+            detail or f"Request body exceeds the {max_bytes // 1024} KiB limit"
+        )
+        self._seen = 0
+
+    async def __call__(self) -> MutableMapping[str, Any]:
+        from fastapi import HTTPException  # noqa: PLC0415
+
+        msg = await self._inner()
+        if msg.get("type") == "http.request":
+            chunk: bytes = msg.get("body", b"")
+            self._seen += len(chunk)
+            if self._seen > self._max:
+                raise HTTPException(status_code=413, detail=self._detail)
+        return msg
+
 
 router = APIRouter()
 

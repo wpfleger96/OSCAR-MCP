@@ -4,6 +4,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from snore.api.middleware import _AUTH_PATH_PREFIX
 from snore.exceptions import NotFoundError
 
 __all__ = [
@@ -12,8 +13,6 @@ __all__ = [
     "not_found_handler",
     "server_error_handler",
 ]
-
-_AUTH_PATH_PREFIX = "/api/v1/auth"
 
 
 class ErrorResponse(BaseModel):
