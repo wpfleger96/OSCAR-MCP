@@ -85,26 +85,32 @@ class TestAnalysisRouterPrimaryMode:
 
     def _make_client(self, facade_mock: MagicMock) -> Any:
         """Create a TestClient with AnalysisFacade dependency overridden."""
+        import typing
+
         from fastapi.testclient import TestClient
 
         from snore.api.app import create_app
-        from snore.api.deps import get_db
+        from snore.api.deps import get_actor, get_db
+        from snore.api.routers.analysis import AnalysisFacadeDep
+        from snore.auth.actor import ActorContext, AuthMode, Role
 
         app = create_app()
 
         async def override_get_db():
             yield MagicMock()
 
-        app.dependency_overrides[get_db] = override_get_db
+        stub_actor = ActorContext(
+            user_id=1, profile_id=1, role=Role.MEMBER, mode=AuthMode.LOCAL
+        )
 
-        # Override the AnalysisFacade dependency directly
+        def override_get_actor():
+            return stub_actor
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_actor] = override_get_actor
+
         def override_facade(_db=None):
             return facade_mock
-
-        import typing
-
-        # Use the actual dependency key registered in the router
-        from snore.api.routers.analysis import AnalysisFacadeDep
 
         dep_key = typing.get_args(AnalysisFacadeDep)[1]
         app.dependency_overrides[dep_key.dependency] = override_facade
