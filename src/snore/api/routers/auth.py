@@ -47,7 +47,7 @@ from snore.api.guards import RequireAuth
 from snore.auth.actor import ActorContext
 from snore.auth.factory import ActorContextFactory
 from snore.auth.invite import InviteRedemptionError
-from snore.auth.lockout import get_lockout_store
+from snore.auth.lockout import get_invite_lockout_store, get_lockout_store
 from snore.auth.passwords import (
     dummy_verify_async,
     hash_password_async,
@@ -73,6 +73,23 @@ _NO_STORE = {"Cache-Control": "no-store"}
 # ---------------------------------------------------------------------------
 
 
+async def _purge_expired_oauth_attempts(db: AsyncSession, now: datetime) -> int:
+    """Execute the oauth_attempts purge DELETE and return the deleted row count.
+
+    Single source of truth for the purge predicate — called from both the
+    startup purge in app.py and the opportunistic on-path cleanup below.
+    """
+    from sqlalchemy import delete  # noqa: PLC0415
+
+    result = await db.execute(
+        delete(models.OauthAttempt).where(
+            (models.OauthAttempt.expires_at <= now)
+            | (models.OauthAttempt.consumed_at.is_not(None))
+        )
+    )
+    return int(result.rowcount)  # type: ignore[attr-defined]
+
+
 async def _opportunistic_purge_oauth_attempts(db: AsyncSession) -> None:
     """Delete expired/consumed oauth_attempts rows opportunistically.
 
@@ -81,17 +98,7 @@ async def _opportunistic_purge_oauth_attempts(db: AsyncSession) -> None:
     not a hard requirement.
     """
     try:
-        from datetime import UTC, datetime  # noqa: PLC0415
-
-        from sqlalchemy import delete  # noqa: PLC0415
-
-        now = datetime.now(UTC)
-        await db.execute(
-            delete(models.OauthAttempt).where(
-                (models.OauthAttempt.expires_at <= now)
-                | (models.OauthAttempt.consumed_at.is_not(None))
-            )
-        )
+        await _purge_expired_oauth_attempts(db, datetime.now(UTC))
     except Exception:
         pass  # Best-effort; never block the calling path.
 
@@ -397,7 +404,7 @@ async def lookup_invite(
     Rate-limited by per-IP lockout to slow down token probing.
     """
     ip = get_client_ip(request)
-    lockout = get_lockout_store()
+    lockout = get_invite_lockout_store()
     token_hash = _hash_invite_token(body.token)
 
     # Rate limit per (token_hash, IP): slow down repeated probing of the same
@@ -428,7 +435,9 @@ async def lookup_invite(
 
     return JSONResponse(
         content=InviteInfoResponse(
-            email=invite.email if invite else "",
+            # Only expose the email when the invite is valid — prevents token
+            # holders from recovering historical invitee emails (S1).
+            email=invite.email if (invite is not None and valid) else "",
             valid=valid,
         ).model_dump(),
         headers=_NO_STORE,
@@ -462,7 +471,7 @@ async def redeem_invite_route(
 
     cfg = get_config()
     ip = get_client_ip(request)
-    lockout = get_lockout_store()
+    lockout = get_invite_lockout_store()
     token_hash = _hash_invite_token(body.token)
 
     # Rate limit per (token_hash, IP).

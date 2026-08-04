@@ -448,7 +448,6 @@ class TestImportant2LockoutMaxEntries:
 
         cap = 5
         store = LockoutStore()
-        store._max_entries = cap
         # Patch MAX_ENTRIES used in record_failure.
         import snore.auth.lockout as lockout_mod  # noqa: PLC0415
 
@@ -1037,8 +1036,12 @@ class TestP2UploadLifecycle:
             except (asyncio.CancelledError, Exception):
                 pass
 
-            # Allow finally cleanup to complete.
-            await asyncio.sleep(0.2)
+            # Poll until finally-cleanup finishes (max 2s, 20 × 0.1s).
+            for _ in range(20):
+                remaining = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+                if not (remaining - tmpdir_before):
+                    break
+                await asyncio.sleep(0.1)
 
         app.dependency_overrides.clear()
 
@@ -1569,6 +1572,7 @@ class TestP2CsrfFailsClosedOnNoneOrigin:
             bind_host="127.0.0.1",
             trusted_proxies=frozenset(),
             dev_origins=frozenset(),
+            cors_origins=["http://localhost:5173"],
             max_upload_bytes=512 * 1024 * 1024,
             max_file_bytes=256 * 1024 * 1024,
             max_jobs_per_user=3,
@@ -2311,4 +2315,148 @@ class TestP3AuthBodyCeiling413:
         assert received_in_handler[1] is sentinel_msg, (
             "Second handler receive must come from original_receive, "
             "not a manufactured http.disconnect"
+        )
+
+
+# ---------------------------------------------------------------------------
+# S2: Login and invite lockout stores are separate
+# ---------------------------------------------------------------------------
+
+
+class TestSeparateLockoutStores:
+    """Login and invite paths must use distinct LockoutStore instances.
+
+    Sharing one store allows exhausting the invite endpoint to silently
+    disable login lockout protection.
+    """
+
+    def test_login_and_invite_lockout_stores_are_distinct(self):
+        """get_lockout_store() and get_invite_lockout_store() return different objects."""
+        from snore.auth.lockout import (  # noqa: PLC0415
+            get_invite_lockout_store,
+            get_lockout_store,
+        )
+
+        assert get_lockout_store() is not get_invite_lockout_store(), (
+            "Login lockout store and invite lockout store must be distinct instances"
+        )
+
+    def test_invite_failures_do_not_affect_login_lockout(self):
+        """Filling the invite lockout store leaves the login lockout store unaffected."""
+        import snore.auth.lockout as lockout_mod  # noqa: PLC0415
+
+        from snore.auth.lockout import (  # noqa: PLC0415
+            get_invite_lockout_store,
+            get_lockout_store,
+        )
+
+        original_max = lockout_mod.MAX_ENTRIES
+        lockout_mod.MAX_ENTRIES = 3
+        try:
+            login_store = get_lockout_store()
+            invite_store = get_invite_lockout_store()
+
+            # Fill the invite store to capacity with unexpired entries.
+            for i in range(3):
+                invite_store.record_failure(f"token{i}", "1.2.3.4")
+
+            # Login store must still accept new entries.
+            login_email = f"login_{uuid.uuid4().hex[:6]}@example.com"
+            login_store.record_failure(login_email, "1.2.3.4")
+            assert login_store.is_locked(login_email, "1.2.3.4"), (
+                "Login lockout store must still accept entries when invite store is full"
+            )
+        finally:
+            lockout_mod.MAX_ENTRIES = original_max
+            # Clean up: remove the test failure from the live login store.
+            from snore.auth.lockout import get_lockout_store as _get  # noqa: PLC0415
+
+            _get().record_success(login_email, "1.2.3.4")
+
+
+# ---------------------------------------------------------------------------
+# S4: X-Forwarded-For and X-Real-IP fallback in get_client_ip
+# ---------------------------------------------------------------------------
+
+
+class TestGetClientIpForwardedHeaders:
+    """get_client_ip honours XFF and X-Real-IP when the peer is trusted."""
+
+    def _make_captured_app(self, monkeypatch: pytest.MonkeyPatch) -> tuple:
+        """Return (app, captured_list) — app records get_client_ip on each request."""
+        from snore.api.client_ip import get_client_ip  # noqa: PLC0415
+
+        monkeypatch.setenv("SNORE_TRUSTED_PROXIES", "10.0.0.1")
+        monkeypatch.setenv("SNORE_AUTH_MODE", "local")
+        set_config(
+            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        )
+
+        from starlette.applications import Starlette  # noqa: PLC0415
+        from starlette.requests import Request  # noqa: PLC0415
+        from starlette.responses import PlainTextResponse  # noqa: PLC0415
+        from starlette.routing import Route  # noqa: PLC0415
+        from starlette.types import ASGIApp, Receive, Scope, Send  # noqa: PLC0415
+
+        captured: list[str] = []
+
+        async def view(r: Request) -> PlainTextResponse:
+            captured.append(get_client_ip(r))
+            return PlainTextResponse("ok")
+
+        base_app = Starlette(routes=[Route("/", view)])
+
+        class TrustedPeerWrapper:
+            def __init__(self, wrapped: ASGIApp) -> None:
+                self.wrapped = wrapped
+
+            async def __call__(
+                self, scope: Scope, receive: Receive, send: Send
+            ) -> None:
+                if scope["type"] == "http":
+                    scope["client"] = ("10.0.0.1", 12345)
+                await self.wrapped(scope, receive, send)
+
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        client = TestClient(TrustedPeerWrapper(base_app))
+        return client, captured
+
+    def test_xff_rightmost_entry_used_when_trusted_peer(self, monkeypatch):
+        """Trusted peer + X-Forwarded-For: 1.2.3.4, 5.6.7.8 → returns 5.6.7.8."""
+        client, captured = self._make_captured_app(monkeypatch)
+        client.get("/", headers={"x-forwarded-for": "1.2.3.4, 5.6.7.8"})
+        assert captured, "view was never called"
+        assert captured[0] == "5.6.7.8", (
+            f"Expected rightmost XFF entry 5.6.7.8, got {captured[0]!r}"
+        )
+
+    def test_x_real_ip_used_when_xff_absent(self, monkeypatch):
+        """Trusted peer + X-Real-IP: 1.2.3.4 (no XFF) → returns 1.2.3.4."""
+        client, captured = self._make_captured_app(monkeypatch)
+        client.get("/", headers={"x-real-ip": "1.2.3.4"})
+        assert captured, "view was never called"
+        assert captured[0] == "1.2.3.4", (
+            f"Expected X-Real-IP value 1.2.3.4, got {captured[0]!r}"
+        )
+
+    def test_peer_used_when_no_forwarding_headers(self, monkeypatch):
+        """Trusted peer with no XFF or X-Real-IP → falls back to peer address."""
+        client, captured = self._make_captured_app(monkeypatch)
+        client.get("/")
+        assert captured, "view was never called"
+        assert captured[0] == "10.0.0.1", (
+            f"Expected peer fallback 10.0.0.1, got {captured[0]!r}"
+        )
+
+    def test_malformed_xff_skips_to_x_real_ip(self, monkeypatch):
+        """Malformed XFF rightmost entry → skips, falls back to X-Real-IP."""
+        client, captured = self._make_captured_app(monkeypatch)
+        client.get(
+            "/",
+            headers={"x-forwarded-for": "1.2.3.4, not-an-ip", "x-real-ip": "9.9.9.9"},
+        )
+        assert captured, "view was never called"
+        assert captured[0] == "9.9.9.9", (
+            f"Expected X-Real-IP fallback 9.9.9.9 after malformed XFF, got {captured[0]!r}"
         )

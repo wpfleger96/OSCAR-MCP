@@ -109,6 +109,8 @@ class AppConfig:
     bind_host: str
     trusted_proxies: frozenset[str]
     dev_origins: frozenset[tuple[str, str, int]]  # Pre-parsed; validated at startup.
+    # CORS allowed origins (parsed from CORS_ORIGINS env var; default localhost:5173).
+    cors_origins: list[str]
     # Upload / job resource bounds
     max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
@@ -130,14 +132,11 @@ class AppConfig:
         """
         if self.public_origin is None:
             return False
-        scheme, host, _ = self.public_origin
+        scheme, _, _ = self.public_origin
         if scheme == "https":
             return True
-        # HTTP is allowed only for loopback.
-        try:
-            return not ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            return host not in ("localhost", "localhost.localdomain")
+        # HTTP is valid only for loopback (enforced by load_config); no Secure flag needed.
+        return False
 
 
 _config: AppConfig | None = None
@@ -194,6 +193,12 @@ def load_config(
             )
         dev_origins.add(parsed_origin)
 
+    cors_origins = [
+        o.strip()
+        for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(",")
+        if o.strip()
+    ]
+
     # Resource bounds — read with safe int parsing.
     try:
         max_upload_bytes = int(
@@ -240,7 +245,8 @@ def load_config(
             )
         if len(session_secret) < 32:
             raise ConfigError(
-                "SNORE_SESSION_SECRET must be at least 32 characters long."
+                "SNORE_SESSION_SECRET must be at least 32 random characters. "
+                'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
             )
         if not public_base_url:
             raise ConfigError(
@@ -284,11 +290,59 @@ def load_config(
         bind_host=bind_host,
         trusted_proxies=trusted_proxies,
         dev_origins=frozenset(dev_origins),
+        cors_origins=cors_origins,
         max_upload_bytes=max_upload_bytes,
         max_file_bytes=max_file_bytes,
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
     )
+
+
+def _validate_origin_url(url: str, *, require_http_loopback: bool = False) -> None:
+    """Shared validator for http/https origin URLs.
+
+    Accepts http and https only; rejects userinfo, path, query, fragment,
+    malformed ports, and out-of-range ports.  When ``require_http_loopback``
+    is True, plain HTTP is only accepted for loopback hosts.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        raise ConfigError(f"Not a valid URL: {exc}") from exc
+
+    if parsed.scheme not in ("http", "https"):
+        raise ConfigError(f"Must use http or https, got {parsed.scheme!r}")
+    host = parsed.hostname or ""
+    if not host:
+        raise ConfigError("Must include a host")
+    if parsed.username or parsed.password:
+        raise ConfigError("Must not contain userinfo (user:pass@host)")
+    if parsed.path not in ("", "/"):
+        raise ConfigError(f"Must not include a path, got {parsed.path!r}")
+    if parsed.query:
+        raise ConfigError("Must not include a query string")
+    if parsed.fragment:
+        raise ConfigError("Must not include a fragment")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"has an invalid port: {exc}") from exc
+    if port is not None and not (1 <= port <= 65535):
+        raise ConfigError(f"port must be 1–65535, got {port}")
+
+    if require_http_loopback and parsed.scheme == "http":
+        try:
+            addr = ipaddress.ip_address(host)
+            if not addr.is_loopback:
+                raise ConfigError(
+                    f"http:// must be a loopback address (127.x.x.x or ::1), "
+                    f"got {host!r}. Use https:// for non-loopback."
+                )
+        except ValueError:
+            if host not in ("localhost", "localhost.localdomain"):
+                raise ConfigError(
+                    f"http:// must be localhost or a loopback IP, got {host!r}."
+                ) from None
 
 
 def _validate_public_base_url(url: str) -> None:
@@ -299,93 +353,20 @@ def _validate_public_base_url(url: str) -> None:
     canonical origin without ambiguity.
     """
     try:
-        parsed = urlparse(url)
-    except Exception as exc:
-        raise ConfigError(f"SNORE_PUBLIC_BASE_URL is not a valid URL: {exc}") from exc
-
-    if parsed.scheme not in ("http", "https"):
-        raise ConfigError(
-            f"SNORE_PUBLIC_BASE_URL must use http or https, got {parsed.scheme!r}"
-        )
-
-    host = parsed.hostname or ""
-    if not host:
-        raise ConfigError("SNORE_PUBLIC_BASE_URL must include a host")
-
-    # Reject userinfo (username/password in the URL).
-    if parsed.username or parsed.password:
-        raise ConfigError(
-            "SNORE_PUBLIC_BASE_URL must not contain userinfo (user:pass@host)"
-        )
-
-    # Reject path, query, and fragment.
-    if parsed.path not in ("", "/"):
-        raise ConfigError(
-            f"SNORE_PUBLIC_BASE_URL must not include a path, got {parsed.path!r}"
-        )
-    if parsed.query:
-        raise ConfigError("SNORE_PUBLIC_BASE_URL must not include a query string")
-    if parsed.fragment:
-        raise ConfigError("SNORE_PUBLIC_BASE_URL must not include a fragment")
-
-    # Validate port — reject malformed text and out-of-range values.
-    try:
-        port = parsed.port  # raises ValueError for non-numeric port text
-    except ValueError as exc:
-        raise ConfigError(f"SNORE_PUBLIC_BASE_URL has an invalid port: {exc}") from exc
-    if port is not None and not (1 <= port <= 65535):
-        raise ConfigError(f"SNORE_PUBLIC_BASE_URL port must be 1–65535, got {port}")
-
-    if parsed.scheme == "http":
-        # HTTP is only allowed for loopback addresses.
-        try:
-            addr = ipaddress.ip_address(host)
-            if not addr.is_loopback:
-                raise ConfigError(
-                    f"SNORE_PUBLIC_BASE_URL with http:// must be a loopback address "
-                    f"(127.x.x.x or ::1), got {host!r}. Use https:// for non-loopback."
-                )
-        except ValueError:
-            # Non-numeric host; accept localhost only.
-            if host not in ("localhost", "localhost.localdomain"):
-                raise ConfigError(
-                    f"SNORE_PUBLIC_BASE_URL with http:// must be localhost or a "
-                    f"loopback IP, got {host!r}."
-                ) from None
+        _validate_origin_url(url, require_http_loopback=True)
+    except ConfigError as exc:
+        raise ConfigError(f"SNORE_PUBLIC_BASE_URL {exc}") from exc
 
 
 def _validate_dev_origin(url: str) -> None:
     """Raise ConfigError if ``url`` is not a strict http/https origin.
 
-    Applies the same restrictions as ``_validate_public_base_url``:
-    ``http``/``https`` only, no userinfo, no path/query/fragment, valid
-    host and port.  This prevents exotic schemes (``javascript:``, etc.)
-    or partial URLs from silently collapsing into a host-wide origin.
+    Applies the same restrictions as ``_validate_public_base_url`` except
+    plain HTTP is allowed for any host (not loopback only).  Prevents exotic
+    schemes (``javascript:``, etc.) or partial URLs from silently collapsing
+    into a host-wide origin.
     """
-    try:
-        parsed = urlparse(url)
-    except Exception as exc:
-        raise ConfigError(f"Not a valid URL: {exc}") from exc
-
-    if parsed.scheme not in ("http", "https"):
-        raise ConfigError(f"Must use http or https, got {parsed.scheme!r}")
-    if not (parsed.hostname or ""):
-        raise ConfigError("Must include a host")
-    if parsed.username or parsed.password:
-        raise ConfigError("Must not contain userinfo (user:pass@host)")
-    if parsed.path not in ("", "/"):
-        raise ConfigError(f"Must not include a path, got {parsed.path!r}")
-    if parsed.query:
-        raise ConfigError("Must not include a query string")
-    if parsed.fragment:
-        raise ConfigError("Must not include a fragment")
-
-    try:
-        port = parsed.port
-    except ValueError as exc:
-        raise ConfigError(f"Has an invalid port: {exc}") from exc
-    if port is not None and not (1 <= port <= 65535):
-        raise ConfigError(f"Port must be 1–65535, got {port}")
+    _validate_origin_url(url)
 
 
 def get_config() -> AppConfig:

@@ -23,7 +23,7 @@ from snore.api.errors import (
 )
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.import_jobs import start_reaper as _start_import_reaper
-from snore.api.middleware import AuthMiddleware, CsrfMiddleware, RateLimitMiddleware
+from snore.api.middleware import AuthMiddleware, AuthPathMiddleware, RateLimitMiddleware
 from snore.api.routers import (
     analysis,
     days,
@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     lease.acquire_shared()
 
     # Purge expired/consumed oauth_attempts at startup.
-    await _purge_expired_oauth_attempts()
+    await _startup_purge_expired_oauth_attempts()
 
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
@@ -121,25 +121,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lease.release()
 
 
-async def _purge_expired_oauth_attempts() -> None:
+async def _startup_purge_expired_oauth_attempts() -> None:
     """Delete expired and consumed oauth_attempts rows at startup."""
     try:
         from datetime import UTC, datetime  # noqa: PLC0415
 
-        from sqlalchemy import delete  # noqa: PLC0415
-
-        from snore.database import models  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
 
         now = datetime.now(UTC)
         async with session_scope() as db:
-            result = await db.execute(
-                delete(models.OauthAttempt).where(
-                    (models.OauthAttempt.expires_at <= now)
-                    | (models.OauthAttempt.consumed_at.is_not(None))
-                )
-            )
-            purged = result.rowcount  # type: ignore[attr-defined]
+            purged = await auth_router._purge_expired_oauth_attempts(db, now)
         if purged:
             logger.info("Purged %d expired/consumed oauth_attempts rows", purged)
     except Exception as exc:
@@ -186,18 +177,12 @@ def _cleanup_stale_upload_tempdirs() -> None:
 
 
 def create_app() -> FastAPI:
-    import os  # noqa: PLC0415
-
-    from snore.api.config import get_config, load_config, set_config  # noqa: PLC0415
+    from snore.api.config import get_config  # noqa: PLC0415
 
     # Ensure config is loaded.  In tests, callers set it via set_config() before
-    # calling create_app(); in production, lifespan sets it.  Fall back to loading
-    # from env here so ``create_app()`` is always safe to call standalone.
-    try:
-        cfg = get_config()
-    except Exception:
-        cfg = load_config()
-        set_config(cfg)
+    # calling create_app(); in production, lifespan sets it.  get_config() lazily
+    # loads from env when the global config is not yet set.
+    cfg = get_config()
 
     is_multiuser = cfg.is_multiuser
 
@@ -207,16 +192,15 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    cors_origins = [
-        o.strip()
-        for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(",")
-    ]
-    app.add_middleware(RateLimitMiddleware)
-    app.add_middleware(CsrfMiddleware)
+    # Middleware add order is innermost-first; requests are processed outermost-first.
+    # AuthPathMiddleware must be innermost of the auth pair so RateLimitMiddleware
+    # fires before the body pre-read, rejecting rate-limited requests cheaply.
+    app.add_middleware(AuthPathMiddleware)  # innermost of auth pair
+    app.add_middleware(RateLimitMiddleware)  # outermost of auth pair
     app.add_middleware(AuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=cors_origins,
+        allow_origins=cfg.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

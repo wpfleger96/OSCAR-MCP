@@ -221,8 +221,12 @@ class TestSessionVersionInvalidation:
     async def test_bumped_session_version_rejects_old_cookie(
         self, temp_db, monkeypatch
     ):
-        """After session_version increments, the old cookie's version no longer
-        matches — AuthMiddleware must reject it (actor=None)."""
+        """After session_version increments, sending the old cookie to
+        GET /api/v1/auth/status must return authenticated=false.
+
+        Falsifiability: reverting the session_version guard in middleware.py
+        would cause this test to return authenticated=true instead.
+        """
         _multiuser_env(monkeypatch)
         cfg = load_config(
             auth_mode_override="multiuser", bind_host_override="127.0.0.1"
@@ -252,7 +256,7 @@ class TestSessionVersionInvalidation:
             user_id = user.id
             profile_id = profile.id
 
-        from snore.auth.session_cookie import decode_session, encode_session
+        from snore.auth.session_cookie import encode_session
 
         old_cookie = encode_session(
             cfg.session_secret,
@@ -261,23 +265,30 @@ class TestSessionVersionInvalidation:
             session_version=0,
         )
 
-        # Bump version in DB.
+        # Bump version in DB — old cookie now carries a stale session_version.
         async with session_scope() as db:
             u = await db.get(models.User, user_id)
             assert u is not None
             u.session_version = 1
 
-        # Decode the cookie — version is 0.
-        decoded = decode_session(cfg.session_secret, old_cookie)
-        assert decoded is not None
-        _, _, cookie_ver = decoded
-        assert cookie_ver == 0
+        # Send the stale cookie through the real middleware stack.
+        import httpx  # noqa: PLC0415
 
-        # DB says version=1: mismatch → AuthMiddleware must reject.
-        async with session_scope() as db:
-            u = await db.get(models.User, user_id)
-            assert u is not None
-            assert u.session_version != cookie_ver  # mismatch confirmed
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+        ) as client:
+            resp = await client.get(
+                "/api/v1/auth/status",
+                cookies={"snore_session": old_cookie},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["authenticated"] is False, (
+            "AuthMiddleware must reject a cookie whose session_version no longer "
+            "matches the DB — stale-cookie rejection is broken."
+        )
 
         await cleanup_database()
 
@@ -502,20 +513,19 @@ class TestPathImportAbsenceInMultiuser:
     def test_import_detect_not_reachable_in_multiuser(self, async_db_session):
         """/import/detect is not registered in multiuser mode.
 
-        FastAPI may return 404 (no route) or 405 (path matches a different
-        HTTP method on the same path template).  Either proves the POST
-        endpoint is absent.
+        The correct Origin header is supplied so CSRF passes; the only acceptable
+        outcomes are 404 (route absent) or 405 (path present but method missing).
+        A 403 would mean CSRF blocked the request before routing — that proves
+        nothing about structural absence and masks a misconfigured route.
         """
         client = _make_multiuser_client(async_db_session)
         resp = client.post(
             "/api/v1/import/detect",
             json={"path": "/some/path"},
+            headers={"origin": "http://127.0.0.1:8000"},
         )
-        # 403 = CSRF middleware rejected (no Origin), which also proves the route is not
-        # callable.  404 = route missing; 405 = path matches but method absent.
-        # 422 = route exists and rejected the body. 200/202 = route callable → FAIL.
-        assert resp.status_code in (403, 404, 405), (
-            f"Expected 403/404/405 for absent/blocked multiuser route, got {resp.status_code}"
+        assert resp.status_code in (404, 405), (
+            f"Expected 404/405 for structurally absent multiuser route, got {resp.status_code}"
         )
 
     def test_import_path_not_reachable_in_multiuser(self, async_db_session):
@@ -524,11 +534,10 @@ class TestPathImportAbsenceInMultiuser:
         resp = client.post(
             "/api/v1/import/path",
             json={"sources": []},
+            headers={"origin": "http://127.0.0.1:8000"},
         )
-        # 403 = CSRF middleware rejected (no Origin); also proves the route is
-        # not callable without authentication bypass.
-        assert resp.status_code in (403, 404, 405), (
-            f"Expected 403/404/405 for absent/blocked multiuser route, got {resp.status_code}"
+        assert resp.status_code in (404, 405), (
+            f"Expected 404/405 for structurally absent multiuser route, got {resp.status_code}"
         )
 
     def test_import_detect_reachable_in_local_mode(self, async_db_session, monkeypatch):
@@ -583,10 +592,10 @@ class TestPathImportAbsenceInMultiuser:
         resp = client.post(
             "/api/v1/import/path",
             json={"sources": []},
+            headers={"origin": "http://127.0.0.1:8000"},
         )
-        # 403 = CSRF rejected (no Origin) also proves route unreachable.
-        assert resp.status_code in (403, 404, 405), (
-            f"Expected 403/404/405 from loopback in multiuser; got {resp.status_code}"
+        assert resp.status_code in (404, 405), (
+            f"Expected 404/405 from loopback in multiuser; got {resp.status_code}"
         )
 
 
@@ -961,5 +970,200 @@ class TestInviteLifecycle:
             )
         assert refreshed is not None
         assert refreshed.redeemed_at is not None
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_valid_invite_lookup_returns_email_and_valid_true(self, temp_db):
+        """POST /auth/invites/lookup with a valid unexpired invite returns
+        valid=true and the invite email.
+
+        Falsifiability: a bug that always returns valid=false would fail here.
+        """
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        token = uuid.uuid4().hex
+        token_hash = __import__("hashlib").sha256(token.encode()).hexdigest()
+        invite_email = f"happy_{uuid.uuid4().hex[:6]}@example.com"
+
+        async with session_scope() as db:
+            admin = models.User(
+                canonical_email=f"admin_happy_{uuid.uuid4().hex[:6]}@test",
+                role="admin",
+                session_version=0,
+            )
+            db.add(admin)
+            await db.flush()
+            from datetime import timedelta  # noqa: PLC0415
+
+            inv = models.Invite(
+                email=invite_email,
+                token_hash=token_hash,
+                role="member",
+                created_by=admin.id,
+                expires_at=datetime.now(UTC) + timedelta(days=7),
+            )
+            db.add(inv)
+            await db.flush()
+
+        from sqlalchemy.ext.asyncio import (  # noqa
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        async_url = f"sqlite+aiosqlite:///{temp_db}"
+        engine = create_async_engine(async_url)
+        factory = async_sessionmaker(
+            bind=engine, expire_on_commit=False, class_=AsyncSession
+        )
+        async with factory() as db:
+
+            async def _override_db():
+                async with db.begin():
+                    yield db
+
+            async def _override_actor(
+                db2: Annotated[AsyncSession, Depends(get_db)],
+            ) -> ActorContext:
+                return await ActorContextFactory(db2).make_local(mode=AuthMode.LOCAL)
+
+            app = create_app()
+            app.dependency_overrides[get_db] = _override_db
+            app.dependency_overrides[get_actor] = _override_actor
+            client = TestClient(app, raise_server_exceptions=True)
+            resp = client.post(
+                "/api/v1/auth/invites/lookup",
+                json={"token": token},
+                headers={"origin": "http://127.0.0.1:8000"},
+            )
+
+        await engine.dispose()
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid"] is True, f"Expected valid=true, got: {data}"
+        assert data["email"] == invite_email, (
+            f"Expected email={invite_email!r}, got {data['email']!r}"
+        )
+
+        await cleanup_database()
+
+
+# ---------------------------------------------------------------------------
+# Active-profile switch integration test
+# ---------------------------------------------------------------------------
+
+
+class TestActiveProfileSwitch:
+    """POST /auth/active-profile rewrites the session cookie with the new profile."""
+
+    @pytest.mark.asyncio
+    async def test_switch_profile_updates_cookie_active_profile_id(
+        self, temp_db, monkeypatch
+    ):
+        """Switching to a second owned profile rewrites the session cookie.
+
+        Asserts that the returned cookie carries the new active_profile_id
+        while session_version is preserved.
+
+        Falsifiability: a bug that doesn't update the cookie would fail here
+        because decoded active_profile_id would still be profile1_id.
+        """
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        async with session_scope() as db:
+            user = models.User(
+                canonical_email=f"switch_{uuid.uuid4().hex[:6]}@test",
+                role="admin",
+                session_version=0,
+            )
+            db.add(user)
+            await db.flush()
+            profile1 = models.Profile(user_id=user.id, name="Default")
+            db.add(profile1)
+            await db.flush()
+            profile2 = models.Profile(user_id=user.id, name="Second")
+            db.add(profile2)
+            await db.flush()
+            user.default_profile_id = profile1.id
+            user_id = user.id
+            profile1_id = profile1.id
+            profile2_id = profile2.id
+            session_version = user.session_version
+
+        from snore.auth.session_cookie import decode_session, encode_session
+
+        # Encode a valid cookie for profile1.
+        cookie_value = encode_session(
+            cfg.session_secret,
+            user_id=user_id,
+            active_profile_id=profile1_id,
+            session_version=session_version,
+        )
+
+        import http.cookies  # noqa: PLC0415
+
+        import httpx  # noqa: PLC0415
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+        ) as client:
+            resp = await client.post(
+                "/api/v1/auth/active-profile",
+                json={"profile_id": profile2_id},
+                # Send cookie via header to avoid httpx per-request cookie deprecation.
+                headers={
+                    "origin": "http://127.0.0.1:8000",
+                    "cookie": f"snore_session={cookie_value}",
+                },
+            )
+
+        assert resp.status_code == 200, (
+            f"Expected 200, got {resp.status_code}: {resp.text}"
+        )
+
+        # Parse Set-Cookie header via http.cookies.SimpleCookie so Python's
+        # octal-escaped cookie encoding is correctly unescaped before decode.
+        set_cookie_header = resp.headers.get("set-cookie", "")
+        c = http.cookies.SimpleCookie()
+        c.load(set_cookie_header)
+        assert "snore_session" in c, (
+            f"Response must set snore_session cookie; Set-Cookie: {set_cookie_header!r}"
+        )
+        raw_token = c["snore_session"].value
+
+        decoded = decode_session(cfg.session_secret, raw_token)
+        assert decoded is not None, (
+            f"New cookie must be decodeable with the configured secret; "
+            f"raw_token={raw_token!r}"
+        )
+        _, active_profile_id, new_session_version = decoded
+        assert active_profile_id == profile2_id, (
+            f"Expected active_profile_id={profile2_id}, got {active_profile_id}"
+        )
+        assert new_session_version == session_version, (
+            "session_version must be preserved across a profile switch"
+        )
 
         await cleanup_database()

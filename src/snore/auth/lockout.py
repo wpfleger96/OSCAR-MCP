@@ -13,6 +13,7 @@ deployment constraint is documented in the plan).
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 
@@ -41,6 +42,7 @@ class LockoutStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._entries: dict[tuple[str, str], _LockoutEntry] = {}
+        self._evict_cursor: int = 0
 
     def is_locked(self, email: str, ip: str) -> bool:
         """Return True if the (email, ip) pair is currently locked out."""
@@ -88,19 +90,40 @@ class LockoutStore:
             self._entries.pop(key, None)
 
     def _evict_one_expired(self, now: float) -> None:
-        """Evict the first expired entry found. Must hold ``_lock``."""
-        for k, v in list(self._entries.items()):
+        """Evict one expired entry starting from _evict_cursor. Must hold ``_lock``.
+
+        Advances the cursor by 1 when an entry is evicted, or by n (full lap)
+        when no expired entry is found, so every position is examined across
+        bounded calls under sustained load.
+        """
+        n = len(self._entries)
+        if n == 0:
+            return
+        start = self._evict_cursor % n
+        for i in range(n):
+            k = next(itertools.islice(self._entries, (start + i) % n, None))
+            v = self._entries[k]
             if now >= v.locked_until:
                 del self._entries[k]
+                self._evict_cursor = start + i + 1
                 return
+        # Full lap without finding an expired entry.
+        self._evict_cursor = start + n
 
 
-# Module-level singleton — one store for the whole process.
+# Separate module-level singletons: login lockout and invite-token lockout.
+# Keeping them separate prevents flooding the invite endpoint from exhausting
+# the login lockout store and silently disabling login protection.
 _lockout_store = LockoutStore()
+_invite_lockout_store = LockoutStore()
 
 
 def get_lockout_store() -> LockoutStore:
     return _lockout_store
+
+
+def get_invite_lockout_store() -> LockoutStore:
+    return _invite_lockout_store
 
 
 # ---------------------------------------------------------------------------
@@ -175,16 +198,19 @@ class RateLimitStore:
         entries are clustered — a prefix of 9,936 active IPs does not pin
         the cursor to the front and leave the stale tail unexamined.
 
+        Uses ``itertools.islice`` over the dict view rather than materialising
+        a full key list so the O(n) allocation is avoided under the lock.
+
         Must be called with ``_lock`` held.
         """
         if not self._entries:
             return
-        keys = list(self._entries.keys())
-        n = len(keys)
+        keys_view = self._entries
+        n = len(keys_view)
         start = self._purge_cursor % n
         stale: list[str] = []
         for i in range(min(budget, n)):
-            ip_key = keys[(start + i) % n]
+            ip_key = next(itertools.islice(keys_view, (start + i) % n, None))
             times = self._entries.get(ip_key)
             if times is None:
                 continue  # deleted earlier in this sweep
