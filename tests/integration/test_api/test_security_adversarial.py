@@ -1998,10 +1998,11 @@ class TestP3AuthBodyCeiling413:
                 },
             )
 
-        # Auth will reject (401/422 — body is not valid JSON), but NOT 413.
-        assert resp.status_code not in (400, 413), (
-            f"Ceiling fired at exactly {_AUTH_BODY_LIMIT} bytes; "
-            f"expected off-by-one boundary, got {resp.status_code}"
+        # Auth will reject 422 (body is not valid JSON) but must NOT return 413.
+        assert resp.status_code == 422, (
+            f"Expected 422 (invalid JSON body) at exactly {_AUTH_BODY_LIMIT} bytes, "
+            f"got {resp.status_code}. If 413: ceiling off-by-one. "
+            f"If 400/other: ceiling corrupted the body."
         )
 
     @pytest.mark.asyncio
@@ -2071,4 +2072,143 @@ class TestP3AuthBodyCeiling413:
         assert resp.status_code == 413, (
             f"Expected 413 even with lying Content-Length: 10, "
             f"got {resp.status_code}. Pre-read buffer must count actual bytes."
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_drain_after_limit_crossed(self):
+        """Return 413 immediately — receive callable not called after limit is crossed.
+
+        A drain loop (reading until more_body=False) can block indefinitely if
+        the client stops sending after crossing the limit.  Verify the receive
+        callable is NOT invoked after the frame that crosses the ceiling.
+        """
+
+        from starlette.requests import Request  # noqa: PLC0415
+
+        from snore.api.middleware import (  # noqa: PLC0415
+            _AUTH_BODY_LIMIT,
+            CsrfMiddleware,
+        )
+
+        # Two frames that cross the limit; any further receive call is a drain bug.
+        frames = [
+            {
+                "type": "http.request",
+                "body": b"x" * _AUTH_BODY_LIMIT,
+                "more_body": True,
+            },
+            # This frame pushes total to _AUTH_BODY_LIMIT + 1.
+            {"type": "http.request", "body": b"x", "more_body": True},
+        ]
+        receive_calls = [0]
+
+        async def counting_receive() -> dict:
+            receive_calls[0] += 1
+            idx = receive_calls[0] - 1
+            if idx < len(frames):
+                return frames[idx]
+            # If called beyond the two frames: drain is happening → fail.
+            raise AssertionError(
+                f"receive called {receive_calls[0]} times — drain loop detected"
+            )
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "query_string": b"",
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"origin", b"http://127.0.0.1:8000"),
+            ],
+            "root_path": "",
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8000),
+        }
+        request = Request(scope, receive=counting_receive)
+
+        from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
+
+        async def _noop_app(scope, receive, send):
+            pass
+
+        csrf_mw = CsrfMiddleware(app=_noop_app)
+        call_next_invoked = [False]
+
+        async def fake_call_next(req: Request) -> StarletteResponse:
+            call_next_invoked[0] = True
+            return StarletteResponse(status_code=200)
+
+        response = await csrf_mw.dispatch(request, fake_call_next)
+
+        assert response.status_code == 413, f"Expected 413, got {response.status_code}"
+        assert receive_calls[0] == 2, (
+            f"Expected exactly 2 receive calls (limit frame + crossing frame), "
+            f"got {receive_calls[0]}. Drain loop runs extra receives."
+        )
+        assert not call_next_invoked[0], "call_next invoked despite 413"
+
+    @pytest.mark.asyncio
+    async def test_disconnect_before_terminal_frame_aborts_without_handler(self):
+        """http.disconnect before more_body=False → 0 call_next invocations.
+
+        A disconnect mid-body must not reach side-effecting handlers
+        (e.g. /invites/redeem which creates a user+profile).
+        """
+        from starlette.requests import Request  # noqa: PLC0415
+
+        from snore.api.middleware import CsrfMiddleware  # noqa: PLC0415
+
+        frames_iter = iter(
+            [
+                # Syntactically complete JSON, but not terminal (more_body=True).
+                {
+                    "type": "http.request",
+                    "body": b'{"token":"t","password":"p"}',
+                    "more_body": True,
+                },
+                # Client disconnects before completing the request.
+                {"type": "http.disconnect"},
+            ]
+        )
+
+        async def receive() -> dict:
+            return next(frames_iter)
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "query_string": b"",
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"origin", b"http://127.0.0.1:8000"),
+            ],
+            "root_path": "",
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8000),
+        }
+        request = Request(scope, receive=receive)
+
+        from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
+
+        async def _noop_app2(scope, receive, send):
+            pass
+
+        csrf_mw = CsrfMiddleware(app=_noop_app2)
+        call_next_invoked = [False]
+
+        async def fake_call_next(req: Request) -> StarletteResponse:
+            call_next_invoked[0] = True
+            return StarletteResponse(status_code=200)
+
+        response = await csrf_mw.dispatch(request, fake_call_next)
+
+        assert not call_next_invoked[0], (
+            "call_next was invoked despite http.disconnect before terminal frame. "
+            "Side-effecting handlers (e.g. /invites/redeem) must not run on "
+            "incomplete requests."
+        )
+        assert response.status_code >= 400, (
+            f"Expected error response (4xx), got {response.status_code}"
         )

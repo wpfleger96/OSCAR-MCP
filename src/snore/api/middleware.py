@@ -214,45 +214,56 @@ class CsrfMiddleware(BaseHTTPMiddleware):
 
         # Pre-read auth-endpoint bodies before call_next so the ceiling fires
         # regardless of Content-Length presence or accuracy.
+        #
+        # Three explicit terminal states:
+        #   total > _AUTH_BODY_LIMIT  → immediate 413 (no further receive calls)
+        #   http.disconnect           → immediate 499 abort (never calls call_next)
+        #   http.request more_body=F  → replay once, then delegate to original receive
         if is_auth_path:
+            original_receive = request.receive  # save before any mutation
             body_chunks: list[bytes] = []
             total = 0
-            exceeded = False
 
             while True:
-                msg = await request.receive()
+                msg = await original_receive()
                 msg_type = msg.get("type")
                 if msg_type == "http.request":
                     chunk = msg.get("body", b"")
                     total += len(chunk)
                     if total > _AUTH_BODY_LIMIT:
-                        exceeded = True
-                        # Drain remaining ASGI chunks to avoid client errors.
-                        while msg.get("more_body", False):
-                            msg = await request.receive()
-                        break
+                        # Immediate 413 — do NOT drain; any further receive call
+                        # can block indefinitely and bypass the rate limiter.
+                        from starlette.responses import JSONResponse  # noqa: PLC0415
+
+                        return JSONResponse(
+                            {
+                                "detail": (
+                                    f"Request body exceeds the "
+                                    f"{_AUTH_BODY_LIMIT // 1024} KiB limit"
+                                )
+                            },
+                            status_code=413,
+                            headers={"Cache-Control": "no-store"},
+                        )
                     body_chunks.append(chunk)
                     if not msg.get("more_body", False):
                         break
+                elif msg_type == "http.disconnect":
+                    # Client disconnected before completing the request.
+                    # Never invoke call_next — the request is incomplete and
+                    # side-effecting handlers (e.g. /invites/redeem) must not run.
+                    from starlette.responses import Response  # noqa: PLC0415
+
+                    return Response(status_code=499)
                 else:
-                    # http.disconnect or other — stop reading.
-                    break
+                    # Unknown ASGI message — treat as disconnect.
+                    from starlette.responses import Response  # noqa: PLC0415
 
-            if exceeded:
-                from starlette.responses import JSONResponse  # noqa: PLC0415
+                    return Response(status_code=499)
 
-                return JSONResponse(
-                    {
-                        "detail": (
-                            f"Request body exceeds the "
-                            f"{_AUTH_BODY_LIMIT // 1024} KiB limit"
-                        )
-                    },
-                    status_code=413,
-                    headers={"Cache-Control": "no-store"},
-                )
-
-            # Replay the buffered body for downstream handlers.
+            # A genuine terminal http.request frame was received.
+            # Replay the buffered body once, then delegate subsequent receives
+            # to the original callable so any streaming downstream work functions.
             full_body = b"".join(body_chunks)
             _replayed = False
 
@@ -265,7 +276,7 @@ class CsrfMiddleware(BaseHTTPMiddleware):
                         "body": full_body,
                         "more_body": False,
                     }
-                return {"type": "http.disconnect"}
+                return await original_receive()
 
             request._receive = _replay_receive  # noqa: SLF001
 
