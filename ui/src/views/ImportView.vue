@@ -4,6 +4,20 @@
 
         <!-- Upload hero card -->
         <div class="hero-card">
+            <!-- Profile selector (multiuser mode with multiple profiles) -->
+            <div v-if="profiles.length > 1" class="profile-selector">
+                <label for="import-profile" class="profile-selector-label"
+                    >Import into profile</label
+                >
+                <select
+                    id="import-profile"
+                    v-model="selectedProfileId"
+                    class="profile-selector-select"
+                >
+                    <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+                </select>
+            </div>
+
             <!-- Always-present hidden file input so fileInputRef is always bound -->
             <input
                 ref="fileInputRef"
@@ -200,10 +214,18 @@ import { formatBytes } from '@/utils/formatting'
 import { Button } from '@/components/ui/button'
 import ImportResultsPanel from '@/components/ImportResultsPanel.vue'
 import { Upload, Folder, Loader2, CheckCircle2, AlertTriangle } from '@lucide/vue'
+import { useAuth } from '@/composables/useAuth'
 
 // UI-only gate; server enforces 403 on non-localhost requests
 const isLocalhost =
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+
+// ---------------------------------------------------------------------------
+// Profile selection
+// ---------------------------------------------------------------------------
+
+const { profiles, activeProfileId, setActiveProfile } = useAuth()
+const selectedProfileId = ref<number | null>(activeProfileId.value)
 
 // ---------------------------------------------------------------------------
 // Upload flow state
@@ -312,6 +334,15 @@ async function onDrop(event: DragEvent) {
 }
 
 async function handleImport() {
+    // Switch active profile if the user selected a different one.
+    if (selectedProfileId.value !== null && selectedProfileId.value !== activeProfileId.value) {
+        try {
+            await setActiveProfile(selectedProfileId.value)
+        } catch {
+            // Non-fatal: import proceeds with the current active profile.
+        }
+    }
+
     uploadPhase.value = 'uploading'
     uploadProgress.value = 0
     uploadLoaded.value = 0
@@ -454,6 +485,40 @@ function resetPath() {
     max-width: 800px;
     margin: 0 auto;
     padding: 1.5rem;
+}
+
+/* ---- Profile selector ---- */
+
+.profile-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.profile-selector-label {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--color-foreground);
+    white-space: nowrap;
+}
+
+.profile-selector-select {
+    height: 2.25rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--color-input);
+    background: transparent;
+    padding: 0 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-foreground);
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.profile-selector-select:focus {
+    border-color: var(--color-primary);
 }
 
 /* ---- Hero card ---- */

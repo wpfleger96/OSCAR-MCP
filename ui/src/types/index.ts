@@ -5,6 +5,12 @@ import type { components } from './generated'
 
 type Schemas = components['schemas']
 
+// Auth
+export type AuthStatusResponse = Schemas['AuthStatusResponse']
+export type UserInfo = Schemas['UserInfo']
+export type ProfileInfo = Schemas['ProfileInfo']
+export type ProfileResponse = Schemas['ProfileResponse']
+
 // Pagination — generic over the concrete instantiations FastAPI generates
 // (PaginatedResponse_SessionListItem_ etc.), so the envelope shape cannot drift.
 export type PaginatedResponse<T> = Omit<Schemas['PaginatedResponse_SessionListItem_'], 'items'> & {

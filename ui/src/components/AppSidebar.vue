@@ -5,7 +5,7 @@
         </div>
         <nav class="sidebar-nav">
             <span class="nav-group-label">Data</span>
-            <RouterLink to="/" class="nav-item">
+            <RouterLink to="/dashboard" class="nav-item">
                 <BarChart3 class="h-4 w-4" />
                 <span>Dashboard</span>
             </RouterLink>
@@ -57,6 +57,50 @@
             </RouterLink>
         </nav>
         <div class="sidebar-footer">
+            <!-- User menu — multiuser mode only -->
+            <template v-if="!isLocal && isAuthenticated">
+                <DropdownMenu>
+                    <DropdownMenuTrigger as-child>
+                        <button class="nav-item user-trigger" type="button">
+                            <User class="h-4 w-4 shrink-0" />
+                            <span class="user-name">{{ displayName }}</span>
+                            <ChevronUp class="h-3 w-3 shrink-0 ml-auto" />
+                        </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent side="top" align="start" class="w-52">
+                        <DropdownMenuLabel class="text-xs text-muted-foreground">
+                            Profiles
+                        </DropdownMenuLabel>
+                        <DropdownMenuItem
+                            v-for="profile in profiles"
+                            :key="profile.id"
+                            class="profile-menu-item"
+                            :class="{ 'profile-menu-item--active': profile.id === activeProfileId }"
+                            @click="switchToProfile(profile.id)"
+                        >
+                            <Check
+                                v-if="profile.id === activeProfileId"
+                                class="h-3.5 w-3.5 mr-1.5 shrink-0"
+                            />
+                            <span v-else class="h-3.5 w-3.5 mr-1.5 shrink-0 inline-block" />
+                            {{ profile.name }}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem as-child>
+                            <RouterLink to="/profiles" class="dropdown-link">
+                                <Settings class="h-4 w-4 mr-2" />
+                                Manage profiles
+                            </RouterLink>
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem @click="handleLogout" class="text-destructive">
+                            <LogOut class="h-4 w-4 mr-2" />
+                            Sign out
+                        </DropdownMenuItem>
+                    </DropdownMenuContent>
+                </DropdownMenu>
+            </template>
+
             <button class="nav-item" @click="toggleDark">
                 <Sun v-if="isDark" class="h-4 w-4" />
                 <Moon v-else class="h-4 w-4" />
@@ -67,24 +111,55 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import {
     BarChart3,
     Brain,
+    Check,
     CheckCircle,
+    ChevronUp,
     Database,
     Download,
     FileText,
     HardDrive,
     List,
+    LogOut,
     Moon,
     Pill,
+    Settings,
     Sun,
     TrendingUp,
     Upload,
+    User,
 } from '@lucide/vue'
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuSeparator,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { useDarkMode } from '@/composables/useDarkMode'
+import { useAuth } from '@/composables/useAuth'
 
+const router = useRouter()
 const { isDark, toggleDark } = useDarkMode()
+const { user, isAuthenticated, isLocal, profiles, activeProfileId, setActiveProfile, logout } =
+    useAuth()
+
+const displayName = computed(() => user.value?.display_name || user.value?.email || 'Account')
+
+async function switchToProfile(profileId: number) {
+    if (profileId === activeProfileId.value) return
+    await setActiveProfile(profileId)
+}
+
+async function handleLogout() {
+    await logout()
+    router.push('/')
+}
 </script>
 
 <style scoped>
@@ -149,6 +224,9 @@ const { isDark, toggleDark } = useDarkMode()
     margin-top: auto;
     padding: 0.75rem 0.5rem;
     border-top: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
 }
 
 .nav-group-label {
@@ -162,5 +240,33 @@ const { isDark, toggleDark } = useDarkMode()
 
 .nav-group-label:first-child {
     padding-top: 0;
+}
+
+.user-trigger {
+    overflow: hidden;
+}
+
+.user-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.875rem;
+}
+
+.profile-menu-item {
+    cursor: pointer;
+}
+
+.profile-menu-item--active {
+    font-weight: 500;
+}
+
+.dropdown-link {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    text-decoration: none;
+    color: inherit;
 }
 </style>

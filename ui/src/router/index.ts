@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuth } from '@/composables/useAuth'
 
 function sessionIdProp(route: { params: { id: string | string[] } }) {
     const id = Number(route.params.id)
@@ -8,10 +9,28 @@ function sessionIdProp(route: { params: { id: string | string[] } }) {
 const router = createRouter({
     history: createWebHistory(),
     routes: [
+        // Auth-free routes
         {
             path: '/',
+            name: 'login',
+            component: () => import('@/views/LoginView.vue'),
+        },
+        {
+            path: '/invite/:token',
+            name: 'invite',
+            component: () => import('@/views/InviteView.vue'),
+        },
+
+        // Authenticated routes
+        {
+            path: '/dashboard',
             name: 'dashboard',
             component: () => import('@/views/DashboardView.vue'),
+        },
+        {
+            path: '/profiles',
+            name: 'profiles',
+            component: () => import('@/views/ProfilesView.vue'),
         },
         {
             path: '/sessions',
@@ -92,6 +111,31 @@ const router = createRouter({
             }),
         },
     ],
+})
+
+// Auth-free paths: login page and invite redemption.
+const AUTH_FREE = ['/', '/invite']
+
+router.beforeEach(async (to) => {
+    const { fetchStatus, isAuthenticated, isLocal } = useAuth()
+
+    try {
+        await fetchStatus()
+    } catch {
+        // Network failure — allow through (server will return 401 on data requests).
+    }
+
+    const authed = isAuthenticated.value || isLocal.value
+
+    // Unauthenticated user trying to reach a guarded route → login.
+    if (!authed && !AUTH_FREE.some((p) => to.path === p || to.path.startsWith('/invite/'))) {
+        return '/'
+    }
+
+    // Authenticated user landing on login page → dashboard.
+    if (authed && to.path === '/') {
+        return '/dashboard'
+    }
 })
 
 export default router
