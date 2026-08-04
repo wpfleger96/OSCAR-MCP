@@ -3709,3 +3709,255 @@ class TestCaMixedVersionRefusal:
         assert result.periodic_breathing_pct is None
         assert result.pb_reason == NullReason.ALGO_VERSION_MISMATCH
         assert result.mv_rolling_variance is None
+
+
+# ---------------------------------------------------------------------------
+# Code-review follow-up fixes (5 findings from parallel /code-review pass)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCodeReviewFixes:
+    """Tests for the 5 code-review findings applied in one commit."""
+
+    # --- Fix 1: unguarded window_end in get_contextual_events ---
+
+    async def test_event_before_session_start_does_not_crash_contextual_events(
+        self, async_db_session
+    ):
+        """get_contextual_events succeeds for events with offset_s < 0 (clock skew).
+
+        Before the fix, window_end = offset_s + 5.0 had no lower bound.  When
+        offset_s = -10.0, window_end = -5.0 fails Pydantic Field(gt=0.0) and
+        aborted the entire call.  The fix guards window_end > 0; the event still
+        appears in results with pressure_reason/leak_reason = NOT_AVAILABLE.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 9, 1)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        # Event 10 s BEFORE session start → offset_s = -10.0
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="OA",
+                start_time=session.start_time - timedelta(seconds=10),
+                duration_seconds=5.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        # Must not raise; old code would crash with Pydantic ValidationError
+        results = await svc.get_contextual_events(
+            therapy_date=therapy_date, device_id=dev.id
+        )
+
+        assert len(results) == 1
+        ev = results[0]
+        # Window guard: pressure/leak unavailable because window_end <= 0
+        assert ev.pressure_reason == NullReason.NOT_AVAILABLE
+        assert ev.leak_reason == NullReason.NOT_AVAILABLE
+
+    # --- Fix 2: unguarded ps_win_end in get_ca_analysis ---
+
+    async def test_ca_event_before_session_start_does_not_crash_ca_analysis(
+        self, async_db_session
+    ):
+        """get_ca_analysis succeeds for CA events with offset_s < 0 (clock skew).
+
+        Before the fix, ps_win_end = offset_s + 5.0 with no guard caused the
+        same Pydantic crash when offset_s = -10.0.  The fix guards ps_win_end > 0
+        and returns ps_delivered=None, ps_reason=NOT_AVAILABLE for that CA.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 9, 2)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        # CA event 10 s BEFORE session start
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time - timedelta(seconds=10),
+                duration_seconds=8.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert len(result.ca_events) == 1
+        ca = result.ca_events[0]
+        # PS window guard: ps_win_end <= 0 → null with NOT_AVAILABLE
+        assert ca.ps_delivered_cmh2o is None
+        assert ca.ps_reason == NullReason.NOT_AVAILABLE
+
+    # --- Fix 3: pre-loaded waveform blobs (single DB fetch per session) ---
+
+    async def test_contextual_events_single_waveform_fetch_per_session(
+        self, async_db_session
+    ):
+        """get_contextual_events calls _fetch_waveform_blobs exactly once per session.
+
+        Before the fix, the function called _fetch_waveform_blobs twice per event
+        (pressure/leak + MV), so N events = 2N blob reads.  The fix pre-loads
+        once before the loop and slices in Python.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        import snore.services.breath_service as bs_mod  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 9, 3)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        # Two events in the session
+        for i in range(2):
+            async_db_session.add(
+                models.Event(
+                    session_id=session.id,
+                    event_type="OA",
+                    start_time=session.start_time + timedelta(minutes=10 + i * 10),
+                    duration_seconds=5.0,
+                )
+            )
+        await async_db_session.flush()
+
+        call_count = 0
+        original_fetch = bs_mod._fetch_waveform_blobs  # noqa: SLF001
+
+        async def counting_fetch(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return await original_fetch(*args, **kwargs)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with patch.object(bs_mod, "_fetch_waveform_blobs", side_effect=counting_fetch):
+            await svc.get_contextual_events(therapy_date=therapy_date, device_id=dev.id)
+
+        # 1 pre-load per session (not 2 × N_events)
+        assert call_count == 1, (
+            f"Expected 1 _fetch_waveform_blobs call (pre-load) but got {call_count}; "
+            "old code would call 2 × N_events"
+        )
+
+    # --- Fix 4: 90-night cap on get_nightly_range_summary ---
+
+    async def test_nightly_range_91_nights_raises_value_error(self, async_db_session):
+        """get_nightly_range_summary raises ValueError for ranges > 90 nights."""
+        _, profile_id = await _make_profile(async_db_session)
+        svc = BreathService(async_db_session, profile_id=profile_id)
+
+        with pytest.raises(ValueError, match="90"):
+            await svc.get_nightly_range_summary(
+                date_start=date(2025, 1, 1),
+                date_end=date(2025, 4, 2),  # 91 days
+            )
+
+    async def test_nightly_range_90_nights_does_not_raise(self, async_db_session):
+        """get_nightly_range_summary succeeds for exactly 90 nights (cap boundary)."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        svc = BreathService(async_db_session, profile_id=profile_id)
+
+        # 90-night range on an owned device → should not raise (may return empty)
+        result = await svc.get_nightly_range_summary(
+            date_start=date(2025, 1, 1),
+            date_end=date(2025, 3, 31),  # exactly 90 days inclusive (90-1+1=90)
+            device_id=dev.id,
+        )
+        assert result.n_calendar_nights == 90
+
+    # --- Fix 5: pb_pct=0.0 false-positive when duration_seconds is NULL ---
+
+    async def test_pb_pct_is_null_when_session_duration_is_null(self, async_db_session):
+        """periodic_breathing_pct is null (not 0.0) when session.duration_seconds is NULL.
+
+        Before the fix: total_eligible_s=0 but pb_seen_any=True → pb_pct=0.0, reason=None.
+        After the fix: pb_pct=None, pb_reason=NOT_AVAILABLE.
+        """
+        from snore.analysis.service import AnalysisService as _AS  # noqa: PLC0415
+        from snore.analysis.types import AnalysisComputation  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 9, 4)
+
+        # Session with NULL duration_seconds
+        day = models.Day(device_id=dev.id, date=therapy_date, session_count=1)
+        async_db_session.add(day)
+        await async_db_session.flush()
+        session = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day, 22, 0
+            ),
+            end_time=datetime(
+                therapy_date.year, therapy_date.month, therapy_date.day + 1, 5, 0
+            ),
+            duration_seconds=None,  # NULL — the bug trigger
+        )
+        async_db_session.add(session)
+        await async_db_session.flush()
+
+        # Analysis result with known PB episodes
+        episodes = [
+            {
+                "start_time": 100.0,
+                "end_time": 400.0,
+                "cycle_length": 30.0,
+                "regularity_score": 0.9,
+                "confidence": 0.95,
+                "has_apneas": False,
+            }
+        ]
+        result_dto = AnalysisResultDTO(
+            session_id=session.id,
+            session_duration_hours=7.0,
+            total_breaths=0,
+            machine_events=[],
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
+            timestamp_start=session.start_time.timestamp(),
+            timestamp_end=(session.start_time + timedelta(hours=7)).timestamp(),
+            periodic_breathing_episodes=episodes,
+        )
+        await _AS(async_db_session, profile_id=profile_id).store_result(
+            AnalysisComputation(summary=result_dto, breaths=[], primary_mode="aasm"),
+            processing_time_ms=10,
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=200),
+                duration_seconds=8.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        # NULL duration → cannot compute %; must be null not 0.0
+        assert result.periodic_breathing_pct is None, (
+            "pb_pct=0.0 (old bug) when session.duration_seconds is NULL; "
+            "must be None with NOT_AVAILABLE reason"
+        )
+        assert result.pb_reason == NullReason.NOT_AVAILABLE

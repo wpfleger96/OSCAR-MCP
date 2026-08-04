@@ -548,6 +548,21 @@ class WaveformWindowRequest(BaseModel):
         return self
 
 
+def _extract_window_mean(
+    offsets: list[float],
+    values: list[float],
+    offset_start: float,
+    offset_end: float,
+) -> float | None:
+    """Mean of values whose offset falls in [offset_start, offset_end]. None if empty."""
+    slice_vals = [
+        v
+        for o, v in zip(offsets, values, strict=True)
+        if offset_start <= o <= offset_end
+    ]
+    return sum(slice_vals) / len(slice_vals) if slice_vals else None
+
+
 async def _fetch_waveform_blobs(
     db: AsyncSession,
     request: WaveformWindowRequest,
@@ -2601,6 +2616,14 @@ class BreathService:
 
         n_calendar = (date_end - date_start).days + 1
 
+        # Enforce pagination cap (plan Phase 1: "paginated ~30 nights/call").
+        _MAX_NIGHTS = 90
+        if n_calendar > _MAX_NIGHTS:
+            raise ValueError(
+                f"Date range spans {n_calendar} nights; maximum per call is "
+                f"{_MAX_NIGHTS}. Use multiple calls to page over longer ranges."
+            )
+
         # Resolve device ONCE across the full range.
         # DeviceAmbiguityError and DeviceNotOwnedError propagate (ownership failures).
         # ValueError (no sessions, device_id=None auto-select found nothing) → empty summary.
@@ -2891,6 +2914,35 @@ class BreathService:
             ev_stmt = ev_stmt.order_by(models.Event.start_time)
             events = (await self._db.execute(ev_stmt)).scalars().all()
 
+            # Pre-load all needed channels for this session ONCE — one DB fetch for
+            # all events rather than two per event (fix: per-event blob read N+1).
+            # Corrupt blobs still raise ValueError per plan IMPORTANT-8.
+            session_duration_s = session_row.duration_seconds or 32400.0
+            pre_raw = await _fetch_waveform_blobs(
+                self._db,
+                WaveformWindowRequest(
+                    therapy_date=therapy_date,
+                    session_id=session_id,
+                    device_id=resolved_device_id,
+                    channels=[
+                        WaveformChannelName.PRESSURE,
+                        WaveformChannelName.LEAK,
+                        WaveformChannelName.MV,
+                    ],
+                    offset_start=0.0,
+                    offset_end=session_duration_s,
+                    window_cap_seconds=session_duration_s,
+                ),
+                session_id,
+                session_start,
+            )
+            pre_window = compute_waveform_window(pre_raw)
+            # Map channel_type → (offsets, values) for O(1) per-event slicing
+            pre_ch: dict[WaveformChannelName, tuple[list[float], list[float]]] = {
+                ch.channel_type: (ch.offset_seconds, ch.values)
+                for ch in pre_window.channels
+            }
+
             for ev in events:
                 ev_start_f = ev.start_time.timestamp()
                 offset_s = ev_start_f - session_start_f
@@ -2907,55 +2959,33 @@ class BreathService:
                 window_end = offset_s + 5.0
                 mv_window_start = max(0.0, offset_s - 120.0)
 
-                # Fetch pressure/leak context — absent channels land in missing_channels,
-                # no exception needed.  Corrupt blobs raise ValueError (plan IMPORTANT-8).
-                raw_ctx = await _fetch_waveform_blobs(
-                    self._db,
-                    WaveformWindowRequest(
-                        therapy_date=therapy_date,
-                        session_id=session_id,
-                        device_id=resolved_device_id,
-                        channels=[
-                            WaveformChannelName.PRESSURE,
-                            WaveformChannelName.LEAK,
-                        ],
-                        offset_start=window_start,
-                        offset_end=window_end,
-                    ),
-                    session_id,
-                    session_start,
-                )
-                ctx_window = compute_waveform_window(raw_ctx)
-                for ch in ctx_window.channels:
-                    if ch.values:
-                        mean_val = sum(ch.values) / len(ch.values)
-                        if ch.channel_type == WaveformChannelName.PRESSURE:
-                            pressure_at = mean_val
-                            pressure_reason = None
-                        elif ch.channel_type == WaveformChannelName.LEAK:
-                            leak_at = mean_val
-                            leak_reason = None
+                # Slice pre-loaded arrays — no DB access per event.
+                # Guard window_end > 0 (fix: event before session start crash).
+                if window_end > 0.0:
+                    for ch_type in (
+                        WaveformChannelName.PRESSURE,
+                        WaveformChannelName.LEAK,
+                    ):
+                        if ch_type in pre_ch:
+                            offsets, vals = pre_ch[ch_type]
+                            val = _extract_window_mean(
+                                offsets, vals, window_start, window_end
+                            )
+                            if val is not None:
+                                if ch_type == WaveformChannelName.PRESSURE:
+                                    pressure_at = val
+                                    pressure_reason = None
+                                else:
+                                    leak_at = val
+                                    leak_reason = None
 
-                # MV window (prior 120 s) — same propagation rule
-                if offset_s > 0.0:
-                    raw_mv = await _fetch_waveform_blobs(
-                        self._db,
-                        WaveformWindowRequest(
-                            therapy_date=therapy_date,
-                            session_id=session_id,
-                            device_id=resolved_device_id,
-                            channels=[WaveformChannelName.MV],
-                            offset_start=mv_window_start,
-                            offset_end=offset_s,
-                        ),
-                        session_id,
-                        session_start,
-                    )
-                    mv_window = compute_waveform_window(raw_mv)
-                    for ch in mv_window.channels:
-                        if ch.channel_type == WaveformChannelName.MV and ch.values:
-                            mv_prior = sum(ch.values) / len(ch.values)
-                            mv_reason = None
+                # MV window (prior 120 s)
+                if offset_s > 0.0 and WaveformChannelName.MV in pre_ch:
+                    offsets, vals = pre_ch[WaveformChannelName.MV]
+                    val = _extract_window_mean(offsets, vals, mv_window_start, offset_s)
+                    if val is not None:
+                        mv_prior = val
+                        mv_reason = None
 
                 results.append(
                     ContextualEvent(
@@ -3229,36 +3259,37 @@ class BreathService:
 
                 ps_win_start = max(0.0, offset_s - 5.0)
                 ps_win_end = offset_s + 5.0
-                raw_ps = await _fetch_waveform_blobs(
-                    self._db,
-                    WaveformWindowRequest(
-                        therapy_date=therapy_date,
-                        session_id=session_id,
-                        device_id=resolved_device_id,
-                        channels=[
-                            WaveformChannelName.THERAPY_PRESSURE,
-                            WaveformChannelName.EPAP,
-                        ],
-                        offset_start=ps_win_start,
-                        offset_end=ps_win_end,
-                    ),
-                    session_id,
-                    session_start,
-                )
-                ps_win = compute_waveform_window(raw_ps)
-                therapy_vals: list[float] = []
-                epap_vals: list[float] = []
-                for ch in ps_win.channels:
-                    if ch.channel_type == WaveformChannelName.THERAPY_PRESSURE:
-                        therapy_vals = ch.values
-                    elif ch.channel_type == WaveformChannelName.EPAP:
-                        epap_vals = ch.values
-                if therapy_vals and epap_vals:
-                    min_len = min(len(therapy_vals), len(epap_vals))
-                    diffs = [therapy_vals[i] - epap_vals[i] for i in range(min_len)]
-                    if diffs:
-                        ps_delivered = sum(diffs) / len(diffs)
-                        ps_reason = None
+                if ps_win_end > 0.0:
+                    raw_ps = await _fetch_waveform_blobs(
+                        self._db,
+                        WaveformWindowRequest(
+                            therapy_date=therapy_date,
+                            session_id=session_id,
+                            device_id=resolved_device_id,
+                            channels=[
+                                WaveformChannelName.THERAPY_PRESSURE,
+                                WaveformChannelName.EPAP,
+                            ],
+                            offset_start=ps_win_start,
+                            offset_end=ps_win_end,
+                        ),
+                        session_id,
+                        session_start,
+                    )
+                    ps_win = compute_waveform_window(raw_ps)
+                    therapy_vals: list[float] = []
+                    epap_vals: list[float] = []
+                    for ch in ps_win.channels:
+                        if ch.channel_type == WaveformChannelName.THERAPY_PRESSURE:
+                            therapy_vals = ch.values
+                        elif ch.channel_type == WaveformChannelName.EPAP:
+                            epap_vals = ch.values
+                    if therapy_vals and epap_vals:
+                        min_len = min(len(therapy_vals), len(epap_vals))
+                        diffs = [therapy_vals[i] - epap_vals[i] for i in range(min_len)]
+                        if diffs:
+                            ps_delivered = sum(diffs) / len(diffs)
+                            ps_reason = None
 
                 ca_details.append(
                     CaDetail(
@@ -3371,9 +3402,11 @@ class BreathService:
         elif pb_seen_any:
             if total_eligible_s > 0:
                 pb_pct = total_pb_s / total_eligible_s * 100.0
+                pb_reason = None
             else:
-                pb_pct = 0.0
-            pb_reason = None
+                # session.duration_seconds was NULL — cannot compute a meaningful %
+                pb_pct = None
+                pb_reason = NullReason.NOT_AVAILABLE
 
         return CaAnalysisResult(
             query_date=therapy_date,
