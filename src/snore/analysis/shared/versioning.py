@@ -177,6 +177,7 @@ class NullReason(StrEnum):
     CHANNEL_ABSENT = "channel_absent"
     CHANNEL_UNALIGNED = "channel_unaligned"
     NOT_AVAILABLE = "not_available"
+    DURATION_ZERO = "duration_zero"
     NO_DATA_IN_RANGE = "no_data_in_range"
     MULTI_SESSION_AMBIGUITY = "multi_session_ambiguity"
     UNVALIDATED_DEVICE = "unvalidated_device"

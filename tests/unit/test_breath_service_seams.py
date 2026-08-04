@@ -4325,3 +4325,212 @@ class TestNightlyRangeSummaryTiIe:
         assert night.ti_median_reason == NullReason.NOT_AVAILABLE
         assert night.ie_ratio_median is None
         assert night.ie_ratio_reason == NullReason.NOT_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# rera_index, rdi, and DURATION_ZERO fields on NightlyAnalysisSummary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNightlySummaryReraRdi:
+    """rera_index, rdi, and NullReason.DURATION_ZERO on NightlyAnalysisSummary."""
+
+    async def test_rera_index_computed_correctly_with_ahi_and_hours(
+        self, async_db_session
+    ):
+        """rera_index = round(rera_count / hours, 2); rdi = round(ahi + rera_index, 2)."""
+        from snore.analysis.types import ComputedBreath  # noqa: PLC0415
+
+        therapy_date = date(2025, 8, 1)
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        start = datetime(therapy_date.year, therapy_date.month, therapy_date.day, 22, 0)
+        day = models.Day(
+            device_id=dev.id,
+            date=therapy_date,
+            session_count=1,
+            total_therapy_hours=8.0,
+            ahi=5.0,
+        )
+        async_db_session.add(day)
+        await async_db_session.flush()
+        session = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start,
+            end_time=start + timedelta(hours=8),
+            duration_seconds=8 * 3600.0,
+        )
+        async_db_session.add(session)
+        await async_db_session.flush()
+
+        # Two FL breaths (flow_class=5, run_len=2) + recovery breath → rera_count=1
+        breaths = [
+            ComputedBreath(
+                breath_number=i + 1,
+                start_offset_s=float(i * 4),
+                end_offset_s=float(i * 4 + 3),
+                inspiration_time_s=1.2,
+                expiration_time_s=1.8,
+                total_time_s=3.0,
+                i_e_ratio=0.67,
+                duty_cycle=0.4,
+                peak_flow_lpm=30.0,
+                peak_exp_flow_lpm=20.0,
+                tidal_volume_ml=400.0,
+                respiratory_rate_rolling=15.0,
+                flatness_index=0.2,
+                mid_insp_flattening=0.35,
+                flow_class=5 if i < 2 else 1,
+                flow_confidence=0.9,
+                is_recovery_breath=(i == 2),
+                inferred_trigger_type="normal",
+                trigger_confidence=0.8,
+                inferred_cycle_type="normal",
+                cycle_confidence=0.75,
+                trigger_cycle_applicable=True,
+                trigger_cycle_reason=None,
+                leak_valid=True,
+                leak_valid_reason=None,
+                ramp_active=None,
+                ramp_active_reason="not_available",
+                mask_off=False,
+                mask_off_reason=None,
+            )
+            for i in range(3)
+        ]
+        result_dto = AnalysisResultDTO(
+            session_id=session.id,
+            session_duration_hours=8.0,
+            total_breaths=3,
+            machine_events=[],
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
+            timestamp_start=start.timestamp(),
+            timestamp_end=(start + timedelta(hours=8)).timestamp(),
+        )
+        await AnalysisService(async_db_session, profile_id=profile_id).store_result(
+            AnalysisComputation(
+                summary=result_dto, breaths=breaths, primary_mode="aasm"
+            ),
+            processing_time_ms=42,
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_summary(therapy_date, device_id=dev.id)
+
+        assert summary.rera_count == 1
+        expected_rera_index = round(1 / 8.0, 2)
+        assert summary.rera_index == pytest.approx(expected_rera_index)
+        assert summary.rera_index_reason is None
+        expected_rdi = round(5.0 + expected_rera_index, 2)
+        assert summary.rdi == pytest.approx(expected_rdi)
+        assert summary.rdi_reason is None
+
+    async def test_rera_index_none_when_therapy_hours_zero(self, async_db_session):
+        """rera_index is None with DURATION_ZERO reason when total_therapy_hours == 0."""
+        therapy_date = date(2025, 8, 2)
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        start = datetime(therapy_date.year, therapy_date.month, therapy_date.day, 22, 0)
+        day = models.Day(
+            device_id=dev.id,
+            date=therapy_date,
+            session_count=1,
+            total_therapy_hours=0.0,
+        )
+        async_db_session.add(day)
+        await async_db_session.flush()
+        session = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+            duration_seconds=3600.0,
+        )
+        async_db_session.add(session)
+        await async_db_session.flush()
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=5
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_summary(therapy_date, device_id=dev.id)
+
+        assert summary.rera_index is None
+        assert summary.rera_index_reason == NullReason.DURATION_ZERO
+        assert summary.rdi is None
+        assert summary.rdi_reason == NullReason.DURATION_ZERO
+
+    async def test_range_summary_bulk_matches_per_night_summary(self, async_db_session):
+        """get_nightly_range_summary over N nights produces identical per-night fields as get_nightly_summary."""
+        therapy_dates = [date(2025, 8, 10), date(2025, 8, 11)]
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        for d in therapy_dates:
+            _, session = await _make_day_and_session(async_db_session, dev.id, d)
+            await _store_analysis_with_breaths(
+                async_db_session, session, profile_id, n_breaths=10
+            )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        range_summary = await svc.get_nightly_range_summary(
+            date_start=therapy_dates[0],
+            date_end=therapy_dates[-1],
+            device_id=dev.id,
+        )
+
+        assert range_summary.n_nights == 2
+        for i, d in enumerate(therapy_dates):
+            per_night = await svc.get_nightly_summary(d, device_id=dev.id)
+            bulk = range_summary.nights[i]
+            assert bulk.therapy_date == per_night.therapy_date
+            assert bulk.day_status == per_night.day_status
+            assert bulk.analyzed_session_count == per_night.analyzed_session_count
+            assert bulk.eligible_session_count == per_night.eligible_session_count
+            assert bulk.rera_count == per_night.rera_count
+            assert bulk.rera_reason == per_night.rera_reason
+            assert bulk.fl_median == per_night.fl_median
+            assert bulk.fl_95th == per_night.fl_95th
+            assert bulk.fl_max == per_night.fl_max
+            assert bulk.ti_median_s == per_night.ti_median_s
+            assert bulk.ie_ratio_median == per_night.ie_ratio_median
+            assert bulk.rera_index == per_night.rera_index
+            assert bulk.rera_index_reason == per_night.rera_index_reason
+            assert bulk.rdi == per_night.rdi
+            assert bulk.rdi_reason == per_night.rdi_reason
+            assert bulk.total_therapy_hours == per_night.total_therapy_hours
+            assert bulk.is_compliant == per_night.is_compliant
+
+    async def test_range_summary_skips_nights_without_sessions(self, async_db_session):
+        """3-night range with empty middle night → n_nights == 2, middle absent from nights."""
+        d1 = date(2025, 8, 20)
+        d2 = date(2025, 8, 21)
+        d3 = date(2025, 8, 22)
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        for d in (d1, d3):
+            await _make_day_and_session(async_db_session, dev.id, d)
+        # No session on d2
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=d1, date_end=d3, device_id=dev.id
+        )
+
+        assert summary.n_nights == 2
+        night_dates = {n.therapy_date for n in summary.nights}
+        assert d1 in night_dates
+        assert d3 in night_dates
+        assert d2 not in night_dates
