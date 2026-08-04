@@ -1609,43 +1609,58 @@ class TestP3RateLimitCursorRotation:
     the front of the table is packed with active entries."""
 
     def test_stale_tail_cleared_with_active_prefix(self):
-        """Mixed active-prefix / stale-tail at reduced cap: new IP tracked within
-        bounded calls.
+        """Cursor advances past an active prefix to evict the stale tail.
 
-        With a cap of 4 and 2 active + 2 stale entries, the cursor must
-        rotate past the active prefix to clear the stale tail.  Without a
-        rotating cursor the first 64-slot sweep only sees the active entries
-        and never evicts the stale ones, leaving the table permanently full.
+        The starvation case: a table of 65 IPs where the first 64 are active
+        and only position 64 is stale.  Without a rotating cursor,
+        _purge_stale(budget=64) always examines positions 0–63 (all active,
+        zero deletions) and never reaches position 64 — the new IP is
+        untracked forever.  With the rotating cursor, the second sweep starts
+        at position 64, finds the stale entry, evicts it, and the new IP is
+        tracked within a bounded number of calls.
+
+        ``max_ips = 65 > budget = 64`` is the minimum shape that makes the
+        starvation reproducible: at cap=4 the entire table fits in one sweep
+        (min(64,4)=4) so cursor position is irrelevant.
         """
         import time
 
+        from collections import deque
+
         from snore.auth.lockout import RateLimitStore
 
-        cap = 4
-        store = RateLimitStore(window=0.05, max_per_window=10, max_ips=cap)
+        # 65 > 64 (budget): active prefix fills exactly one sweep window.
+        cap = 65
+        store = RateLimitStore(window=60.0, max_per_window=100, max_ips=cap)
 
-        # Fill 2 active IPs.
-        store.check_and_record("1.1.1.1")
-        store.check_and_record("2.2.2.2")
+        # Fill positions 0–63 with active IPs.
+        for i in range(64):
+            store.check_and_record(f"10.0.{i // 256}.{i % 256}")
 
-        # Fill 2 more IPs and let their windows expire (stale tail).
-        store.check_and_record("3.3.3.3")
-        store.check_and_record("4.4.4.4")
-        time.sleep(0.1)  # windows close for 3.3.3.3 and 4.4.4.4
+        # Position 64: directly insert a stale entry (timestamp 61s in the past,
+        # beyond the 60s window).  This avoids sleeping and is unambiguously stale.
+        stale_ts = time.monotonic() - 61.0  # 1 second past the window
+        with store._lock:
+            store._entries["192.0.2.1"] = deque([stale_ts])
 
-        assert len(store._entries) == cap, "Table should be full"
+        assert len(store._entries) == cap, "Table must be at capacity"
 
-        # Within a bounded number of check_and_record calls a new IP must
-        # be tracked (not failed-open forever).
+        # Without cursor: _purge_stale always sweeps positions 0–63 (active),
+        # never reaches 192.0.2.1 at position 64 → new IP untracked forever.
+        # With cursor: first check_and_record sweeps 0–63 (no deletions, cursor
+        # advances to 64), second sweeps 64 (stale, deleted), table drops to 64,
+        # new IP tracked on the third call at the latest.
         tracked = False
-        for _ in range(cap + 1):
-            if store.check_and_record("5.5.5.5"):
+        for _ in range(4):  # bounded: at most 3 calls with cursor
+            if store.check_and_record("203.0.113.1"):
                 with store._lock:
-                    if "5.5.5.5" in store._entries:
+                    if "203.0.113.1" in store._entries:
                         tracked = True
                         break
         assert tracked, (
-            "New IP was never tracked — stale tail not reached by rotating cursor"
+            "New IP was never tracked after bounded calls — rotating cursor "
+            "did not advance past the 64-entry active prefix to the stale tail. "
+            "The starvation the cursor fixes is still present."
         )
 
 
