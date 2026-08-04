@@ -1346,32 +1346,35 @@ class TestTwoProfileIsolation:
                 )
             )
 
-    async def test_resolve_session_for_date_foreign_device_invisible(
+    async def test_resolve_range_foreign_profile_sessions_invisible(
         self, async_db_session
     ):
-        """_resolve_session_for_date does not find sessions from B when scoped to A.
+        """_resolve_range does not expose sessions from profile B when scoped to A.
 
         When two profiles each have a session on the same date, profile A's
-        resolver only finds A's session; profile B's session is invisible.
+        _resolve_range only finds A's session; profile B's session is invisible.
         """
+        therapy_date = date(2025, 6, 15)
         (
             profile_a_id,
             dev_a_id,
             session_a,
             _profile_b_id,
-            dev_b_id,
+            _dev_b_id,
             session_b,
         ) = await self._setup_two_profiles(async_db_session)
 
         svc_a = BreathService(async_db_session, profile_id=profile_a_id)
-        # Should resolve to A's session without ambiguity error
-        resolved_sid, resolved_did = await svc_a._resolve_session_for_date(
-            date(2025, 6, 15), None
+        # Should resolve to A's device without ambiguity error
+        resolved_device_id, sessions_by_date = await svc_a._resolve_range(
+            therapy_date, therapy_date, None
         )
-        assert resolved_sid == session_a.id
-        assert resolved_did == dev_a_id
-        # B's session_id must not be returned
-        assert resolved_sid != session_b.id
+        assert resolved_device_id == dev_a_id
+        day_sessions = sessions_by_date.get(therapy_date, [])
+        session_ids = [s.id for s in day_sessions]
+        assert session_a.id in session_ids
+        # B's session must not be returned
+        assert session_b.id not in session_ids
 
     async def test_get_device_capabilities_foreign_device_returns_empty(
         self, async_db_session
@@ -1416,10 +1419,15 @@ class TestTwoProfileIsolation:
         assert result.day_status == DayAnalysisStatus.NOT_RUN
         assert result.windows == []
 
-    async def test_compare_epochs_foreign_device_contributes_zero_sessions(
+    async def test_compare_epochs_foreign_device_returns_not_available(
         self, async_db_session
     ):
-        """compare_epochs with device_b returns NO_DATA_IN_RANGE for profile A."""
+        """compare_epochs with a foreign device_id returns NOT_AVAILABLE (not NO_DATA_IN_RANGE).
+
+        A device owned by profile B is not accessible by profile A's service.
+        The structured null_reason must be NOT_AVAILABLE, distinguishing it from
+        an owned device that simply has no data in the requested range.
+        """
         (
             profile_a_id,
             _dev_a_id,
@@ -1441,7 +1449,8 @@ class TestTwoProfileIsolation:
             ]
         )
         assert len(result.epochs) == 1
-        assert result.epochs[0].null_reason == NullReason.NO_DATA_IN_RANGE
+        # Foreign device → NOT_AVAILABLE (plan §13: explicit foreign device_id)
+        assert result.epochs[0].null_reason == NullReason.NOT_AVAILABLE
 
     async def test_fetch_waveform_window_raw_foreign_session_raises(
         self, async_db_session
@@ -2415,10 +2424,11 @@ class TestCaNumericProvenance:
         assert abs(result.periodic_breathing_pct - 10.0) < 0.1
 
     async def test_ca_mv_slope_nonzero_from_linear_ramp(self, async_db_session):
-        """preceding_mv_slope ≈ 1.0 when MV = t (unit ramp, values == timestamps).
+        """preceding_mv_slope ≈ 60.0 (L/min per minute) when MV = t (unit ramp).
 
-        CA at offset 300 s.  MV window = [180, 300] s (120 samples).
-        Linear regression of y=t on x=t → slope = 1.0 exactly.
+        CA at offset 300 s.  MV window = [240, 300] s (60 s; plan §12 line 976).
+        Linear regression of y=t on x=t → per-second slope = 1.0 L/min per s.
+        After unit conversion (×60 s/min): preceding_mv_slope = 60.0 L/min per minute.
         """
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
@@ -2456,7 +2466,8 @@ class TestCaNumericProvenance:
         ev = result.ca_events[0]
         assert ev.preceding_mv_slope is not None
         assert ev.preceding_mv_slope > 0.0
-        assert abs(ev.preceding_mv_slope - 1.0) < 0.05
+        # plan §12 line 976: slope in L/min per minute; unit ramp → 60.0 (tolerance ±1.0)
+        assert abs(ev.preceding_mv_slope - 60.0) < 1.0
 
     async def test_ca_ps_nonzero_from_known_pressures(self, async_db_session):
         """ps_delivered_cmh2o ≈ 12.0 when THERAPY_PRESSURE=20.0, EPAP=8.0.
@@ -2520,6 +2531,8 @@ class TestCaNumericProvenance:
         Session = 1200 s (exactly two 600-s bins, no tail bin).
         Bin 1 [0-600 s]: MV = 5.0.  Bin 2 [600-1200 s): MV = 15.0.
         variance([5.0, 15.0]) = 50.0.
+
+        Session must have an OK AnalysisResult — eligibility gate skips NOT_RUN sessions.
         """
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
@@ -2529,6 +2542,10 @@ class TestCaNumericProvenance:
             dev.id,
             therapy_date,
             duration_hours=1200.0 / 3600.0,
+        )
+        # Store an OK analysis result so this session passes the eligibility gate
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=1
         )
 
         n = 1200
@@ -2560,3 +2577,702 @@ class TestCaNumericProvenance:
         assert result.mv_rolling_variance > 0.0
         # variance([5.0, 15.0]) = 50.0  (±1.0 tolerance for bin boundary effects)
         assert abs(result.mv_rolling_variance - 50.0) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Additional TestSameProfileTwoDevice tests (two-phase resolver)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSameProfileTwoDeviceExtended:
+    """Extended two-device tests exercising the _resolve_range two-phase design."""
+
+    async def _setup_two_devices_on_date(
+        self, db: AsyncSession, therapy_date: date
+    ) -> tuple[int, models.Device, models.Session, models.Device, models.Session]:
+        """One profile with two devices, both having sessions on therapy_date."""
+        _, profile_id = await _make_profile(db)
+        dev_a = await _make_device(db, profile_id, manufacturer="ResMed")
+        _, session_a = await _make_day_and_session(db, dev_a.id, therapy_date)
+        dev_b = await _make_device(db, profile_id, manufacturer="Philips")
+        _, session_b = await _make_day_and_session(db, dev_b.id, therapy_date)
+        return profile_id, dev_a, session_a, dev_b, session_b
+
+    async def test_two_device_compare_epochs_raises_device_ambiguity(
+        self, async_db_session
+    ):
+        """compare_epochs with same-profile two devices and no device_id raises DeviceAmbiguityError."""
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        therapy_date = date(2026, 1, 15)
+        profile_id, dev_a, _, dev_b, _ = await self._setup_two_devices_on_date(
+            async_db_session, therapy_date
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(DeviceAmbiguityError) as exc_info:
+            await svc.compare_epochs(
+                epochs=[
+                    EpochRequest(
+                        label="ambiguous",
+                        date_start=therapy_date,
+                        date_end=therapy_date,
+                        # device_id=None → ambiguity since two owned devices have sessions
+                    )
+                ]
+            )
+        err = exc_info.value
+        assert dev_a.id in err.owned_device_ids
+        assert dev_b.id in err.owned_device_ids
+
+    async def test_two_device_disjoint_date_range_raises_device_ambiguity(
+        self, async_db_session
+    ):
+        """Two devices with sessions on disjoint date ranges → DeviceAmbiguityError in compare_epochs."""
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev_a = await _make_device(async_db_session, profile_id, manufacturer="ResMed")
+        dev_b = await _make_device(async_db_session, profile_id, manufacturer="Philips")
+        date_a = date(2026, 1, 10)  # device A only
+        date_b = date(2026, 2, 10)  # device B only
+        await _make_day_and_session(async_db_session, dev_a.id, date_a)
+        await _make_day_and_session(async_db_session, dev_b.id, date_b)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        # Range spans both dates — two distinct devices found → DeviceAmbiguityError
+        with pytest.raises(DeviceAmbiguityError) as exc_info:
+            await svc.compare_epochs(
+                epochs=[
+                    EpochRequest(
+                        label="cross_month",
+                        date_start=date_a,
+                        date_end=date_b,
+                    )
+                ]
+            )
+        err = exc_info.value
+        assert dev_a.id in err.owned_device_ids
+        assert dev_b.id in err.owned_device_ids
+
+    async def test_explicit_foreign_device_id_raises_in_epochs(self, async_db_session):
+        """Foreign device_id in compare_epochs returns NOT_AVAILABLE (not NO_DATA_IN_RANGE)."""
+        _, profile_a_id = await _make_profile(async_db_session)
+        _, profile_b_id = await _make_profile(async_db_session)
+        dev_b = await _make_device(async_db_session, profile_b_id)
+        therapy_date = date(2026, 1, 20)
+        await _make_day_and_session(async_db_session, dev_b.id, therapy_date)
+
+        # Profile A asks for device_b (owned by profile B) → structured error, not NO_DATA_IN_RANGE
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        result = await svc_a.compare_epochs(
+            epochs=[
+                EpochRequest(
+                    label="foreign_device",
+                    date_start=therapy_date,
+                    date_end=therapy_date,
+                    device_id=dev_b.id,
+                )
+            ]
+        )
+        assert len(result.epochs) == 1
+        assert result.epochs[0].null_reason == NullReason.NOT_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# compare_epochs refusal tests (two-phase: RX + identity checks before breath queries)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCompareEpochsRefusal:
+    """Verify that metadata failures null ALL epoch distributions before any breath queries."""
+
+    async def _make_setting(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        key: str,
+        value: str,
+    ) -> None:
+        from snore.database import models as _models  # noqa: PLC0415
+
+        db.add(_models.Setting(session_id=session_id, key=key, value=value))
+        await db.flush()
+
+    async def test_same_night_rx_divergence_refuses_with_null_distributions(
+        self, async_db_session
+    ):
+        """Within-epoch RX change → null distributions for that epoch (RX_CHANGED_WITHIN_EPOCH).
+
+        One device, two OK sessions on the same night with different PS values.
+        """
+        from snore.analysis.rx_tracker import RX_KEYS  # noqa: PLC0415
+        from snore.database import models as _models  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 3, 1)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = _models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        session_a = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(hours=3),
+            duration_seconds=3 * 3600.0,
+        )
+        session_b = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=4),
+            end_time=start_a + timedelta(hours=7),
+            duration_seconds=3 * 3600.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        await _store_analysis_with_breaths(
+            async_db_session, session_a, profile_id, n_breaths=2
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, session_b, profile_id, n_breaths=2
+        )
+
+        # Pick a key from RX_KEYS to vary between sessions
+        rx_key = next(iter(RX_KEYS))
+        await self._make_setting(async_db_session, session_a.id, rx_key, "8.0")
+        await self._make_setting(
+            async_db_session, session_b.id, rx_key, "12.0"
+        )  # differs
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.compare_epochs(
+            epochs=[
+                EpochRequest(
+                    label="same_night_rx",
+                    date_start=therapy_date,
+                    date_end=therapy_date,
+                    device_id=dev.id,
+                )
+            ]
+        )
+
+        assert len(result.epochs) == 1
+        epoch_result = result.epochs[0]
+        # RX changed within epoch → refusal with null distributions
+        assert epoch_result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+        assert epoch_result.mid_insp_flattening.median is None
+        assert epoch_result.flatness_index.median is None
+        assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+
+    async def test_cross_epoch_identity_mismatch_refuses_with_null_distributions(
+        self, async_db_session
+    ):
+        """Cross-epoch algorithm identity mismatch → null_reason=ALGO_VERSION_MISMATCH on all epochs.
+
+        Because _latest_analysis_for_session only returns OK when the stored identity
+        matches the current runtime identity, genuine cross-epoch mismatches cannot be
+        created through DB fixtures alone.  We mock _latest_analysis_for_session to
+        inject different AlgoVersions (each individually OK) for two sessions in two
+        different epochs, so the cross-epoch identity check fires.
+        """
+        import copy  # noqa: PLC0415
+
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.analysis.shared.versioning import (  # noqa: PLC0415
+            AlgorithmIdentity,
+            AnalysisRunMetadata,
+        )
+        from snore.database import models as _models  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        date_a = date(2026, 4, 1)
+        date_b = date(2026, 5, 1)
+
+        _, session_a = await _make_day_and_session(async_db_session, dev.id, date_a)
+        _, session_b = await _make_day_and_session(async_db_session, dev.id, date_b)
+
+        # Construct two AlgoVersions with different identities on CROSS_VERSION_REFUSAL_KEYS
+        current_id = AlgorithmIdentity.current()
+        run_meta = AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"])
+        algo_a = AlgoVersions(identity=current_id, run=run_meta)
+
+        alt_id_dict = copy.deepcopy(current_id.model_dump())
+        # Use "segmenter" — always a string field in CROSS_VERSION_REFUSAL_KEYS
+        old_segmenter = alt_id_dict.get("segmenter", "v0")
+        alt_id_dict["segmenter"] = (
+            "v999.999.999" if old_segmenter != "v999.999.999" else "v998.0.0"
+        )
+        algo_b = AlgoVersions(
+            identity=AlgorithmIdentity.model_validate(alt_id_dict), run=run_meta
+        )
+
+        # Insert real AnalysisResult rows so _resolve_range finds sessions; we'll
+        # override the status via mock
+        for sess in (session_a, session_b):
+            async_db_session.add(
+                _models.AnalysisResult(
+                    session_id=sess.id,
+                    timestamp_start=sess.start_time,
+                    timestamp_end=sess.end_time or sess.start_time + timedelta(hours=7),
+                    programmatic_result_json={},
+                    processing_time_ms=5,
+                    engine_versions_json=algo_a.model_dump(),  # both "current" in DB
+                )
+            )
+        await async_db_session.flush()
+
+        # Query real ar_ids to feed into the mock
+        from sqlalchemy import select  # noqa: PLC0415
+
+        ar_a_id = (
+            await async_db_session.execute(
+                select(_models.AnalysisResult.id)
+                .where(_models.AnalysisResult.session_id == session_a.id)
+                .limit(1)
+            )
+        ).scalar()
+        ar_b_id = (
+            await async_db_session.execute(
+                select(_models.AnalysisResult.id)
+                .where(_models.AnalysisResult.session_id == session_b.id)
+                .limit(1)
+            )
+        ).scalar()
+
+        async def _mocked_latest(
+            session_id: int,
+        ) -> tuple[AnalysisStatus, AlgoVersions | None, int | None]:
+            if session_id == session_a.id:
+                return (AnalysisStatus.OK, algo_a, ar_a_id)
+            if session_id == session_b.id:
+                return (AnalysisStatus.OK, algo_b, ar_b_id)
+            return (AnalysisStatus.NOT_RUN, None, None)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with patch.object(
+            svc, "_latest_analysis_for_session", side_effect=_mocked_latest
+        ):
+            result = await svc.compare_epochs(
+                epochs=[
+                    EpochRequest(
+                        label="epoch_a",
+                        date_start=date_a,
+                        date_end=date_a,
+                        device_id=dev.id,
+                    ),
+                    EpochRequest(
+                        label="epoch_b",
+                        date_start=date_b,
+                        date_end=date_b,
+                        device_id=dev.id,
+                    ),
+                ]
+            )
+
+        # Cross-epoch identity mismatch → all null
+        assert result.null_reason == NullReason.ALGO_VERSION_MISMATCH
+        for es in result.epochs:
+            assert es.null_reason == NullReason.ALGO_VERSION_MISMATCH
+            assert es.mid_insp_flattening.median is None
+            assert es.flatness_index.median is None
+
+
+# ---------------------------------------------------------------------------
+# Additional CA numeric provenance tests (eligibility gate + variance)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCaNumericProvenanceExtended:
+    """Additional CA numeric tests exercising the eligibility gate and cross-session variance."""
+
+    async def test_ca_stability_index_over_60s_window(self, async_db_session):
+        """stability_index uses a 60-second window (plan §12 line 976).
+
+        CA at 90 s.  MV data covers [30, 90] s (60 s window).
+        Known values so variance is computable; index = stdev / mean.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 6, 1)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        # MV data: alternating 8.0 and 12.0 to produce known stdev
+        n = 3600
+        ts = np.arange(n, dtype=np.float32)
+        vals = np.where(ts % 2 == 0, 8.0, 12.0).astype(np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(ts, vals),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=90),
+                duration_seconds=8.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert len(result.ca_events) == 1
+        ev = result.ca_events[0]
+        # stability_index = stdev / mean must be non-null for valid window data
+        assert ev.stability_index is not None
+        assert ev.stability_reason is None
+        # mean([8,12]) = 10, stdev ≈ 2; CV ≈ 0.2
+        assert ev.stability_index > 0.0
+
+    async def test_ca_pb_pct_over_eligible_sessions_only(self, async_db_session):
+        """PB% uses only OK-session durations in denominator (eligibility gate).
+
+        Split night: 1 OK session (1800 s, 360 s of PB) + 1 NOT_RUN session (1800 s).
+        pb_pct = 360 / 1800 * 100 = 20.0 % (NOT 10%, which would dilute with NOT_RUN).
+        """
+        from snore.database import models as _models  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 6, 2)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = _models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        # session_a: 1800 s, gets an OK analysis with PB episodes (360 s total)
+        session_a = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(seconds=1800),
+            duration_seconds=1800.0,
+        )
+        # session_b: 1800 s, NOT_RUN (no AnalysisResult)
+        session_b = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=3),
+            end_time=start_a + timedelta(hours=3) + timedelta(seconds=1800),
+            duration_seconds=1800.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        # Store OK analysis with PB episode for session_a
+        from snore.analysis.modes.types import ModeResult  # noqa: PLC0415
+        from snore.analysis.service import AnalysisService as _AS  # noqa: PLC0415
+        from snore.analysis.types import AnalysisComputation  # noqa: PLC0415
+        from snore.analysis.types import (
+            AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+        )
+
+        episodes = [
+            {
+                "start_time": 100.0,
+                "end_time": 460.0,  # 360 s of PB
+                "cycle_length": 30.0,
+                "regularity_score": 0.9,
+                "confidence": 0.95,
+                "has_apneas": False,
+            }
+        ]
+        result_dto = AnalysisResultDTO(
+            session_id=session_a.id,
+            session_duration_hours=1800.0 / 3600.0,
+            total_breaths=0,
+            machine_events=[],
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
+            timestamp_start=session_a.start_time.timestamp(),
+            timestamp_end=(session_a.start_time + timedelta(seconds=1800)).timestamp(),
+            periodic_breathing_episodes=episodes,
+        )
+        await _AS(async_db_session, profile_id=profile_id).store_result(
+            AnalysisComputation(summary=result_dto, breaths=[], primary_mode="aasm"),
+            processing_time_ms=5,
+        )
+
+        # Add a CA event so we can call get_ca_analysis
+        async_db_session.add(
+            _models.Event(
+                session_id=session_a.id,
+                event_type="CA",
+                start_time=session_a.start_time + timedelta(seconds=50),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert result.periodic_breathing_pct is not None
+        # plan §12: pb_pct = 360 / 1800 * 100 = 20.0 % (NOT_RUN session excluded from denominator)
+        assert abs(result.periodic_breathing_pct - 20.0) < 0.1
+
+    async def test_ca_mv_variance_over_all_eligible_sessions(self, async_db_session):
+        """Cross-session MV variance combines bin means from ALL OK sessions.
+
+        Two OK sessions: session_a MV=5.0 (one 600-s bin), session_b MV=15.0 (one 600-s bin).
+        Combined bin_means = [5.0, 15.0]; variance = 50.0.
+        """
+        from snore.database import models as _models  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 6, 3)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = _models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        session_a = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(seconds=600),
+            duration_seconds=600.0,
+        )
+        session_b = _models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=2),
+            end_time=start_a + timedelta(hours=2) + timedelta(seconds=600),
+            duration_seconds=600.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        # Both sessions get OK analysis
+        await _store_analysis_with_breaths(
+            async_db_session, session_a, profile_id, n_breaths=1
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, session_b, profile_id, n_breaths=1
+        )
+
+        # session_a MV = constant 5.0 for 600 s
+        n = 600
+        ts_a = np.arange(n, dtype=np.float32)
+        async_db_session.add(
+            _models.Waveform(
+                session_id=session_a.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(
+                    ts_a, np.full(n, 5.0, dtype=np.float32)
+                ),
+            )
+        )
+        # session_b MV = constant 15.0 for 600 s
+        ts_b = np.arange(n, dtype=np.float32)
+        async_db_session.add(
+            _models.Waveform(
+                session_id=session_b.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(
+                    ts_b, np.full(n, 15.0, dtype=np.float32)
+                ),
+            )
+        )
+        # CA event in session_a for get_ca_analysis to find
+        async_db_session.add(
+            _models.Event(
+                session_id=session_a.id,
+                event_type="CA",
+                start_time=session_a.start_time + timedelta(seconds=100),
+                duration_seconds=8.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert result.mv_rolling_variance is not None
+        # Combined bin_means = [5.0, 15.0] from both OK sessions → variance = 50.0
+        assert abs(result.mv_rolling_variance - 50.0) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# event_types cap tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestContextualEventsInputValidationExtended:
+    """event_types cap tests (plan §13: 50-item limit)."""
+
+    async def test_event_types_at_cap_does_not_raise(self, async_db_session):
+        """get_contextual_events with exactly 50 unique event_types succeeds."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 1)
+        await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        event_types_50 = [f"TYPE_{i:03d}" for i in range(50)]
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        # Should not raise — empty result since no events of those types exist
+        result = await svc.get_contextual_events(
+            therapy_date=therapy_date,
+            device_id=dev.id,
+            event_types=event_types_50,
+        )
+        assert result == []
+
+    async def test_event_types_over_cap_is_truncated(self, async_db_session):
+        """get_contextual_events with 60 unique event_types truncates to 50, no error."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 2)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        # Insert an event whose type is in position 51 (would be dropped after cap)
+        dropped_type = "TYPE_060"  # index 60, past cap
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type=dropped_type,
+                start_time=session.start_time + timedelta(minutes=10),
+                duration_seconds=5.0,
+            )
+        )
+        await async_db_session.flush()
+
+        event_types_60 = [
+            f"TYPE_{i:03d}" for i in range(60)
+        ]  # 60 unique, all different
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        # Should succeed; the dropped_type at index 60 is truncated (not queried)
+        result = await svc.get_contextual_events(
+            therapy_date=therapy_date,
+            device_id=dev.id,
+            event_types=event_types_60,
+        )
+        # dropped_type (index 60) was truncated, so it won't appear
+        returned_types = {e.event_type for e in result}
+        assert dropped_type not in returned_types
+
+
+# ---------------------------------------------------------------------------
+# Unexpected runtime error propagation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestUnexpectedErrorPropagation:
+    """Non-ValueError compute failures must propagate, not be swallowed."""
+
+    async def test_unexpected_runtime_error_propagates_through_contextual_events(
+        self, async_db_session
+    ):
+        """A RuntimeError from compute_waveform_window propagates out of get_contextual_events.
+
+        Absent channels use missing_channels (no exception).  Corrupt blobs raise
+        ValueError.  Any other unexpected exception must propagate rather than being
+        swallowed by a catch-all.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.services import breath_service as bs_mod  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 8, 1)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="OA",
+                start_time=session.start_time + timedelta(minutes=10),
+                duration_seconds=5.0,
+            )
+        )
+        await async_db_session.flush()
+
+        def _raise_runtime(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("injected compute failure")
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with patch.object(
+            bs_mod, "compute_waveform_window", side_effect=_raise_runtime
+        ):
+            with pytest.raises(RuntimeError, match="injected compute failure"):
+                await svc.get_contextual_events(
+                    therapy_date=therapy_date, device_id=dev.id
+                )
+
+    async def test_unexpected_runtime_error_propagates_through_ca_analysis(
+        self, async_db_session
+    ):
+        """A RuntimeError from compute_waveform_window propagates out of get_ca_analysis."""
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.services import breath_service as bs_mod  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 8, 2)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        def _raise_runtime(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("injected CA compute failure")
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with patch.object(
+            bs_mod, "compute_waveform_window", side_effect=_raise_runtime
+        ):
+            with pytest.raises(RuntimeError, match="injected CA compute failure"):
+                await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
