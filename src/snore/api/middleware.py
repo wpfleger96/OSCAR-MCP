@@ -254,12 +254,16 @@ class CsrfMiddleware(BaseHTTPMiddleware):
                     # side-effecting handlers (e.g. /invites/redeem) must not run.
                     from starlette.responses import Response  # noqa: PLC0415
 
-                    return Response(status_code=499)
+                    return Response(
+                        status_code=499, headers={"Cache-Control": "no-store"}
+                    )
                 else:
                     # Unknown ASGI message — treat as disconnect.
                     from starlette.responses import Response  # noqa: PLC0415
 
-                    return Response(status_code=499)
+                    return Response(
+                        status_code=499, headers={"Cache-Control": "no-store"}
+                    )
 
             # A genuine terminal http.request frame was received.
             # Replay the buffered body once, then delegate subsequent receives

@@ -2209,6 +2209,106 @@ class TestP3AuthBodyCeiling413:
             "Side-effecting handlers (e.g. /invites/redeem) must not run on "
             "incomplete requests."
         )
-        assert response.status_code >= 400, (
-            f"Expected error response (4xx), got {response.status_code}"
+        assert response.status_code == 499, (
+            f"Expected 499 (client disconnect abort), got {response.status_code}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_replay_receive_delegates_to_original_after_first_replay(self):
+        """After replaying the buffered body once, subsequent receives delegate to
+        original_receive — not a manufactured http.disconnect.
+
+        Proves _replay_receive line 279 (``return await original_receive()``) is
+        reachable and returns what original_receive returns, not a synthetic disconnect.
+        """
+        from starlette.requests import Request  # noqa: PLC0415
+        from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
+
+        from snore.api.middleware import CsrfMiddleware  # noqa: PLC0415
+
+        body_bytes = b'{"email":"test@example.com","password":"pw"}'
+        sentinel_msg = {"type": "http.disconnect", "body": b"SENTINEL"}
+
+        async def original_receive() -> dict:
+            return sentinel_msg
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "query_string": b"",
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"origin", b"http://127.0.0.1:8000"),
+            ],
+            "root_path": "",
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8000),
+        }
+
+        # Terminal http.request frame — will be buffered and replayed.
+        terminal_frame = {
+            "type": "http.request",
+            "body": body_bytes,
+            "more_body": False,
+        }
+        _called = [0]
+
+        async def counting_receive() -> dict:
+            _called[0] += 1
+            return terminal_frame
+
+        request = Request(scope, receive=counting_receive)
+        # Override the private callable with one that returns the sentinel after replay.
+        # We have to do this after Request is constructed because it copies the receive.
+        _original_saved = request.receive
+
+        async def receive_with_sentinel() -> dict:
+            return sentinel_msg
+
+        request._receive = receive_with_sentinel  # noqa: SLF001
+
+        # Reconstruct so dispatch sees the right receive.
+        request = Request(scope, receive=receive_with_sentinel)
+        # Prime it with the real terminal frame first.
+        first_call = [True]
+
+        async def staged_receive() -> dict:
+            if first_call[0]:
+                first_call[0] = False
+                return terminal_frame
+            return sentinel_msg
+
+        request = Request(scope, receive=staged_receive)
+
+        async def _noop_app3(scope, receive, send):
+            pass
+
+        csrf_mw = CsrfMiddleware(app=_noop_app3)
+
+        received_in_handler: list[dict] = []
+
+        async def checking_call_next(req: Request) -> StarletteResponse:
+            # First receive = buffered body replay.
+            msg1 = await req.receive()
+            received_in_handler.append(msg1)
+            # Second receive = original_receive delegate.
+            msg2 = await req.receive()
+            received_in_handler.append(msg2)
+            return StarletteResponse(status_code=200)
+
+        await csrf_mw.dispatch(request, checking_call_next)
+
+        assert len(received_in_handler) == 2, (
+            f"Expected 2 receives in handler, got {len(received_in_handler)}"
+        )
+        assert received_in_handler[0]["type"] == "http.request", (
+            "First handler receive must be the replayed http.request body"
+        )
+        assert received_in_handler[0].get("body") == body_bytes, (
+            "Replayed body must match the original buffered bytes"
+        )
+        assert received_in_handler[1] is sentinel_msg, (
+            "Second handler receive must come from original_receive, "
+            "not a manufactured http.disconnect"
         )
