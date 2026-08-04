@@ -753,17 +753,25 @@ class TestGetWaveformWindow:
 
 @pytest.mark.unit
 class TestFetchWaveformWindowRaw:
-    async def test_missing_session_raises_value_error(self, async_db_session):
-        """fetch_waveform_window_raw raises ValueError for an unknown session_id."""
-        _, profile_id = await _make_profile(async_db_session)
+    async def test_unknown_session_id_returns_empty_channels(self, async_db_session):
+        """fetch_waveform_window_raw returns empty channels for an unknown session_id.
+
+        After removing the internal resolver, the function only queries Waveform rows.
+        A session_id with no Waveform rows → all channels go to missing_channels.
+        Resolution (profile/device/session ownership) is the caller's responsibility.
+        """
         req = WaveformWindowRequest(
             therapy_date=date(2025, 1, 1),
             session_id=99999,
             offset_start=0.0,
             offset_end=120.0,
+            channels=[WaveformChannelName.FLOW],
         )
-        with pytest.raises(ValueError, match="Session"):
-            await fetch_waveform_window_raw(async_db_session, req, profile_id)
+        raw = await fetch_waveform_window_raw(
+            async_db_session, req, 99999, datetime.min
+        )
+        assert raw.channels == []
+        assert WaveformChannelName.FLOW in raw.missing_channels
 
 
 # ---------------------------------------------------------------------------
@@ -1484,10 +1492,14 @@ class TestTwoProfileIsolation:
         # Foreign device → NOT_AVAILABLE (plan §13: explicit foreign device_id)
         assert result.epochs[0].null_reason == NullReason.NOT_AVAILABLE
 
-    async def test_fetch_waveform_window_raw_foreign_session_raises(
-        self, async_db_session
-    ):
-        """fetch_waveform_window_raw with profile_id raises ValueError for B's session."""
+    async def test_get_waveform_window_foreign_device_raises(self, async_db_session):
+        """get_waveform_window with a foreign device_id raises DeviceNotOwnedError.
+
+        Resolution now lives in get_waveform_window via _resolve_range; the raw
+        fetch no longer performs resolution or profile checks.
+        """
+        from snore.services.breath_service import DeviceNotOwnedError  # noqa: PLC0415
+
         (
             profile_a_id,
             _,
@@ -1497,9 +1509,9 @@ class TestTwoProfileIsolation:
             session_b,
         ) = await self._setup_two_profiles(async_db_session)
 
-        with pytest.raises(ValueError, match="Session"):
-            await fetch_waveform_window_raw(
-                async_db_session,
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        with pytest.raises(DeviceNotOwnedError):
+            await svc_a.get_waveform_window(
                 WaveformWindowRequest(
                     therapy_date=date(2025, 6, 15),
                     session_id=session_b.id,
@@ -1507,8 +1519,7 @@ class TestTwoProfileIsolation:
                     channels=[WaveformChannelName.FLOW],
                     offset_start=0.0,
                     offset_end=60.0,
-                ),
-                profile_a_id,
+                )
             )
 
     async def test_ambiguity_payload_excludes_foreign_profile_session(
@@ -1566,16 +1577,18 @@ class TestTwoProfileIsolation:
             MultiSessionAmbiguityError,
         )
 
+        # Resolution now lives in get_waveform_window via _resolve_range.
+        # Profile A has 1 device with 2 sessions → MultiSessionAmbiguityError;
+        # profile B's session must not appear in the payload.
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
         with pytest.raises(MultiSessionAmbiguityError) as exc_info:
-            await fetch_waveform_window_raw(
-                async_db_session,
+            await svc_a.get_waveform_window(
                 WaveformWindowRequest(
                     therapy_date=therapy_date,
                     channels=[WaveformChannelName.FLOW],
                     offset_start=0.0,
                     offset_end=60.0,
-                ),
-                profile_a_id,
+                )
             )
         err = exc_info.value
         session_ids_in_payload = {s.session_id for s in err.sessions}
@@ -1589,9 +1602,9 @@ class TestTwoProfileIsolation:
     ):
         """Profile A (1 session) + profile B (1 session) on same date → no ambiguity.
 
-        This is the direct regression test for Item 1: without the profile predicate
-        in fetch_waveform_window_raw's resolution query, both sessions are visible
-        and the call raises MultiSessionAmbiguityError instead of resolving cleanly.
+        Resolution now lives in get_waveform_window via _resolve_range.  Profile A
+        has one device with one session; profile B's session is scoped out during
+        _resolve_range, so no multi-session error fires.
         """
         therapy_date = date(2025, 6, 15)
         (
@@ -1603,19 +1616,18 @@ class TestTwoProfileIsolation:
             _session_b,
         ) = await self._setup_two_profiles(async_db_session)
 
-        # Should resolve cleanly to profile A's session with no ambiguity
-        raw = await fetch_waveform_window_raw(
-            async_db_session,
+        # Should resolve cleanly to profile A's session (profile B's is invisible)
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        window = await svc_a.get_waveform_window(
             WaveformWindowRequest(
                 therapy_date=therapy_date,
                 channels=[WaveformChannelName.FLOW],
                 offset_start=0.0,
                 offset_end=60.0,
-            ),
-            profile_a_id,
+            )
         )
-        # Returns empty channels (no waveform data stored) but resolves to A's session
-        assert raw.session_id == session_a.id
+        # Returns empty channels (no waveform data) but resolved to A's session
+        assert window.session_id == session_a.id
 
     async def test_foreign_analysis_result_not_returned_via_breath_table_by_date(
         self, async_db_session
@@ -2049,32 +2061,34 @@ class TestSameProfileTwoDevice:
         with pytest.raises(DeviceAmbiguityError):
             await svc.get_ca_analysis(therapy_date=therapy_date)
 
-    async def test_two_device_waveform_window_raises_without_device_id(
+    async def test_two_device_waveform_window_raises_device_ambiguity(
         self, async_db_session
     ):
-        """fetch_waveform_window_raw with two devices raises MultiSessionAmbiguityError."""
+        """get_waveform_window with two devices and no device_id raises DeviceAmbiguityError.
+
+        Resolution now lives in get_waveform_window via _resolve_range so that
+        multi-device ambiguity produces DeviceAmbiguityError (not MultiSessionAmbiguityError).
+        """
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
         therapy_date = date(2025, 11, 7)
-        profile_id, _, _, _, _ = await self._setup_two_devices(
+        profile_id, dev_a, _, dev_b, _ = await self._setup_two_devices(
             async_db_session, therapy_date
         )
 
-        from snore.services.breath_service import (  # noqa: PLC0415
-            MultiSessionAmbiguityError,
-        )
-
-        # fetch_waveform_window_raw resolves sessions profile-wide;
-        # with 2 devices (2 sessions), it raises MultiSessionAmbiguityError
-        with pytest.raises(MultiSessionAmbiguityError):
-            await fetch_waveform_window_raw(
-                async_db_session,
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with pytest.raises(DeviceAmbiguityError) as exc_info:
+            await svc.get_waveform_window(
                 WaveformWindowRequest(
                     therapy_date=therapy_date,
                     channels=[WaveformChannelName.FLOW],
                     offset_start=0.0,
                     offset_end=60.0,
-                ),
-                profile_id,
+                )
             )
+        err = exc_info.value
+        assert dev_a.id in err.owned_device_ids
+        assert dev_b.id in err.owned_device_ids
 
 
 # ---------------------------------------------------------------------------
@@ -2738,10 +2752,12 @@ class TestSameProfileTwoDeviceExtended:
     async def test_foreign_device_id_in_contextual_events_propagates(
         self, async_db_session
     ):
-        """get_contextual_events with a foreign device_id propagates ValueError (not []).
+        """get_contextual_events with a foreign device_id propagates (not []).
 
         Before the fix, the ValueError was caught and silently returned [].
         """
+        from snore.services.breath_service import DeviceNotOwnedError  # noqa: PLC0415
+
         _, profile_a_id = await _make_profile(async_db_session)
         _, profile_b_id = await _make_profile(async_db_session)
         dev_b = await _make_device(async_db_session, profile_b_id)
@@ -2749,11 +2765,93 @@ class TestSameProfileTwoDeviceExtended:
         await _make_day_and_session(async_db_session, dev_b.id, therapy_date)
 
         svc_a = BreathService(async_db_session, profile_id=profile_a_id)
-        # profile A asking about profile B's device → must propagate, not silently []
-        with pytest.raises(ValueError):
+        # profile A asking about profile B's device → DeviceNotOwnedError, not []
+        with pytest.raises(DeviceNotOwnedError):
             await svc_a.get_contextual_events(
                 therapy_date=therapy_date, device_id=dev_b.id
             )
+
+    async def test_foreign_device_id_in_nightly_range_raises_device_not_owned(
+        self, async_db_session
+    ):
+        """get_nightly_range_summary with a foreign device_id raises DeviceNotOwnedError.
+
+        Before the fix, the ValueError was caught and a valid-looking empty summary
+        was returned with device_id=<foreign>, n_nights=0, compliance_pct=0.0.
+        """
+        from snore.services.breath_service import DeviceNotOwnedError  # noqa: PLC0415
+
+        _, profile_a_id = await _make_profile(async_db_session)
+        _, profile_b_id = await _make_profile(async_db_session)
+        dev_b = await _make_device(async_db_session, profile_b_id)
+        therapy_date = date(2026, 3, 12)
+        await _make_day_and_session(async_db_session, dev_b.id, therapy_date)
+
+        svc_a = BreathService(async_db_session, profile_id=profile_a_id)
+        with pytest.raises(DeviceNotOwnedError):
+            await svc_a.get_nightly_range_summary(
+                date_start=therapy_date,
+                date_end=therapy_date,
+                device_id=dev_b.id,
+            )
+
+    async def test_valid_device_with_no_sessions_in_range_returns_empty_summary(
+        self, async_db_session
+    ):
+        """get_nightly_range_summary for an owned device with no sessions returns n_nights=0."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_nightly_range_summary(
+            date_start=date(2026, 3, 1),
+            date_end=date(2026, 3, 7),
+            device_id=dev.id,
+        )
+        assert result.n_nights == 0
+        assert result.nights == []
+
+    async def test_two_separate_disjoint_epoch_requests_raise_device_ambiguity(
+        self, async_db_session
+    ):
+        """Two separate EpochRequests spanning different devices raise DeviceAmbiguityError.
+
+        This is the specific regression case from pass 5: two SEPARATE EpochRequest
+        objects (not one spanning both dates) where device A owns epoch 1 dates and
+        device B owns epoch 2 dates.  With no device_id, the union-resolve fires.
+        """
+        from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev_a = await _make_device(async_db_session, profile_id, manufacturer="ResMed")
+        dev_b = await _make_device(async_db_session, profile_id, manufacturer="Philips")
+        date_a = date(2026, 4, 1)  # device A only on this date
+        date_b = date(2026, 5, 1)  # device B only on this date
+        await _make_day_and_session(async_db_session, dev_a.id, date_a)
+        await _make_day_and_session(async_db_session, dev_b.id, date_b)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        # Two separate, disjoint-date EpochRequests with no device_id
+        with pytest.raises(DeviceAmbiguityError) as exc_info:
+            await svc.compare_epochs(
+                epochs=[
+                    EpochRequest(
+                        label="epoch_a",
+                        date_start=date_a,
+                        date_end=date_a,
+                        # device_id=None → auto-select from union
+                    ),
+                    EpochRequest(
+                        label="epoch_b",
+                        date_start=date_b,
+                        date_end=date_b,
+                        # device_id=None → auto-select from union
+                    ),
+                ]
+            )
+        err = exc_info.value
+        assert dev_a.id in err.owned_device_ids
+        assert dev_b.id in err.owned_device_ids
 
 
 # ---------------------------------------------------------------------------
@@ -3474,6 +3572,8 @@ class TestCaMixedVersionRefusal:
         assert result.day_status == DayAnalysisStatus.MIXED_VERSION
         # plan §12 lines 984-993: MIXED_VERSION requires algorithm_identity=None
         assert result.algorithm_identity is None
+        # plan §12 lines 984-993: top-level provenance is ALGO_VERSION_MISMATCH, not STALE
+        assert result.null_reason == NullReason.ALGO_VERSION_MISMATCH
         # Night-level fields refused on MIXED_VERSION (plan §12 line 980)
         assert result.periodic_breathing_pct is None
         assert result.pb_reason == NullReason.ALGO_VERSION_MISMATCH

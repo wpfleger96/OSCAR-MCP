@@ -48,6 +48,7 @@ __all__ = [
     "SessionSummary",
     "MultiSessionAmbiguityError",
     "DeviceAmbiguityError",
+    "DeviceNotOwnedError",
     "BreathRow",
     "BreathBin",
     "BreathPage",
@@ -140,6 +141,17 @@ class MultiSessionAmbiguityError(Exception):
         self.sessions = sessions
         super().__init__(
             f"Multiple sessions on {therapy_date}: pass session_id to disambiguate"
+        )
+
+
+class DeviceNotOwnedError(Exception):
+    """Raised when an explicit device_id is not owned by the requesting profile."""
+
+    def __init__(self, device_id: int, profile_id: int) -> None:
+        self.device_id = device_id
+        self.profile_id = profile_id
+        super().__init__(
+            f"device_id={device_id} not found or not owned by profile {profile_id}"
         )
 
 
@@ -539,72 +551,22 @@ class WaveformWindowRequest(BaseModel):
 async def fetch_waveform_window_raw(
     db: AsyncSession,
     request: WaveformWindowRequest,
-    profile_id: int,
+    session_id: int,
+    session_start: datetime,
 ) -> RawWaveformWindow:
-    """DB I/O ONLY — fetch waveform blobs for the requested channels.
+    """DB I/O ONLY — fetch waveform blobs for a pre-resolved session.
 
     Never closes db: the scope owner opens and closes the scope around this call.
 
-    ``profile_id`` is required and enforced in the first resolution query via
-    ``Device.profile_id``, so foreign sessions never appear in resolution or
-    ambiguity payloads.
+    ``session_id`` and ``session_start`` must be pre-resolved by the caller
+    (typically via ``_resolve_range``).  No Session query is performed here.
     """
 
     from sqlalchemy import select  # noqa: PLC0415
 
     from snore.database import models  # noqa: PLC0415
 
-    # Resolve session_id from therapy_date + device_id, profile-scoped in
-    # the first query so foreign rows never enter resolution or ambiguity.
-    stmt = (
-        select(models.Session, models.Day)
-        .join(models.Day, models.Session.day_id == models.Day.id)
-        .join(models.Device, models.Session.device_id == models.Device.id)
-        .where(
-            models.Day.date == request.therapy_date,
-            models.Device.profile_id == profile_id,
-        )
-    )
-    if request.device_id is not None:
-        stmt = stmt.where(models.Session.device_id == request.device_id)
-    if request.session_id is not None:
-        stmt = stmt.where(models.Session.id == request.session_id)
-
-    rows = (await db.execute(stmt)).all()
-    if not rows:
-        if request.session_id is not None:
-            raise ValueError(
-                f"Session {request.session_id} not found for date {request.therapy_date}"
-                f" on profile {profile_id}"
-            )
-        # Return empty window (no sessions on this date/device for this profile)
-        return RawWaveformWindow(
-            request=request,
-            session_id=request.session_id or 0,
-            session_start_wall_clock=datetime.min,
-            channels=[],
-            missing_channels=list(request.channels),
-        )
-
-    if len(rows) > 1 and request.session_id is None:
-        sessions_list = [
-            SessionSummary(
-                session_id=r.Session.id,
-                start_wall_clock=r.Session.start_time,
-                duration_seconds=r.Session.duration_seconds or 0.0,
-            )
-            for r in rows
-        ]
-        raise MultiSessionAmbiguityError(
-            therapy_date=request.therapy_date,
-            device_id=request.device_id or rows[0].Session.device_id,
-            sessions=sessions_list,
-        )
-
-    session_row = rows[0].Session
-    session_id = session_row.id
-
-    # Fetch waveform blobs
+    # Fetch waveform blobs for the known session — no resolution pass.
     requested_types = [ch.value for ch in request.channels]
     wf_stmt = select(models.Waveform).where(
         models.Waveform.session_id == session_id,
@@ -633,7 +595,7 @@ async def fetch_waveform_window_raw(
     return RawWaveformWindow(
         request=request,
         session_id=session_id,
-        session_start_wall_clock=session_row.start_time,
+        session_start_wall_clock=session_start,
         channels=channels,
         missing_channels=missing,
     )
@@ -926,8 +888,8 @@ class BreathService:
                 )
             ).scalar_one_or_none()
             if owned is None:
-                raise ValueError(
-                    f"device_id={device_id} not found or not owned by this profile"
+                raise DeviceNotOwnedError(
+                    device_id=device_id, profile_id=self._profile_id
                 )
             # Fetch sessions in range (ownership already verified above)
             stmt = (
@@ -1888,9 +1850,36 @@ class BreathService:
             )
         except DeviceAmbiguityError:
             raise
+        except DeviceNotOwnedError:
+            # Explicit foreign device → NOT_AVAILABLE for all epochs
+            not_avail_epochs = [
+                EpochBreathStats(
+                    label=e.label,
+                    date_start=e.date_start,
+                    date_end=e.date_end,
+                    nights_with_data=0,
+                    nights_missing_analysis=0,
+                    algorithm_identity=None,
+                    null_reason=NullReason.NOT_AVAILABLE,
+                    primary_mode=None,
+                    mid_insp_flattening=_null_dist,
+                    flatness_index=_null_dist,
+                    flow_class_distribution={},
+                    tidal_volume_ml=_null_dist,
+                    ie_ratio=_null_dist,
+                    rera_proxy_count=None,
+                    rera_reason=NullReason.NOT_AVAILABLE,
+                    rx_settings={},
+                )
+                for e in epochs
+            ]
+            return CompareEpochsResult(
+                null_reason=NullReason.NOT_AVAILABLE,
+                epochs=not_avail_epochs,
+            )
         except ValueError:
-            # No sessions in range (device_id=None) → NO_DATA_IN_RANGE
-            # Foreign/unknown explicit device_id → NOT_AVAILABLE
+            # No sessions in range (device_id=None, auto-select found nothing)
+            # → NO_DATA_IN_RANGE
             no_data_reason = (
                 NullReason.NOT_AVAILABLE
                 if union_device_id is not None
@@ -2563,12 +2552,13 @@ class BreathService:
         n_calendar = (date_end - date_start).days + 1
 
         # Resolve device ONCE across the full range.
-        # DeviceAmbiguityError propagates; ValueError (no sessions, device_id=None) → empty.
+        # DeviceAmbiguityError and DeviceNotOwnedError propagate (ownership failures).
+        # ValueError (no sessions, device_id=None auto-select found nothing) → empty summary.
         try:
             resolved_device_id, _ = await self._resolve_range(
                 date_start, date_end, device_id
             )
-        except DeviceAmbiguityError:
+        except (DeviceAmbiguityError, DeviceNotOwnedError):
             raise
         except ValueError:
             return NightlyRangeSummary(
@@ -2882,7 +2872,8 @@ class BreathService:
                         offset_start=window_start,
                         offset_end=window_end,
                     ),
-                    self._profile_id,
+                    session_id,
+                    session_start,
                 )
                 ctx_window = compute_waveform_window(raw_ctx)
                 for ch in ctx_window.channels:
@@ -2907,7 +2898,8 @@ class BreathService:
                             offset_start=mv_window_start,
                             offset_end=offset_s,
                         ),
-                        self._profile_id,
+                        session_id,
+                        session_start,
                     )
                     mv_window = compute_waveform_window(raw_mv)
                     for ch in mv_window.channels:
@@ -2938,18 +2930,58 @@ class BreathService:
     async def get_waveform_window(
         self, request: WaveformWindowRequest
     ) -> WaveformWindow:
-        """Convenience orchestrator: fetch then compute. Never closes self._db.
+        """Convenience orchestrator: resolve → fetch blobs → compute. Never closes self._db.
 
-        Validates device ownership via _resolve_range before fetching so that
-        multi-device ambiguity raises DeviceAmbiguityError (not MultiSessionAmbiguityError)
-        and unknown explicit device_ids raise ValueError (not a synthetic empty window).
+        Uses _resolve_range for device validation and session selection so that
+        multi-device ambiguity raises DeviceAmbiguityError, foreign device_id raises
+        DeviceNotOwnedError, and fetch_waveform_window_raw performs no additional resolution.
         """
-        resolved_device_id, _ = await self._resolve_range(
+        resolved_device_id, sessions_by_date = await self._resolve_range(
             request.therapy_date, request.therapy_date, request.device_id
         )
-        resolved_request = request.model_copy(update={"device_id": resolved_device_id})
+        day_sessions = sessions_by_date.get(request.therapy_date, [])
+
+        if not day_sessions:
+            return compute_waveform_window(
+                RawWaveformWindow(
+                    request=request,
+                    session_id=0,
+                    session_start_wall_clock=datetime.min,
+                    channels=[],
+                    missing_channels=list(request.channels),
+                )
+            )
+
+        if request.session_id is not None:
+            # Verify the provided session_id belongs to the resolved device
+            session_ids = {s.id for s in day_sessions}
+            if request.session_id not in session_ids:
+                raise ValueError(
+                    f"Session {request.session_id} not found on profile {self._profile_id} "
+                    f"for date {request.therapy_date} on device {resolved_device_id}"
+                )
+            session_row = next(s for s in day_sessions if s.id == request.session_id)
+        elif len(day_sessions) > 1:
+            raise MultiSessionAmbiguityError(
+                therapy_date=request.therapy_date,
+                device_id=resolved_device_id,
+                sessions=[
+                    SessionSummary(
+                        session_id=s.id,
+                        start_wall_clock=s.start_time,
+                        duration_seconds=s.duration_seconds or 0.0,
+                    )
+                    for s in day_sessions
+                ],
+            )
+        else:
+            session_row = day_sessions[0]
+
+        resolved_request = request.model_copy(
+            update={"device_id": resolved_device_id, "session_id": session_row.id}
+        )
         raw = await fetch_waveform_window_raw(
-            self._db, resolved_request, profile_id=self._profile_id
+            self._db, resolved_request, session_row.id, session_row.start_time
         )
         return compute_waveform_window(raw)
 
@@ -3019,11 +3051,11 @@ class BreathService:
         # Map day_status → null_reason for the result
         if ca_day_status == DayAnalysisStatus.OK:
             ca_null_reason: NullReason | None = None
-        elif ca_day_status in (
-            DayAnalysisStatus.STALE,
-            DayAnalysisStatus.MIXED_VERSION,
-        ):
+        elif ca_day_status == DayAnalysisStatus.STALE:
             ca_null_reason = NullReason.ANALYSIS_STALE
+        elif ca_day_status == DayAnalysisStatus.MIXED_VERSION:
+            # plan §12 lines 984-993: conflicting algo identities → ALGO_VERSION_MISMATCH
+            ca_null_reason = NullReason.ALGO_VERSION_MISMATCH
         elif ca_day_status == DayAnalysisStatus.PARTIAL:
             ca_null_reason = None
         else:
@@ -3102,7 +3134,8 @@ class BreathService:
                             offset_start=mv_win_start,
                             offset_end=offset_s,
                         ),
-                        self._profile_id,
+                        session_id,
+                        session_start,
                     )
                     mv_win = compute_waveform_window(raw_mv)
                     for ch in mv_win.channels:
@@ -3148,7 +3181,8 @@ class BreathService:
                         offset_start=ps_win_start,
                         offset_end=ps_win_end,
                     ),
-                    self._profile_id,
+                    session_id,
+                    session_start,
                 )
                 ps_win = compute_waveform_window(raw_ps)
                 therapy_vals: list[float] = []
@@ -3238,7 +3272,8 @@ class BreathService:
                         offset_end=session_cap,
                         window_cap_seconds=session_cap,
                     ),
-                    self._profile_id,
+                    session_id,
+                    session_start,
                 )
                 mv_full = compute_waveform_window(raw_mv_full)
                 for ch in mv_full.channels:
