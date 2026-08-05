@@ -17,6 +17,33 @@ if TYPE_CHECKING:
     from snore.services.breath_service import WaveformWindow
 
 
+def _build_suptitle(window: WaveformWindow) -> str:
+    """Build the figure suptitle string for a waveform window.
+
+    Pure helper — no side effects, no imports.  Extracts the title construction
+    so it can be tested directly without rendering a full PNG.
+    """
+    if window.session_id > 0:
+        wall_clock_str = window.session_start_wall_clock.isoformat()
+        title_parts = [
+            f"Session {window.session_id}",
+            wall_clock_str,
+            f"{window.window_start_offset:.0f}–{window.window_end_offset:.0f} s",
+        ]
+    else:
+        title_parts = [
+            "no session",
+            f"{window.window_start_offset:.0f}–{window.window_end_offset:.0f} s",
+        ]
+
+    if window.missing_channels:
+        title_parts.append(
+            "missing: " + ", ".join(str(ch) for ch in window.missing_channels)
+        )
+
+    return "  |  ".join(title_parts)
+
+
 def render_waveform_window(window: WaveformWindow) -> bytes:
     """Render a ``WaveformWindow`` DTO as a PNG and return the raw bytes.
 
@@ -70,26 +97,7 @@ def render_waveform_window(window: WaveformWindow) -> bytes:
             if idx == n:
                 ax.set_xlabel("Offset from session start (s)", fontsize=8)
 
-    # Build suptitle
-    if window.session_id and window.session_id > 0:
-        wall_clock_str = window.session_start_wall_clock.isoformat()
-        title_parts = [
-            f"Session {window.session_id}",
-            wall_clock_str,
-            f"{window.window_start_offset:.0f}–{window.window_end_offset:.0f} s",
-        ]
-    else:
-        title_parts = [
-            "no session",
-            f"{window.window_start_offset:.0f}–{window.window_end_offset:.0f} s",
-        ]
-
-    if window.missing_channels:
-        title_parts.append(
-            "missing: " + ", ".join(str(ch) for ch in window.missing_channels)
-        )
-
-    fig.suptitle("  |  ".join(title_parts), fontsize=9)
+    fig.suptitle(_build_suptitle(window), fontsize=9)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
     buf = io.BytesIO()

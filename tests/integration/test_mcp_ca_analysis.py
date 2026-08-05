@@ -274,6 +274,32 @@ class TestGetCaAnalysisNoAnalysisResult:
         assert result.algorithm_identity is None
 
 
+class TestGetCaAnalysisDeviceCapabilities:
+    async def test_device_capabilities_present_on_analyzed_day(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Seeded device with session and analysis → device_capabilities is not None
+        and reflects the device's identity fields."""
+        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+
+        day_date = date(2025, 2, 1)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        _, sess = await _make_day_session(async_db_session, device, day_date)
+        await _make_analysis_result(async_db_session, sess)
+        await async_db_session.flush()
+
+        result = await get_ca_analysis(
+            async_db_session, day_date, async_test_profile.id
+        )
+
+        assert result.device_capabilities is not None
+        # Device fields populated from the seeded Device row
+        assert result.device_capabilities.manufacturer == "CaMfr"
+        assert result.device_capabilities.model == "CaModel"
+        # Analysis was run → has_analysis=True
+        assert result.device_capabilities.has_analysis is True
+
+
 class TestGetCaAnalysisProfileIsolation:
     async def test_profile_b_ca_event_absent_from_profile_a_query(
         self, async_db_session: AsyncSession, async_test_profile: Any

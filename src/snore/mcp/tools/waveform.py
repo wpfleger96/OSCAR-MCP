@@ -40,7 +40,8 @@ async def fetch_waveform_raw(
     session_id: int | None = None,
     channels: list[str] | None = None,
     max_points: int | None = None,
-    window_cap_seconds: float = 120.0,
+    *,
+    window_cap_seconds: float,
 ) -> RawWaveformWindow:
     """Resolve and fetch raw waveform blobs within the caller's DB scope.
 
@@ -67,7 +68,7 @@ async def fetch_waveform_raw(
         channels: Waveform channel names to fetch (e.g. ["flow", "pressure"]).
             Defaults to [flow, pressure, leak] when empty or None.
         max_points: LTTB target point count for downsampling (1–1000).
-        window_cap_seconds: Maximum window width in seconds (default 120).
+        window_cap_seconds: Maximum window width in seconds (enforced by caller).
     """
     from snore.services.breath_service import (  # noqa: PLC0415
         BreathService,

@@ -156,3 +156,42 @@ def test_render_does_not_mutate_input_dto() -> None:
     render_waveform_window(window)
     snapshot_after = window.model_dump()
     assert snapshot_before == snapshot_after
+
+
+# ---------------------------------------------------------------------------
+# Tests for _build_suptitle — pure helper, no PNG rendering needed
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSuptitle:
+    def test_no_session_branch_contains_no_session_and_not_datetime_min(
+        self,
+    ) -> None:
+        """session_id=0 → title contains 'no session' and must not expose datetime.min."""
+        from snore.mcp.rendering import _build_suptitle  # noqa: PLC0415
+
+        window = _make_window(session_id=0)
+        title = _build_suptitle(window)
+
+        assert "no session" in title
+        # datetime.min is 0001-01-01; it must never leak into the title
+        assert "0001-01-01" not in title
+
+    def test_happy_path_contains_wall_clock_and_missing_channels(self) -> None:
+        """session_id > 0 with missing channels → title has wall-clock ISO string
+        and 'missing:' list."""
+        from snore.mcp.rendering import _build_suptitle  # noqa: PLC0415
+        from snore.services.breath_service import WaveformChannelName  # noqa: PLC0415
+
+        window = _make_window(
+            session_id=42,
+            missing_channels=[WaveformChannelName.SPO2, WaveformChannelName.PULSE],
+        )
+        title = _build_suptitle(window)
+
+        # Wall-clock should appear (the DTO has datetime(2024, 1, 15, 22, 0, 0))
+        assert "2024-01-15T22:00:00" in title
+        # Missing channels listed
+        assert "missing:" in title
+        assert "spo2" in title
+        assert "pulse" in title

@@ -156,6 +156,7 @@ class TestHappyPath:
             profile_id=async_test_profile.id,
             offset_start=10.0,
             offset_end=20.0,
+            window_cap_seconds=120.0,
         )
         response = waveform_response_from_raw(raw)
 
@@ -201,6 +202,7 @@ class TestEmptyDay:
             offset_end=30.0,
             device_id=device.id,
             channels=["flow", "pressure"],
+            window_cap_seconds=120.0,
         )
         response = waveform_response_from_raw(raw)
 
@@ -241,6 +243,7 @@ class TestMissingChannel:
             offset_start=0.0,
             offset_end=30.0,
             channels=["flow", "pressure"],
+            window_cap_seconds=120.0,
         )
         response = waveform_response_from_raw(raw)
 
@@ -285,6 +288,7 @@ class TestIsolation:
                 offset_start=0.0,
                 offset_end=30.0,
                 session_id=sess_b.id,  # B's session
+                window_cap_seconds=120.0,
             )
 
     async def test_auto_resolve_as_a_excludes_b_sentinel(
@@ -321,6 +325,7 @@ class TestIsolation:
             offset_start=0.0,
             offset_end=30.0,
             channels=["flow"],
+            window_cap_seconds=120.0,
         )
         response = waveform_response_from_raw(raw)
 
@@ -359,6 +364,7 @@ class TestRenderPng:
             offset_start=0.0,
             offset_end=30.0,
             channels=["flow"],
+            window_cap_seconds=120.0,
         )
         png_bytes = render_png_from_raw(raw)
 

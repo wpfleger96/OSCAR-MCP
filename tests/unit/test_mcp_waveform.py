@@ -272,6 +272,55 @@ class TestPureFunctions:
         png_bytes = render_png_from_raw(raw)
         assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
 
+    def test_lttb_small_window_raw_passthrough_is_downsampled_false(self) -> None:
+        """Window with 2 samples and max_points=1 → values not reduced, is_downsampled=False.
+
+        Pins the service contract: LTTB requires ≥3 points; slices smaller than that
+        are returned raw regardless of max_points.
+        """
+        from snore.services.breath_service import (  # noqa: PLC0415
+            RawWaveformChannel,
+            RawWaveformWindow,
+            WaveformChannelName,
+            WaveformWindowRequest,
+        )
+
+        # 2-sample blob
+        offsets = [0.0, 1.0]
+        values = [1.0, 2.0]
+        blob, count = _make_blob(offsets, values)
+
+        ch = RawWaveformChannel(
+            waveform_type=WaveformChannelName.FLOW,
+            unit="L/min",
+            sample_rate=1.0,
+            sample_count=count,
+            raw_bytes=blob,
+        )
+        request = WaveformWindowRequest(
+            therapy_date=date(2024, 1, 1),
+            offset_start=0.0,
+            offset_end=30.0,
+            channels=[WaveformChannelName.FLOW],
+            max_points=1,  # smaller than the 2 samples
+            window_cap_seconds=120.0,
+        )
+        raw = RawWaveformWindow(
+            request=request,
+            session_id=7,
+            session_start_wall_clock=datetime(2024, 1, 1, 22, 0, 0),
+            channels=[ch],
+            missing_channels=[],
+        )
+
+        response = waveform_response_from_raw(raw)
+
+        assert len(response.channels) == 1
+        result_ch = response.channels[0]
+        # LTTB skipped: both samples returned, not downsampled
+        assert len(result_ch.values) == 2
+        assert result_ch.is_downsampled is False
+
 
 # ---------------------------------------------------------------------------
 # TestPureErrors — fetch_waveform_raw input validation
@@ -293,7 +342,8 @@ class TestPureErrors:
                     date(2024, 1, 1),
                     profile_id=1,
                     offset_start=0.0,
-                    offset_end=200.0,  # 200 s > 120 s default cap
+                    offset_end=200.0,  # 200 s > 120 s cap
+                    window_cap_seconds=120.0,
                 )
 
         mock_svc.assert_not_called()
@@ -314,6 +364,7 @@ class TestPureErrors:
                     offset_start=0.0,
                     offset_end=30.0,
                     channels=["invalid_channel"],
+                    window_cap_seconds=120.0,
                 )
 
         mock_svc.assert_not_called()
@@ -347,6 +398,7 @@ class TestErrorMapping:
                     offset_start=0.0,
                     offset_end=30.0,
                     device_id=42,
+                    window_cap_seconds=120.0,
                 )
 
         message = str(exc_info.value)
@@ -380,6 +432,7 @@ class TestErrorMapping:
                     profile_id=1,
                     offset_start=0.0,
                     offset_end=30.0,
+                    window_cap_seconds=120.0,
                 )
 
         message = str(exc_info.value)
@@ -426,6 +479,7 @@ class TestErrorMapping:
                     profile_id=1,
                     offset_start=0.0,
                     offset_end=30.0,
+                    window_cap_seconds=120.0,
                 )
 
         message = str(exc_info.value)
@@ -611,3 +665,47 @@ class TestRenderWindowClient:
                 )
 
         assert "900" in str(exc_info.value)
+
+    async def test_render_window_channels_passthrough_to_service(
+        self, mock_db_session: MagicMock, mcp_client_factory: object
+    ) -> None:
+        """render_window with channels=['spo2'] → WaveformWindowRequest contains SPO2;
+        result is still ImageContent."""
+        import base64  # noqa: PLC0415
+
+        from snore.services.breath_service import WaveformChannelName  # noqa: PLC0415
+
+        flow = _flow_channel(n=60, time_start=0.0, time_end=30.0)
+        raw = _make_raw(session_id=42, channels=[flow])
+
+        mock_fetch = AsyncMock(return_value=raw)
+
+        async with mcp_client_factory(
+            mock_db_session,
+            extra_patches=[
+                patch(
+                    "snore.services.breath_service.BreathService.fetch_waveform_window",
+                    mock_fetch,
+                ),
+            ],
+        ) as client:
+            result = await client.call_tool(
+                "render_window",
+                {
+                    "date": "2024-01-01",
+                    "offset_start": 0.0,
+                    "offset_end": 30.0,
+                    "channels": ["spo2"],
+                },
+            )
+
+        # Verify the service received a request with SPO2 channel
+        mock_fetch.assert_called_once()
+        call_request = mock_fetch.call_args[0][0]
+        assert WaveformChannelName.SPO2 in call_request.channels
+
+        # Result must still be ImageContent with valid PNG
+        content = result.content[0]
+        assert content.type == "image"
+        img_bytes = base64.b64decode(content.data)
+        assert img_bytes[:8] == b"\x89PNG\r\n\x1a\n"

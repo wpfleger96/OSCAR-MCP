@@ -34,7 +34,10 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from functools import wraps
 from importlib.metadata import version
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from snore.services.breath_service import RawWaveformWindow
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -280,6 +283,44 @@ def _check_response_size(result: Any, tool_name: str) -> None:
             f"Response from {tool_name} exceeds the {RESPONSE_SIZE_LIMIT:,}-byte limit. "
             "Narrow your query: use a shorter date range, smaller page_size, or add "
             "device/type filters."
+        )
+
+
+async def _fetch_waveform_for_tool(
+    ctx: Context,
+    date: str,
+    offset_start: float,
+    offset_end: float,
+    device_id: int | None,
+    session_id: int | None,
+    channels: list[str] | None,
+    max_points: int | None,
+    window_cap_seconds: float,
+) -> RawWaveformWindow:
+    """Parse date, extract runtime, fetch raw waveform within a scoped DB session.
+
+    Shared by ``get_waveform`` and ``render_window``; the only difference between
+    the two callers is ``window_cap_seconds`` (120 s vs. 900 s).  Post-processing
+    (JSON serialisation or PNG render) runs in each wrapper after this returns,
+    outside the DB transaction.
+    """
+    from snore.mcp.tools.waveform import fetch_waveform_raw  # noqa: PLC0415
+
+    runtime = _runtime(ctx)
+    therapy_date = parse_date(date, "date")
+
+    async with runtime.scope_provider() as db:
+        return await fetch_waveform_raw(
+            db,
+            therapy_date,
+            profile_id=runtime.profile_id,
+            offset_start=offset_start,
+            offset_end=offset_end,
+            device_id=device_id,
+            session_id=session_id,
+            channels=channels,
+            max_points=max_points,
+            window_cap_seconds=window_cap_seconds,
         )
 
 
@@ -878,6 +919,8 @@ def _register_tools(mcp: FastMCP) -> None:
         the visual shape is preserved while reducing data volume.  Omit for raw
         unmodified samples.  Many-channel raw requests often exceed the 500,000-byte
         response limit — use ``max_points`` or fewer channels if that happens.
+        Windows whose slice has fewer than 3 samples are returned raw even if
+        ``max_points`` is smaller (LTTB needs ≥3 points); ``is_downsampled`` stays false.
 
         Args:
             date: Session date in YYYY-MM-DD format.
@@ -899,35 +942,35 @@ def _register_tools(mcp: FastMCP) -> None:
             ``missing_channels`` lists channels the device did not record;
             ``missing_channel_reason: "channel_absent"`` is set when any are absent.
 
+        Refusal semantics (successful responses):
+            When ``device_id`` is provided (owned device) and the date has no sessions,
+            the tool returns SUCCESS with ``session_id: null``,
+            ``session_start_wall_clock: null``, empty ``channels``, and requested
+            channels in ``missing_channels`` — not an error.
+
         Error conditions:
             - Window width > 120 s → tool error.
-            - No sessions found for date → tool error ("No sessions found in range").
+            - No ``device_id`` provided and no sessions found for date → tool error
+              ("No sessions found in range <start> to <end>").
             - Multiple devices on date and no ``device_id`` → tool error listing IDs.
             - Multiple sessions on date and no ``session_id`` → tool error listing IDs.
             - Response exceeds 500,000-byte limit → tool error; use ``max_points``
               or request fewer channels.
         """
-        from snore.mcp.tools.waveform import (  # noqa: PLC0415
-            fetch_waveform_raw,
-            waveform_response_from_raw,
+        # Keep in sync with render_window's docstring — pinned by test_channel_vocab_in_sync.
+        from snore.mcp.tools.waveform import waveform_response_from_raw  # noqa: PLC0415
+
+        raw = await _fetch_waveform_for_tool(
+            ctx,
+            date,
+            offset_start=offset_start,
+            offset_end=offset_end,
+            device_id=device_id,
+            session_id=session_id,
+            channels=channels,
+            max_points=max_points,
+            window_cap_seconds=120.0,
         )
-
-        runtime = _runtime(ctx)
-        therapy_date = parse_date(date, "date")
-
-        async with runtime.scope_provider() as db:
-            raw = await fetch_waveform_raw(
-                db,
-                therapy_date,
-                profile_id=runtime.profile_id,
-                offset_start=offset_start,
-                offset_end=offset_end,
-                device_id=device_id,
-                session_id=session_id,
-                channels=channels,
-                max_points=max_points,
-                window_cap_seconds=120.0,
-            )
 
         # Deserialize and LTTB run outside the open DB transaction.
         payload = waveform_response_from_raw(raw).model_dump(mode="json")
@@ -997,27 +1040,19 @@ def _register_tools(mcp: FastMCP) -> None:
             - Multiple devices on date and no ``device_id`` → tool error listing IDs.
             - Multiple sessions on date and no ``session_id`` → tool error listing IDs.
         """
-        from snore.mcp.tools.waveform import (  # noqa: PLC0415
-            fetch_waveform_raw,
-            render_png_from_raw,
+        from snore.mcp.tools.waveform import render_png_from_raw  # noqa: PLC0415
+
+        raw = await _fetch_waveform_for_tool(
+            ctx,
+            date,
+            offset_start=offset_start,
+            offset_end=offset_end,
+            device_id=device_id,
+            session_id=session_id,
+            channels=channels,
+            max_points=max_points,
+            window_cap_seconds=900.0,
         )
-
-        runtime = _runtime(ctx)
-        therapy_date = parse_date(date, "date")
-
-        async with runtime.scope_provider() as db:
-            raw = await fetch_waveform_raw(
-                db,
-                therapy_date,
-                profile_id=runtime.profile_id,
-                offset_start=offset_start,
-                offset_end=offset_end,
-                device_id=device_id,
-                session_id=session_id,
-                channels=channels,
-                max_points=max_points,
-                window_cap_seconds=900.0,
-            )
 
         # Render PNG outside the open DB transaction.
         png = render_png_from_raw(raw)
@@ -1066,8 +1101,10 @@ def _register_tools(mcp: FastMCP) -> None:
 
         Returns:
             CaAnalysisResponse with ``query_date``, ``device_id``, ``day_status``,
-            ``session_coverage``, ``algorithm_identity``, ``ca_events`` list, and
-            night-level fields.
+            ``session_coverage``, ``algorithm_identity``, ``ca_events`` list,
+            night-level fields, and ``device_capabilities`` (including
+            ``has_flow_waveform``/``has_pressure_waveform``, so null waveform-derived
+            metrics can be distinguished from never-recorded channels).
 
         Refusal semantics (successful responses):
             Night-level fields (``periodic_breathing_pct``, ``mv_rolling_variance``)
@@ -1075,9 +1112,13 @@ def _register_tools(mcp: FastMCP) -> None:
             ``mixed_version``.  CA events are still present in all these cases.
             ``algorithm_identity`` is null+``null_reason: "algo_version_mismatch"``
             on mixed-version days.
+            When ``device_id`` is provided and the date has no sessions,
+            the tool returns ``day_status: "not_run"``, ``ca_events: []``, and
+            night-level nulls with reasons (SUCCESS) — not a tool error.
 
         Error conditions:
-            - No sessions found for date → tool error ("No sessions found in range").
+            - No ``device_id`` provided and no sessions found for date → tool error
+              ("No sessions found in range <start> to <end>").
             - Multiple devices on date and no ``device_id`` → tool error listing
               owned device IDs.
         """

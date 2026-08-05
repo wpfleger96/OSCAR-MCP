@@ -293,6 +293,45 @@ class TestGetCaAnalysisAdapter:
         assert c1.analysis_status == "not_run"
         assert c1.algo_versions is None
 
+    async def test_device_capabilities_populated_on_happy_path(
+        self, mock_db_session: Any
+    ) -> None:
+        """Happy path: device_capabilities is present (non-None) when build_device_capabilities
+        returns a value."""
+        from snore.mcp.schemas import DeviceCapabilities  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+
+        mock_result = _make_ca_analysis_result()
+        mock_caps = DeviceCapabilities(
+            manufacturer="TestMfr",
+            model="TestModel",
+            serial_number="SN001",
+            has_flow_waveform=True,
+            has_pressure_waveform=True,
+            has_leak_waveform=True,
+            has_spo2=False,
+            has_events=True,
+            has_analysis=True,
+        )
+
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.get_ca_analysis",
+                AsyncMock(return_value=mock_result),
+            ),
+            patch(
+                "snore.mcp.tools.ca_analysis.build_device_capabilities",
+                AsyncMock(return_value=mock_caps),
+            ),
+        ):
+            result = await get_ca_analysis(
+                mock_db_session, date(2025, 1, 15), profile_id=1
+            )
+
+        assert result.device_capabilities is not None
+        assert result.device_capabilities.has_flow_waveform is True
+        assert result.device_capabilities.manufacturer == "TestMfr"
+
     async def test_device_ambiguity_error_maps_to_validation_error_listing_devices(
         self, mock_db_session: Any
     ) -> None:

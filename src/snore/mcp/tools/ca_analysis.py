@@ -19,6 +19,7 @@ from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.schemas import CaAnalysisResponse, CaDetailSchema, SessionCoverageEntry
+from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -48,6 +49,8 @@ async def get_ca_analysis(
     from snore.services.breath_service import BreathService  # noqa: PLC0415
 
     bs = BreathService(db_session, profile_id)
+    # MultiSessionAmbiguityError is included in MAPPED_SERVICE_ERRORS defensively;
+    # get_ca_analysis iterates all sessions and does not currently raise it.
     try:
         result = await bs.get_ca_analysis(
             therapy_date=therapy_date, device_id=device_id
@@ -87,6 +90,23 @@ async def get_ca_analysis(
         for ev in result.ca_events
     ]
 
+    # Service uses device_id=0 as a sentinel for "no device resolved" (never emit it).
+    resolved_device_id = result.device_id if result.device_id > 0 else None
+
+    caps = None
+    if resolved_device_id is not None:
+        # Pass analysis_run=True when the day has analysis coverage (avoids an
+        # extra DB round-trip when day_status already confirms analysis ran).
+        analysis_run = str(result.day_status) != "not_run"
+        caps = await build_device_capabilities(
+            db_session,
+            profile_id,
+            resolved_device_id,
+            date_start=therapy_date,
+            date_end=therapy_date,
+            analysis_run=analysis_run,
+        )
+
     return CaAnalysisResponse(
         query_date=result.query_date.isoformat(),
         device_id=result.device_id,
@@ -103,4 +123,5 @@ async def get_ca_analysis(
         mv_variance_reason=str(result.mv_variance_reason)
         if result.mv_variance_reason is not None
         else None,
+        device_capabilities=caps,
     )

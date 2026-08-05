@@ -469,12 +469,12 @@ class CompareEpochsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Stage-3 schemas: get_waveform_window, get_ca_analysis
+# Stage-3 schemas: get_waveform, get_ca_analysis
 # ---------------------------------------------------------------------------
 
 
 class WaveformChannelSchema(BaseModel):
-    """One deserialized, windowed waveform channel returned by get_waveform_window."""
+    """One deserialized, windowed waveform channel returned by get_waveform."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -488,7 +488,7 @@ class WaveformChannelSchema(BaseModel):
 
 
 class WaveformWindowResponse(BaseModel):
-    """Response from get_waveform_window."""
+    """Response from get_waveform."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -539,6 +539,7 @@ class CaAnalysisResponse(BaseModel):
     pb_reason: str | None = None
     mv_rolling_variance: float | None = None
     mv_variance_reason: str | None = None
+    device_capabilities: DeviceCapabilities | None = None
 
 
 # Mapping used for docs://schemas/{type} — maps schema name to model class
