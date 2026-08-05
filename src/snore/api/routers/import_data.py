@@ -129,7 +129,7 @@ def _get_upload_limits() -> tuple[int, int, int]:
         cfg = get_config()
         return cfg.max_upload_bytes, cfg.max_upload_files, cfg.max_file_bytes
     except Exception:
-        return 512 * 1024 * 1024, 10_000, 256 * 1024 * 1024
+        return 2 * 1024 * 1024 * 1024, 10_000, 256 * 1024 * 1024
 
 
 def _require_localhost(request: Request) -> None:

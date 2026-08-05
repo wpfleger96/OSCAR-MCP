@@ -118,7 +118,7 @@ class AppConfig:
     oauth_attempt_ttl_seconds: int  # Window for completing an OAuth flow; default 600.
     pre_auth_cookie_ttl_seconds: int  # Browser-binding cookie TTL; default 600.
     # Upload / job resource bounds
-    max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
+    max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 2 GiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
     max_upload_files: int  # Per-upload file count ceiling; default 10 000.
     max_jobs_per_user: int  # Per-user active-job cap; default 3.
@@ -243,7 +243,7 @@ def load_config(
     # Resource bounds — read with safe int parsing.
     try:
         max_upload_bytes = int(
-            os.environ.get("SNORE_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))
+            os.environ.get("SNORE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024))
         )
     except ValueError as exc:
         raise ConfigError(
