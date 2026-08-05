@@ -1,11 +1,14 @@
 name: Docker Publish
 
+# Publishing is temporarily disabled while the deployment gets more local
+# testing — manual runs only. To re-enable automatic publishing, restore:
+#   push:
+#     branches:
+#       - main
+#     tags:
+#       - 'v*'
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 # Queue publish runs per ref so an older build can never overwrite a newer
 # `latest` tag.  cancel-in-progress: false means we wait, not skip.
