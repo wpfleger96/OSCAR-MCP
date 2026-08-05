@@ -1,4 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import type { RouteLocationNormalized } from 'vue-router'
+import { useAuth } from '@/composables/useAuth'
+
+declare module 'vue-router' {
+    interface RouteMeta {
+        authFree?: boolean
+    }
+}
 
 function sessionIdProp(route: { params: { id: string | string[] } }) {
     const id = Number(route.params.id)
@@ -8,10 +16,30 @@ function sessionIdProp(route: { params: { id: string | string[] } }) {
 const router = createRouter({
     history: createWebHistory(),
     routes: [
+        // Auth-free routes — no sidebar, no navigation chrome.
         {
             path: '/',
+            name: 'login',
+            component: () => import('@/views/LoginView.vue'),
+            meta: { authFree: true },
+        },
+        {
+            path: '/invite',
+            name: 'invite',
+            component: () => import('@/views/InviteView.vue'),
+            meta: { authFree: true },
+        },
+
+        // Authenticated routes
+        {
+            path: '/dashboard',
             name: 'dashboard',
             component: () => import('@/views/DashboardView.vue'),
+        },
+        {
+            path: '/profiles',
+            name: 'profiles',
+            component: () => import('@/views/ProfilesView.vue'),
         },
         {
             path: '/sessions',
@@ -93,5 +121,30 @@ const router = createRouter({
         },
     ],
 })
+
+// Exported for unit testing — the production router uses this directly.
+export async function authGuard(to: RouteLocationNormalized): Promise<string | boolean | void> {
+    const { fetchStatus, isAuthenticated, isLocal } = useAuth()
+
+    try {
+        await fetchStatus()
+    } catch {
+        // Network failure — allow through (data endpoints will 401 if session is bad).
+    }
+
+    const authed = isAuthenticated.value || isLocal.value
+
+    // Unauthenticated user on a guarded route → login.
+    if (!authed && !to.meta.authFree) {
+        return '/'
+    }
+
+    // Authenticated user landing on login page → dashboard.
+    if (authed && to.path === '/') {
+        return '/dashboard'
+    }
+}
+
+router.beforeEach(authGuard)
 
 export default router

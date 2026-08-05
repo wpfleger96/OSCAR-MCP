@@ -21,6 +21,19 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         await session.close()
 
 
+async def get_raw_session() -> AsyncGenerator[AsyncSession]:
+    """FastAPI dependency yielding an AsyncSession WITHOUT an open transaction.
+
+    Use when a handler needs fine-grained transaction control (e.g., splitting
+    a read transaction from network I/O from a write transaction).
+    """
+    session = get_session()
+    try:
+        yield session
+    finally:
+        await session.close()
+
+
 async def get_actor(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],

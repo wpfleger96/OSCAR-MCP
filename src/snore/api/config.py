@@ -111,6 +111,12 @@ class AppConfig:
     dev_origins: frozenset[tuple[str, str, int]]  # Pre-parsed; validated at startup.
     # CORS allowed origins (parsed from CORS_ORIGINS env var; default localhost:5173).
     cors_origins: list[str]
+    # Google OAuth credentials (empty string = not configured; Google routes return 503).
+    google_client_id: str
+    google_client_secret: str
+    # OAuth flow timing (seconds).
+    oauth_attempt_ttl_seconds: int  # Window for completing an OAuth flow; default 600.
+    pre_auth_cookie_ttl_seconds: int  # Browser-binding cookie TTL; default 600.
     # Upload / job resource bounds
     max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
@@ -120,6 +126,10 @@ class AppConfig:
     @property
     def is_multiuser(self) -> bool:
         return self.auth_mode is AuthMode.MULTIUSER
+
+    @property
+    def is_google_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
 
     @property
     def secure_cookie(self) -> bool:
@@ -198,6 +208,36 @@ def load_config(
         for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(",")
         if o.strip()
     ]
+
+    # Google OAuth credentials — optional; missing = Google routes return 503.
+    google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+
+    try:
+        oauth_attempt_ttl_seconds = int(
+            os.environ.get("SNORE_OAUTH_ATTEMPT_TTL_SECONDS", "600")
+        )
+    except ValueError as exc:
+        raise ConfigError(
+            "SNORE_OAUTH_ATTEMPT_TTL_SECONDS must be a positive integer (seconds)"
+        ) from exc
+    if oauth_attempt_ttl_seconds <= 0:
+        raise ConfigError(
+            "SNORE_OAUTH_ATTEMPT_TTL_SECONDS must be a positive integer (seconds)"
+        )
+
+    try:
+        pre_auth_cookie_ttl_seconds = int(
+            os.environ.get("SNORE_PRE_AUTH_COOKIE_TTL_SECONDS", "600")
+        )
+    except ValueError as exc:
+        raise ConfigError(
+            "SNORE_PRE_AUTH_COOKIE_TTL_SECONDS must be a positive integer (seconds)"
+        ) from exc
+    if pre_auth_cookie_ttl_seconds <= 0:
+        raise ConfigError(
+            "SNORE_PRE_AUTH_COOKIE_TTL_SECONDS must be a positive integer (seconds)"
+        )
 
     # Resource bounds — read with safe int parsing.
     try:
@@ -291,6 +331,10 @@ def load_config(
         trusted_proxies=trusted_proxies,
         dev_origins=frozenset(dev_origins),
         cors_origins=cors_origins,
+        google_client_id=google_client_id,
+        google_client_secret=google_client_secret,
+        oauth_attempt_ttl_seconds=oauth_attempt_ttl_seconds,
+        pre_auth_cookie_ttl_seconds=pre_auth_cookie_ttl_seconds,
         max_upload_bytes=max_upload_bytes,
         max_file_bytes=max_file_bytes,
         max_jobs_per_user=max_jobs_per_user,

@@ -146,6 +146,114 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/auth/google/login': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Google Login
+         * @description Initiate a Google OAuth login flow (login-only; never provisions accounts).
+         *
+         *     Issues a ``snore_pre_auth`` browser-binding cookie when absent and inserts
+         *     an ``oauth_attempts`` row, then redirects the browser to Google.
+         */
+        get: operations['google_login_api_v1_auth_google_login_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/google/callback': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Google Callback
+         * @description Handle Google OAuth callback for login-only flows.
+         *
+         *     Validates browser binding, exchanges code, looks up the linked identity,
+         *     and sets a session cookie before redirecting to ``/dashboard``.
+         *
+         *     Uses two transaction windows so no DB connection is held during Google I/O:
+         *     Window 1 reads and validates the attempt; Window 2 consumes and resolves.
+         */
+        get: operations['google_callback_api_v1_auth_google_callback_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/invites/google': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Google Invite Initiate
+         * @description Initiate a Google OAuth signup flow for an invite token.
+         *
+         *     Token is in the request body — never in the URL — so it never appears
+         *     in Uvicorn access logs.  Returns JSON with an ``authorization_url`` that
+         *     the client should redirect to.
+         *
+         *     Rate-limited per (token_hash, client IP) to slow down token probing.
+         */
+        post: operations['google_invite_initiate_api_v1_auth_invites_google_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/google/invite-callback': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Google Invite Callback
+         * @description Handle Google OAuth callback for invite-based signup flows.
+         *
+         *     Validates browser binding, exchanges code, checks email matches invite,
+         *     and resolves the account (link existing | create new), then redirects
+         *     to ``/dashboard``.
+         *
+         *     Uses two transaction windows so no DB connection is held during Google I/O:
+         *     Window 1 reads the attempt and invite (capturing role); Window 2 consumes
+         *     and resolves.
+         *
+         *     Resolution order:
+         *     a. Auth identity (provider=google, sub) already exists → login, leave invite.
+         *     b. User with matching canonical email exists → link identity, consume invite.
+         *     c. Neither → create user + profile + identity, consume invite.
+         */
+        get: operations['google_invite_callback_api_v1_auth_google_invite_callback_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/devices/': {
         parameters: {
             query?: never
@@ -1168,6 +1276,11 @@ export interface components {
             /** Modes */
             modes?: string[]
             /**
+             * Primary Mode
+             * @description Mode whose recovery markers are persisted. Must be a member of `modes` when supplied; defaults to 'aasm' when 'aasm' is in modes, required otherwise.
+             */
+            primary_mode?: string | null
+            /**
              * Store Results
              * @default true
              */
@@ -1278,6 +1391,11 @@ export interface components {
             to_date?: string | null
             /** Modes */
             modes?: ('aasm' | 'aasm_relaxed' | 'resmed')[]
+            /**
+             * Primary Mode
+             * @description Mode whose recovery markers are persisted. Must be a member of `modes` when supplied; defaults to 'aasm' when 'aasm' is in modes, required otherwise.
+             */
+            primary_mode?: string | null
             /**
              * Store Results
              * @default true
@@ -1786,6 +1904,11 @@ export interface components {
             /** Percentage */
             percentage: number
         }
+        /** GoogleInviteInitRequest */
+        GoogleInviteInitRequest: {
+            /** Token */
+            token: string
+        }
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1851,6 +1974,8 @@ export interface components {
         ImportPathRequest: {
             /** Sources */
             sources: components['schemas']['ImportSource'][]
+            /** Profile Id */
+            profile_id?: number | null
         }
         /**
          * ImportSource
@@ -2123,6 +2248,13 @@ export interface components {
             name: string
             /** User Id */
             user_id: number
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string
+            /** Is Default */
+            is_default: boolean
         }
         /**
          * RERAEvent
@@ -2987,6 +3119,125 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    google_login_api_v1_auth_google_login_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+        }
+    }
+    google_callback_api_v1_auth_google_callback_get: {
+        parameters: {
+            query?: {
+                state?: string | null
+                code?: string | null
+                error?: string | null
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    google_invite_initiate_api_v1_auth_invites_google_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['GoogleInviteInitRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    google_invite_callback_api_v1_auth_google_invite_callback_get: {
+        parameters: {
+            query?: {
+                state?: string | null
+                code?: string | null
+                error?: string | null
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
                 }
             }
             /** @description Validation Error */
@@ -3982,6 +4233,8 @@ export interface operations {
             content: {
                 'multipart/form-data': {
                     files: string[]
+                    /** @description Target profile ID (defaults to actor's active profile) */
+                    profile_id?: number
                 }
             }
         }

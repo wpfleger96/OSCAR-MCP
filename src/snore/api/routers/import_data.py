@@ -10,14 +10,16 @@ import threading
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from snore.api.deps import ActorDep
+from snore.api.deps import ActorDep, get_db
 from snore.api.guards import RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
@@ -29,6 +31,7 @@ from snore.api.import_jobs import (
     remove_job,
     reserve_slot,
 )
+from snore.database import models
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
@@ -114,6 +117,7 @@ class DetectRequest(BaseModel):
 
 class ImportPathRequest(BaseModel):
     sources: list[ImportSource]
+    profile_id: int | None = None
 
 
 class JobResponse(BaseModel):
@@ -339,7 +343,11 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                             "files": {
                                 "type": "array",
                                 "items": {"type": "string", "format": "binary"},
-                            }
+                            },
+                            "profile_id": {
+                                "type": "integer",
+                                "description": "Target profile ID (defaults to actor's active profile)",
+                            },
                         },
                     }
                 }
@@ -347,7 +355,11 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         }
     },
 )
-async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
+async def import_files(
+    request: Request,
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JobResponse:
     max_upload_bytes, max_upload_files, max_file_bytes = _get_upload_limits()
 
     # Step 1: Reserve admission slot BEFORE reading any body bytes.
@@ -372,9 +384,18 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
     # block uses this flag to decide whether to clean up the job.
     _job_cleanup = True
     tmp: str | None = None
+    _requested_profile_id: int | None = None
 
     try:
         async with request.form(max_files=max_upload_files) as form:
+            _profile_id_raw = form.get("profile_id")
+            if isinstance(_profile_id_raw, str):
+                try:
+                    _requested_profile_id = int(_profile_id_raw)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=422, detail="profile_id must be an integer"
+                    ) from None
             uploads = [
                 f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
             ]
@@ -439,11 +460,32 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                         ),
                     ) from None
 
+        # Resolve target profile: validate ownership if caller specified one.
+        if _requested_profile_id is not None:
+            owned = (
+                (
+                    await db.execute(
+                        select(models.Profile).where(
+                            models.Profile.id == _requested_profile_id,
+                            models.Profile.user_id == actor.user_id,
+                            models.Profile.deleting_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if owned is None:
+                raise HTTPException(status_code=403, detail="Profile not owned by user")
+            resolved_profile_id = _requested_profile_id
+        else:
+            resolved_profile_id = actor.profile_id
+
         # Transfer ownership to the job; the worker will clean up on completion.
         job.temp_dir = tmp_path
         tmp = None  # Job owns the directory now.
         job.convert_to_pending()
-        job.target_profile_id = actor.profile_id
+        job.target_profile_id = resolved_profile_id
         _job_cleanup = False  # Worker owns the job from here.
 
     finally:
@@ -457,10 +499,10 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
             job.cleanup_files()
             job.release_capacity()
 
-    # Derive profile-scoped backup root from actor.
+    # Derive profile-scoped backup root from the resolved target profile.
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
-    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(job.target_profile_id)
 
     # Start worker immediately — /progress is observer-only.
     _start_worker(job, profile_raw_root)
@@ -469,9 +511,32 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
 
 @local_only_router.post("/path", response_model=JobResponse, status_code=202)
 async def import_from_path(
-    body: ImportPathRequest, request: Request, actor: RequireWritable
+    body: ImportPathRequest,
+    request: Request,
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JobResponse:
     _require_localhost(request)
+
+    if body.profile_id is not None:
+        owned = (
+            (
+                await db.execute(
+                    select(models.Profile).where(
+                        models.Profile.id == body.profile_id,
+                        models.Profile.user_id == actor.user_id,
+                        models.Profile.deleting_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Profile not owned by user")
+        resolved_profile_id = body.profile_id
+    else:
+        resolved_profile_id = actor.profile_id
 
     try:
         job = create_job(
@@ -480,11 +545,11 @@ async def import_from_path(
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail="Too many active imports.") from exc
 
-    job.target_profile_id = actor.profile_id
+    job.target_profile_id = resolved_profile_id
 
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
-    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(resolved_profile_id)
 
     _start_worker(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
