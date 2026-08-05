@@ -1,12 +1,11 @@
-"""Unit tests for the get_ca_analysis MCP tool adapter.
+"""Unit tests for the get_ca_analysis MCP tool fetch/compute pair.
 
 Split into two groups:
-  A) TestGetCaAnalysisAdapter — pure adapter tests calling the function directly
-     with a mock DB session and patched BreathService.  Run now; no server
-     wiring required.
-  B) TestGetCaAnalysisClient — client-level roundtrip tests via mcp_client_factory.
-     Written for when the server wrapper lands; currently FAIL with "Unknown tool"
-     because the server has not yet registered get_ca_analysis.
+  A) TestGetCaAnalysisAdapter — direct tests of the production composition
+     (``fetch_ca_raw`` inside the DB scope, then pure ``ca_response_from_raw``)
+     with a mock DB session and patched BreathService seams.
+  B) TestGetCaAnalysisClient — client-level roundtrip tests via
+     mcp_client_factory, exercising the registered get_ca_analysis server tool.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import json
 
 from datetime import date, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -99,8 +98,27 @@ def _make_ca_analysis_result(**kwargs: Any) -> Any:
     return CaAnalysisResult(**defaults)
 
 
+def _make_minimal_raw(device_id: int = 3) -> Any:
+    """Minimal RawCaAnalysis (empty-day shape) for tests that mock compute_ca_analysis."""
+    from snore.services.breath_service import (  # noqa: PLC0415
+        DayAnalysisStatus,
+        NullReason,
+        RawCaAnalysis,
+    )
+
+    return RawCaAnalysis(
+        therapy_date=date(2025, 1, 15),
+        device_id=device_id,
+        session_data=[],
+        day_status=DayAnalysisStatus.NOT_RUN,
+        algorithm_identity=None,
+        null_reason=NullReason.ANALYSIS_NOT_RUN,
+        night_level_refused=False,
+    )
+
+
 # ---------------------------------------------------------------------------
-# A) Pure adapter tests — call adapter directly, no server wiring needed
+# A) Adapter tests — call fetch_ca_raw + ca_response_from_raw directly
 # ---------------------------------------------------------------------------
 
 
@@ -110,7 +128,10 @@ class TestGetCaAnalysisAdapter:
     ) -> None:
         """Two CA events: renamed fields present, wall-clock isoformat, timezone unknown,
         offsets pass through."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
 
         ev1 = _make_ca_detail(session_id=1, offset_seconds=60.0, preceding_mv_slope=0.4)
         ev2 = _make_ca_detail(
@@ -118,13 +139,20 @@ class TestGetCaAnalysisAdapter:
         )
         mock_result = _make_ca_analysis_result(ca_events=[ev1, ev2])
 
-        with patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
-            AsyncMock(return_value=mock_result),
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.fetch_ca_analysis",
+                AsyncMock(return_value=_make_minimal_raw()),
+            ),
+            patch(
+                "snore.services.breath_service.compute_ca_analysis",
+                MagicMock(return_value=mock_result),
+            ),
         ):
-            result = await get_ca_analysis(
+            raw, caps = await fetch_ca_raw(
                 mock_db_session, date(2025, 1, 15), profile_id=1
             )
+            result = ca_response_from_raw(raw, caps)
 
         assert result.query_date == "2025-01-15"
         assert result.device_id == 3
@@ -149,20 +177,30 @@ class TestGetCaAnalysisAdapter:
     ) -> None:
         """periodic_breathing_pct=None + pb_reason=ANALYSIS_NOT_RUN →
         pb_reason string 'analysis_not_run' in response."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
         from snore.services.breath_service import NullReason  # noqa: PLC0415
 
         mock_result = _make_ca_analysis_result(
             periodic_breathing_pct=None,
             pb_reason=NullReason.ANALYSIS_NOT_RUN,
         )
-        with patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
-            AsyncMock(return_value=mock_result),
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.fetch_ca_analysis",
+                AsyncMock(return_value=_make_minimal_raw()),
+            ),
+            patch(
+                "snore.services.breath_service.compute_ca_analysis",
+                MagicMock(return_value=mock_result),
+            ),
         ):
-            result = await get_ca_analysis(
+            raw, caps = await fetch_ca_raw(
                 mock_db_session, date(2025, 1, 15), profile_id=1
             )
+            result = ca_response_from_raw(raw, caps)
 
         assert result.periodic_breathing_pct is None
         assert result.pb_reason == "analysis_not_run"
@@ -172,7 +210,10 @@ class TestGetCaAnalysisAdapter:
     ) -> None:
         """day_status=NOT_RUN with non-empty ca_events → events still present
         (event-anchored; import-time events are independent of analysis status)."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
         from snore.services.breath_service import (  # noqa: PLC0415
             AnalysisStatus,
             DayAnalysisStatus,
@@ -194,13 +235,20 @@ class TestGetCaAnalysisAdapter:
             null_reason=NullReason.ANALYSIS_NOT_RUN,
             ca_events=[ev],
         )
-        with patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
-            AsyncMock(return_value=mock_result),
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.fetch_ca_analysis",
+                AsyncMock(return_value=_make_minimal_raw()),
+            ),
+            patch(
+                "snore.services.breath_service.compute_ca_analysis",
+                MagicMock(return_value=mock_result),
+            ),
         ):
-            result = await get_ca_analysis(
+            raw, caps = await fetch_ca_raw(
                 mock_db_session, date(2025, 1, 15), profile_id=1
             )
+            result = ca_response_from_raw(raw, caps)
 
         assert result.day_status == "not_run"
         assert result.null_reason == "analysis_not_run"
@@ -212,7 +260,10 @@ class TestGetCaAnalysisAdapter:
     ) -> None:
         """MIXED_VERSION → algorithm_identity=None, null_reason='algo_version_mismatch';
         night-level fields null; ca_events still returned."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
         from snore.services.breath_service import (  # noqa: PLC0415
             DayAnalysisStatus,
             NullReason,
@@ -229,13 +280,20 @@ class TestGetCaAnalysisAdapter:
             mv_rolling_variance=None,
             mv_variance_reason=NullReason.ALGO_VERSION_MISMATCH,
         )
-        with patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
-            AsyncMock(return_value=mock_result),
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.fetch_ca_analysis",
+                AsyncMock(return_value=_make_minimal_raw()),
+            ),
+            patch(
+                "snore.services.breath_service.compute_ca_analysis",
+                MagicMock(return_value=mock_result),
+            ),
         ):
-            result = await get_ca_analysis(
+            raw, caps = await fetch_ca_raw(
                 mock_db_session, date(2025, 1, 15), profile_id=1
             )
+            result = ca_response_from_raw(raw, caps)
 
         assert result.day_status == "mixed_version"
         assert result.algorithm_identity is None
@@ -251,7 +309,10 @@ class TestGetCaAnalysisAdapter:
         self, mock_db_session: Any
     ) -> None:
         """session_coverage: session_id, analysis_status str, algo_versions dict."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
         from snore.services.breath_service import (  # noqa: PLC0415
             AnalysisStatus,
             SessionCoverage,
@@ -272,13 +333,20 @@ class TestGetCaAnalysisAdapter:
                 ),
             ]
         )
-        with patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
-            AsyncMock(return_value=mock_result),
+        with (
+            patch(
+                "snore.services.breath_service.BreathService.fetch_ca_analysis",
+                AsyncMock(return_value=_make_minimal_raw()),
+            ),
+            patch(
+                "snore.services.breath_service.compute_ca_analysis",
+                MagicMock(return_value=mock_result),
+            ),
         ):
-            result = await get_ca_analysis(
+            raw, caps = await fetch_ca_raw(
                 mock_db_session, date(2025, 1, 15), profile_id=1
             )
+            result = ca_response_from_raw(raw, caps)
 
         assert len(result.session_coverage) == 2
         c0 = result.session_coverage[0]
@@ -299,7 +367,10 @@ class TestGetCaAnalysisAdapter:
         """Happy path: device_capabilities is present (non-None) when build_device_capabilities
         returns a value."""
         from snore.mcp.schemas import DeviceCapabilities  # noqa: PLC0415
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
 
         mock_result = _make_ca_analysis_result()
         mock_caps = DeviceCapabilities(
@@ -316,17 +387,22 @@ class TestGetCaAnalysisAdapter:
 
         with (
             patch(
-                "snore.services.breath_service.BreathService.get_ca_analysis",
-                AsyncMock(return_value=mock_result),
+                "snore.services.breath_service.BreathService.fetch_ca_analysis",
+                AsyncMock(return_value=_make_minimal_raw()),
             ),
             patch(
                 "snore.mcp.tools.ca_analysis.build_device_capabilities",
                 AsyncMock(return_value=mock_caps),
             ),
+            patch(
+                "snore.services.breath_service.compute_ca_analysis",
+                MagicMock(return_value=mock_result),
+            ),
         ):
-            result = await get_ca_analysis(
+            raw, caps = await fetch_ca_raw(
                 mock_db_session, date(2025, 1, 15), profile_id=1
             )
+            result = ca_response_from_raw(raw, caps)
 
         assert result.device_capabilities is not None
         assert result.device_capabilities.has_flow_waveform is True
@@ -338,7 +414,7 @@ class TestGetCaAnalysisAdapter:
         """DeviceAmbiguityError → snore.mcp.errors.ValidationError with device IDs listed;
         profile_id NOT in message."""
         from snore.mcp.errors import ValidationError  # noqa: PLC0415
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import fetch_ca_raw  # noqa: PLC0415
         from snore.services.breath_service import DeviceAmbiguityError  # noqa: PLC0415
 
         exc = DeviceAmbiguityError(
@@ -348,11 +424,11 @@ class TestGetCaAnalysisAdapter:
             device_serials={3: "SN001", 5: "SN002"},
         )
         with patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
+            "snore.services.breath_service.BreathService.fetch_ca_analysis",
             AsyncMock(side_effect=exc),
         ):
             with pytest.raises(ValidationError) as exc_info:
-                await get_ca_analysis(mock_db_session, date(2025, 1, 15), profile_id=99)
+                await fetch_ca_raw(mock_db_session, date(2025, 1, 15), profile_id=99)
 
         msg = str(exc_info.value)
         assert "device_id=3" in msg
@@ -366,16 +442,16 @@ class TestGetCaAnalysisAdapter:
         """DeviceNotOwnedError → ValidationError with device_id= in message,
         profile_id absent."""
         from snore.mcp.errors import ValidationError  # noqa: PLC0415
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import fetch_ca_raw  # noqa: PLC0415
         from snore.services.breath_service import DeviceNotOwnedError  # noqa: PLC0415
 
         exc = DeviceNotOwnedError(device_id=42, profile_id=99)
         with patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
+            "snore.services.breath_service.BreathService.fetch_ca_analysis",
             AsyncMock(side_effect=exc),
         ):
             with pytest.raises(ValidationError) as exc_info:
-                await get_ca_analysis(
+                await fetch_ca_raw(
                     mock_db_session, date(2025, 1, 15), profile_id=99, device_id=42
                 )
 
@@ -385,8 +461,7 @@ class TestGetCaAnalysisAdapter:
 
 
 # ---------------------------------------------------------------------------
-# B) Client-level roundtrip tests — will FAIL with "Unknown tool" until the
-#    server wrapper for get_ca_analysis is wired by a later agent.
+# B) Client-level roundtrip tests via the registered get_ca_analysis tool
 # ---------------------------------------------------------------------------
 
 
@@ -396,7 +471,9 @@ class TestGetCaAnalysisClient:
     ) -> None:
         """Happy path: mocked service DTO → correct JSON payload.
 
-        Expected failure mode until server wiring: ToolError 'Unknown tool'.
+        Patches BreathService.fetch_ca_analysis (returning a minimal RawCaAnalysis)
+        and compute_ca_analysis (returning mock_result) so the pure ca_response_from_raw
+        mapping runs against the mocked CaAnalysisResult.
         """
         from snore.services.breath_service import NullReason  # noqa: PLC0415
 
@@ -412,13 +489,16 @@ class TestGetCaAnalysisClient:
             periodic_breathing_pct=None,
             pb_reason=NullReason.NOT_AVAILABLE,
         )
-        service_mock = AsyncMock(return_value=mock_result)
-        patch_cm = patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
-            service_mock,
+        patch_fetch = patch(
+            "snore.services.breath_service.BreathService.fetch_ca_analysis",
+            AsyncMock(return_value=_make_minimal_raw()),
+        )
+        patch_compute = patch(
+            "snore.services.breath_service.compute_ca_analysis",
+            MagicMock(return_value=mock_result),
         )
         async with mcp_client_factory(
-            mock_db_session, extra_patches=[patch_cm]
+            mock_db_session, extra_patches=[patch_fetch, patch_compute]
         ) as client:
             result = await client.call_tool(
                 "get_ca_analysis",
@@ -442,10 +522,7 @@ class TestGetCaAnalysisClient:
     async def test_invalid_date_string_raises_tool_error(
         self, mock_db_session: Any, mcp_client_factory: Any
     ) -> None:
-        """Invalid date string → ToolError.
-
-        Expected failure mode until server wiring: ToolError 'Unknown tool'.
-        """
+        """Invalid date string → ToolError."""
         async with mcp_client_factory(mock_db_session) as client:
             with pytest.raises(ToolError):
                 await client.call_tool(
@@ -456,21 +533,21 @@ class TestGetCaAnalysisClient:
     async def test_size_guard_raises_tool_error(
         self, mock_db_session: Any, mcp_client_factory: Any
     ) -> None:
-        """When JSON exceeds RESPONSE_SIZE_LIMIT → ToolError advises narrowing.
-
-        Expected failure mode until server wiring: ToolError 'Unknown tool'.
-        """
+        """When JSON exceeds RESPONSE_SIZE_LIMIT → ToolError advises narrowing."""
         ev = _make_ca_detail()
         mock_result = _make_ca_analysis_result(ca_events=[ev])
-        service_mock = AsyncMock(return_value=mock_result)
-        patch_service = patch(
-            "snore.services.breath_service.BreathService.get_ca_analysis",
-            service_mock,
+        patch_fetch = patch(
+            "snore.services.breath_service.BreathService.fetch_ca_analysis",
+            AsyncMock(return_value=_make_minimal_raw()),
+        )
+        patch_compute = patch(
+            "snore.services.breath_service.compute_ca_analysis",
+            MagicMock(return_value=mock_result),
         )
         patch_size = patch("snore.mcp.server.RESPONSE_SIZE_LIMIT", new=1)
 
         async with mcp_client_factory(
-            mock_db_session, extra_patches=[patch_service, patch_size]
+            mock_db_session, extra_patches=[patch_fetch, patch_compute, patch_size]
         ) as client:
             with pytest.raises(ToolError):
                 await client.call_tool(

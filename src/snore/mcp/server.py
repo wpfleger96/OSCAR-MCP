@@ -1194,20 +1194,22 @@ def _register_tools(mcp: FastMCP) -> None:
               owned device IDs.
         """
         from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
-            get_ca_analysis as _impl,
+            ca_response_from_raw,
+            fetch_ca_raw,
         )
 
         runtime = _runtime(ctx)
         therapy_date = parse_date(date, "date")
 
         async with runtime.scope_provider() as db:
-            result = await _impl(
+            raw, caps = await fetch_ca_raw(
                 db,
                 therapy_date,
                 profile_id=runtime.profile_id,
                 device_id=device_id,
             )
 
+        result = ca_response_from_raw(raw, caps)
         payload: dict[str, Any] = result.model_dump(mode="json")
         _check_response_size(payload, "get_ca_analysis")
         return payload
