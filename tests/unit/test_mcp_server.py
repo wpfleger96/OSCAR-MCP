@@ -285,8 +285,8 @@ class TestValidateMinDuration:
 class TestStage2ToolsRegistered:
     """The three Stage-2 tools appear in make_server() tool listing."""
 
-    async def test_seven_tools_registered(self) -> None:
-        """make_server() registers exactly seven tools (four Stage-1 + three Stage-2)."""
+    async def test_ten_tools_registered(self) -> None:
+        """make_server() registers exactly ten tools (four Stage-1 + three Stage-2 + three Stage-3)."""
         from collections.abc import AsyncIterator
         from contextlib import asynccontextmanager
         from unittest.mock import MagicMock, patch
@@ -321,7 +321,11 @@ class TestStage2ToolsRegistered:
         # Stage-1 tools still present
         assert "get_data_overview" in tool_names
         assert "get_events" in tool_names
-        assert len(tool_names) == 7
+        # Stage-3 tools
+        assert "get_waveform" in tool_names
+        assert "render_window" in tool_names
+        assert "get_ca_analysis" in tool_names
+        assert len(tool_names) == 10
 
     async def test_compare_epochs_schema_has_epochs_parameter(self) -> None:
         """compare_epochs tool schema includes an 'epochs' parameter."""

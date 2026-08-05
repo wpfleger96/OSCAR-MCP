@@ -1,0 +1,158 @@
+"""Unit tests for the MCP waveform renderer.
+
+Exercises ``render_waveform_window`` directly with real ``WaveformWindow``
+DTOs — no server wiring, no database.  Verifies PNG output correctness,
+no-pyplot guarantee, and DTO immutability.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+
+from datetime import datetime
+
+# ---------------------------------------------------------------------------
+# Module-level helpers — build real service DTOs
+# ---------------------------------------------------------------------------
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _make_channel(
+    *,
+    channel_type: str = "flow",
+    unit: str | None = "L/min",
+    n_points: int = 100,
+    is_downsampled: bool = False,
+    original_sample_count: int | None = None,
+) -> object:
+    """Build a single ``WaveformChannel`` DTO with synthetic values."""
+    from snore.services.breath_service import (  # noqa: PLC0415
+        WaveformChannel,
+        WaveformChannelName,
+    )
+
+    offsets = [i * 0.1 for i in range(n_points)]
+    values = [math.sin(o) for o in offsets]
+    osc = original_sample_count if original_sample_count is not None else n_points
+
+    return WaveformChannel(
+        channel_type=WaveformChannelName(channel_type),
+        unit=unit,
+        sample_rate=10.0,
+        offset_seconds=offsets,
+        values=values,
+        original_sample_count=osc,
+        is_downsampled=is_downsampled,
+    )
+
+
+def _make_window(
+    *,
+    session_id: int = 42,
+    channels: list | None = None,
+    missing_channels: list | None = None,
+) -> object:
+    """Build a ``WaveformWindow`` DTO."""
+    from snore.services.breath_service import (  # noqa: PLC0415
+        NullReason,
+        TimezoneStatus,
+        WaveformWindow,
+    )
+
+    return WaveformWindow(
+        session_id=session_id,
+        session_start_wall_clock=datetime(2024, 1, 15, 22, 0, 0),
+        timezone_status=TimezoneStatus.UNKNOWN,
+        window_start_offset=0.0,
+        window_end_offset=10.0,
+        channels=channels or [],
+        missing_channels=missing_channels or [],
+        missing_channel_reason=None
+        if not missing_channels
+        else NullReason.NOT_AVAILABLE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+def test_empty_channels_window_produces_valid_png() -> None:
+    """Empty-channel window (session_id=0) renders a valid PNG placeholder."""
+    from snore.mcp.rendering import render_waveform_window  # noqa: PLC0415
+
+    window = _make_window(session_id=0, channels=[])
+    result = render_waveform_window(window)
+    assert isinstance(result, bytes)
+    assert result[:8] == PNG_MAGIC
+    assert len(result) > 0
+
+
+def test_single_channel_produces_valid_png() -> None:
+    """Single-channel window with 100 synthetic data points renders a valid PNG."""
+    from snore.mcp.rendering import render_waveform_window  # noqa: PLC0415
+
+    channel = _make_channel(n_points=100)
+    window = _make_window(channels=[channel])
+    result = render_waveform_window(window)
+    assert result[:8] == PNG_MAGIC
+    assert len(result) > 0
+
+
+def test_three_channels_produces_valid_png() -> None:
+    """Three-channel window renders a stacked multi-panel PNG."""
+    from snore.mcp.rendering import render_waveform_window  # noqa: PLC0415
+
+    channels = [
+        _make_channel(channel_type="flow", unit="L/min"),
+        _make_channel(channel_type="pressure", unit="cmH2O"),
+        _make_channel(channel_type="leak", unit="L/min"),
+    ]
+    window = _make_window(channels=channels)
+    result = render_waveform_window(window)
+    assert result[:8] == PNG_MAGIC
+    assert len(result) > 0
+
+
+def test_downsampled_channel_produces_valid_png() -> None:
+    """Downsampled channel (LTTB annotation) renders a valid PNG."""
+    from snore.mcp.rendering import render_waveform_window  # noqa: PLC0415
+
+    channel = _make_channel(
+        n_points=50,
+        is_downsampled=True,
+        original_sample_count=500,
+    )
+    window = _make_window(channels=[channel])
+    result = render_waveform_window(window)
+    assert result[:8] == PNG_MAGIC
+    assert len(result) > 0
+
+
+def test_render_does_not_import_pyplot() -> None:
+    """render_waveform_window must not import matplotlib.pyplot (no global state)."""
+    from snore.mcp.rendering import render_waveform_window  # noqa: PLC0415
+
+    # Remove pyplot from cache so we have a clean baseline
+    sys.modules.pop("matplotlib.pyplot", None)
+
+    channel = _make_channel(n_points=20)
+    window = _make_window(channels=[channel])
+    render_waveform_window(window)
+    assert "matplotlib.pyplot" not in sys.modules
+
+
+def test_render_does_not_mutate_input_dto() -> None:
+    """render_waveform_window must not modify the WaveformWindow DTO."""
+    from snore.mcp.rendering import render_waveform_window  # noqa: PLC0415
+
+    channel = _make_channel(n_points=30)
+    window = _make_window(channels=[channel])
+
+    snapshot_before = window.model_dump()
+    render_waveform_window(window)
+    snapshot_after = window.model_dump()
+    assert snapshot_before == snapshot_after

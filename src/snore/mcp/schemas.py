@@ -468,6 +468,79 @@ class CompareEpochsResponse(BaseModel):
     rx_violations: list[EpochRxViolationRow] = []
 
 
+# ---------------------------------------------------------------------------
+# Stage-3 schemas: get_waveform_window, get_ca_analysis
+# ---------------------------------------------------------------------------
+
+
+class WaveformChannelSchema(BaseModel):
+    """One deserialized, windowed waveform channel returned by get_waveform_window."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    channel_type: str
+    unit: str | None = None
+    sample_rate_hz: float
+    offset_seconds: list[float]  # tier-3 positions from session start
+    values: list[float]
+    original_sample_count: int  # pre-LTTB count within the window
+    is_downsampled: bool
+
+
+class WaveformWindowResponse(BaseModel):
+    """Response from get_waveform_window."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: int | None = None  # null when no session on the date
+    session_start_wall_clock: str | None = (
+        None  # tier-2 naive ISO; null when session_id null
+    )
+    timezone_status: str = "unknown"
+    window_start_offset_s: float
+    window_end_offset_s: float
+    channels: list[WaveformChannelSchema]
+    missing_channels: list[str]
+    missing_channel_reason: str | None = None
+
+
+class CaDetailSchema(BaseModel):
+    """One central apnea event with context."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: int
+    session_start_wall_clock: str  # tier-2 naive ISO
+    timezone_status: str = "unknown"
+    offset_seconds: float  # tier-3 CA start from session start
+    duration_seconds: float | None = None
+    preceding_mv_slope_lpm_per_min: float | None = None
+    preceding_mv_slope_reason: str | None = None
+    ps_delivered_cmh2o: float | None = None
+    ps_reason: str | None = None
+    stability_index: float | None = None
+    stability_reason: str | None = None
+
+
+class CaAnalysisResponse(BaseModel):
+    """Response from get_ca_analysis."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    query_date: str
+    device_id: int
+    day_status: str
+    # SessionCoverageEntry reused from Stage-2 (session_id, analysis_status, algo_versions)
+    session_coverage: list[SessionCoverageEntry] = []
+    algorithm_identity: dict[str, Any] | None = None
+    null_reason: str | None = None
+    ca_events: list[CaDetailSchema] = []
+    periodic_breathing_pct: float | None = None
+    pb_reason: str | None = None
+    mv_rolling_variance: float | None = None
+    mv_variance_reason: str | None = None
+
+
 # Mapping used for docs://schemas/{type} — maps schema name to model class
 SCHEMA_MODEL_MAP: dict[str, type[BaseModel]] = {
     "device_capabilities": DeviceCapabilities,
@@ -495,6 +568,11 @@ SCHEMA_MODEL_MAP: dict[str, type[BaseModel]] = {
     "epoch_stats": EpochStats,
     "epoch_rx_violation": EpochRxViolationRow,
     "compare_epochs_response": CompareEpochsResponse,
+    # Stage 3
+    "waveform_channel": WaveformChannelSchema,
+    "waveform_window": WaveformWindowResponse,
+    "ca_detail": CaDetailSchema,
+    "ca_analysis": CaAnalysisResponse,
 }
 
 

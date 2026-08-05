@@ -3230,17 +3230,22 @@ class BreathService:
                 )
         return results
 
-    async def get_waveform_window(
+    async def fetch_waveform_window(
         self, request: WaveformWindowRequest
-    ) -> WaveformWindow:
-        """Convenience orchestrator: resolve → fetch blobs → compute. Never closes self._db.
+    ) -> RawWaveformWindow:
+        """Resolve, validate, and fetch raw waveform blobs for a window request.
 
-        Uses ``_resolve_range`` for device validation and session selection (raises
-        ``DeviceAmbiguityError`` for multi-device, ``DeviceNotOwnedError`` for foreign
-        device_id), then calls private ``_fetch_waveform_blobs`` directly with the
-        already-scoped session.  The public ``fetch_waveform_window_raw`` is not called
-        here; that function enforces the full identity tuple (profile + date + device)
-        and is intended for direct callers such as future MCP render/raw tools.
+        MCP raw/render seam (plan docs/mcp-server-plan.md §9): the fetch step runs
+        inside the caller's DB scope while ``compute_waveform_window`` (pure, CPU-only)
+        runs after the scope closes.  Direct callers that need the raw bytes or want
+        to render a PNG call this method, then pass the returned ``RawWaveformWindow``
+        to ``compute_waveform_window`` independently.
+
+        Raises ``DeviceAmbiguityError`` for multi-device profiles with no device_id,
+        ``DeviceNotOwnedError`` for a foreign device_id, ``ValueError`` when an
+        explicit session_id is provided but the date has no sessions, and
+        ``MultiSessionAmbiguityError`` when the date has multiple sessions and no
+        session_id was specified.
         """
         resolved_device_id, sessions_by_date = await self._resolve_range(
             request.therapy_date, request.therapy_date, request.device_id
@@ -3256,14 +3261,12 @@ class BreathService:
                     f"Session {request.session_id} not found for date "
                     f"{request.therapy_date} on device {resolved_device_id}"
                 )
-            return compute_waveform_window(
-                RawWaveformWindow(
-                    request=request,
-                    session_id=0,
-                    session_start_wall_clock=datetime.min,
-                    channels=[],
-                    missing_channels=list(request.channels),
-                )
+            return RawWaveformWindow(
+                request=request,
+                session_id=0,
+                session_start_wall_clock=datetime.min,
+                channels=[],
+                missing_channels=list(request.channels),
             )
 
         if request.session_id is not None:
@@ -3294,9 +3297,21 @@ class BreathService:
         resolved_request = request.model_copy(
             update={"device_id": resolved_device_id, "session_id": session_row.id}
         )
-        raw = await _fetch_waveform_blobs(
+        return await _fetch_waveform_blobs(
             self._db, resolved_request, session_row.id, session_row.start_time
         )
+
+    async def get_waveform_window(
+        self, request: WaveformWindowRequest
+    ) -> WaveformWindow:
+        """Convenience orchestrator: resolve → fetch blobs → compute. Never closes self._db.
+
+        Uses ``_resolve_range`` for device validation and session selection (raises
+        ``DeviceAmbiguityError`` for multi-device, ``DeviceNotOwnedError`` for foreign
+        device_id), then delegates to ``fetch_waveform_window`` (the MCP seam) and
+        applies ``compute_waveform_window`` (pure) to produce the final DTO.
+        """
+        raw = await self.fetch_waveform_window(request)
         return compute_waveform_window(raw)
 
     async def get_ca_analysis(
