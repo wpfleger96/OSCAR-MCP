@@ -103,9 +103,11 @@ import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { listProfiles, createProfile, updateProfile, setDefaultProfile } from '@/api/profiles'
 import { useAuth } from '@/composables/useAuth'
+import { useDateFormat } from '@/composables/useDateFormat'
 import type { ProfileResponse } from '@/types'
 
 const { activeProfileId, canWrite, refreshStatus } = useAuth()
+const { formatDate, loadDateFormat } = useDateFormat()
 
 const profiles = ref<ProfileResponse[]>([])
 const loading = ref(true)
@@ -117,14 +119,6 @@ const editName = ref('')
 
 const newProfileName = ref('')
 const creating = ref(false)
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-    })
-}
 
 async function loadProfiles() {
     loading.value = true
@@ -138,7 +132,10 @@ async function loadProfiles() {
     }
 }
 
-onMounted(loadProfiles)
+onMounted(() => {
+    loadDateFormat()
+    loadProfiles()
+})
 
 function startEdit(profile: ProfileResponse) {
     editingId.value = profile.id

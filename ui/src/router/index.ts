@@ -1,11 +1,26 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
+import client from '@/api/client'
+import type { components } from '@/types/generated'
+
+type UserPreferences = components['schemas']['UserPreferences']
 
 declare module 'vue-router' {
     interface RouteMeta {
         authFree?: boolean
+        requiresMultiuser?: boolean
+        requiresAdmin?: boolean
     }
+}
+
+// landing_page value → route path.
+// NOTE: UserPreferences includes 'days' but no /days list route exists in this
+// router (only /days/:date for day-detail). Substituted with '/sessions'.
+const LANDING_PAGE_MAP: Record<UserPreferences['landing_page'], string> = {
+    dashboard: '/dashboard',
+    sessions: '/sessions',
+    days: '/sessions',
 }
 
 function sessionIdProp(route: { params: { id: string | string[] } }) {
@@ -119,12 +134,26 @@ const router = createRouter({
                     : route.params.date,
             }),
         },
+
+        // Multiuser-only routes
+        {
+            path: '/account',
+            name: 'account',
+            component: () => import('@/views/AccountView.vue'),
+            meta: { requiresMultiuser: true },
+        },
+        {
+            path: '/admin/users',
+            name: 'admin-users',
+            component: () => import('@/views/AdminUsersView.vue'),
+            meta: { requiresMultiuser: true, requiresAdmin: true },
+        },
     ],
 })
 
 // Exported for unit testing — the production router uses this directly.
 export async function authGuard(to: RouteLocationNormalized): Promise<string | boolean | void> {
-    const { fetchStatus, isAuthenticated, isLocal } = useAuth()
+    const { fetchStatus, isAuthenticated, isLocal, role } = useAuth()
 
     try {
         await fetchStatus()
@@ -139,8 +168,26 @@ export async function authGuard(to: RouteLocationNormalized): Promise<string | b
         return '/'
     }
 
-    // Authenticated user landing on login page → dashboard.
+    // Authenticated user landing on login page → preference-based landing or dashboard.
     if (authed && to.path === '/') {
+        if (isLocal.value) {
+            // Local mode has no preferences endpoint; skip the fetch.
+            return '/dashboard'
+        }
+        const prefs = await client
+            .get<UserPreferences>('/auth/me/preferences')
+            .then((r) => r.data)
+            .catch(() => null)
+        return LANDING_PAGE_MAP[prefs?.landing_page ?? 'dashboard'] ?? '/dashboard'
+    }
+
+    // Multiuser-only routes are inaccessible in local mode.
+    if (to.meta.requiresMultiuser && isLocal.value) {
+        return '/dashboard'
+    }
+
+    // Admin-only routes require the admin role.
+    if (to.meta.requiresAdmin && role.value !== 'admin') {
         return '/dashboard'
     }
 }
