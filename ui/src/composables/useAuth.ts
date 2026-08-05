@@ -61,21 +61,12 @@ export function useAuth() {
 
     async function login(email: string, password: string): Promise<void> {
         await loginUser({ email, password })
-        // Invalidate any in-flight status fetch so the post-login fetch wins.
-        status.value = null
-        _fetchPromise = null
-        _generation++
-        _lastFetched = 0
-        await fetchStatus()
+        await refreshStatus()
     }
 
     async function demoLogin(): Promise<void> {
         await demoLoginUser()
-        status.value = null
-        _fetchPromise = null
-        _generation++
-        _lastFetched = 0
-        await fetchStatus()
+        await refreshStatus()
     }
 
     function clearAuth(): void {

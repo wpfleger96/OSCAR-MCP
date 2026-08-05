@@ -17,7 +17,7 @@
             <Button :disabled="!canWrite || running" @click="handleRunAnalysis">
                 <Loader2 v-if="running" class="h-4 w-4 animate-spin" />
                 <Play v-else class="h-4 w-4" />
-                {{ canWrite ? 'Run Analysis' : 'Demo: Read-only' }}
+                {{ canWrite ? 'Run Analysis' : 'Read-only mode' }}
             </Button>
         </div>
     </div>
@@ -363,13 +363,12 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Loader2, AlertTriangle, ArrowLeft, BarChart3, Play } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
-import { useAuth } from '@/composables/useAuth'
-
-const { canWrite } = useAuth()
 import { getWaveformCompare } from '@/api/waveforms'
+import { useAuth } from '@/composables/useAuth'
 import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
 import { FLOW_LIMITATION_CLASSES } from '@/utils/flowLimitation'
+import type { AnalysisResult, EventComparisonResult } from '@/types'
 
 interface FlowAnalysis {
     total_breaths: number
@@ -377,7 +376,8 @@ interface FlowAnalysis {
     flow_limitation_index: number
     average_confidence: number
 }
-import type { AnalysisResult, EventComparisonResult } from '@/types'
+
+const { canWrite } = useAuth()
 
 const props = defineProps<{ sessionId: number }>()
 

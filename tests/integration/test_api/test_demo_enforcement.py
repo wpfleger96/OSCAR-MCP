@@ -58,6 +58,11 @@ def demo_client(temp_db, async_db_session, db_session):
 
     The demo actor has role=DEMO in MULTIUSER mode, so require_writable raises
     403 on any mutating route that enforces it.
+
+    The fixture uses local mode (test default from conftest.py) because
+    can_write derives from the actor's role, not from the auth mode.  A demo
+    actor in local mode is structurally identical to one in multiuser mode for
+    the purpose of this guard test.
     """
     app = create_app()
 
@@ -132,6 +137,16 @@ class TestDemoEnforcement:
         """
         mutating = _mutating_routes()
         assert mutating, "No mutating routes found — route enumeration broken"
+
+        live_route_keys = {f"{method} {path}" for method, path in mutating}
+
+        # Guard against a stale allowlist: every entry must match a live route.
+        stale_allowlist = DEMO_ALLOWED_MUTATING - live_route_keys
+        assert not stale_allowlist, (
+            "DEMO_ALLOWED_MUTATING contains entries that no longer match any "
+            "registered route (remove stale entries):\n"
+            + "\n".join(f"  {e}" for e in sorted(stale_allowlist))
+        )
 
         unclassified_failures: list[str] = []
 

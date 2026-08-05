@@ -386,10 +386,17 @@ async def demo_login(
     Looks up the single active demo user and issues a session cookie.
     Returns 404 (generic) when no demo account is configured so callers
     cannot distinguish "demo user disabled" from "demo user absent".
+
+    Only meaningful in multiuser mode — returns 404 in local mode (which has
+    no session cookie and no per-role access control).
     """
     from snore.api.config import get_config  # noqa: PLC0415
 
     cfg = get_config()
+
+    # Demo login is a multiuser concept; local mode has no session cookie.
+    if not cfg.is_multiuser:
+        raise HTTPException(status_code=404, detail="Demo not available")
 
     demo_user = (
         (

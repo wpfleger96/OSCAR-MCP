@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
 
 vi.mock('@/composables/useAuth')
@@ -103,20 +103,23 @@ describe('LoginView', () => {
         expect(demoBtn.attributes('disabled')).toBeUndefined()
     })
 
-    it('test_demo_button_click_calls_demoLogin', async () => {
+    it('test_demo_button_click_calls_demoLogin_and_navigates_to_dashboard', async () => {
         const demoLoginMock = vi.fn().mockResolvedValueOnce(undefined)
         vi.mocked(useAuth).mockReturnValue({
             ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
             demoLogin: demoLoginMock,
         })
+        const router = makeRouter()
         const wrapper = mount(LoginView, {
-            global: { plugins: [makeRouter()] },
+            global: { plugins: [router] },
         })
 
         await wrapper.find('.demo-btn').trigger('click')
-        await wrapper.vm.$nextTick()
+        // flushPromises drains all microtasks (the async demoLogin + router.push).
+        await flushPromises()
 
         expect(demoLoginMock).toHaveBeenCalledOnce()
+        expect(router.currentRoute.value.path).toBe('/dashboard')
     })
 
     it('test_demo_button_shows_unavailable_on_404', async () => {

@@ -126,7 +126,7 @@
                     </div>
                     <Button
                         variant="outline"
-                        :disabled="vacuuming"
+                        :disabled="!canWrite || vacuuming"
                         @click="vacuumDialogOpen = true"
                     >
                         <Loader2 v-if="vacuuming" class="mr-2 h-4 w-4 animate-spin" />
@@ -261,6 +261,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useAuth } from '@/composables/useAuth'
 import StatCard from '@/components/StatCard.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { Button } from '@/components/ui/button'
@@ -281,6 +282,7 @@ import { formatDateShort } from '@/utils/formatting'
 import type { VacuumResult, ResetResult } from '@/types'
 
 const { data, loading, error, reload } = useApiLoad(() => getDbStats())
+const { canWrite } = useAuth()
 
 const vacuumDialogOpen = ref(false)
 const vacuuming = ref(false)

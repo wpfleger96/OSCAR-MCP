@@ -6,6 +6,7 @@ import asyncio
 
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -242,11 +243,38 @@ def scrub_demo(db: str | None, source_profile_id: int, yes: bool) -> None:
     asyncio.run(_run())
 
 
-async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
-    """Async implementation of the scrub-demo command."""
+_DEMO_EMAIL = "demo@snore.local"
+
+
+async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
+    """Async implementation of the scrub-demo command.
+
+    Algorithm (single transaction — atomicity beats WAL-peak concerns at this scale;
+    peak disk usage during scrub is roughly 2–3× the dataset size while old and new
+    data co-exist before the cascade-delete of existing demo devices completes):
+
+    Step 1 — verify source profile exists.
+    Step 2 — find-or-create demo user (role='demo', password_hash=NULL).
+    Step 3 — find-or-create demo profile; on re-run delete old device chain + reset
+              PII fields (username, height_cm, settings) on the profile row itself.
+    Step 4 — compute whole-day date offset (most recent source day → today-7).
+    Step 5 — copy device/day/session chain with PII scrubs and date shift:
+              - waveforms copied via INSERT...SELECT at the SQL layer so blobs never
+                enter Python memory;
+              - events, statistics, settings, analysis_results fetched in one batch
+                per device (WHERE session_id IN (...)) to avoid per-session round-trips;
+              - detected_patterns and breaths batched per analysis result batch.
+    Step 6 — post-scrub integrity checks (ClickException, not bare assert).
+    Step 7 — print summary.
+
+    To revoke a demo session: bump ``users.session_version`` for the demo user;
+    all outstanding session cookies will be invalidated on the next request.
+
+    See the Click command docstring for full semantics and PII scrub policy.
+    """
     from datetime import datetime  # noqa: PLC0415
 
-    from sqlalchemy import select  # noqa: PLC0415
+    from sqlalchemy import select, text  # noqa: PLC0415
     from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
 
     from snore.database.models import (  # noqa: PLC0415
@@ -260,13 +288,12 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
         Setting,
         Statistics,
         User,
-        Waveform,
     )
     from snore.database.models import (
         Session as DbSession,
     )
 
-    db: AsyncSession = session  # type: ignore[assignment]
+    db: AsyncSession = session
 
     # ---- 1. Verify source profile exists ----
     source_profile = await db.get(Profile, source_profile_id)
@@ -275,13 +302,12 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
 
     # ---- 2. Find-or-create demo user ----
     # Each query uses a unique variable name so mypy can track the return type.
-    demo_email = "demo@snore.local"
-    user_q = select(User).where(User.canonical_email == demo_email)
+    user_q = select(User).where(User.canonical_email == _DEMO_EMAIL)
     demo_user: User | None = (await db.execute(user_q)).scalars().first()
 
     if demo_user is None:
         demo_user = User(
-            canonical_email=demo_email,
+            canonical_email=_DEMO_EMAIL,
             display_name="Demo",
             role="demo",
             password_hash=None,
@@ -294,6 +320,7 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
         console.print(f"Using existing demo user (id={demo_user.id})")
 
     assert demo_user is not None  # narrowing for mypy
+
     # ---- 3. Find-or-create demo profile ----
     profile_q = select(Profile).where(
         Profile.user_id == demo_user.id,
@@ -319,7 +346,12 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
         console.print(f"Created demo profile (id={demo_profile.id})")
     else:
         console.print(f"Replacing existing demo profile data (id={demo_profile.id})")
-        # Delete existing device chain (cascade handles sessions, events, etc.)
+        # Re-run path: reset PII fields on the profile row itself (new devices will
+        # be recreated below; these column values persist on the existing row).
+        demo_profile.username = None
+        demo_profile.height_cm = None
+        demo_profile.settings = {}
+        # Delete existing device chain — cascade handles sessions/events/etc.
         cleanup_dev_q = select(Device).where(Device.profile_id == demo_profile.id)
         existing_devices = (await db.execute(cleanup_dev_q)).scalars().all()
         for dev in existing_devices:
@@ -327,6 +359,7 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
         await db.flush()
 
     assert demo_profile is not None  # narrowing for mypy
+
     # Ensure demo_user.default_profile_id points to the demo profile.
     if demo_user.default_profile_id != demo_profile.id:
         demo_user.default_profile_id = demo_profile.id
@@ -364,7 +397,7 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
             return None
         return dt + day_offset
 
-    # ---- 5. Copy devices ----
+    # ---- 5. Copy device/day/session chain ----
     source_dev_q = select(Device).where(Device.profile_id == source_profile_id)
     source_devices = (await db.execute(source_dev_q)).scalars().all()
 
@@ -381,11 +414,14 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
         "breaths": 0,
     }
 
-    # Map source device id -> demo device id
+    # Map source device id → demo device id (needed for session.device_id).
     device_id_map: dict[int, int] = {}
-    # Map source day id -> demo day id (needed for session.day_id)
+    # Map source day id → demo day id (needed for session.day_id composite FK).
     day_id_map: dict[int, int] = {}
+    # Map source session id → demo session id (needed for child table copies).
+    src_to_demo_session: dict[int, int] = {}
 
+    # --- Phase A: devices and days ---
     for dev_idx, src_dev in enumerate(source_devices):
         demo_serial = f"DEMO-{dev_idx + 1:03d}"
         demo_dev = Device(
@@ -402,7 +438,6 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
         device_id_map[src_dev.id] = demo_dev.id
         counts["devices"] += 1
 
-        # Copy days for this device
         days_q = select(Day).where(Day.device_id == src_dev.id)
         src_days = (await db.execute(days_q)).scalars().all()
         for src_day in src_days:
@@ -443,79 +478,80 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
             day_id_map[src_day.id] = demo_day.id
             counts["days"] += 1
 
-    # Copy sessions + children
-    # Map source session id -> demo session id (for breaths denorm FK)
-    session_id_map: dict[int, int] = {}
+    # --- Phase B: sessions ---
+    # Fetch all source sessions in one query per device, create demo sessions,
+    # and copy waveforms via INSERT...SELECT (SQL-layer; blobs never enter Python).
+    source_dev_ids = [d.id for d in source_devices]
+    all_sessions_q = select(DbSession).where(DbSession.device_id.in_(source_dev_ids))
+    all_src_sessions = (await db.execute(all_sessions_q)).scalars().all()
 
-    for src_dev in source_devices:
-        demo_device_id = device_id_map[src_dev.id]
+    for src_sess in all_src_sessions:
+        demo_device_id = device_id_map[src_sess.device_id]
+        demo_day_id = day_id_map.get(src_sess.day_id) if src_sess.day_id else None
 
-        sessions_q = select(DbSession).where(DbSession.device_id == src_dev.id)
-        src_sessions = (await db.execute(sessions_q)).scalars().all()
+        demo_sess = DbSession(
+            device_id=demo_device_id,
+            day_id=demo_day_id,
+            device_session_id=src_sess.device_session_id,
+            start_time=shift_dt(src_sess.start_time),
+            end_time=shift_dt(src_sess.end_time),
+            duration_seconds=src_sess.duration_seconds,
+            therapy_mode=src_sess.therapy_mode,
+            import_source="demo",
+            parser_version=src_sess.parser_version,
+            data_quality_notes=src_sess.data_quality_notes,
+            has_waveform_data=src_sess.has_waveform_data,
+            has_event_data=src_sess.has_event_data,
+            has_statistics=src_sess.has_statistics,
+            enabled=src_sess.enabled,
+        )
+        db.add(demo_sess)
+        await db.flush()
+        src_to_demo_session[src_sess.id] = demo_sess.id
+        counts["sessions"] += 1
 
-        for src_sess in src_sessions:
-            demo_day_id = day_id_map.get(src_sess.day_id) if src_sess.day_id else None
+        # Waveforms have no date columns and no PII — copy at the SQL layer
+        # so LargeBinary blobs never enter Python memory.
+        wf_result = await db.execute(
+            text(
+                "INSERT INTO waveforms "
+                "(session_id, waveform_type, sample_rate, unit, "
+                "min_value, max_value, mean_value, data_blob, sample_count) "
+                "SELECT :new_sid, waveform_type, sample_rate, unit, "
+                "min_value, max_value, mean_value, data_blob, sample_count "
+                "FROM waveforms WHERE session_id = :old_sid"
+            ),
+            {"new_sid": demo_sess.id, "old_sid": src_sess.id},
+        )
+        counts["waveforms"] += wf_result.rowcount  # type: ignore[attr-defined]
 
-            demo_sess = DbSession(
-                device_id=demo_device_id,
-                day_id=demo_day_id,
-                device_session_id=src_sess.device_session_id,
-                start_time=shift_dt(src_sess.start_time),
-                end_time=shift_dt(src_sess.end_time),
-                duration_seconds=src_sess.duration_seconds,
-                therapy_mode=src_sess.therapy_mode,
-                import_source="demo",
-                parser_version=src_sess.parser_version,
-                data_quality_notes=src_sess.data_quality_notes,
-                has_waveform_data=src_sess.has_waveform_data,
-                has_event_data=src_sess.has_event_data,
-                has_statistics=src_sess.has_statistics,
-                enabled=src_sess.enabled,
-            )
-            db.add(demo_sess)
-            await db.flush()
-            session_id_map[src_sess.id] = demo_sess.id
-            counts["sessions"] += 1
+    # --- Phase C: batch-fetch scalar child tables, insert with session mapping ---
+    source_session_ids = list(src_to_demo_session.keys())
 
-            # Copy waveforms (binary data blobs — no PII)
-            wf_q = select(Waveform).where(Waveform.session_id == src_sess.id)
-            src_waveforms = (await db.execute(wf_q)).scalars().all()
-            for src_wf in src_waveforms:
-                demo_wf = Waveform(
-                    session_id=demo_sess.id,
-                    waveform_type=src_wf.waveform_type,
-                    sample_rate=src_wf.sample_rate,
-                    unit=src_wf.unit,
-                    min_value=src_wf.min_value,
-                    max_value=src_wf.max_value,
-                    mean_value=src_wf.mean_value,
-                    data_blob=src_wf.data_blob,
-                    sample_count=src_wf.sample_count,
-                )
-                db.add(demo_wf)
-                counts["waveforms"] += 1
-
-            # Copy events
-            events_q = select(Event).where(Event.session_id == src_sess.id)
-            src_events = (await db.execute(events_q)).scalars().all()
-            for src_evt in src_events:
-                demo_evt = Event(
-                    session_id=demo_sess.id,
+    if source_session_ids:
+        # Events — date-shifted.
+        events_q = select(Event).where(Event.session_id.in_(source_session_ids))
+        for src_evt in (await db.execute(events_q)).scalars().all():
+            db.add(
+                Event(
+                    session_id=src_to_demo_session[src_evt.session_id],
                     event_type=src_evt.event_type,
                     start_time=shift_dt(src_evt.start_time),
                     duration_seconds=src_evt.duration_seconds,
                     spo2_drop=src_evt.spo2_drop,
                     peak_flow_limitation=src_evt.peak_flow_limitation,
                 )
-                db.add(demo_evt)
-                counts["events"] += 1
+            )
+            counts["events"] += 1
 
-            # Copy statistics
-            stats_q = select(Statistics).where(Statistics.session_id == src_sess.id)
-            src_stats = (await db.execute(stats_q)).scalars().first()
-            if src_stats is not None:
-                demo_stats = Statistics(
-                    session_id=demo_sess.id,
+        # Statistics — no date/PII columns.
+        stats_q = select(Statistics).where(
+            Statistics.session_id.in_(source_session_ids)
+        )
+        for src_stats in (await db.execute(stats_q)).scalars().all():
+            db.add(
+                Statistics(
+                    session_id=src_to_demo_session[src_stats.session_id],
                     obstructive_apneas=src_stats.obstructive_apneas,
                     central_apneas=src_stats.central_apneas,
                     mixed_apneas=src_stats.mixed_apneas,
@@ -564,47 +600,52 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
                     pulse_mean=src_stats.pulse_mean,
                     usage_hours=src_stats.usage_hours,
                 )
-                db.add(demo_stats)
-                counts["statistics"] += 1
+            )
+            counts["statistics"] += 1
 
-            # Copy settings
-            settings_q = select(Setting).where(Setting.session_id == src_sess.id)
-            src_settings = (await db.execute(settings_q)).scalars().all()
-            for src_setting in src_settings:
-                demo_setting = Setting(
-                    session_id=demo_sess.id,
+        # Settings — device therapy config (enum-like constants, not identity PII).
+        settings_q = select(Setting).where(Setting.session_id.in_(source_session_ids))
+        for src_setting in (await db.execute(settings_q)).scalars().all():
+            db.add(
+                Setting(
+                    session_id=src_to_demo_session[src_setting.session_id],
                     key=src_setting.key,
                     value=src_setting.value,
                 )
-                db.add(demo_setting)
-                counts["settings"] += 1
-
-            # Copy analysis results + children
-            ar_q = select(AnalysisResult).where(
-                AnalysisResult.session_id == src_sess.id
             )
-            src_analyses = (await db.execute(ar_q)).scalars().all()
-            for src_ar in src_analyses:
-                demo_ar = AnalysisResult(
-                    session_id=demo_sess.id,
-                    timestamp_start=shift_dt(src_ar.timestamp_start),
-                    timestamp_end=shift_dt(src_ar.timestamp_end),
-                    programmatic_result_json=src_ar.programmatic_result_json,
-                    processing_time_ms=src_ar.processing_time_ms,
-                    engine_versions_json=src_ar.engine_versions_json,
-                )
-                db.add(demo_ar)
-                await db.flush()
-                counts["analysis_results"] += 1
+            counts["settings"] += 1
 
-                # Copy detected patterns
-                patterns_q = select(DetectedPattern).where(
-                    DetectedPattern.analysis_result_id == src_ar.id
-                )
-                src_patterns = (await db.execute(patterns_q)).scalars().all()
-                for src_pat in src_patterns:
-                    demo_pat = DetectedPattern(
-                        analysis_result_id=demo_ar.id,
+        # --- Phase D: analysis results ---
+        ar_q = select(AnalysisResult).where(
+            AnalysisResult.session_id.in_(source_session_ids)
+        )
+        src_analyses = (await db.execute(ar_q)).scalars().all()
+
+        src_to_demo_ar: dict[int, int] = {}
+        for src_ar in src_analyses:
+            demo_ar = AnalysisResult(
+                session_id=src_to_demo_session[src_ar.session_id],
+                timestamp_start=shift_dt(src_ar.timestamp_start),
+                timestamp_end=shift_dt(src_ar.timestamp_end),
+                programmatic_result_json=src_ar.programmatic_result_json,
+                processing_time_ms=src_ar.processing_time_ms,
+                engine_versions_json=src_ar.engine_versions_json,
+            )
+            db.add(demo_ar)
+            await db.flush()
+            src_to_demo_ar[src_ar.id] = demo_ar.id
+            counts["analysis_results"] += 1
+
+        # --- Phase E: detected_patterns and breaths (batched by analysis result IDs) ---
+        source_ar_ids = list(src_to_demo_ar.keys())
+        if source_ar_ids:
+            patterns_q = select(DetectedPattern).where(
+                DetectedPattern.analysis_result_id.in_(source_ar_ids)
+            )
+            for src_pat in (await db.execute(patterns_q)).scalars().all():
+                db.add(
+                    DetectedPattern(
+                        analysis_result_id=src_to_demo_ar[src_pat.analysis_result_id],
                         pattern_id=src_pat.pattern_id,
                         start_time=shift_dt(src_pat.start_time),
                         duration=src_pat.duration,
@@ -613,16 +654,21 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
                         metrics_json=src_pat.metrics_json,
                         notes=None,  # PII scrub
                     )
-                    db.add(demo_pat)
-                    counts["detected_patterns"] += 1
+                )
+                counts["detected_patterns"] += 1
 
-                # Copy breaths (offsets are session-relative seconds, no date shift)
-                breaths_q = select(Breath).where(Breath.analysis_result_id == src_ar.id)
-                src_breaths = (await db.execute(breaths_q)).scalars().all()
-                for src_breath in src_breaths:
-                    demo_breath = Breath(
-                        analysis_result_id=demo_ar.id,
-                        session_id=demo_sess.id,
+            # Breaths use session-relative offsets (seconds) — no date shift needed.
+            # Both FKs (analysis_result_id, session_id) must be remapped.
+            breaths_q = select(Breath).where(
+                Breath.analysis_result_id.in_(source_ar_ids)
+            )
+            for src_breath in (await db.execute(breaths_q)).scalars().all():
+                db.add(
+                    Breath(
+                        analysis_result_id=src_to_demo_ar[
+                            src_breath.analysis_result_id
+                        ],
+                        session_id=src_to_demo_session[src_breath.session_id],
                         breath_number=src_breath.breath_number,
                         start_offset_s=src_breath.start_offset_s,
                         end_offset_s=src_breath.end_offset_s,
@@ -653,36 +699,44 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
                         mask_off=src_breath.mask_off,
                         mask_off_reason=src_breath.mask_off_reason,
                     )
-                    db.add(demo_breath)
-                    counts["breaths"] += 1
-
-            await db.flush()
+                )
+                counts["breaths"] += 1
 
     await db.flush()
 
-    # ---- 6. Post-scrub assertions ----
-    # a. No source serial numbers in demo devices
+    # ---- 6. Post-scrub integrity checks ----
+    # Using explicit ClickException (not bare assert) so checks survive python -O.
+
+    # a. No source serial numbers remain in demo devices.
     assert_device_stmt = select(Device).where(Device.profile_id == demo_profile.id)
     demo_devices_check = (await db.execute(assert_device_stmt)).scalars().all()
     source_serials = {d.serial_number for d in source_devices}
     for dev in demo_devices_check:
-        assert dev.serial_number not in source_serials, (
-            f"ASSERTION FAILED: demo device still has source serial {dev.serial_number!r}"
+        if dev.serial_number in source_serials:
+            raise click.ClickException(
+                f"Integrity check failed: demo device still has source serial "
+                f"{dev.serial_number!r}"
+            )
+
+    # b. Demo profile has no PII fields.
+    await db.refresh(demo_profile)
+    for field, val in [
+        ("first_name", demo_profile.first_name),
+        ("last_name", demo_profile.last_name),
+        ("date_of_birth", demo_profile.date_of_birth),
+        ("username", demo_profile.username),
+        ("height_cm", demo_profile.height_cm),
+    ]:
+        if val is not None:
+            raise click.ClickException(
+                f"Integrity check failed: demo profile.{field} is not None"
+            )
+    if demo_profile.settings:
+        raise click.ClickException(
+            "Integrity check failed: demo profile.settings is not empty"
         )
 
-    # b. Demo profile has no PII fields
-    await db.refresh(demo_profile)
-    assert demo_profile.first_name is None, (
-        "ASSERTION FAILED: demo profile.first_name is not None"
-    )
-    assert demo_profile.last_name is None, (
-        "ASSERTION FAILED: demo profile.last_name is not None"
-    )
-    assert demo_profile.date_of_birth is None, (
-        "ASSERTION FAILED: demo profile.date_of_birth is not None"
-    )
-
-    # c. No detected_patterns.notes
+    # c. No detected_patterns.notes survive the scrub.
     assert_pattern_stmt = (
         select(DetectedPattern)
         .join(AnalysisResult, DetectedPattern.analysis_result_id == AnalysisResult.id)
@@ -692,17 +746,20 @@ async def _do_scrub_demo(session: object, source_profile_id: int) -> None:
         .where(DetectedPattern.notes.is_not(None))
     )
     bad_patterns = (await db.execute(assert_pattern_stmt)).scalars().all()
-    assert not bad_patterns, (
-        f"ASSERTION FAILED: {len(bad_patterns)} demo detected_patterns still have notes"
-    )
+    if bad_patterns:
+        raise click.ClickException(
+            f"Integrity check failed: {len(bad_patterns)} demo detected_patterns "
+            "still have notes"
+        )
 
-    # d. No raw backup files for demo profile
+    # d. No raw backup files for demo profile (scrub must never copy filesystem data).
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
     raw_dir = Path(DEFAULT_RAW_BACKUP_DIR) / str(demo_profile.id)
-    assert not raw_dir.exists(), (
-        f"ASSERTION FAILED: raw backup dir exists for demo profile: {raw_dir}"
-    )
+    if raw_dir.exists():
+        raise click.ClickException(
+            f"Integrity check failed: raw backup dir exists for demo profile: {raw_dir}"
+        )
 
     # ---- 7. Summary ----
     print_success("Scrub-demo complete")
