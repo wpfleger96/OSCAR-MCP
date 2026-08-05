@@ -120,6 +120,7 @@ class AppConfig:
     # Upload / job resource bounds
     max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
+    max_upload_files: int  # Per-upload file count ceiling; default 10 000.
     max_jobs_per_user: int  # Per-user active-job cap; default 3.
     max_jobs_global: int  # Global active-job cap; default 10.
 
@@ -263,6 +264,13 @@ def load_config(
         raise ConfigError("SNORE_MAX_FILE_BYTES must be a positive integer (bytes)")
 
     try:
+        max_upload_files = int(os.environ.get("SNORE_MAX_UPLOAD_FILES", "10000"))
+    except ValueError as exc:
+        raise ConfigError("SNORE_MAX_UPLOAD_FILES must be a positive integer") from exc
+    if max_upload_files <= 0:
+        raise ConfigError("SNORE_MAX_UPLOAD_FILES must be a positive integer")
+
+    try:
         max_jobs_per_user = int(os.environ.get("SNORE_MAX_JOBS_PER_USER", "3"))
     except ValueError as exc:
         raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer") from exc
@@ -337,6 +345,7 @@ def load_config(
         pre_auth_cookie_ttl_seconds=pre_auth_cookie_ttl_seconds,
         max_upload_bytes=max_upload_bytes,
         max_file_bytes=max_file_bytes,
+        max_upload_files=max_upload_files,
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
     )

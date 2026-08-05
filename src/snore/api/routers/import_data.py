@@ -78,9 +78,6 @@ router = APIRouter()
 # worthless behind Cloudflare, so we structurally exclude them.
 local_only_router = APIRouter()
 
-# Default file-count ceiling — read at import time, overridden via SNORE config.
-_DEFAULT_MAX_UPLOAD_FILES = 500
-
 # Chunk size for the off-event-loop file copy.
 _COPY_CHUNK = 65536  # 64 KiB
 
@@ -130,9 +127,9 @@ def _get_upload_limits() -> tuple[int, int, int]:
         from snore.api.config import get_config  # noqa: PLC0415
 
         cfg = get_config()
-        return cfg.max_upload_bytes, _DEFAULT_MAX_UPLOAD_FILES, cfg.max_file_bytes
+        return cfg.max_upload_bytes, cfg.max_upload_files, cfg.max_file_bytes
     except Exception:
-        return 512 * 1024 * 1024, _DEFAULT_MAX_UPLOAD_FILES, 256 * 1024 * 1024
+        return 512 * 1024 * 1024, 10_000, 256 * 1024 * 1024
 
 
 def _require_localhost(request: Request) -> None:
