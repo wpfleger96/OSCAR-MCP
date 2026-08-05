@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
-import client from '@/api/client'
+import { getPreferences } from '@/api/me'
 import type { components } from '@/types/generated'
 
 type UserPreferences = components['schemas']['UserPreferences']
@@ -23,10 +23,7 @@ const LANDING_PAGE_MAP: Record<UserPreferences['landing_page'], string> = {
 
 /** Resolve the authenticated user's preferred landing path (multiuser only). */
 export async function resolveLandingPath(): Promise<string> {
-    const prefs = await client
-        .get<UserPreferences>('/auth/me/preferences')
-        .then((r) => r.data)
-        .catch(() => null)
+    const prefs = await getPreferences(AbortSignal.timeout(5000)).catch(() => null)
     return LANDING_PAGE_MAP[prefs?.landing_page ?? 'dashboard'] ?? '/dashboard'
 }
 

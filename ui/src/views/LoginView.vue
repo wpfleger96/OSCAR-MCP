@@ -176,39 +176,6 @@ async function handleDemoLogin() {
     gap: 0.75rem;
 }
 
-.field-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
-}
-
-.field-label {
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: var(--color-foreground);
-}
-
-.field-input {
-    height: 2.25rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-input);
-    background: transparent;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    transition: border-color 0.15s;
-    outline: none;
-}
-
-.field-input:focus {
-    border-color: var(--color-primary);
-}
-
-.field-input:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-}
-
 .login-error {
     font-size: 0.875rem;
     color: var(--color-destructive);

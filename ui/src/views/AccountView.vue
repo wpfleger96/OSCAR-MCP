@@ -76,6 +76,7 @@
                             type="password"
                             autocomplete="new-password"
                             class="field-input"
+                            required
                             :disabled="isDemo || passwordSaving"
                         />
                     </div>
@@ -88,6 +89,7 @@
                             type="password"
                             autocomplete="new-password"
                             class="field-input"
+                            required
                             :disabled="isDemo || passwordSaving"
                         />
                     </div>
@@ -164,6 +166,7 @@ import { ref, computed, watch } from 'vue'
 import { Loader2 } from '@lucide/vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
+import { useDateFormat } from '@/composables/useDateFormat'
 import {
     getMe,
     updateDisplayName,
@@ -177,6 +180,7 @@ type UserPreferences = components['schemas']['UserPreferences']
 
 const { role, refreshStatus } = useAuth()
 const isDemo = computed(() => role.value === 'demo')
+const { setDateFormat } = useDateFormat()
 
 // ── Account ──────────────────────────────────────────────────────────────────
 
@@ -220,25 +224,38 @@ async function savePassword() {
     if (isDemo.value) return
     passwordError.value = null
     passwordSuccess.value = null
+    if (!newPassword.value) {
+        passwordError.value = 'New password cannot be empty'
+        return
+    }
     if (newPassword.value !== confirmPassword.value) {
         passwordError.value = 'Passwords do not match'
         return
     }
     passwordSaving.value = true
+    let succeeded = false
     try {
         await changePassword({
             new_password: newPassword.value,
             ...(me.value?.has_password ? { current_password: currentPassword.value } : {}),
         })
+        succeeded = true
         passwordSuccess.value = 'Password updated'
         currentPassword.value = ''
         newPassword.value = ''
         confirmPassword.value = ''
-        await reloadMe()
     } catch (e: unknown) {
         passwordError.value = e instanceof Error ? e.message : 'Failed to change password'
     } finally {
         passwordSaving.value = false
+    }
+    // Reload me in its own try so a network failure here does not corrupt success state.
+    if (succeeded) {
+        try {
+            await reloadMe()
+        } catch {
+            // Swallow — me.has_password self-corrects on the next full reload.
+        }
     }
 }
 
@@ -284,6 +301,9 @@ async function savePreferences() {
         prefBaseline.value = { landing_page: result.landing_page, date_format: result.date_format }
         prefLandingPage.value = result.landing_page
         prefDateFormat.value = result.date_format
+        if (update.date_format !== undefined) {
+            setDateFormat(result.date_format)
+        }
         prefSuccess.value = 'Preferences saved'
     } catch (e: unknown) {
         prefSaveError.value = e instanceof Error ? e.message : 'Failed to save preferences'
@@ -318,10 +338,8 @@ async function savePreferences() {
     margin-bottom: 1rem;
 }
 
+/* min-width aligns the Email label in its flex row */
 .field-label {
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: var(--color-foreground);
     min-width: 7rem;
 }
 
@@ -358,42 +376,9 @@ async function savePreferences() {
     gap: 0.75rem;
 }
 
-.field-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
-}
-
-.field-input,
-.field-select {
-    height: 2.25rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-input);
-    background: transparent;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    outline: none;
-    transition: border-color 0.15s;
-}
-
+/* flex: 1 so the input fills the inline-row */
 .field-input {
     flex: 1;
-}
-
-.field-select {
-    cursor: pointer;
-}
-
-.field-input:focus,
-.field-select:focus {
-    border-color: var(--color-primary);
-}
-
-.field-input:disabled,
-.field-select:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
 }
 
 .save-btn {

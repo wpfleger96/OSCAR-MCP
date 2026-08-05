@@ -20,7 +20,10 @@ export const changePassword = apiPost<MessageResponse, [body: PasswordChangeRequ
     (body) => ({ data: body }),
 )
 
-export const getPreferences = apiGet<UserPreferences>('/auth/me/preferences')
+export const getPreferences = apiGet<UserPreferences, [signal?: AbortSignal]>(
+    '/auth/me/preferences',
+    (signal) => ({ signal }),
+)
 
 export const updatePreferences = apiPatch<UserPreferences, [body: UserPreferencesUpdate]>(
     '/auth/me/preferences',

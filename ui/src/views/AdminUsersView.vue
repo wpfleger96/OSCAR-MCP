@@ -61,6 +61,7 @@
                                     <select
                                         :value="displayedRoles[u.id] ?? u.role"
                                         class="role-select"
+                                        :disabled="busyUserIds.has(u.id)"
                                         @change="
                                             onRoleChange(
                                                 u,
@@ -87,6 +88,7 @@
                                     <button
                                         v-if="!u.disabled && u.id !== currentUser?.id"
                                         class="action-btn action-btn--destructive"
+                                        :disabled="busyUserIds.has(u.id)"
                                         @click="handleDisable(u.id)"
                                     >
                                         Disable
@@ -94,6 +96,7 @@
                                     <button
                                         v-if="u.disabled"
                                         class="action-btn"
+                                        :disabled="busyUserIds.has(u.id)"
                                         @click="handleEnable(u.id)"
                                     >
                                         Enable
@@ -201,12 +204,14 @@
                                         <span class="revoke-confirm-label">Revoke?</span>
                                         <button
                                             class="action-btn action-btn--destructive"
+                                            :disabled="revokeBusy"
                                             @click="executeRevoke(inv.id)"
                                         >
                                             Yes
                                         </button>
                                         <button
                                             class="action-btn action-btn--ghost"
+                                            :disabled="revokeBusy"
                                             @click="revokingInviteId = null"
                                         >
                                             No
@@ -237,7 +242,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, onMounted } from 'vue'
 import { Loader2 } from '@lucide/vue'
 import {
     Table,
@@ -250,6 +255,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
+import { useDateFormat } from '@/composables/useDateFormat'
 import {
     listUsers,
     updateUser,
@@ -265,6 +271,11 @@ type UserItem = components['schemas']['UserItem']
 type InviteCreatedResponse = components['schemas']['InviteCreatedResponse']
 
 const { user: currentUser } = useAuth()
+const { formatDate, loadDateFormat } = useDateFormat()
+
+onMounted(() => {
+    loadDateFormat()
+})
 
 // --- Users ---
 
@@ -278,12 +289,13 @@ const {
 // Track displayed role per user so the select reverts on error without a full reload.
 const displayedRoles = reactive<Record<number, string | undefined>>({})
 const userRowErrors = reactive<Record<number, string | undefined>>({})
+const busyUserIds = reactive(new Set<number>())
 
 watch(usersData, (users) => {
     if (!users) return
     for (const u of users) {
         displayedRoles[u.id] = u.role
-        delete userRowErrors[u.id]
+        // Row errors are cleared only by the action that owns that row, not here.
     }
 })
 
@@ -303,6 +315,7 @@ function cancelEditName(): void {
 }
 
 async function saveDisplayName(userId: number): Promise<void> {
+    busyUserIds.add(userId)
     editNameSaving.value = true
     delete userRowErrors[userId]
     try {
@@ -314,6 +327,7 @@ async function saveDisplayName(userId: number): Promise<void> {
         userRowErrors[userId] = e instanceof Error ? e.message : 'Failed to update display name'
     } finally {
         editNameSaving.value = false
+        busyUserIds.delete(userId)
     }
 }
 
@@ -321,32 +335,41 @@ async function onRoleChange(u: UserItem, newRole: string): Promise<void> {
     const oldRole = displayedRoles[u.id] ?? u.role
     displayedRoles[u.id] = newRole
     delete userRowErrors[u.id]
+    busyUserIds.add(u.id)
     try {
         await updateUser(u.id, { role: newRole as 'admin' | 'member' | 'demo' })
         await reloadUsers()
     } catch (e: unknown) {
         displayedRoles[u.id] = oldRole
         userRowErrors[u.id] = e instanceof Error ? e.message : 'Failed to update role'
+    } finally {
+        busyUserIds.delete(u.id)
     }
 }
 
 async function handleDisable(userId: number): Promise<void> {
     delete userRowErrors[userId]
+    busyUserIds.add(userId)
     try {
         await disableUser(userId)
         await reloadUsers()
     } catch (e: unknown) {
         userRowErrors[userId] = e instanceof Error ? e.message : 'Failed to disable user'
+    } finally {
+        busyUserIds.delete(userId)
     }
 }
 
 async function handleEnable(userId: number): Promise<void> {
     delete userRowErrors[userId]
+    busyUserIds.add(userId)
     try {
         await enableUser(userId)
         await reloadUsers()
     } catch (e: unknown) {
         userRowErrors[userId] = e instanceof Error ? e.message : 'Failed to enable user'
+    } finally {
+        busyUserIds.delete(userId)
     }
 }
 
@@ -361,6 +384,14 @@ const createdInvite = ref<InviteCreatedResponse | null>(null)
 const inviteUrlInputRef = ref<HTMLInputElement | null>(null)
 
 async function handleCreateInvite(): Promise<void> {
+    if (
+        !Number.isInteger(inviteTtlDays.value) ||
+        inviteTtlDays.value < 1 ||
+        inviteTtlDays.value > 30
+    ) {
+        createInviteError.value = 'Expiry must be between 1 and 30 days'
+        return
+    }
     creatingInvite.value = true
     createInviteError.value = null
     try {
@@ -404,10 +435,12 @@ const {
 } = useApiLoad(listInvites, 'Failed to load invites')
 
 const revokingInviteId = ref<number | null>(null)
+const revokeBusy = ref(false)
 const inviteRowErrors = reactive<Record<number, string | undefined>>({})
 
 async function executeRevoke(inviteId: number): Promise<void> {
     delete inviteRowErrors[inviteId]
+    revokeBusy.value = true
     try {
         await revokeInvite(inviteId)
         revokingInviteId.value = null
@@ -415,17 +448,9 @@ async function executeRevoke(inviteId: number): Promise<void> {
     } catch (e: unknown) {
         revokingInviteId.value = null
         inviteRowErrors[inviteId] = e instanceof Error ? e.message : 'Failed to revoke invite'
+    } finally {
+        revokeBusy.value = false
     }
-}
-
-// --- Utilities ---
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-    })
 }
 </script>
 
@@ -506,49 +531,13 @@ function formatDate(iso: string): string {
     border-color: var(--color-primary);
 }
 
-/* Action buttons */
+/* Action buttons — divergent: inline grouping needs per-item margin-right */
 .action-btn {
-    font-size: 0.8rem;
-    padding: 0.25rem 0.625rem;
-    border-radius: 4px;
-    border: 1px solid var(--color-border);
-    background: var(--color-card);
-    color: var(--color-foreground);
-    cursor: pointer;
-    transition: background 0.1s;
     margin-right: 0.25rem;
 }
 
 .action-btn:last-child {
     margin-right: 0;
-}
-
-.action-btn:hover:not(:disabled) {
-    background: var(--color-accent);
-}
-
-.action-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-.action-btn--ghost {
-    background: transparent;
-    border-color: transparent;
-}
-
-.action-btn--ghost:hover:not(:disabled) {
-    background: var(--color-accent);
-    border-color: var(--color-border);
-}
-
-.action-btn--destructive {
-    color: var(--color-destructive);
-    border-color: color-mix(in srgb, var(--color-destructive) 40%, transparent);
-}
-
-.action-btn--destructive:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
 }
 
 /* Error display */
@@ -583,55 +572,22 @@ function formatDate(iso: string): string {
     align-items: center;
 }
 
-.field-input {
-    height: 2.25rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-input);
-    background: transparent;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    outline: none;
-    transition: border-color 0.15s;
-}
-
-.field-input:focus {
-    border-color: var(--color-primary);
-}
-
-.field-input:disabled {
-    opacity: 0.6;
-}
-
+/* Divergent: tighter horizontal padding for the invite/role select */
 .field-select {
-    height: 2.25rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-input);
-    background: transparent;
     padding: 0 0.5rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    outline: none;
 }
 
-.field-select:focus {
-    border-color: var(--color-primary);
-}
-
-.field-select:disabled {
-    opacity: 0.6;
+/* Divergent: muted label style for inline TTL group */
+.field-label {
+    color: var(--color-muted-foreground);
+    font-weight: 400;
+    white-space: nowrap;
 }
 
 .ttl-group {
     display: flex;
     align-items: center;
     gap: 0.375rem;
-}
-
-.field-label {
-    font-size: 0.875rem;
-    color: var(--color-muted-foreground);
-    white-space: nowrap;
 }
 
 .ttl-input {
@@ -662,10 +618,6 @@ function formatDate(iso: string): string {
     font-family: monospace;
     font-size: 0.8125rem;
     min-width: 0;
-}
-
-.mt-3 {
-    margin-top: 0.75rem;
 }
 
 /* Revoke confirm */

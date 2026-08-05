@@ -30,9 +30,18 @@ export function useDateFormat() {
     }
 
     /**
+     * Directly update the date format — used after a successful preference save so that
+     * all open views reflect the new format immediately without a reload.
+     */
+    function setDateFormat(fmt: DateFormat): void {
+        dateFormat.value = fmt
+        _loaded = true
+    }
+
+    /**
      * Format a date string or Date object using the loaded preference.
      *
-     * iso    → YYYY-MM-DD
+     * iso    → YYYY-MM-DD (local calendar date, not UTC)
      * locale → browser locale default
      * short  → locale with 2-digit year (e.g. "1/5/25")
      */
@@ -47,10 +56,15 @@ export function useDateFormat() {
                     month: 'numeric',
                     day: 'numeric',
                 })
-            default: // 'iso'
-                return date.toISOString().slice(0, 10)
+            default: {
+                // 'iso'
+                const y = date.getFullYear()
+                const mo = String(date.getMonth() + 1).padStart(2, '0')
+                const dy = String(date.getDate()).padStart(2, '0')
+                return `${y}-${mo}-${dy}`
+            }
         }
     }
 
-    return { dateFormat, loadDateFormat, formatDate }
+    return { dateFormat, loadDateFormat, setDateFormat, formatDate }
 }
