@@ -98,9 +98,6 @@ def ca_response_from_raw(
     Pure — no DB access.  Calls ``compute_ca_analysis`` (numpy/statistics
     aggregation) then maps the ``CaAnalysisResult`` DTO to the MCP response
     schema.
-
-    Session sentinel scrub: ``device_id=0`` means no device was resolved; it
-    is never emitted in the response (mapped to null).
     """
     from snore.services.breath_service import compute_ca_analysis  # noqa: PLC0415
 
