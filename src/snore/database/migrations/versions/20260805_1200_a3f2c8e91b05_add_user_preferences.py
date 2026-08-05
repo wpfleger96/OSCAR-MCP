@@ -12,6 +12,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+import snore.database.types
+
 # revision identifiers, used by Alembic.
 revision: str = "a3f2c8e91b05"
 down_revision: str | Sequence[str] | None = "dab8ad625898"
@@ -21,7 +23,14 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.add_column("users", sa.Column("preferences", sa.Text(), nullable=True))
+    op.add_column(
+        "users",
+        sa.Column(
+            "preferences",
+            snore.database.types.ValidatedJSONWithDefault(),
+            nullable=True,
+        ),
+    )
 
 
 def downgrade() -> None:

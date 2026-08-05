@@ -15,6 +15,9 @@ Security controls
 -----------------
 - Password change requires the existing password when one is set; rejects
   ``current_password`` when no password is set (Google-only accounts).
+- Password change applies the same lockout tracking as the login endpoint:
+  repeated wrong ``current_password`` attempts are throttled per
+  (canonical_email, client_ip).
 - Password change bumps ``session_version`` and re-issues the caller's
   session cookie so the change takes effect immediately without logout.
 - Preference updates reject unknown fields (extra="forbid") to prevent
@@ -27,13 +30,16 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.api.client_ip import get_client_ip
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth, RequireWritable
+from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
+from snore.auth.lockout import get_lockout_store
 from snore.auth.passwords import (
     hash_password_async,
     validate_password_bytes,
@@ -46,7 +52,6 @@ router = APIRouter()
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
-_DISPLAY_NAME_MAX = 150
 _PASSWORD_MAX_CHARS = (
     4096  # conservative char cap; byte validator refines to 1024 bytes
 )
@@ -55,10 +60,6 @@ _PASSWORD_MAX_CHARS = (
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
-
-
-class MessageResponse(BaseModel):
-    message: str
 
 
 class MeResponse(BaseModel):
@@ -70,7 +71,9 @@ class MeResponse(BaseModel):
 
 
 class DisplayNameRequest(BaseModel):
-    display_name: Annotated[str, StringConstraints(max_length=_DISPLAY_NAME_MAX)] | None
+    display_name: (
+        Annotated[str, StringConstraints(max_length=DISPLAY_NAME_MAX_LEN)] | None
+    )
 
 
 class PasswordChangeRequest(BaseModel):
@@ -93,6 +96,19 @@ class UserPreferencesUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+async def _get_user_or_401(db: AsyncSession, user_id: int) -> models.User:
+    """Fetch the user row by PK; raise 401 if not found."""
+    user = await db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -103,9 +119,7 @@ async def get_me(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Return the authenticated user's account information."""
-    user = await db.get(models.User, actor.user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
+    user = await _get_user_or_401(db, actor.user_id)
 
     return JSONResponse(
         content=MeResponse(
@@ -126,9 +140,7 @@ async def update_display_name(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Update the authenticated user's display name."""
-    user = await db.get(models.User, actor.user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
+    user = await _get_user_or_401(db, actor.user_id)
 
     # Strip; empty-after-strip → None.
     name = body.display_name
@@ -144,6 +156,7 @@ async def update_display_name(
 
 @router.post("/password", response_model=MessageResponse)
 async def change_password(
+    request: Request,
     actor: RequireWritable,
     body: PasswordChangeRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -161,9 +174,15 @@ async def change_password(
             status_code=422, detail="Password must be 1–1024 bytes encoded"
         ) from None
 
-    user = await db.get(models.User, actor.user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
+    user = await _get_user_or_401(db, actor.user_id)
+
+    canonical = user.canonical_email
+    ip = get_client_ip(request)
+    lockout = get_lockout_store()
+
+    # Check lockout before any password verification.
+    if lockout.is_locked(canonical, ip):
+        raise HTTPException(status_code=401, detail="Authentication failed")
 
     if user.password_hash is not None:
         # Existing password — current_password required.
@@ -171,6 +190,7 @@ async def change_password(
             raise HTTPException(status_code=422, detail="Current password required")
         ok, _ = await verify_password_async(user.password_hash, body.current_password)
         if not ok:
+            lockout.record_failure(canonical, ip)
             raise HTTPException(status_code=401, detail="Authentication failed")
     else:
         # Google-only account — current_password must be absent/None.
@@ -179,6 +199,8 @@ async def change_password(
                 status_code=422,
                 detail="No current password is set on this account",
             )
+
+    lockout.record_success(canonical, ip)
 
     user.password_hash = await hash_password_async(body.new_password)
     user.session_version += 1
@@ -205,9 +227,7 @@ async def get_preferences(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Return the authenticated user's preferences, filling gaps with defaults."""
-    user = await db.get(models.User, actor.user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
+    user = await _get_user_or_401(db, actor.user_id)
 
     prefs = UserPreferences(**(user.preferences or {}))
     return JSONResponse(
@@ -223,9 +243,7 @@ async def update_preferences(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Merge supplied preferences into stored preferences; return the merged result."""
-    user = await db.get(models.User, actor.user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
+    user = await _get_user_or_401(db, actor.user_id)
 
     # Load current state (defaults fill gaps, unknown stored keys stripped).
     current = UserPreferences(**(user.preferences or {}))
@@ -233,9 +251,10 @@ async def update_preferences(
     # Apply only explicitly supplied (non-None) fields.
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     merged = current.model_copy(update=updates)
-    user.preferences = merged.model_dump()
+    dumped = merged.model_dump()
+    user.preferences = dumped
 
     return JSONResponse(
-        content=merged.model_dump(),
+        content=dumped,
         headers=_NO_STORE,
     )

@@ -33,6 +33,7 @@ from snore.api.app import create_app
 from snore.api.config import load_config, set_config
 from snore.api.deps import get_actor, get_db
 from snore.auth.actor import ActorContext, AuthMode, Role
+from snore.auth.lockout import get_lockout_store
 from snore.auth.passwords import hash_password, verify_password
 from snore.auth.session_cookie import encode_session
 from snore.database import models
@@ -446,6 +447,80 @@ class TestChangePassword:
         )
         assert resp.status_code == 403
 
+    def test_repeated_wrong_password_triggers_lockout(
+        self, async_db_session, db_session
+    ):
+        """Repeated wrong current_password attempts are recorded in the lockout store;
+        once locked, the endpoint returns 401 before checking the password."""
+        user, profile = _seed_user(
+            db_session, role="member", password="correct-password"
+        )
+        store = get_lockout_store()
+        canonical = user.canonical_email
+        # TestClient uses "testclient" as the client hostname; get_client_ip returns it.
+        tc_ip = "testclient"
+
+        try:
+            # Pre-seed the lockout store to simulate repeated failures.
+            for _ in range(15):
+                store.record_failure(canonical, tc_ip)
+
+            client = _make_client(async_db_session, user.id, profile.id, "member")
+            resp = client.post(
+                "/api/v1/auth/me/password",
+                json={"current_password": "wrong-pw", "new_password": "new-pw-123"},
+            )
+            assert resp.status_code == 401
+            assert "Authentication failed" in resp.json()["detail"]
+        finally:
+            # Always clear so this test does not pollute the shared store.
+            store.record_success(canonical, tc_ip)
+
+    def test_wrong_password_records_failure_in_lockout_store(
+        self, async_db_session, db_session
+    ):
+        """A single wrong current_password call records a failure — the (email, ip)
+        pair becomes locked immediately (BASE_LOCKOUT_SECONDS applies on first failure)."""
+        user, profile = _seed_user(db_session, role="member", password="correct-pw")
+        store = get_lockout_store()
+        canonical = user.canonical_email
+        tc_ip = "testclient"
+
+        try:
+            client = _make_client(async_db_session, user.id, profile.id, "member")
+            resp = client.post(
+                "/api/v1/auth/me/password",
+                json={"current_password": "wrong-pw", "new_password": "new-pw-123"},
+            )
+            assert resp.status_code == 401
+            # The handler must have called record_failure; one failure locks immediately.
+            assert store.is_locked(canonical, tc_ip)
+        finally:
+            store.record_success(canonical, tc_ip)
+
+    def test_successful_password_change_clears_lockout_state(
+        self, async_db_session, db_session
+    ):
+        """A successful password change calls record_success, leaving no active lockout entry."""
+        old_pw = "old-password-abc"
+        user, profile = _seed_user(db_session, role="member", password=old_pw)
+        store = get_lockout_store()
+        canonical = user.canonical_email
+        tc_ip = "testclient"
+
+        try:
+            client = _make_client(async_db_session, user.id, profile.id, "member")
+            resp = client.post(
+                "/api/v1/auth/me/password",
+                json={"current_password": old_pw, "new_password": "new-pw-xyz"},
+            )
+            assert resp.status_code == 200
+
+            # record_success must have been called — no active lockout entry.
+            assert not store.is_locked(canonical, tc_ip)
+        finally:
+            store.record_success(canonical, tc_ip)
+
 
 # ---------------------------------------------------------------------------
 # TestPreferences
@@ -520,3 +595,16 @@ class TestPreferences:
             json={"landing_page": "sessions"},
         )
         assert resp.status_code == 403
+
+    def test_patch_all_null_body_is_noop_returns_current(
+        self, async_db_session, db_session
+    ):
+        """Empty PATCH body returns 200 with the current (default) preferences unchanged."""
+        user, profile = _seed_user(db_session, role="member")
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.patch("/api/v1/auth/me/preferences", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {"landing_page": "dashboard", "date_format": "iso"}

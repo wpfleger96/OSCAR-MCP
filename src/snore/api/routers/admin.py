@@ -11,6 +11,8 @@ GET    /invites
 DELETE /invites/{invite_id}
 
 All routes require admin role.  Registered at prefix /api/v1/admin by app.py.
+This prefix is intentionally outside the /api/v1/auth rate-limit scope;
+admin session authentication and CSRF are the relevant controls here.
 
 Security controls
 -----------------
@@ -24,7 +26,6 @@ Security controls
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 
 from datetime import UTC, datetime, timedelta
@@ -33,11 +34,13 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db
 from snore.api.guards import RequireAdmin
+from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
+from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
 
 router = APIRouter()
@@ -48,10 +51,6 @@ _NO_STORE = {"Cache-Control": "no-store"}
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
-
-
-class MessageResponse(BaseModel):
-    message: str
 
 
 class UserItem(BaseModel):
@@ -67,15 +66,20 @@ class PatchUserRequest(BaseModel):
     """Partial update for a user record.
 
     At least one field must be provided.  display_name accepts None to clear
-    the stored value.  role must be one of the allowed literals when provided.
+    the stored value.  role must be one of the allowed literals when provided;
+    supplying role=null alone is treated the same as an empty body (422).
     """
 
-    display_name: Annotated[str | None, StringConstraints(max_length=150)] = None
+    display_name: Annotated[
+        str | None, StringConstraints(max_length=DISPLAY_NAME_MAX_LEN)
+    ] = None
     role: Literal["admin", "member", "demo"] | None = None
 
     @model_validator(mode="after")
     def at_least_one(self) -> PatchUserRequest:
-        if not self.model_fields_set:
+        has_display_name = "display_name" in self.model_fields_set
+        has_role = "role" in self.model_fields_set and self.role is not None
+        if not has_display_name and not has_role:
             raise ValueError("At least one of display_name or role must be provided")
         return self
 
@@ -84,6 +88,13 @@ class CreateInviteRequest(BaseModel):
     email: Annotated[str, StringConstraints(max_length=254)]
     role: Literal["admin", "member"] = "member"
     ttl_days: int = Field(default=7, ge=1, le=30)
+
+    @model_validator(mode="after")
+    def validate_email(self) -> CreateInviteRequest:
+        normalized = self.email.strip().lower()
+        if not normalized or "@" not in normalized:
+            raise ValueError("Invalid email address")
+        return self
 
 
 class InviteCreatedResponse(BaseModel):
@@ -151,31 +162,42 @@ async def patch_user(
     if "role" in body.model_fields_set and body.role is not None:
         new_role = body.role
         if new_role != user.role:
-            # Last-admin guard: block demoting the sole active admin.
+            # Last-admin guard (pre-check): fast path for the common case.
             if (
                 user.role == "admin"
                 and user.disabled_at is None
                 and new_role != "admin"
             ):
-                other_active_admins = (
-                    (
-                        await db.execute(
-                            select(models.User).where(
-                                models.User.role == "admin",
-                                models.User.disabled_at.is_(None),
-                                models.User.id != user_id,
-                            )
+                other_admin_count = (
+                    await db.execute(
+                        select(func.count()).where(
+                            models.User.role == "admin",
+                            models.User.disabled_at.is_(None),
+                            models.User.id != user_id,
                         )
                     )
-                    .scalars()
-                    .all()
-                )
-                if not other_active_admins:
+                ).scalar()
+                if other_admin_count == 0:
                     raise HTTPException(
                         status_code=409, detail="Cannot demote the last admin"
                     )
             user.role = new_role
             bump_version = True
+
+            # Post-write check: guards against TOCTOU race where a concurrent
+            # demotion completes between our pre-check and this write.
+            admin_count_after = (
+                await db.execute(
+                    select(func.count()).where(
+                        models.User.role == "admin",
+                        models.User.disabled_at.is_(None),
+                    )
+                )
+            ).scalar()
+            if admin_count_after == 0:
+                raise HTTPException(
+                    status_code=409, detail="Cannot demote the last admin"
+                )
 
     if "display_name" in body.model_fields_set:
         dn = body.display_name
@@ -222,7 +244,9 @@ async def enable_user(
 ) -> MessageResponse:
     """Re-enable a previously disabled user account.
 
-    Idempotent when the user is already active.
+    Idempotent when the user is already active.  Note: enabling does not
+    restore old sessions — disable bumped session_version, so the user
+    must log in again to obtain a fresh cookie.
     """
     user = await db.get(models.User, user_id)
     if user is None:
@@ -259,7 +283,7 @@ async def create_invite(
 
     canonical = body.email.strip().lower()
     raw = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(raw.encode()).hexdigest()
+    token_hash = hash_invite_token(raw)
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=body.ttl_days)
 
