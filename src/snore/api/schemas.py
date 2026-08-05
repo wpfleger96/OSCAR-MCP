@@ -123,3 +123,17 @@ class ValidationRequest(BaseModel):
     from_date: date
     to_date: date
     mode: AnalysisMode = "aasm"
+
+
+class AnalysisJobStatus(BaseModel):
+    job_id: str
+    state: str
+    source: str
+    session_count: int
+    progress_completed: int
+    progress_total: int
+    error_message: str | None
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
+    owner_user_id: int | None

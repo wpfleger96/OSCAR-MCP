@@ -2,7 +2,7 @@ import type { ImportResult } from '@/types'
 
 export interface ImportProgressCallbacks {
     onProgress: (data: { message: string }) => void
-    onComplete: (data: { result: ImportResult }) => void
+    onComplete: (data: { result: ImportResult; analysis_job_id?: string }) => void
     onError: (data: { message: string }) => void
 }
 

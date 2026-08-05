@@ -112,6 +112,9 @@ export type BatchAnalysisRequest = Schemas['BatchAnalysisRequest']
 export type BatchAnalysisResult = Schemas['BatchAnalysisResult']
 export type BatchSessionResult = Schemas['BatchSessionResult']
 
+// Analysis jobs (background queue — not in OpenAPI spec)
+export type { AnalysisJobInfo } from '@/api/analysis'
+
 // Waveform compare
 export type EventComparisonResult = Schemas['EventComparisonResult']
 export type EventComparisonDetail = Schemas['EventComparisonDetail']

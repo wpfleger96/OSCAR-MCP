@@ -1,9 +1,10 @@
 from datetime import datetime, time
-from typing import Annotated, cast
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from snore.analysis.types import AnalysisResult
+from snore.api import analysis_jobs as _analysis_jobs_store
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
 from snore.api.guards import RequireWritable
@@ -17,7 +18,6 @@ from snore.services import AnalysisFacade
 from snore.services.schemas import (
     AnalysisDeletePreview,
     AnalysisListItem,
-    BatchAnalysisResult,
 )
 
 router = APIRouter()
@@ -111,26 +111,56 @@ async def get_analysis_delete_preview(
     return await facade.get_delete_preview(session_ids, all_versions=all_versions)
 
 
-@router.post("/analysis/batch", status_code=201, response_model=BatchAnalysisResult)
+@router.post("/analysis/batch", status_code=202)
 async def run_batch_analysis(
     body: BatchAnalysisRequest,
     facade: AnalysisFacadeDep,
+    request: Request,
     _actor: RequireWritable,
-) -> BatchAnalysisResult:
+) -> dict[str, object]:
     if body.from_date is None and body.to_date is None:
         raise HTTPException(
             status_code=400,
             detail="At least one of from_date or to_date is required",
         )
-    try:
-        return await facade.run_batch_analysis(
-            from_date=datetime.combine(body.from_date, time.min)
-            if body.from_date
-            else None,
-            to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
-            modes=cast(list[str], body.modes),
-            primary_mode=body.primary_mode,
-            store_results=body.store_results,
+
+    from_dt = datetime.combine(body.from_date, time.min) if body.from_date else None
+    to_dt = datetime.combine(body.to_date, time.max) if body.to_date else None
+
+    session_infos = await facade.list_sessions_with_status(
+        start=from_dt, end=to_dt, limit=10000, offset=0, sort_by="date-asc"
+    )
+    session_ids = [s.session_id for s in session_infos]
+
+    if not session_ids:
+        raise HTTPException(
+            status_code=422, detail="No sessions found for the specified date range"
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    owner_user_id = getattr(getattr(request, "state", None), "user_id", None)
+    aj = _analysis_jobs_store.enqueue(
+        profile_id=facade.profile_id,
+        session_ids=session_ids,
+        source="batch",
+        owner_user_id=owner_user_id,
+    )
+    if aj is None:
+        raise HTTPException(
+            status_code=429, detail="Analysis queue is full; try again later"
+        )
+
+    return {"job_id": aj.job_id, "session_count": len(session_ids)}
+
+
+@router.get("/analysis/jobs")
+async def list_analysis_jobs(request: Request) -> dict[str, object]:
+    owner_user_id = getattr(getattr(request, "state", None), "user_id", None)
+    jobs = _analysis_jobs_store.list_jobs(owner_user_id=owner_user_id)
+    return {"jobs": [j.to_dict() for j in jobs]}
+
+
+@router.delete("/analysis/jobs/{job_id}", status_code=204)
+async def cancel_analysis_job(job_id: str, _actor: RequireWritable) -> None:
+    found = _analysis_jobs_store.cancel_job(job_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Job not found")

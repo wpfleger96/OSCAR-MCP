@@ -6,6 +6,14 @@
             <StatCard label="Failed" :value="result.total_failed" />
         </div>
 
+        <div v-if="analysisJobId" class="analysis-queued-note">
+            <Brain class="h-4 w-4" />
+            <span
+                >Analysis running in background —
+                <RouterLink to="/analysis">view progress</RouterLink></span
+            >
+        </div>
+
         <div v-if="result.warnings && result.warnings.length > 0" class="warnings-box">
             <div class="warnings-header">
                 <AlertTriangle class="h-4 w-4" />
@@ -54,9 +62,9 @@ import { useRouter } from 'vue-router'
 import type { ImportResult } from '@/types'
 import { Button } from '@/components/ui/button'
 import StatCard from '@/components/StatCard.vue'
-import { Check, AlertTriangle } from '@lucide/vue'
+import { Check, AlertTriangle, Brain } from '@lucide/vue'
 
-defineProps<{ result: ImportResult }>()
+defineProps<{ result: ImportResult; analysisJobId?: string | null }>()
 const emit = defineEmits<{ reset: [] }>()
 
 const router = useRouter()
@@ -182,5 +190,22 @@ const router = useRouter()
     gap: 0.75rem;
     justify-content: flex-end;
     padding-top: 0.5rem;
+}
+
+.analysis-queued-note {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--color-muted-foreground);
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-accent);
+}
+
+.analysis-queued-note a {
+    color: var(--color-primary);
+    text-decoration: underline;
 }
 </style>

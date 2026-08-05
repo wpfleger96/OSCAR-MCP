@@ -87,21 +87,21 @@ class TestBatchAnalysis:
         )
 
     def test_from_date_only_accepted(self, api_client):
+        # from_date alone must not cause a 400; 202 (queued) or 422 (no sessions)
+        # are both valid outcomes depending on database state.
         response = api_client.post(
             "/api/v1/analysis/batch", json={"from_date": "2025-01-01"}
         )
-        assert response.status_code == 201
+        assert response.status_code in (202, 422)
 
-    def test_empty_range_returns_total_zero(self, api_client):
+    def test_empty_range_returns_422(self, api_client):
+        # A date range with no sessions now returns 422 instead of an empty result.
         response = api_client.post(
             "/api/v1/analysis/batch",
             json={"from_date": "2099-01-01", "to_date": "2099-01-31"},
         )
-        assert response.status_code == 201
-        data = response.json()
-        assert data["total"] == 0
-        assert data["successful"] == 0
-        assert data["failed"] == 0
+        assert response.status_code == 422
+        assert "No sessions found" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

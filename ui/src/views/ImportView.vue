@@ -105,6 +105,7 @@
             <ImportResultsPanel
                 v-else-if="uploadPhase === 'done' && importResult"
                 :result="importResult"
+                :analysis-job-id="analysisJobId"
                 @reset="resetUpload"
             />
         </div>
@@ -198,6 +199,7 @@
                 <ImportResultsPanel
                     v-else-if="pathPhase === 'done' && pathImportResult"
                     :result="pathImportResult"
+                    :analysis-job-id="pathAnalysisJobId"
                     @reset="resetPath"
                 />
             </div>
@@ -243,6 +245,7 @@ const uploadLoaded = ref(0)
 const uploadTotal = ref(0)
 const importError = ref<string | null>(null)
 const importResult = ref<ImportResult | null>(null)
+const analysisJobId = ref<string | null>(null)
 const processingMessage = ref('Processing files...')
 const isDragging = ref(false)
 const dropError = ref<string | null>(null)
@@ -367,6 +370,7 @@ async function handleImport() {
             },
             onComplete: (data) => {
                 importResult.value = data.result as ImportResult
+                analysisJobId.value = data.analysis_job_id ?? null
                 uploadPhase.value = 'done'
             },
             onError: (data) => {
@@ -390,6 +394,7 @@ function resetUpload() {
     uploadTotal.value = 0
     importError.value = null
     importResult.value = null
+    analysisJobId.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
@@ -407,6 +412,7 @@ const noSourcesDetected = ref(false)
 const detectError = ref<string | null>(null)
 const pathImportError = ref<string | null>(null)
 const pathImportResult = ref<ImportResult | null>(null)
+const pathAnalysisJobId = ref<string | null>(null)
 
 function toggleSource(i: number) {
     const next = new Set(selectedSources.value)
@@ -456,6 +462,7 @@ async function handlePathImport() {
             },
             onComplete: (data) => {
                 pathImportResult.value = data.result as ImportResult
+                pathAnalysisJobId.value = data.analysis_job_id ?? null
                 pathPhase.value = 'done'
             },
             onError: (data) => {
@@ -478,6 +485,7 @@ function resetPath() {
     detectError.value = null
     pathImportError.value = null
     pathImportResult.value = null
+    pathAnalysisJobId.value = null
 }
 </script>
 
