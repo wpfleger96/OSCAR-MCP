@@ -36,6 +36,11 @@ def upgrade() -> None:
         sa.Column("default_profile_id", sa.Integer(), nullable=True),
         sa.Column("created_at", snore.database.types.UTCDateTime(), nullable=False),
         sa.Column("updated_at", snore.database.types.UTCDateTime(), nullable=False),
+        sa.Column(
+            "preferences",
+            snore.database.types.ValidatedJSONWithDefault(),
+            nullable=True,
+        ),
         sa.CheckConstraint("role IN ('admin','member','demo')", name="chk_user_role"),
         sa.CheckConstraint("length(canonical_email) > 0", name="chk_user_email"),
         sa.ForeignKeyConstraint(
