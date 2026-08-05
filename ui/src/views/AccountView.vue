@@ -128,7 +128,7 @@
                         >
                             <option value="dashboard">Dashboard</option>
                             <option value="sessions">Sessions</option>
-                            <option value="days">Days</option>
+                            <option value="stats">Statistics</option>
                         </select>
                     </div>
 

@@ -15,12 +15,10 @@ declare module 'vue-router' {
 }
 
 // landing_page value → route path.
-// NOTE: UserPreferences includes 'days' but no /days list route exists in this
-// router (only /days/:date for day-detail). Substituted with '/sessions'.
 const LANDING_PAGE_MAP: Record<UserPreferences['landing_page'], string> = {
     dashboard: '/dashboard',
     sessions: '/sessions',
-    days: '/sessions',
+    stats: '/stats',
 }
 
 function sessionIdProp(route: { params: { id: string | string[] } }) {
