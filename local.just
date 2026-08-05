@@ -20,3 +20,17 @@ _dev-auth-seed:
     @echo "--- Dev-auth invite ---"
     SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
     uv run snore user invite dev@localhost --role admin
+
+# Full-stack multiuser smoke test: build the UI, start from a fresh throwaway DB,
+# seed an admin invite, and serve everything at http://127.0.0.1:8000.
+# Open the printed invite URL to walk the signup → login → import journey.
+smoke db="/tmp/snore-smoke.db": web-install web-build
+    rm -f {{db}} {{db}}-wal {{db}}-shm
+    @echo "--- Smoke invite (fresh DB at {{db}}) ---"
+    SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
+    uv run snore user invite dev@localhost --role admin --db {{db}}
+    SNORE_AUTH_MODE=multiuser \
+    SNORE_SESSION_SECRET=dev-throwaway-secret-not-for-production-1234567890ab \
+    SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
+    SNORE_BIND_HOST=127.0.0.1 \
+    uv run snore serve --host 127.0.0.1 --port 8000 --db {{db}}

@@ -1008,9 +1008,11 @@ class TestRouteHTTPBoundary:
         real database.  The stub actor's user_id matches the owner_user_id used by
         ``_upload_and_get_job`` when seeding jobs.
         """
+        from unittest.mock import AsyncMock  # noqa: PLC0415
+
         from fastapi import FastAPI  # noqa: PLC0415
 
-        from snore.api.deps import get_actor  # noqa: PLC0415
+        from snore.api.deps import get_actor, get_db  # noqa: PLC0415
         from snore.api.routers import import_data  # noqa: PLC0415
         from snore.auth.actor import ActorContext, AuthMode, Role  # noqa: PLC0415
 
@@ -1021,8 +1023,14 @@ class TestRouteHTTPBoundary:
         async def _override_get_actor() -> ActorContext:
             return _test_actor
 
+        async def _override_get_db():
+            # Minimal DB stub — profile-ownership validation never runs in these
+            # tests because no profile_id is passed in requests.
+            yield AsyncMock()
+
         app = FastAPI()
         app.dependency_overrides[get_actor] = _override_get_actor
+        app.dependency_overrides[get_db] = _override_get_db
         app.include_router(import_data.router, prefix="/api/v1/import")
         return app
 
