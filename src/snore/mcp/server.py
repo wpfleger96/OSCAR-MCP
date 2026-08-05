@@ -34,10 +34,14 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from functools import wraps
 from importlib.metadata import version
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from snore.services.breath_service import RawWaveformWindow
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.utilities.types import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.session import (
@@ -115,12 +119,14 @@ WORKFLOW:
 3. get_settings_timeline → understand settings epochs
 4. get_events (date) → event-level detail for a night
 5. get_breath_table, find_windows, compare_epochs for breath morphology tuning
-6. (Phase 3) render_window, get_waveform for visual inspection
+6. get_ca_analysis → central-apnea context and periodic-breathing stats
+7. render_window → PNG chart for visual inspection (≤15 min window)
+8. get_waveform → raw per-sample arrays for deep inspection (≤2 min window)
 
 DATA TIERS (progressive disclosure):
   Tier 1 (primary):  computed metrics — indices, percentiles, aggregates
-  Tier 2 (secondary): PNG charts — render_window (Phase 3)
-  Tier 3 (escape hatch): raw arrays — get_waveform ≤2 min / ≤1000 pts (Phase 3)
+  Tier 2 (secondary): PNG charts — render_window (≤15 min window)
+  Tier 3 (escape hatch): raw arrays — get_waveform ≤2 min / ≤1000 pts
 
 NULL FIELDS: When data is absent, fields are null + a companion *_reason field
 explains why (e.g. rera_index_reason: "analysis_not_run"). Never infer from null.
@@ -280,6 +286,44 @@ def _check_response_size(result: Any, tool_name: str) -> None:
         )
 
 
+async def _fetch_waveform_for_tool(
+    ctx: Context,
+    date: str,
+    offset_start: float,
+    offset_end: float,
+    device_id: int | None,
+    session_id: int | None,
+    channels: list[str] | None,
+    max_points: int | None,
+    window_cap_seconds: float,
+) -> RawWaveformWindow:
+    """Parse date, extract runtime, fetch raw waveform within a scoped DB session.
+
+    Shared by ``get_waveform`` and ``render_window``; the only difference between
+    the two callers is ``window_cap_seconds`` (120 s vs. 900 s).  Post-processing
+    (JSON serialisation or PNG render) runs in each wrapper after this returns,
+    outside the DB transaction.
+    """
+    from snore.mcp.tools.waveform import fetch_waveform_raw  # noqa: PLC0415
+
+    runtime = _runtime(ctx)
+    therapy_date = parse_date(date, "date")
+
+    async with runtime.scope_provider() as db:
+        return await fetch_waveform_raw(
+            db,
+            therapy_date,
+            profile_id=runtime.profile_id,
+            offset_start=offset_start,
+            offset_end=offset_end,
+            device_id=device_id,
+            session_id=session_id,
+            channels=channels,
+            max_points=max_points,
+            window_cap_seconds=window_cap_seconds,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
@@ -296,7 +340,8 @@ def _register_resources(mcp: FastMCP) -> None:
         nightly_summary, event_context, event_row, events_response, capability_entry,
         breath_table_query, breath_table_row, breath_table_bin, breath_table_response,
         window_row, session_coverage_entry, find_windows_response, epoch_spec,
-        epoch_distribution, epoch_stats, epoch_rx_violation, compare_epochs_response.
+        epoch_distribution, epoch_stats, epoch_rx_violation, compare_epochs_response,
+        waveform_channel, waveform_window, ca_detail, ca_analysis.
         """
         model = SCHEMA_MODEL_MAP.get(schema_type)
         if model is None:
@@ -674,7 +719,7 @@ def _register_tools(mcp: FastMCP) -> None:
         """Find the N worst breath windows matching a flow-limitation criterion for a night.
 
         Use this tool to locate specific regions in a therapy session worth reviewing in
-        detail (e.g. in ``get_breath_table`` or Phase-3 ``render_window``).  Each window
+        detail (e.g. in ``get_breath_table`` or ``render_window``).  Each window
         is a contiguous breath sequence ranked by severity; windows with >50% overlap
         (relative to the shorter) are deduped, keeping the worst.  Results are ordered
         worst-first.
@@ -834,4 +879,264 @@ def _register_tools(mcp: FastMCP) -> None:
 
         payload: dict[str, Any] = result.model_dump(mode="json")
         _check_response_size(payload, "compare_epochs")
+        return payload
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_waveform(
+        ctx: Context,
+        date: str,
+        offset_start: float,
+        offset_end: float,
+        device_id: int | None = None,
+        session_id: int | None = None,
+        channels: list[str] | None = None,
+        max_points: int | None = None,
+    ) -> dict[str, Any]:
+        """Raw per-sample waveform arrays for a single therapy-night window (≤2 min).
+
+        Use this tool for deep numerical inspection of a specific waveform window
+        when ``render_window`` or ``get_breath_table`` is insufficient.  Window cap
+        is 120 s — requesting a wider window is an error.
+
+        Channel vocabulary (12 channels):
+            ``flow``             — inspiratory/expiratory flow (L/min)
+            ``pressure``         — delivered mask pressure (cmH2O)
+            ``therapy_pressure`` — therapy-algorithm target pressure (cmH2O)
+            ``epap``             — expiratory positive airway pressure (cmH2O)
+            ``leak``             — estimated unintentional leak (L/min)
+            ``mv``               — minute ventilation derived from flow (L/min)
+            ``rr``               — respiratory rate (breaths/min)
+            ``tv``               — tidal volume derived from flow (mL)
+            ``spo2``             — pulse-oximetry oxygen saturation (%)
+            ``pulse``            — pulse rate (bpm)
+            ``fl``               — flow-limitation index (dimensionless)
+            ``snore``            — snore-intensity signal (arbitrary units)
+
+        Default channels when ``channels`` is empty or omitted: flow, pressure, leak.
+
+        ``max_points`` (1–1000): when set, applies LTTB downsampling per channel so
+        the visual shape is preserved while reducing data volume.  Omit for raw
+        unmodified samples.  Many-channel raw requests often exceed the 500,000-byte
+        response limit — use ``max_points`` or fewer channels if that happens.
+        Windows whose slice has fewer than 3 samples are returned raw even if
+        ``max_points`` is smaller (LTTB needs ≥3 points); ``is_downsampled`` stays false.
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            offset_start: Window start in seconds from session start (≥ 0).
+            offset_end: Window end in seconds from session start (> offset_start).
+                        Must be within 120 s of offset_start (enforced).
+            device_id: Filter to a specific device.  Required when multiple devices
+                       have data for the same date.
+            session_id: Filter to a specific session.  Required when the device had
+                        multiple sessions on the date.
+            channels: Waveform channels to return.  Defaults to [flow, pressure, leak].
+            max_points: LTTB target sample count per channel (1–1000).
+
+        Returns:
+            WaveformWindowResponse.  ``session_id`` and ``session_start_wall_clock``
+            (tier-2 offset-free ISO 8601, ``timezone_status: "unknown"``) are null
+            when the date has no session.  Each channel carries ``offset_seconds``
+            arrays (tier-3 positions from session start) and ``values``.
+            ``missing_channels`` lists channels the device did not record;
+            ``missing_channel_reason: "channel_absent"`` is set when any are absent.
+
+        Refusal semantics (successful responses):
+            When ``device_id`` is provided (owned device) and the date has no sessions,
+            the tool returns SUCCESS with ``session_id: null``,
+            ``session_start_wall_clock: null``, empty ``channels``, and requested
+            channels in ``missing_channels`` — not an error.
+
+        Error conditions:
+            - Window width > 120 s → tool error.
+            - No ``device_id`` provided and no sessions found for date → tool error
+              ("No sessions found in range <start> to <end>").
+            - Multiple devices on date and no ``device_id`` → tool error listing IDs.
+            - Multiple sessions on date and no ``session_id`` → tool error listing IDs.
+            - Response exceeds 500,000-byte limit → tool error; use ``max_points``
+              or request fewer channels.
+        """
+        # Keep in sync with render_window's docstring — pinned by test_channel_vocab_in_sync.
+        from snore.mcp.tools.waveform import waveform_response_from_raw  # noqa: PLC0415
+
+        raw = await _fetch_waveform_for_tool(
+            ctx,
+            date,
+            offset_start=offset_start,
+            offset_end=offset_end,
+            device_id=device_id,
+            session_id=session_id,
+            channels=channels,
+            max_points=max_points,
+            window_cap_seconds=120.0,
+        )
+
+        # Deserialize and LTTB run outside the open DB transaction.
+        payload = waveform_response_from_raw(raw).model_dump(mode="json")
+        _check_response_size(payload, "get_waveform")
+        return payload
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def render_window(
+        ctx: Context,
+        date: str,
+        offset_start: float,
+        offset_end: float,
+        device_id: int | None = None,
+        session_id: int | None = None,
+        channels: list[str] | None = None,
+        max_points: int | None = None,
+    ) -> Image:
+        """PNG waveform chart for visual inspection of a therapy-night window (≤15 min).
+
+        Returns a stacked-subplot PNG image — one panel per channel — suitable for
+        visual inspection of breathing patterns, flow limitation, leak, and SpO2.
+        Window cap is 900 s (15 min) — requesting a wider window is an error.
+
+        Channel vocabulary (12 channels):
+            ``flow``             — inspiratory/expiratory flow (L/min)
+            ``pressure``         — delivered mask pressure (cmH2O)
+            ``therapy_pressure`` — therapy-algorithm target pressure (cmH2O)
+            ``epap``             — expiratory positive airway pressure (cmH2O)
+            ``leak``             — estimated unintentional leak (L/min)
+            ``mv``               — minute ventilation derived from flow (L/min)
+            ``rr``               — respiratory rate (breaths/min)
+            ``tv``               — tidal volume derived from flow (mL)
+            ``spo2``             — pulse-oximetry oxygen saturation (%)
+            ``pulse``            — pulse rate (bpm)
+            ``fl``               — flow-limitation index (dimensionless)
+            ``snore``            — snore-intensity signal (arbitrary units)
+
+        Default channels when ``channels`` is empty or omitted: flow, pressure, leak.
+
+        ``max_points`` (1–1000): thins dense windows before plotting, preserving visual
+        shape while speeding rendering.  Omit for raw unmodified samples.
+
+        Missing channels (not recorded by the device) are noted in the image title
+        rather than causing an error.
+
+        A date with no sessions returns a valid single-panel PNG with a "No waveform
+        data" label rather than a tool error.
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            offset_start: Window start in seconds from session start (≥ 0).
+            offset_end: Window end in seconds from session start (> offset_start).
+                        Must be within 900 s of offset_start (enforced).
+            device_id: Filter to a specific device.  Required when multiple devices
+                       have data for the same date.
+            session_id: Filter to a specific session.  Required when the device had
+                        multiple sessions on the date.
+            channels: Waveform channels to plot.  Defaults to [flow, pressure, leak].
+            max_points: LTTB target sample count per channel before plotting (1–1000).
+
+        Returns:
+            PNG image (not JSON) — one stacked subplot per channel.
+
+        Error conditions:
+            - Window width > 900 s → tool error mentioning 900.
+            - Multiple devices on date and no ``device_id`` → tool error listing IDs.
+            - Multiple sessions on date and no ``session_id`` → tool error listing IDs.
+        """
+        from snore.mcp.tools.waveform import render_png_from_raw  # noqa: PLC0415
+
+        raw = await _fetch_waveform_for_tool(
+            ctx,
+            date,
+            offset_start=offset_start,
+            offset_end=offset_end,
+            device_id=device_id,
+            session_id=session_id,
+            channels=channels,
+            max_points=max_points,
+            window_cap_seconds=900.0,
+        )
+
+        # Render PNG outside the open DB transaction.
+        png = render_png_from_raw(raw)
+        # No _check_response_size: binary content, bounded by figure size.
+        return Image(data=png, format="png")
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_ca_analysis(
+        ctx: Context,
+        date: str,
+        device_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Central-apnea (clear-airway) context for a single therapy date.
+
+        Returns per-CA-event metrics and night-level periodic-breathing statistics.
+        CA events are sourced from device-reported event records (import-time Event
+        rows) and are returned regardless of day analysis status — ``day_status``
+        values of ``not_run``, ``partial``, and ``mixed_version`` all yield a
+        successful response with events present.  Only the derived night-level fields
+        (``periodic_breathing_pct``, ``mv_rolling_variance``) are null+reason when
+        coverage is insufficient.
+
+        Per-CA-event metrics (each nullable with a companion ``*_reason`` field):
+            ``preceding_mv_slope_lpm_per_min`` — minute-ventilation slope (L/min per
+                minute) computed over the 120 s preceding the event.
+            ``ps_delivered_cmh2o`` — pressure support delivered during the event
+                (cmH2O).
+            ``stability_index`` — coefficient of variation of MV in the 60 s before
+                the event.
+
+        Night-level fields:
+            ``periodic_breathing_pct`` — fraction of the night exhibiting periodic
+                breathing, null+``pb_reason`` when not computable.
+            ``mv_rolling_variance`` — rolling variance of minute ventilation across
+                the night, null+``mv_variance_reason`` when not computable.
+
+        ``algorithm_identity`` is null with ``null_reason: "algo_version_mismatch"``
+        on mixed-version days (sessions analysed with incompatible algorithm versions).
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            device_id: Filter to a specific device.  Required when multiple owned
+                       devices have data for the date; ambiguity error lists owned
+                       device IDs.
+
+        Returns:
+            CaAnalysisResponse with ``query_date``, ``device_id``, ``day_status``,
+            ``session_coverage``, ``algorithm_identity``, ``ca_events`` list,
+            night-level fields, and ``device_capabilities`` (including
+            ``has_flow_waveform``/``has_pressure_waveform``, so null waveform-derived
+            metrics can be distinguished from never-recorded channels).
+
+        Refusal semantics (successful responses):
+            Night-level fields (``periodic_breathing_pct``, ``mv_rolling_variance``)
+            are null+reason when ``day_status`` is ``not_run``, ``partial``, or
+            ``mixed_version``.  CA events are still present in all these cases.
+            ``algorithm_identity`` is null+``null_reason: "algo_version_mismatch"``
+            on mixed-version days.
+            When ``device_id`` is provided and the date has no sessions,
+            the tool returns ``day_status: "not_run"``, ``ca_events: []``, and
+            night-level nulls with reasons (SUCCESS) — not a tool error.
+
+        Error conditions:
+            - No ``device_id`` provided and no sessions found for date → tool error
+              ("No sessions found in range <start> to <end>").
+            - Multiple devices on date and no ``device_id`` → tool error listing
+              owned device IDs.
+        """
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            get_ca_analysis as _impl,
+        )
+
+        runtime = _runtime(ctx)
+        therapy_date = parse_date(date, "date")
+
+        async with runtime.scope_provider() as db:
+            result = await _impl(
+                db,
+                therapy_date,
+                profile_id=runtime.profile_id,
+                device_id=device_id,
+            )
+
+        payload: dict[str, Any] = result.model_dump(mode="json")
+        _check_response_size(payload, "get_ca_analysis")
         return payload

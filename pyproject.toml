@@ -29,6 +29,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "authlib>=1.4.0",
     "fastmcp>=3,<4",
+    "matplotlib>=3.11",
 ]
 
 [project.optional-dependencies]
@@ -78,7 +79,7 @@ explicit_package_bases = true
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["numpy.*", "scipy.*", "mne.*", "pyedflib.*", "plotext.*", "ureg.*"]
+module = ["numpy.*", "scipy.*", "mne.*", "pyedflib.*", "plotext.*", "ureg.*", "matplotlib.*"]
 ignore_missing_imports = true  # Only for external libs without stubs
 
 [[tool.mypy.overrides]]
