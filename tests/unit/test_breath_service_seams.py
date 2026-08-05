@@ -354,6 +354,48 @@ class TestGetBreathTable:
 
 
 # ---------------------------------------------------------------------------
+# BreathQueryRange validation — non-finite offsets (DoS guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestBreathQueryRangeValidation:
+    def test_infinite_offset_end_with_bin_minutes_is_rejected(self):
+        """offset_end=inf with bin_minutes set is rejected before service call.
+
+        Without this guard the binned loop (while bin_start < offset_end) becomes
+        infinite once float addition saturates.
+        """
+        with pytest.raises(ValueError, match="finite"):
+            BreathQueryRange(
+                therapy_date=date(2025, 1, 1),
+                offset_start=0.0,
+                offset_end=float("inf"),
+                bin_minutes=5.0,
+            )
+
+    def test_infinite_offset_start_is_rejected(self):
+        """offset_start=inf is rejected by validate_window."""
+        with pytest.raises(ValueError, match="finite"):
+            BreathQueryRange(
+                therapy_date=date(2025, 1, 1),
+                offset_start=float("inf"),
+                offset_end=float("inf"),
+                bin_minutes=5.0,
+            )
+
+    def test_nan_offset_end_is_rejected(self):
+        """NaN offset_end is rejected (caught by field gt=0 constraint before validate_window)."""
+        with pytest.raises(ValueError):
+            BreathQueryRange(
+                therapy_date=date(2025, 1, 1),
+                offset_start=0.0,
+                offset_end=float("nan"),
+                bin_minutes=5.0,
+            )
+
+
+# ---------------------------------------------------------------------------
 # find_windows
 # ---------------------------------------------------------------------------
 

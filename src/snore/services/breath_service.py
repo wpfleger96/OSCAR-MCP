@@ -9,6 +9,8 @@ src/snore/services/breath_service.py").
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from enum import StrEnum
@@ -194,6 +196,8 @@ class BreathQueryRange(BaseModel):
 
     @model_validator(mode="after")
     def validate_window(self) -> BreathQueryRange:
+        if not (math.isfinite(self.offset_start) and math.isfinite(self.offset_end)):
+            raise ValueError("offset_start and offset_end must be finite")
         if self.offset_end <= self.offset_start:
             raise ValueError("offset_end must be > offset_start")
         window_minutes = (self.offset_end - self.offset_start) / 60
@@ -300,6 +304,8 @@ class BreathPage(BaseModel):
     page_size: int
     rows: list[BreathRow] = Field(default_factory=list)
     bins: list[BreathBin] = Field(default_factory=list)
+    session_id: int | None = None
+    """Resolved session for this page; None only on legacy constructions."""
 
 
 # ---------------------------------------------------------------------------
@@ -1214,6 +1220,7 @@ class BreathService:
                 total_breaths=0,
                 page=query.page,
                 page_size=query.page_size,
+                session_id=session_id,
             )
 
         # Stale version — return empty page with status
@@ -1227,6 +1234,7 @@ class BreathService:
                 total_breaths=0,
                 page=query.page,
                 page_size=query.page_size,
+                session_id=session_id,
             )
 
         # Fetch matching breaths
@@ -1325,6 +1333,7 @@ class BreathService:
                 page=query.page,
                 page_size=query.page_size,
                 rows=rows,
+                session_id=session_id,
             )
         else:
             # Binned fetch — load all matching breaths then aggregate
@@ -1411,6 +1420,7 @@ class BreathService:
                 page=1,
                 page_size=len(bins),
                 bins=bins,
+                session_id=session_id,
             )
 
     async def find_windows(
@@ -1997,13 +2007,10 @@ class BreathService:
                 epochs=not_avail_epochs,
             )
         except ValueError:
-            # No sessions in range (device_id=None, auto-select found nothing)
-            # → NO_DATA_IN_RANGE
-            no_data_reason = (
-                NullReason.NOT_AVAILABLE
-                if union_device_id is not None
-                else NullReason.NO_DATA_IN_RANGE
-            )
+            # ValueError here means auto-select found no sessions in range — always
+            # NO_DATA_IN_RANGE (the NOT_AVAILABLE arm required union_device_id is not None,
+            # but _resolve_range raises DeviceNotOwnedError for foreign explicit devices).
+            no_data_reason = NullReason.NO_DATA_IN_RANGE
             null_epochs = [
                 EpochBreathStats(
                     label=e.label,

@@ -22,6 +22,26 @@ from snore.database import models
 from snore.mcp.schemas import DeviceCapabilities
 
 
+async def get_device_id_for_session(
+    db_session: AsyncSession, session_id: int, profile_id: int
+) -> int | None:
+    """Return the device_id for *session_id*, scoped to *profile_id*.
+
+    Executes a single profile-scoped join (Session → Device) to resolve the
+    device without leaking sessions from other profiles.  Returns None when the
+    session does not exist or is not owned by this profile.
+    """
+    result = await db_session.execute(
+        select(models.Session.device_id)
+        .join(models.Device, models.Device.id == models.Session.device_id)
+        .where(
+            models.Session.id == session_id,
+            models.Device.profile_id == profile_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def _has_analysis(db_session: AsyncSession, profile_id: int) -> bool:
     """Return True when at least one AnalysisResult exists for this profile.
 

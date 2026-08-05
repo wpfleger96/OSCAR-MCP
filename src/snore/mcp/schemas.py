@@ -252,6 +252,222 @@ class CapabilityEntry(BaseModel):
     sample_rate_hz: float | None = None
 
 
+# ---------------------------------------------------------------------------
+# Stage-2 schemas: get_breath_table, find_windows, compare_epochs
+# ---------------------------------------------------------------------------
+
+
+class BreathTableQuery(BaseModel):
+    """Echo of the breath-table query as resolved by the service."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    therapy_date: str
+    device_id: int | None = None
+    session_id: int | None = None
+    offset_start: float
+    offset_end: float
+    page: int
+    page_size: int
+    bin_minutes: float | None = None
+
+
+class BreathTableRow(BaseModel):
+    """One analyzed breath (tier-2 wall-clock anchor + tier-3 offsets).
+
+    Nullable measurement fields carry companion ``*_reason`` fields where the
+    service provides them; absence of a value is never coerced to zero.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    analysis_result_id: int
+    session_id: int
+    breath_number: int
+    session_start_wall_clock: str
+    timezone_status: str = "unknown"
+    start_offset_seconds: float
+    end_offset_seconds: float
+    ti_s: float | None = None
+    te_s: float | None = None
+    ttot_s: float | None = None
+    ie_ratio: float | None = None
+    duty_cycle: float | None = None
+    peak_insp_flow_lpm: float | None = None
+    peak_exp_flow_lpm: float | None = None
+    tidal_volume_ml: float | None = None
+    flatness_index: float | None = None
+    mid_insp_flattening: float | None = None
+    flow_class: int | None = None
+    flow_class_confidence: float | None = None
+    is_recovery_breath: bool | None = None
+    trigger_type: str | None = None
+    cycle_type: str | None = None
+    trigger_cycle_confidence: float | None = None
+    trigger_cycle_experimental: bool = True
+    trigger_cycle_applicability: str | None = None
+    trigger_cycle_reason: str | None = None
+    leak_valid: bool | None = None
+    leak_valid_reason: str | None = None
+    ramp_active: bool | None = None
+    ramp_active_reason: str | None = None
+    mask_off: bool | None = None
+    mask_off_reason: str | None = None
+
+
+class BreathTableBin(BaseModel):
+    """Aggregated breath metrics for one time bin."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_start_wall_clock: str
+    timezone_status: str = "unknown"
+    bin_start_offset: float
+    bin_end_offset: float
+    breath_count: int
+    flatness_index_median: float | None = None
+    mid_insp_flattening_median: float | None = None
+    flow_class_mode: int | None = None
+    tidal_volume_median_ml: float | None = None
+    ie_ratio_median: float | None = None
+    leak_valid_fraction: float | None = None
+    analysis_status: str
+
+
+class BreathTableResponse(BaseModel):
+    """Response from get_breath_table. Exactly one of rows/bins is populated."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    query: BreathTableQuery
+    session_id: int | None = None
+    session_start_wall_clock: str | None = None
+    timezone_status: str = "unknown"
+    analysis_status: str
+    algo_versions: dict[str, Any] | None = None
+    null_reason: str | None = None
+    is_binned: bool
+    total_breaths: int
+    page: int
+    page_size: int
+    rows: list[BreathTableRow] = []
+    bins: list[BreathTableBin] = []
+    device_capabilities: DeviceCapabilities | None = None
+
+
+class SessionCoverageEntry(BaseModel):
+    """Per-session analysis coverage for a queried day."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: int
+    analysis_status: str
+    algo_versions: dict[str, Any] | None = None
+
+
+class WindowRow(BaseModel):
+    """One found window, worst-first ordering within the response."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    criterion: str
+    session_id: int
+    session_start_wall_clock: str
+    timezone_status: str = "unknown"
+    window_start_offset: float
+    window_end_offset: float
+    reason_summary: str
+    worst_mid_insp_flattening: float | None = None
+    fl_run_length: int | None = None
+    anchor_event_offset: float | None = None
+    analysis_result_id: int | None = None
+    analysis_status: str
+    analysis_reason: str | None = None
+
+
+class FindWindowsResponse(BaseModel):
+    """Response from find_windows."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    query_date: str
+    device_id: int | None = None
+    criterion: str
+    day_status: str
+    session_coverage: list[SessionCoverageEntry] = []
+    algorithm_identity: dict[str, Any] | None = None
+    null_reason: str | None = None
+    primary_mode: str | None = None
+    windows: list[WindowRow] = []
+    device_capabilities: DeviceCapabilities | None = None
+
+
+class EpochSpec(BaseModel):
+    """Input epoch for compare_epochs (dates are YYYY-MM-DD strings)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    label: str
+    date_start: str
+    date_end: str
+    device_id: int | None = None
+
+
+class EpochDistribution(BaseModel):
+    """Descriptive stats for one metric over one epoch (leak-valid breaths only)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    median: float | None = None
+    iqr: float | None = None
+    p95: float | None = None
+    n_breaths: int
+    n_nights: int
+
+
+class EpochRxViolationRow(BaseModel):
+    """A therapy-settings change detected inside one epoch's date range."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    epoch_label: str
+    changed_keys: list[str] = []
+    change_dates: list[str] = []
+
+
+class EpochStats(BaseModel):
+    """Breath-feature distributions for one epoch."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    label: str
+    date_start: str
+    date_end: str
+    nights_with_data: int
+    nights_missing_analysis: int
+    algorithm_identity: dict[str, Any] | None = None
+    null_reason: str | None = None
+    primary_mode: str | None = None
+    mid_insp_flattening: EpochDistribution
+    flatness_index: EpochDistribution
+    flow_class_distribution: dict[str, int] = {}
+    tidal_volume_ml: EpochDistribution
+    ie_ratio: EpochDistribution
+    rera_proxy_count: int | None = None
+    rera_reason: str | None = None
+    rx_settings: dict[str, str] = {}
+
+
+class CompareEpochsResponse(BaseModel):
+    """Response from compare_epochs."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    epochs: list[EpochStats] = []
+    null_reason: str | None = None
+    rx_violations: list[EpochRxViolationRow] = []
+
+
 # Mapping used for docs://schemas/{type} — maps schema name to model class
 SCHEMA_MODEL_MAP: dict[str, type[BaseModel]] = {
     "device_capabilities": DeviceCapabilities,
@@ -266,6 +482,19 @@ SCHEMA_MODEL_MAP: dict[str, type[BaseModel]] = {
     "event_row": EventRow,
     "events_response": EventsResponse,
     "capability_entry": CapabilityEntry,
+    # Stage 2
+    "breath_table_query": BreathTableQuery,
+    "breath_table_row": BreathTableRow,
+    "breath_table_bin": BreathTableBin,
+    "breath_table_response": BreathTableResponse,
+    "window_row": WindowRow,
+    "session_coverage_entry": SessionCoverageEntry,
+    "find_windows_response": FindWindowsResponse,
+    "epoch_spec": EpochSpec,
+    "epoch_distribution": EpochDistribution,
+    "epoch_stats": EpochStats,
+    "epoch_rx_violation": EpochRxViolationRow,
+    "compare_epochs_response": CompareEpochsResponse,
 }
 
 

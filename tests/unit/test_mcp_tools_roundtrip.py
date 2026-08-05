@@ -18,78 +18,11 @@ from __future__ import annotations
 
 import json
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import fastmcp
 import pytest
-
-from snore.mcp.server import SNORERuntime
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_mock_session() -> MagicMock:
-    """Return a minimal AsyncSession mock that satisfies scalar queries."""
-    session = MagicMock()
-    result_mock = MagicMock()
-    result_mock.scalar_one.return_value = 0
-    result_mock.scalar_one_or_none.return_value = None
-    result_mock.scalars.return_value.all.return_value = []
-    result_mock.scalars.return_value.first.return_value = None
-    result_mock.one.return_value = (0, None, None)
-    result_mock.all.return_value = []
-    session.execute = AsyncMock(return_value=result_mock)
-    return session
-
-
-@asynccontextmanager
-async def _mock_scope(session: MagicMock) -> Any:
-    yield session
-
-
-def _make_server() -> Any:
-    from snore.mcp.server import make_server  # noqa: PLC0415
-
-    return make_server()
-
-
-@asynccontextmanager
-async def _patched_client(
-    session: MagicMock, extra_patches: list[Any] | None = None
-) -> AsyncIterator[fastmcp.Client]:
-    """Context manager yielding a connected fastmcp.Client with lifespan mocked.
-
-    ``_lifespan`` is replaced with a stub that yields a ``SNORERuntime``
-    backed by ``session``.  Any additional ``unittest.mock.patch`` context
-    managers can be passed via ``extra_patches`` and are entered alongside
-    the lifespan patch.
-    """
-
-    @asynccontextmanager
-    async def _fake_lifespan(
-        app: Any, db_flag: str | None = None, profile_name: str = "neutral"
-    ) -> Any:  # noqa: RUF029
-        yield SNORERuntime(scope_provider=lambda: _mock_scope(session), profile_id=1)
-
-    mcp = _make_server()
-    with patch("snore.mcp.server._lifespan", _fake_lifespan):
-        cm_stack = list(extra_patches or [])
-        # Enter all extra patch context managers
-        for cm in cm_stack:
-            cm.__enter__()
-        try:
-            async with fastmcp.Client(mcp) as client:
-                yield client
-        finally:
-            for cm in reversed(cm_stack):
-                cm.__exit__(None, None, None)
-
 
 # ---------------------------------------------------------------------------
 # get_data_overview
@@ -97,16 +30,16 @@ async def _patched_client(
 
 
 class TestGetDataOverviewRoundtrip:
-    async def test_empty_db_returns_empty_overview(self) -> None:
+    async def test_empty_db_returns_empty_overview(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_data_overview on empty DB: no error, devices=[]."""
-        session = _make_mock_session()
-
         with patch(
             "snore.services.device_service.DeviceService.list_devices",
             new_callable=AsyncMock,
             return_value=[],
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool("get_data_overview", {})
 
         assert not result.is_error
@@ -115,7 +48,9 @@ class TestGetDataOverviewRoundtrip:
         assert payload["total_sessions"] == 0
         assert payload["analysis_run"] is False
 
-    async def test_single_device_appears_in_overview(self) -> None:
+    async def test_single_device_appears_in_overview(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_data_overview with one device returns device info.
 
         Query order in get_data_overview (after list_devices):
@@ -125,8 +60,6 @@ class TestGetDataOverviewRoundtrip:
           4. waveform types → .scalars().all()
           5. event types → .scalars().all()
         """
-        session = _make_mock_session()
-
         mock_device = MagicMock()
         mock_device.id = 1
         mock_device.manufacturer = "ResMed"
@@ -153,7 +86,7 @@ class TestGetDataOverviewRoundtrip:
         event_result = MagicMock()
         event_result.scalars.return_value.all.return_value = []
 
-        session.execute = AsyncMock(
+        mock_db_session.execute = AsyncMock(
             side_effect=[
                 count_result,
                 stats_result,
@@ -177,7 +110,7 @@ class TestGetDataOverviewRoundtrip:
                 return_value=None,
             ),
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool("get_data_overview", {})
 
         assert not result.is_error
@@ -192,16 +125,16 @@ class TestGetDataOverviewRoundtrip:
 
 
 class TestGetSettingsTimelineRoundtrip:
-    async def test_empty_range_returns_no_epochs(self) -> None:
+    async def test_empty_range_returns_no_epochs(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_settings_timeline with no data: no error, epochs=[]."""
-        session = _make_mock_session()
-
         with patch(
             "snore.analysis.rx_tracker.RxTracker.get_history",
             new_callable=AsyncMock,
             return_value=[],
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool(
                     "get_settings_timeline",
                     {"start": "2024-01-01", "end": "2024-12-31"},
@@ -212,13 +145,13 @@ class TestGetSettingsTimelineRoundtrip:
         assert payload["epochs"] == []
         assert payload["total_epochs"] == 0
 
-    async def test_invalid_date_range_returns_error(self) -> None:
+    async def test_invalid_date_range_returns_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_settings_timeline with end < start: ToolError raised."""
         from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        session = _make_mock_session()
-
-        async with _patched_client(session) as client:
+        async with mcp_client_factory(mock_db_session) as client:
             with pytest.raises(ToolError):
                 await client.call_tool(
                     "get_settings_timeline",
@@ -232,10 +165,10 @@ class TestGetSettingsTimelineRoundtrip:
 
 
 class TestGetNightlySummaryRoundtrip:
-    async def test_empty_range_returns_empty_nights(self) -> None:
+    async def test_empty_range_returns_empty_nights(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_nightly_summary with no Day rows: no error, nights=[]."""
-        session = _make_mock_session()
-
         # Return None (no range summary) rather than raising — summary.py leaves
         # bs_range as None and falls through to empty DB result → nights=[].
         with patch(
@@ -243,7 +176,7 @@ class TestGetNightlySummaryRoundtrip:
             new_callable=AsyncMock,
             return_value=None,
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool(
                     "get_nightly_summary",
                     {"start": "2024-01-01", "end": "2024-01-31"},
@@ -254,26 +187,26 @@ class TestGetNightlySummaryRoundtrip:
         assert payload["nights"] == []
         assert payload["total_nights"] == 0
 
-    async def test_invalid_page_returns_error(self) -> None:
+    async def test_invalid_page_returns_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_nightly_summary with page=0: ToolError raised."""
         from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        session = _make_mock_session()
-
-        async with _patched_client(session) as client:
+        async with mcp_client_factory(mock_db_session) as client:
             with pytest.raises(ToolError):
                 await client.call_tool(
                     "get_nightly_summary",
                     {"start": "2024-01-01", "end": "2024-01-31", "page": 0},
                 )
 
-    async def test_over_90_nights_raises_tool_error_without_db(self) -> None:
+    async def test_over_90_nights_raises_tool_error_without_db(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_nightly_summary spanning >90 calendar nights raises ToolError before any DB call."""
         from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        session = _make_mock_session()
-
-        async with _patched_client(session) as client:
+        async with mcp_client_factory(mock_db_session) as client:
             with pytest.raises(ToolError, match="maximum per call is 90"):
                 await client.call_tool(
                     "get_nightly_summary",
@@ -282,7 +215,7 @@ class TestGetNightlySummaryRoundtrip:
                 )
 
         # DB was never touched — scope_provider was never called
-        session.execute.assert_not_called()
+        mock_db_session.execute.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -291,29 +224,29 @@ class TestGetNightlySummaryRoundtrip:
 
 
 class TestGetEventsRoundtrip:
-    async def test_missing_date_raises_tool_error(self) -> None:
+    async def test_missing_date_raises_tool_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_events for a date with no data: ToolError with no-data message."""
         from fastmcp.exceptions import ToolError  # noqa: PLC0415
-
-        session = _make_mock_session()
 
         with patch(
             "snore.services.breath_service.BreathService.get_contextual_events",
             new_callable=AsyncMock,
             side_effect=ValueError("no sessions for date"),
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 with pytest.raises(ToolError, match="No therapy data"):
                     await client.call_tool("get_events", {"date": "2024-01-01"})
 
-    async def test_events_returned_for_date(self) -> None:
+    async def test_events_returned_for_date(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_events with contextual events: no error, events list populated."""
         from snore.services.breath_service import (  # noqa: PLC0415
             ContextualEvent,
             TimezoneStatus,
         )
-
-        session = _make_mock_session()
 
         ev = ContextualEvent(
             session_id=42,
@@ -344,7 +277,7 @@ class TestGetEventsRoundtrip:
                 return_value=None,
             ),
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool(
                     "get_events", {"date": "2024-01-01", "include_context": True}
                 )
@@ -360,20 +293,20 @@ class TestGetEventsRoundtrip:
         assert ctx["pressure_at_event_cmh2o"] == pytest.approx(8.2)
         assert ctx["mv_prior_120s_lpm"] == pytest.approx(5.8)
 
-    async def test_invalid_date_format_raises_tool_error(self) -> None:
+    async def test_invalid_date_format_raises_tool_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_events with non-ISO date: ToolError raised."""
         from fastmcp.exceptions import ToolError  # noqa: PLC0415
 
-        session = _make_mock_session()
-
-        async with _patched_client(session) as client:
+        async with mcp_client_factory(mock_db_session) as client:
             with pytest.raises(ToolError):
                 await client.call_tool("get_events", {"date": "not-a-date"})
 
-    async def test_empty_events_returns_null_response_anchors(self) -> None:
+    async def test_empty_events_returns_null_response_anchors(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """get_events with no events for a valid date: empty list and null response-level anchors."""
-        session = _make_mock_session()
-
         with (
             patch(
                 "snore.services.breath_service.BreathService.get_contextual_events",
@@ -386,7 +319,7 @@ class TestGetEventsRoundtrip:
                 return_value=None,
             ),
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool("get_events", {"date": "2024-01-01"})
 
         assert not result.is_error
@@ -396,14 +329,14 @@ class TestGetEventsRoundtrip:
         assert payload["session_id"] is None
         assert payload["session_start_wall_clock"] is None
 
-    async def test_multi_session_events_null_response_anchors(self) -> None:
+    async def test_multi_session_events_null_response_anchors(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """Events spanning two sessions: response-level anchors null, per-event anchors populated."""
         from snore.services.breath_service import (  # noqa: PLC0415
             ContextualEvent,
             TimezoneStatus,
         )
-
-        session = _make_mock_session()
 
         # Two events from different sessions
         ev1 = ContextualEvent(
@@ -451,7 +384,7 @@ class TestGetEventsRoundtrip:
                 return_value=None,
             ),
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool("get_events", {"date": "2024-01-01"})
 
         assert not result.is_error
@@ -469,11 +402,11 @@ class TestGetEventsRoundtrip:
         assert events[1]["session_id"] == 11
         assert events[1]["session_start_wall_clock"] == "2024-01-02T00:00:00"
 
-    async def test_max_events_truncates_list_and_sets_flag(self) -> None:
+    async def test_max_events_truncates_list_and_sets_flag(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """max_events < event count: truncated=True, total_events is full count."""
         from snore.services.breath_service import ContextualEvent, TimezoneStatus
-
-        session = _make_mock_session()
 
         def _make_event() -> ContextualEvent:
             return ContextualEvent(
@@ -505,7 +438,7 @@ class TestGetEventsRoundtrip:
                 return_value=None,
             ),
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool(
                     "get_events", {"date": "2024-01-01", "max_events": 3}
                 )
@@ -516,11 +449,11 @@ class TestGetEventsRoundtrip:
         assert payload["total_events"] == 5
         assert len(payload["events"]) == 3
 
-    async def test_default_max_events_produces_no_truncation(self) -> None:
+    async def test_default_max_events_produces_no_truncation(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """Default max_events (500) with fewer events: truncated=False."""
         from snore.services.breath_service import ContextualEvent, TimezoneStatus
-
-        session = _make_mock_session()
 
         ev = ContextualEvent(
             session_id=1,
@@ -551,7 +484,7 @@ class TestGetEventsRoundtrip:
                 return_value=None,
             ),
         ):
-            async with _patched_client(session) as client:
+            async with mcp_client_factory(mock_db_session) as client:
                 result = await client.call_tool("get_events", {"date": "2024-01-01"})
 
         assert not result.is_error
@@ -559,16 +492,16 @@ class TestGetEventsRoundtrip:
         assert payload["truncated"] is False
         assert payload["total_events"] == 1
 
-    async def test_max_events_zero_raises_tool_error(self) -> None:
+    async def test_max_events_zero_raises_tool_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
         """max_events=0 is rejected before the DB is touched."""
         from fastmcp.exceptions import ToolError
 
-        session = _make_mock_session()
-
-        async with _patched_client(session) as client:
+        async with mcp_client_factory(mock_db_session) as client:
             with pytest.raises(ToolError, match="max_events must be >= 1"):
                 await client.call_tool(
                     "get_events", {"date": "2024-01-01", "max_events": 0}
                 )
 
-        session.execute.assert_not_called()
+        mock_db_session.execute.assert_not_called()

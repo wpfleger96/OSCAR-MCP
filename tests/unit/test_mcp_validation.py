@@ -64,6 +64,88 @@ class TestParseDateRange:
             parse_date_range("2024-01-01", "bad")
 
 
+class TestValidateWindowCount:
+    """validate_window_count accepts 1–50 and rejects everything else."""
+
+    def test_one_is_accepted(self) -> None:
+        from snore.mcp.validation import validate_window_count
+
+        validate_window_count(1)  # must not raise
+
+    def test_fifty_is_accepted(self) -> None:
+        from snore.mcp.validation import validate_window_count
+
+        validate_window_count(50)  # must not raise
+
+    def test_zero_raises_with_message(self) -> None:
+        from snore.mcp.validation import validate_window_count
+
+        with pytest.raises(ValidationError, match="n must be between 1 and 50"):
+            validate_window_count(0)
+
+    def test_fifty_one_raises_with_message(self) -> None:
+        from snore.mcp.validation import validate_window_count
+
+        with pytest.raises(ValidationError, match="n must be between 1 and 50"):
+            validate_window_count(51)
+
+    def test_negative_raises(self) -> None:
+        from snore.mcp.validation import validate_window_count
+
+        with pytest.raises(ValidationError, match="n must be between 1 and 50"):
+            validate_window_count(-1)
+
+    def test_error_message_includes_value(self) -> None:
+        from snore.mcp.validation import validate_window_count
+
+        with pytest.raises(ValidationError, match="got 99"):
+            validate_window_count(99)
+
+
+class TestValidateEpochCount:
+    """validate_epoch_count accepts 1–6 and rejects everything else."""
+
+    def test_one_is_accepted(self) -> None:
+        from snore.mcp.validation import validate_epoch_count
+
+        validate_epoch_count(1)  # must not raise
+
+    def test_six_is_accepted(self) -> None:
+        from snore.mcp.validation import validate_epoch_count
+
+        validate_epoch_count(6)  # must not raise
+
+    def test_zero_raises_with_message(self) -> None:
+        from snore.mcp.validation import validate_epoch_count
+
+        with pytest.raises(
+            ValidationError, match="epochs must contain between 1 and 6"
+        ):
+            validate_epoch_count(0)
+
+    def test_seven_raises_with_message(self) -> None:
+        from snore.mcp.validation import validate_epoch_count
+
+        with pytest.raises(
+            ValidationError, match="epochs must contain between 1 and 6"
+        ):
+            validate_epoch_count(7)
+
+    def test_negative_raises(self) -> None:
+        from snore.mcp.validation import validate_epoch_count
+
+        with pytest.raises(
+            ValidationError, match="epochs must contain between 1 and 6"
+        ):
+            validate_epoch_count(-3)
+
+    def test_error_message_includes_value(self) -> None:
+        from snore.mcp.validation import validate_epoch_count
+
+        with pytest.raises(ValidationError, match="got 10"):
+            validate_epoch_count(10)
+
+
 class TestValidateMaxEvents:
     """validate_max_events rejects values below 1 and accepts values >= 1."""
 

@@ -35,6 +35,24 @@ class TestSchemaModelMap:
         }
         assert expected <= set(SCHEMA_MODEL_MAP.keys())
 
+    def test_stage2_schema_keys_present(self) -> None:
+        """All Stage-2 schema keys are registered in SCHEMA_MODEL_MAP."""
+        stage2_keys = {
+            "breath_table_query",
+            "breath_table_row",
+            "breath_table_bin",
+            "breath_table_response",
+            "window_row",
+            "session_coverage_entry",
+            "find_windows_response",
+            "epoch_spec",
+            "epoch_distribution",
+            "epoch_stats",
+            "epoch_rx_violation",
+            "compare_epochs_response",
+        }
+        assert stage2_keys <= set(SCHEMA_MODEL_MAP.keys())
+
     def test_model_to_schema_returns_dict_with_properties(self) -> None:
         schema = model_to_schema(DeviceInfo)
         assert "properties" in schema

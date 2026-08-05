@@ -172,15 +172,15 @@ class TestBuildInstructions:
         instructions = _build_instructions(profile)
         assert "UARS" in instructions
 
-    def test_contains_required_reading_directive(self) -> None:
+    def test_does_not_reference_docs_tools(self) -> None:
         profile = get_profile("neutral")
         instructions = _build_instructions(profile)
-        assert "REQUIRED READING" in instructions
+        assert "docs://tools" not in instructions
 
-    def test_contains_docs_tools_reference(self) -> None:
+    def test_instructions_mention_schemas_resource(self) -> None:
         profile = get_profile("neutral")
         instructions = _build_instructions(profile)
-        assert "docs://tools" in instructions
+        assert "docs://schemas" in instructions
 
     def test_all_profiles_produce_non_empty_instructions(self) -> None:
         from snore.mcp.profiles import VALID_PROFILES
@@ -280,6 +280,84 @@ class TestValidateMinDuration:
 
         with pytest.raises(ValidationError, match="min_duration must be >= 0"):
             validate_min_duration(-0.1)
+
+
+class TestStage2ToolsRegistered:
+    """The three Stage-2 tools appear in make_server() tool listing."""
+
+    async def test_seven_tools_registered(self) -> None:
+        """make_server() registers exactly seven tools (four Stage-1 + three Stage-2)."""
+        from collections.abc import AsyncIterator
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock, patch
+
+        import fastmcp
+
+        from snore.mcp.server import SNORERuntime, make_server
+
+        @asynccontextmanager
+        async def _fake_lifespan(
+            app: MagicMock, db_flag: str | None = None, profile_name: str = "neutral"
+        ) -> AsyncIterator[SNORERuntime]:
+            session = MagicMock()
+            yield SNORERuntime(
+                scope_provider=lambda: _noop_scope(session),
+                profile_id=1,
+            )
+
+        @asynccontextmanager
+        async def _noop_scope(s: MagicMock) -> AsyncIterator[MagicMock]:
+            yield s
+
+        mcp = make_server()
+        with patch("snore.mcp.server._lifespan", _fake_lifespan):
+            async with fastmcp.Client(mcp) as client:
+                tools = await client.list_tools()
+
+        tool_names = {t.name for t in tools}
+        assert "get_breath_table" in tool_names
+        assert "find_windows" in tool_names
+        assert "compare_epochs" in tool_names
+        # Stage-1 tools still present
+        assert "get_data_overview" in tool_names
+        assert "get_events" in tool_names
+        assert len(tool_names) == 7
+
+    async def test_compare_epochs_schema_has_epochs_parameter(self) -> None:
+        """compare_epochs tool schema includes an 'epochs' parameter."""
+        from collections.abc import AsyncIterator
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock, patch
+
+        import fastmcp
+
+        from snore.mcp.server import SNORERuntime, make_server
+
+        @asynccontextmanager
+        async def _fake_lifespan(
+            app: MagicMock, db_flag: str | None = None, profile_name: str = "neutral"
+        ) -> AsyncIterator[SNORERuntime]:
+            session = MagicMock()
+            yield SNORERuntime(
+                scope_provider=lambda: _noop_scope(session),
+                profile_id=1,
+            )
+
+        @asynccontextmanager
+        async def _noop_scope(s: MagicMock) -> AsyncIterator[MagicMock]:
+            yield s
+
+        mcp = make_server()
+        with patch("snore.mcp.server._lifespan", _fake_lifespan):
+            async with fastmcp.Client(mcp) as client:
+                tools = await client.list_tools()
+
+        ce_tool = next(t for t in tools if t.name == "compare_epochs")
+        # epochs parameter must appear in the input schema
+        schema = ce_tool.inputSchema
+        assert "epochs" in (schema.get("properties") or {}), (
+            f"compare_epochs inputSchema missing 'epochs': {schema}"
+        )
 
 
 class TestLifespanStartupFailure:
