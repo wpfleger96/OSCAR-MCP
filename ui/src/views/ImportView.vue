@@ -109,8 +109,9 @@
             />
         </div>
 
-        <!-- Server path section — localhost only; server enforces 403 otherwise -->
-        <details v-if="isLocalhost" class="path-section">
+        <!-- Server path section — local mode on localhost only; the route is not
+             registered in multiuser mode and the server enforces 403 otherwise -->
+        <details v-if="isLocalhost && isLocal" class="path-section">
             <summary class="path-summary">Import from server path (localhost)</summary>
             <div class="path-content">
                 <!-- idle / detecting: path input -->
@@ -224,7 +225,7 @@ const isLocalhost =
 // Profile selection
 // ---------------------------------------------------------------------------
 
-const { profiles, activeProfileId } = useAuth()
+const { profiles, activeProfileId, isLocal } = useAuth()
 const selectedProfileId = ref<number | null>(activeProfileId.value)
 
 // ---------------------------------------------------------------------------
