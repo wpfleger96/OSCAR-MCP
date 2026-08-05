@@ -3208,14 +3208,14 @@ export interface components {
              * @default dashboard
              * @enum {string}
              */
-            landing_page: 'dashboard' | 'sessions' | 'days'
+            landing_page: 'dashboard' | 'sessions' | 'stats'
         }
         /** UserPreferencesUpdate */
         UserPreferencesUpdate: {
             /** Date Format */
             date_format?: ('iso' | 'locale' | 'short') | null
             /** Landing Page */
-            landing_page?: ('dashboard' | 'sessions' | 'days') | null
+            landing_page?: ('dashboard' | 'sessions' | 'stats') | null
         }
         /**
          * VacuumResult
