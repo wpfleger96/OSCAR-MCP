@@ -325,11 +325,24 @@ describe('workflow: profile default calls PATCH endpoint', () => {
             name: 'Work',
             user_id: 1,
             is_default: true,
+            created_at: '2026-01-01T00:00:00Z',
         })
         vi.mocked(profilesApi.setDefaultProfile).mockImplementation(setDefaultMock)
         vi.mocked(profilesApi.listProfiles).mockResolvedValueOnce([
-            { id: 1, name: 'Primary', user_id: 1 },
-            { id: 2, name: 'Work', user_id: 1 },
+            {
+                id: 1,
+                name: 'Primary',
+                user_id: 1,
+                created_at: '2026-01-01T00:00:00Z',
+                is_default: false,
+            },
+            {
+                id: 2,
+                name: 'Work',
+                user_id: 1,
+                created_at: '2026-01-01T00:00:00Z',
+                is_default: false,
+            },
         ])
 
         makeAuthMock(true, false)
@@ -381,12 +394,20 @@ describe('workflow: profile CRUD refreshes shared auth store', () => {
         })
 
         vi.mocked(profilesApi.listProfiles).mockResolvedValueOnce([
-            { id: 1, name: 'Primary', user_id: 1 },
+            {
+                id: 1,
+                name: 'Primary',
+                user_id: 1,
+                created_at: '2026-01-01T00:00:00Z',
+                is_default: false,
+            },
         ])
         vi.mocked(profilesApi.createProfile).mockResolvedValueOnce({
             id: 2,
             name: 'Work',
             user_id: 1,
+            created_at: '2026-01-01T00:00:00Z',
+            is_default: false,
         })
 
         const ProfilesView = (await import('@/views/ProfilesView.vue')).default
@@ -434,12 +455,20 @@ describe('workflow: profile mutation success not shadowed by refresh failure', (
         })
 
         vi.mocked(profilesApi.listProfiles).mockResolvedValueOnce([
-            { id: 1, name: 'Primary', user_id: 1 },
+            {
+                id: 1,
+                name: 'Primary',
+                user_id: 1,
+                created_at: '2026-01-01T00:00:00Z',
+                is_default: false,
+            },
         ])
         vi.mocked(profilesApi.updateProfile).mockResolvedValueOnce({
             id: 1,
             name: 'NewName',
             user_id: 1,
+            created_at: '2026-01-01T00:00:00Z',
+            is_default: false,
         })
 
         const ProfilesView = (await import('@/views/ProfilesView.vue')).default
