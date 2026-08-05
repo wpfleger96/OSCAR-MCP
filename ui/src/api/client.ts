@@ -10,7 +10,7 @@ const api = axios.create({
 
 api.interceptors.response.use(
     (response) => response,
-    (error: AxiosError<{ message?: string; detail?: string | Array<{ msg: string }> }>) => {
+    async (error: AxiosError<{ message?: string; detail?: string | Array<{ msg: string }> }>) => {
         const data = error.response?.data
         if (data) {
             if (typeof data.message === 'string') {
@@ -25,6 +25,17 @@ api.interceptors.response.use(
                 if (msgs) error.message = msgs
             }
         }
+
+        // Session expired on a data endpoint: clear local auth state and redirect to login.
+        // Auth endpoints (/auth/*) handle their own 401 responses (e.g., wrong password).
+        if (error.response?.status === 401 && !error.config?.url?.startsWith('/auth/')) {
+            const { useAuth } = await import('@/composables/useAuth')
+            const { clearAuth } = useAuth()
+            clearAuth()
+            const routerModule = await import('@/router')
+            routerModule.default.push('/')
+        }
+
         return Promise.reject(error)
     },
 )
