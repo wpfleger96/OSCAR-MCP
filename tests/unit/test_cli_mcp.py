@@ -85,6 +85,39 @@ class TestMcpCliStdioPath:
         mock_make.assert_called_once_with(db_flag="/tmp/test.db", profile_name="osa")
         mock_server.run.assert_called_once_with(transport="stdio")
 
+    def test_stdio_with_custom_host_emits_warning(self) -> None:
+        from snore.cli.commands.mcp import mcp
+
+        runner = CliRunner()
+        mock_server = MagicMock()
+        with patch("snore.mcp.server.make_server", return_value=mock_server):
+            result = runner.invoke(mcp, ["--host", "0.0.0.0"])
+
+        assert result.exit_code == 0, result.output
+        assert "ignored" in result.output
+
+    def test_stdio_with_custom_port_emits_warning(self) -> None:
+        from snore.cli.commands.mcp import mcp
+
+        runner = CliRunner()
+        mock_server = MagicMock()
+        with patch("snore.mcp.server.make_server", return_value=mock_server):
+            result = runner.invoke(mcp, ["--port", "9999"])
+
+        assert result.exit_code == 0, result.output
+        assert "ignored" in result.output
+
+    def test_stdio_default_host_and_port_no_warning(self) -> None:
+        from snore.cli.commands.mcp import mcp
+
+        runner = CliRunner()
+        mock_server = MagicMock()
+        with patch("snore.mcp.server.make_server", return_value=mock_server):
+            result = runner.invoke(mcp, [])
+
+        assert result.exit_code == 0, result.output
+        assert "ignored" not in result.output
+
 
 class TestMcpCliHttpMissingEnvVars:
     """http transport without env vars -> UsageError naming the missing vars."""
@@ -133,6 +166,21 @@ class TestMcpCliHttpMissingEnvVars:
         result = runner.invoke(mcp, ["--transport", "http"])
         assert result.exit_code != 0
         # Empty string counts as missing
+        assert "SNORE_MCP_BASE_URL" in result.output
+
+    def test_whitespace_only_env_var_treated_as_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from snore.cli.commands.mcp import mcp
+
+        monkeypatch.setenv("SNORE_MCP_BASE_URL", "   ")
+        monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+        monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(mcp, ["--transport", "http"])
+        assert result.exit_code != 0
+        # Whitespace-only counts as missing
         assert "SNORE_MCP_BASE_URL" in result.output
 
 
@@ -189,10 +237,10 @@ class TestMcpCliHttpPath:
             transport="http", host="0.0.0.0", port=9000
         )
 
-    def test_http_does_not_start_unauthenticated(
+    def test_auth_provider_construction_failure_exits_nonzero(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Verifies make_server is only called when auth was successfully constructed."""
+        """make_auth_provider ValueError surfaces as a clean UsageError (no traceback)."""
         monkeypatch.setenv("SNORE_MCP_BASE_URL", "https://mcp.example.com")
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id")
         monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "client-secret")
@@ -206,5 +254,7 @@ class TestMcpCliHttpPath:
             runner = CliRunner()
             result = runner.invoke(mcp, ["--transport", "http"])
 
-        # Server must not start when auth construction fails
+        # Server must not start when auth construction fails.
         assert result.exit_code != 0
+        # The ValueError text must appear in output (not a raw traceback).
+        assert "bad credentials" in result.output

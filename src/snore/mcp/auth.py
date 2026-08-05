@@ -10,7 +10,6 @@ Public API consumed by server.py:
 - actor_scope         — _ScopeProvider seam: resolves actor per request
 - current_actor       — retrieve actor bound by actor_scope()
 - resolve_actor       — async token→ActorContext mapping (also tested directly)
-- GOOGLE_PROVIDER     — constant for auth_identities.provider column
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ from snore.database.session import session_scope
 if TYPE_CHECKING:
     from fastmcp.server.auth.auth import AccessToken, AuthProvider
 
-GOOGLE_PROVIDER = "google"
+GOOGLE_PROVIDER = "google"  # auth_identities.provider column value for Google OAuth
 
 # Per-request ContextVar holding the resolved actor; None when no request is active.
 _current_actor: ContextVar[ActorContext | None] = ContextVar(
@@ -50,7 +49,9 @@ def make_auth_provider(
     """Construct a GoogleProvider for HTTP transport.
 
     Args:
-        base_url:            Public server URL (SNORE_MCP_BASE_URL).
+        base_url:            Public server URL (SNORE_MCP_BASE_URL).  Must be
+                             HTTPS for non-loopback hosts; plain HTTP is allowed
+                             for loopback addresses (127.x.x.x, ::1, localhost).
         google_client_id:    OAuth client ID (GOOGLE_CLIENT_ID).
         google_client_secret: OAuth client secret (GOOGLE_CLIENT_SECRET).
 
@@ -58,15 +59,37 @@ def make_auth_provider(
         Configured GoogleProvider instance.
 
     Raises:
-        ValueError: If any argument is empty or blank, with the env var name.
+        ValueError: If any argument is empty, blank, or if base_url violates
+                    the loopback-HTTP / HTTPS-required policy.
+
+    Performance note:
+        fastmcp's GoogleProvider re-validates the upstream Google token via a
+        live tokeninfo HTTP call on every authenticated request (in
+        OAuthProxy.load_access_token).  GoogleProvider does not expose a
+        token_verifier seam at construction time, so a clean in-process TTL
+        cache cannot be injected without patching fastmcp internals.  Google
+        tokeninfo outages or rate-limits will therefore affect all authenticated
+        requests.
     """
     from fastmcp.server.auth.providers.google import GoogleProvider  # noqa: PLC0415
+
+    from snore.api.config import (  # noqa: PLC0415
+        ConfigError,
+        _validate_origin_url,
+    )
 
     _require_nonempty(base_url, "base_url", "SNORE_MCP_BASE_URL")
     _require_nonempty(google_client_id, "google_client_id", "GOOGLE_CLIENT_ID")
     _require_nonempty(
         google_client_secret, "google_client_secret", "GOOGLE_CLIENT_SECRET"
     )
+
+    try:
+        _validate_origin_url(base_url, require_http_loopback=True)
+    except ConfigError as exc:
+        raise ValueError(
+            f"SNORE_MCP_BASE_URL must be a valid HTTPS (or loopback HTTP) URL: {exc}"
+        ) from exc
 
     return GoogleProvider(
         client_id=google_client_id,
@@ -124,16 +147,15 @@ async def resolve_actor(db: AsyncSession, token: AccessToken) -> ActorContext:
             "Sign in to the SNORE web app first."
         )
 
+    user = await db.get(models.User, identity.user_id)
+    if user is not None and user.disabled_at is not None:
+        raise ToolError("This account is disabled. Contact your administrator.")
+
     try:
         actor = await ActorContextFactory(db).make(
             identity.user_id, None, AuthMode.MULTIUSER
         )
     except ValueError as exc:
-        msg = str(exc)
-        if "disabled" in msg:
-            raise ToolError(
-                "This account is disabled. Contact your administrator."
-            ) from exc
         raise ToolError(
             "Unable to resolve your SNORE account. Contact your administrator."
         ) from exc

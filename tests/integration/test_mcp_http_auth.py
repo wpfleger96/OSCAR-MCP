@@ -33,8 +33,8 @@ DB lifecycle:
 
 from __future__ import annotations
 
+import asyncio
 import json
-import socket
 import threading
 import time
 import uuid
@@ -87,21 +87,27 @@ _SUB_TWO_PROFILES = f"sub-two-profiles-{_RUN_ID}"
 # _SUB_UNKNOWN is intentionally NOT inserted into auth_identities.
 _SUB_UNKNOWN = f"sub-unknown-{_RUN_ID}"
 
+# Audience string used by JWTVerifier and minted into every valid test token.
+# Tokens with a different audience are rejected by the auth middleware (401).
+_TEST_AUDIENCE = "https://mcp.snore.test"
+
 
 # ---------------------------------------------------------------------------
 # Infrastructure helpers
 # ---------------------------------------------------------------------------
 
 
-def _free_port() -> int:
-    """Return an unoccupied localhost TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _mint_token(key_pair: RSAKeyPair, sub: str, expires_in: int = 3600) -> str:
-    return key_pair.create_token(subject=sub, expires_in_seconds=expires_in)
+def _mint_token(
+    key_pair: RSAKeyPair,
+    sub: str,
+    expires_in: int = 3600,
+    audience: str | None = _TEST_AUDIENCE,
+) -> str:
+    return key_pair.create_token(
+        subject=sub,
+        expires_in_seconds=expires_in,
+        audience=audience,
+    )
 
 
 def _mcp_client(url: str, token: str) -> Client:
@@ -248,7 +254,7 @@ def _key_pair() -> RSAKeyPair:
 
 @pytest.fixture(scope="module")
 def _verifier(_key_pair: RSAKeyPair) -> JWTVerifier:
-    return JWTVerifier(public_key=_key_pair.public_key)
+    return JWTVerifier(public_key=_key_pair.public_key, audience=_TEST_AUDIENCE)
 
 
 @pytest.fixture(scope="module")
@@ -271,11 +277,13 @@ def _server_url(
     # host_origin_protection=False: suppress localhost Host-header validation
     # that would reject test requests originating from 127.0.0.1.
     app = server.http_app(host_origin_protection=False)
-    port = _free_port()
+    # port=0: the OS assigns an ephemeral port, eliminating the TOCTOU race
+    # between _free_port() closing its probe socket and uvicorn binding.
+    # The actual port is read from uv.servers after startup completes.
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
-        port=port,
+        port=0,
         lifespan="on",
         log_level="error",
     )
@@ -291,6 +299,9 @@ def _server_url(
         uv.should_exit = True
         thread.join(timeout=5)
         raise RuntimeError("uvicorn server failed to start within 15 s")
+
+    # Read the OS-assigned port from the started asyncio server.
+    port: int = uv.servers[0].sockets[0].getsockname()[1]
 
     # Server has initialized the schema via Alembic. Seed test users now.
     _seed_sync(db_path)
@@ -425,3 +436,65 @@ async def test_expired_token_rejected_401(
             },
         )
     assert resp.status_code == 401
+
+
+async def test_wrong_audience_token_rejected_401(
+    _server_url: str, _key_pair: RSAKeyPair
+) -> None:
+    """Token with wrong audience → HTTP 401 from auth middleware; no MCP dispatch."""
+    wrong_aud_token = _mint_token(
+        _key_pair, _SUB_A, audience="https://other.service.example"
+    )
+    async with httpx.AsyncClient() as http:
+        resp = await http.post(
+            _server_url,
+            content=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0.1.0"},
+                    },
+                    "id": 1,
+                }
+            ),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {wrong_aud_token}",
+            },
+        )
+    assert resp.status_code == 401
+
+
+async def test_concurrent_requests_do_not_share_actor(
+    _server_url: str, _key_pair: RSAKeyPair
+) -> None:
+    """Two users' requests interleave on the same server without actor bleed-through.
+
+    Both clients are open simultaneously and their tool calls are dispatched via
+    asyncio.gather, so the server handles them concurrently.  Each response must
+    contain only that user's data markers (MfrA / MfrB), proving that
+    per-request actor resolution is fully isolated.
+    """
+    token_a = _mint_token(_key_pair, _SUB_A)
+    token_b = _mint_token(_key_pair, _SUB_B)
+
+    async with _mcp_client(_server_url, token_a) as client_a:
+        async with _mcp_client(_server_url, token_b) as client_b:
+            result_a, result_b = await asyncio.gather(
+                client_a.call_tool("get_data_overview"),
+                client_b.call_tool("get_data_overview"),
+            )
+
+    assert result_a.structured_content is not None
+    assert result_b.structured_content is not None
+
+    mfrs_a = {d["manufacturer"] for d in result_a.structured_content["devices"]}
+    mfrs_b = {d["manufacturer"] for d in result_b.structured_content["devices"]}
+
+    assert mfrs_a == {"MfrA"}, f"User A saw unexpected devices under load: {mfrs_a}"
+    assert mfrs_b == {"MfrB"}, f"User B saw unexpected devices under load: {mfrs_b}"
+    assert "MfrB" not in mfrs_a
+    assert "MfrA" not in mfrs_b

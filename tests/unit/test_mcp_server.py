@@ -54,15 +54,27 @@ class TestToolErrorBoundary:
         with pytest.raises(ToolError, match="already a tool error"):
             await _bad()
 
-    async def test_converts_generic_exception_to_tool_error(self) -> None:
+    async def test_converts_generic_exception_to_tool_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
         from fastmcp.exceptions import ToolError
 
         @tool_error_boundary
         async def _bad() -> str:
-            raise RuntimeError("unexpected")
+            raise RuntimeError("internal detail that must not leak")
 
-        with pytest.raises(ToolError, match="unexpected"):
-            await _bad()
+        with caplog.at_level(logging.ERROR, logger="snore.mcp.server"):
+            with pytest.raises(ToolError, match="An unexpected error occurred."):
+                await _bad()
+
+        # Internal exception detail must be logged server-side, not forwarded.
+        assert any(
+            "internal detail that must not leak" in r.message
+            or "internal detail that must not leak" in str(r.exc_info)
+            for r in caplog.records
+        )
 
     async def test_exc_with_response_status_code_emits_http_status_message(
         self,
@@ -285,7 +297,7 @@ class TestValidateMinDuration:
 class TestStage2ToolsRegistered:
     """The three Stage-2 tools appear in make_server() tool listing."""
 
-    async def test_ten_tools_registered(self) -> None:
+    async def test_make_server_registers_exactly_ten_tools(self) -> None:
         """make_server() registers exactly ten tools (four Stage-1 + three Stage-2 + three Stage-3)."""
         from collections.abc import AsyncIterator
         from contextlib import asynccontextmanager
@@ -547,45 +559,47 @@ class TestActorRuntime:
     """ActorRuntime delegates profile_id to current_actor() on each access."""
 
     def test_profile_id_raises_when_no_actor_bound(self) -> None:
-        import sys
-
-        from unittest.mock import MagicMock, patch
-
-        from snore.mcp.server import ActorRuntime
-
-        mock_auth = MagicMock()
-        mock_auth.current_actor.side_effect = RuntimeError("no actor bound to context")
-
-        with patch.dict(sys.modules, {"snore.mcp.auth": mock_auth}):
-            rt = ActorRuntime(scope_provider=MagicMock())
-            with pytest.raises(RuntimeError, match="no actor bound to context"):
-                _ = rt.profile_id
-
-    def test_profile_id_returns_bound_actor_profile_id(self) -> None:
-        import sys
-
-        from unittest.mock import MagicMock, patch
-
-        from snore.mcp.server import ActorRuntime
-
-        mock_actor = MagicMock()
-        mock_actor.profile_id = 99
-
-        mock_auth = MagicMock()
-        mock_auth.current_actor.return_value = mock_actor
-
-        with patch.dict(sys.modules, {"snore.mcp.auth": mock_auth}):
-            rt = ActorRuntime(scope_provider=MagicMock())
-            assert rt.profile_id == 99
-
-    def test_scope_provider_stored_as_instance_attribute(self) -> None:
         from unittest.mock import MagicMock
 
-        from snore.mcp.server import ActorRuntime
+        from snore.mcp.auth import _current_actor  # noqa: PLC0415
+        from snore.mcp.server import ActorRuntime  # noqa: PLC0415
+
+        # Ensure no actor is bound in this context.
+        token = _current_actor.set(None)
+        try:
+            rt = ActorRuntime(scope_provider=MagicMock())
+            with pytest.raises(RuntimeError, match="actor_scope"):
+                _ = rt.profile_id
+        finally:
+            _current_actor.reset(token)
+
+    def test_profile_id_returns_bound_actor_profile_id(self) -> None:
+        from unittest.mock import MagicMock
+
+        from snore.mcp.auth import _current_actor  # noqa: PLC0415
+        from snore.mcp.server import ActorRuntime  # noqa: PLC0415
+
+        stub_actor = MagicMock()
+        stub_actor.profile_id = 99
+
+        token = _current_actor.set(stub_actor)
+        try:
+            rt = ActorRuntime(scope_provider=MagicMock())
+            assert rt.profile_id == 99
+        finally:
+            _current_actor.reset(token)
+
+    def test_scope_provider_is_read_only_property(self) -> None:
+        from unittest.mock import MagicMock
+
+        from snore.mcp.server import ActorRuntime  # noqa: PLC0415
 
         provider = MagicMock()
         rt = ActorRuntime(scope_provider=provider)
         assert rt.scope_provider is provider
+        # read-only: assigning must raise AttributeError
+        with pytest.raises(AttributeError):
+            rt.scope_provider = MagicMock()  # type: ignore[misc]
 
 
 class TestMakeServerAuth:

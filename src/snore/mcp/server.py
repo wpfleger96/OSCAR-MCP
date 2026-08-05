@@ -98,8 +98,8 @@ class StaticRuntime:
     """Stdio-path runtime: scope_provider and profile_id fixed at lifespan start.
 
     Frozen to prevent accidental mutation across concurrent requests sharing
-    the same lifespan.  ``profile_id`` is resolved from the first live profile
-    row at server startup.
+    the same lifespan.  ``profile_id`` is resolved from the live profile with
+    the lowest ID at server startup.
     """
 
     scope_provider: _ScopeProvider
@@ -116,7 +116,11 @@ class ActorRuntime:
     """
 
     def __init__(self, scope_provider: _ScopeProvider) -> None:
-        self.scope_provider = scope_provider
+        self._scope_provider = scope_provider
+
+    @property
+    def scope_provider(self) -> _ScopeProvider:
+        return self._scope_provider
 
     @property
     def profile_id(self) -> int:
@@ -320,12 +324,10 @@ def tool_error_boundary(
         except Exception as exc:
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
-            message = (
-                f"HTTP {status} from upstream service"
-                if status is not None
-                else str(exc)
-            )
-            raise ToolError(message) from exc
+            if status is not None:
+                raise ToolError(f"HTTP {status} from upstream service") from exc
+            logger.exception("Unexpected error in tool call")
+            raise ToolError("An unexpected error occurred.") from exc
 
     return wrapper
 

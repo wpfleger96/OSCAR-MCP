@@ -36,7 +36,7 @@ async def _db(tmp_path: Path) -> AsyncGenerator[Any]:
 
 
 @pytest.fixture()
-async def seeded_db(_db: Any, tmp_path: Path) -> dict[str, Any]:
+async def seeded_db(_db: Any) -> dict[str, Any]:
     """Seed a user + two profiles + auth_identity and return their IDs.
 
     Layout:
@@ -265,6 +265,102 @@ class TestResolveActorErrors:
         # Must be actionable.
         assert "disabled" in msg.lower()
 
+    async def test_resolve_actor_tombstoned_profile_raises_generic_tool_error(
+        self, _db: Any
+    ) -> None:
+        """Active user whose only profile is tombstoned → generic ToolError, no user id."""
+        from datetime import UTC, datetime
+
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        async with session_scope() as db:
+            user = models.User(
+                canonical_email=f"tombstone_{uuid.uuid4().hex[:8]}@example.com",
+                role="member",
+            )
+            db.add(user)
+            await db.flush()
+
+            profile = models.Profile(
+                user_id=user.id,
+                name="Tombstoned Profile",
+                deleting_at=datetime.now(UTC),
+            )
+            db.add(profile)
+            await db.flush()
+
+            sub = f"google-tombstone-{uuid.uuid4().hex[:8]}"
+            identity = models.AuthIdentity(
+                user_id=user.id,
+                provider="google",
+                subject=sub,
+                email=user.canonical_email,
+            )
+            db.add(identity)
+            await db.flush()
+            user_id = user.id
+
+        token = _fake_token({"sub": sub})
+
+        async with session_scope() as db:
+            with pytest.raises(ToolError) as exc_info:
+                await resolve_actor(db, token)
+
+        msg = str(exc_info.value)
+        # Must not leak user id.
+        assert str(user_id) not in msg
+        # Must be the generic message, not the disabled message.
+        assert "disabled" not in msg.lower()
+        assert "Unable to resolve" in msg or "administrator" in msg
+
+    async def test_resolve_actor_cross_provider_identity_not_matched(
+        self, _db: Any
+    ) -> None:
+        """AuthIdentity with provider='github' and same sub must not resolve via Google lookup."""
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        sub = f"cross-provider-{uuid.uuid4().hex[:8]}"
+
+        async with session_scope() as db:
+            user = models.User(
+                canonical_email=f"github_{uuid.uuid4().hex[:8]}@example.com",
+                role="member",
+            )
+            db.add(user)
+            await db.flush()
+
+            profile = models.Profile(user_id=user.id, name="GitHub Profile")
+            db.add(profile)
+            await db.flush()
+
+            # Seed a GitHub identity with the same subject value.
+            identity = models.AuthIdentity(
+                user_id=user.id,
+                provider="github",
+                subject=sub,
+                email=user.canonical_email,
+            )
+            db.add(identity)
+            await db.flush()
+
+        # Token claims sub matching the GitHub identity's subject.
+        token = _fake_token({"sub": sub})
+
+        async with session_scope() as db:
+            with pytest.raises(ToolError) as exc_info:
+                await resolve_actor(db, token)
+
+        msg = str(exc_info.value)
+        # Must not match the GitHub identity — provider filter is Google only.
+        assert sub not in msg
+        assert "No SNORE account" in msg or "Sign in" in msg
+
 
 # ---------------------------------------------------------------------------
 # actor_scope tests
@@ -355,6 +451,40 @@ class TestMakeAuthProvider:
                 google_client_secret="",
             )
 
+    def test_make_auth_provider_http_non_loopback_rejected(self) -> None:
+        from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="SNORE_MCP_BASE_URL"):
+            make_auth_provider(
+                base_url="http://example.com",
+                google_client_id="client-id",
+                google_client_secret="secret",
+            )
+
+    def test_make_auth_provider_http_loopback_accepted(self) -> None:
+        from fastmcp.server.auth.auth import AuthProvider  # noqa: PLC0415
+
+        from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
+
+        provider = make_auth_provider(
+            base_url="http://127.0.0.1:8321",
+            google_client_id="valid-client-id",
+            google_client_secret="valid-client-secret",
+        )
+        assert isinstance(provider, AuthProvider)
+
+    def test_make_auth_provider_https_non_loopback_accepted(self) -> None:
+        from fastmcp.server.auth.auth import AuthProvider  # noqa: PLC0415
+
+        from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
+
+        provider = make_auth_provider(
+            base_url="https://mcp.example.com",
+            google_client_id="valid-client-id",
+            google_client_secret="valid-client-secret",
+        )
+        assert isinstance(provider, AuthProvider)
+
     def test_make_auth_provider_returns_provider(self) -> None:
         from fastmcp.server.auth.auth import AuthProvider  # noqa: PLC0415
 
@@ -367,3 +497,5 @@ class TestMakeAuthProvider:
         )
 
         assert isinstance(provider, AuthProvider)
+        # Pin that the configured base URL was wired into the provider.
+        assert str(provider.base_url).rstrip("/") == "https://example.com"

@@ -45,8 +45,9 @@ def mcp(db: str | None, profile: str, transport: str, host: str, port: int) -> N
     for Claude Desktop / Claude Code integration.
 
     HTTP transport: Start the FastMCP server over streamable-HTTP with Google
-    OAuth, suitable for Claude iOS (remote MCP) integration.  Requires three
-    environment variables:
+    OAuth, suitable for Claude iOS (remote MCP) integration.  Note: every
+    authenticated request performs a live Google tokeninfo call; outages or
+    rate-limits will affect all requests.  Requires three environment variables:
 
     \b
         SNORE_MCP_BASE_URL     — public base URL of this server (e.g.
@@ -81,15 +82,15 @@ def mcp(db: str | None, profile: str, transport: str, host: str, port: int) -> N
     logger.debug("snore mcp: profile=%s db=%r transport=%s", profile, db, transport)
 
     if transport == "http":
-        missing = [
-            name
-            for name, var in [
-                ("SNORE_MCP_BASE_URL", os.environ.get("SNORE_MCP_BASE_URL")),
-                ("GOOGLE_CLIENT_ID", os.environ.get("GOOGLE_CLIENT_ID")),
-                ("GOOGLE_CLIENT_SECRET", os.environ.get("GOOGLE_CLIENT_SECRET")),
-            ]
-            if not var
+        _env_vars = [
+            ("SNORE_MCP_BASE_URL", os.environ.get("SNORE_MCP_BASE_URL", "").strip()),
+            ("GOOGLE_CLIENT_ID", os.environ.get("GOOGLE_CLIENT_ID", "").strip()),
+            (
+                "GOOGLE_CLIENT_SECRET",
+                os.environ.get("GOOGLE_CLIENT_SECRET", "").strip(),
+            ),
         ]
+        missing = [name for name, val in _env_vars if not val]
         if missing:
             raise click.UsageError(
                 f"HTTP transport requires environment variables: {', '.join(missing)}"
@@ -97,13 +98,21 @@ def mcp(db: str | None, profile: str, transport: str, host: str, port: int) -> N
 
         from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
 
-        auth = make_auth_provider(
-            base_url=os.environ["SNORE_MCP_BASE_URL"],
-            google_client_id=os.environ["GOOGLE_CLIENT_ID"],
-            google_client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-        )
+        base_url, google_client_id, google_client_secret = (val for _, val in _env_vars)
+        try:
+            auth = make_auth_provider(
+                base_url=base_url,
+                google_client_id=google_client_id,
+                google_client_secret=google_client_secret,
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
         server = make_server(db_flag=db, profile_name=profile, auth=auth)
         server.run(transport="http", host=host, port=port)
     else:
+        if host != "127.0.0.1" or port != 8321:
+            click.echo(
+                "Warning: --host/--port are ignored with stdio transport", err=True
+            )
         server = make_server(db_flag=db, profile_name=profile)
         server.run(transport="stdio")
