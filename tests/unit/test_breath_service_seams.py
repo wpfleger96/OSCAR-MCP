@@ -973,6 +973,121 @@ class TestComputeWaveformWindow:
 
 
 # ---------------------------------------------------------------------------
+# fetch_ca_analysis / compute_ca_analysis seam (module-level)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFetchCaAnalysis:
+    async def test_fetch_returns_dto_free_of_orm_handles(self, async_db_session):
+        """fetch_ca_analysis returns a RawCaAnalysis carrying no ORM/DB objects.
+
+        Verifies that RawCaAnalysis, its session_data, pre_waveform, and
+        ca_events fields all contain only plain Python/Pydantic values so that
+        compute_ca_analysis can run outside the DB scope safely.
+        """
+        from snore.services.breath_service import (  # noqa: PLC0415
+            BreathService,
+            RawCaAnalysis,
+            RawCaSessionData,
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 6, 20)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(async_db_session, session, profile_id)
+        # Add a CA event so session_data is populated
+        ca_event = models.Event(
+            session_id=session.id,
+            event_type="CA",
+            start_time=session.start_time + timedelta(minutes=5),
+            duration_seconds=10.0,
+        )
+        async_db_session.add(ca_event)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert isinstance(raw, RawCaAnalysis)
+        assert len(raw.session_data) == 1
+
+        sd = raw.session_data[0]
+        assert isinstance(sd, RawCaSessionData)
+        # No ORM model types anywhere in the DTO
+        assert isinstance(sd.session_id, int)
+        assert isinstance(sd.session_start, datetime)
+        assert len(sd.ca_events) == 1
+        assert sd.ca_events[0].duration_seconds == pytest.approx(10.0)
+        # pre_waveform carries bytes, not SQLAlchemy rows
+        from snore.services.breath_service import RawWaveformWindow  # noqa: PLC0415
+
+        assert isinstance(sd.pre_waveform, RawWaveformWindow)
+        for ch in sd.pre_waveform.channels:
+            assert isinstance(ch.raw_bytes, bytes)
+
+    async def test_compute_is_deterministic_on_fixed_raw(self, async_db_session):
+        """compute_ca_analysis produces identical output when called twice with the same raw.
+
+        Verifies that the pure function has no mutable state — identical inputs
+        always yield identical CaAnalysisResult values.
+        """
+        from snore.services.breath_service import (  # noqa: PLC0415
+            BreathService,
+            compute_ca_analysis,
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 6, 21)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(async_db_session, session, profile_id)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        result1 = compute_ca_analysis(raw)
+        result2 = compute_ca_analysis(raw)
+
+        assert result1.model_dump() == result2.model_dump()
+
+    async def test_orchestrator_equals_fetch_plus_compute(self, async_db_session):
+        """get_ca_analysis(date) == compute_ca_analysis(fetch_ca_analysis(date)).
+
+        Verifies that the convenience orchestrator produces bit-identical output
+        to the explicit fetch+compute composition.
+        """
+        from snore.services.breath_service import (  # noqa: PLC0415
+            BreathService,
+            compute_ca_analysis,
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 6, 22)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(async_db_session, session, profile_id)
+        ca_event = models.Event(
+            session_id=session.id,
+            event_type="CA",
+            start_time=session.start_time + timedelta(minutes=15),
+            duration_seconds=8.0,
+        )
+        async_db_session.add(ca_event)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+        composed = compute_ca_analysis(raw)
+        orchestrated = await svc.get_ca_analysis(
+            therapy_date=therapy_date, device_id=dev.id
+        )
+
+        assert composed.model_dump() == orchestrated.model_dump()
+
+
+# ---------------------------------------------------------------------------
 # A-suite rework — drives store_result() production path
 # ---------------------------------------------------------------------------
 

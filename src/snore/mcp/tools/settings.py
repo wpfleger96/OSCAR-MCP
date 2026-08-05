@@ -6,7 +6,7 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.rx_tracker import RX_KEYS, RxTracker
+from snore.analysis.rx_tracker import RX_KEYS, RxTracker, changed_setting_keys
 from snore.mcp.schemas import (
     DeviceCapabilities,
     SettingsEpoch,
@@ -77,7 +77,7 @@ async def get_settings_timeline(
         # Determine which keys changed vs. previous epoch for this device
         key = dev_id if dev_id is not None else -1
         prev = prev_settings.get(key, {})
-        changed_keys = [k for k in settings if settings[k] != prev.get(k)]
+        changed_keys = sorted(changed_setting_keys(prev, settings))
         prev_settings[key] = settings
 
         # Clip epoch boundaries to requested range

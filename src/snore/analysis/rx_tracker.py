@@ -3,6 +3,7 @@
 import itertools
 import logging
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -35,6 +36,19 @@ RX_KEYS = (
 )
 
 _TAIL_WALK_BATCH_SIZE = 90
+
+
+def changed_setting_keys(
+    prev: Mapping[str, str | None],
+    curr: Mapping[str, str | None],
+) -> set[str]:
+    """Return the set of keys whose value differs between prev and curr.
+
+    Uses union semantics: a key present in only one mapping (i.e. added or
+    removed) is also reported.  Return type is a set so callers can choose
+    their own ordering (sorted, RX_KEYS order, etc.).
+    """
+    return {k for k in set(prev) | set(curr) if prev.get(k) != curr.get(k)}
 
 
 def _diff_settings(

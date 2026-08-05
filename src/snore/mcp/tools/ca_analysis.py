@@ -1,4 +1,12 @@
-"""get_ca_analysis tool — BreathService.get_ca_analysis() adapter.
+"""get_ca_analysis tool — BreathService CA-analysis adapter.
+
+Architecture (plan §9 in-scope/out-of-scope split):
+- DB fetch runs INSIDE the server's scope_provider context: ``fetch_ca_raw``
+  holds the AsyncSession only during the query and device-capabilities fetch;
+  the scope closes before CPU work begins.
+- ``ca_response_from_raw`` is PURE — it calls ``compute_ca_analysis``
+  (deserialize/compute/aggregate) outside the DB scope.  No session access
+  occurs after ``fetch_ca_raw`` returns.
 
 Timestamp contract (A6):
 - Session wall-clock anchors (session_start_wall_clock) use tier-2
@@ -15,59 +23,90 @@ when coverage is insufficient. Refusals are SUCCESS responses, never errors.
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import CaAnalysisResponse, CaDetailSchema, SessionCoverageEntry
+from snore.mcp.schemas import CaAnalysisResponse, CaDetailSchema
 from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._coverage import map_session_coverage
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
 )
 
+if TYPE_CHECKING:
+    from snore.mcp.schemas import DeviceCapabilities
+    from snore.services.breath_service import RawCaAnalysis
 
-async def get_ca_analysis(
+
+async def fetch_ca_raw(
     db_session: AsyncSession,
     therapy_date: date,
     profile_id: int,
     device_id: int | None = None,
-) -> CaAnalysisResponse:
-    """Return CA event context and night-level periodic-breathing stats.
+) -> tuple[RawCaAnalysis, DeviceCapabilities | None]:
+    """Fetch CA data and device capabilities within the caller's DB scope.
 
-    CA events are event-anchored (import-time Event rows) and are returned
-    even when day_status is not_run, partial, or mixed_version.  Night-level
-    fields (periodic_breathing_pct, mv_rolling_variance) are null with
-    companion *_reason fields when coverage is insufficient.
+    Delegates to ``BreathService.fetch_ca_analysis`` for the per-session
+    waveform blobs, CA events, and PB% JSON, then builds ``DeviceCapabilities``
+    within the same scope.
+
+    ``DeviceAmbiguityError``, ``DeviceNotOwnedError``, and
+    ``MultiSessionAmbiguityError`` are mapped to ``ValidationError`` via
+    ``raise_mapped_service_error``.
 
     Args:
-        db_session: Async database session.
+        db_session: Async database session (used only inside this call).
         therapy_date: Therapy date to query.
-        profile_id: Profile scope for ownership checks (required).
+        profile_id: Profile scope for all ownership checks.
         device_id: Filter to a specific device; required when multiple devices
             share the date.
     """
     from snore.services.breath_service import BreathService  # noqa: PLC0415
 
     bs = BreathService(db_session, profile_id)
-    # MultiSessionAmbiguityError is included in MAPPED_SERVICE_ERRORS defensively;
-    # get_ca_analysis iterates all sessions and does not currently raise it.
     try:
-        result = await bs.get_ca_analysis(
-            therapy_date=therapy_date, device_id=device_id
-        )
+        raw = await bs.fetch_ca_analysis(therapy_date=therapy_date, device_id=device_id)
     except MAPPED_SERVICE_ERRORS as exc:
         raise_mapped_service_error(exc)
 
-    coverage = [
-        SessionCoverageEntry(
-            session_id=c.session_id,
-            analysis_status=str(c.analysis_status),
-            algo_versions=c.algo_versions.model_dump(mode="json")
-            if c.algo_versions is not None
-            else None,
+    # Service uses device_id=0 as a sentinel for "no device resolved" (never emit it).
+    resolved_device_id = raw.device_id if raw.device_id > 0 else None
+    caps = None
+    if resolved_device_id is not None:
+        # Pass analysis_run=True when the day has analysis coverage (avoids an
+        # extra DB round-trip when day_status already confirms analysis ran).
+        analysis_run = str(raw.day_status) != "not_run"
+        caps = await build_device_capabilities(
+            db_session,
+            profile_id,
+            resolved_device_id,
+            date_start=therapy_date,
+            date_end=therapy_date,
+            analysis_run=analysis_run,
         )
-        for c in result.session_coverage
-    ]
+    return raw, caps
+
+
+def ca_response_from_raw(
+    raw: RawCaAnalysis,
+    caps: DeviceCapabilities | None,
+) -> CaAnalysisResponse:
+    """Build a ``CaAnalysisResponse`` from raw fetch results.
+
+    Pure — no DB access.  Calls ``compute_ca_analysis`` (numpy/statistics
+    aggregation) then maps the ``CaAnalysisResult`` DTO to the MCP response
+    schema.
+
+    Session sentinel scrub: ``device_id=0`` means no device was resolved; it
+    is never emitted in the response (mapped to null).
+    """
+    from snore.services.breath_service import compute_ca_analysis  # noqa: PLC0415
+
+    result = compute_ca_analysis(raw)
+
+    coverage = map_session_coverage(result.session_coverage)
 
     ca_events = [
         CaDetailSchema(
@@ -89,23 +128,6 @@ async def get_ca_analysis(
         )
         for ev in result.ca_events
     ]
-
-    # Service uses device_id=0 as a sentinel for "no device resolved" (never emit it).
-    resolved_device_id = result.device_id if result.device_id > 0 else None
-
-    caps = None
-    if resolved_device_id is not None:
-        # Pass analysis_run=True when the day has analysis coverage (avoids an
-        # extra DB round-trip when day_status already confirms analysis ran).
-        analysis_run = str(result.day_status) != "not_run"
-        caps = await build_device_capabilities(
-            db_session,
-            profile_id,
-            resolved_device_id,
-            date_start=therapy_date,
-            date_end=therapy_date,
-            analysis_run=analysis_run,
-        )
 
     return CaAnalysisResponse(
         query_date=result.query_date.isoformat(),
