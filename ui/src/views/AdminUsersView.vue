@@ -369,6 +369,7 @@ async function handleCreateInvite(): Promise<void> {
             role: inviteRole.value,
             ttl_days: inviteTtlDays.value,
         })
+        await reloadInvites()
     } catch (e: unknown) {
         createInviteError.value = e instanceof Error ? e.message : 'Failed to create invite'
     } finally {

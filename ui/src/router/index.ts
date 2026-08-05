@@ -21,6 +21,15 @@ const LANDING_PAGE_MAP: Record<UserPreferences['landing_page'], string> = {
     stats: '/stats',
 }
 
+/** Resolve the authenticated user's preferred landing path (multiuser only). */
+export async function resolveLandingPath(): Promise<string> {
+    const prefs = await client
+        .get<UserPreferences>('/auth/me/preferences')
+        .then((r) => r.data)
+        .catch(() => null)
+    return LANDING_PAGE_MAP[prefs?.landing_page ?? 'dashboard'] ?? '/dashboard'
+}
+
 function sessionIdProp(route: { params: { id: string | string[] } }) {
     const id = Number(route.params.id)
     return { sessionId: Number.isFinite(id) ? id : -1 }
@@ -172,11 +181,7 @@ export async function authGuard(to: RouteLocationNormalized): Promise<string | b
             // Local mode has no preferences endpoint; skip the fetch.
             return '/dashboard'
         }
-        const prefs = await client
-            .get<UserPreferences>('/auth/me/preferences')
-            .then((r) => r.data)
-            .catch(() => null)
-        return LANDING_PAGE_MAP[prefs?.landing_page ?? 'dashboard'] ?? '/dashboard'
+        return resolveLandingPath()
     }
 
     // Multiuser-only routes are inaccessible in local mode.

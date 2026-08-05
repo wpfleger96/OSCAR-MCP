@@ -77,6 +77,7 @@ import { useRouter } from 'vue-router'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/composables/useAuth'
+import { resolveLandingPath } from '@/router'
 
 const router = useRouter()
 const { login, demoLogin } = useAuth()
@@ -93,7 +94,7 @@ async function handleLogin() {
     loading.value = true
     try {
         await login(email.value, password.value)
-        router.push('/dashboard')
+        router.push(await resolveLandingPath())
     } catch (e: unknown) {
         const status = (e as { response?: { status?: number } }).response?.status
         if (status === 401) {
@@ -115,7 +116,7 @@ async function handleDemoLogin() {
     demoLoading.value = true
     try {
         await demoLogin()
-        router.push('/dashboard')
+        router.push(await resolveLandingPath())
     } catch (e: unknown) {
         const status = (e as { response?: { status?: number } }).response?.status
         if (status === 404) {
