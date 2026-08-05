@@ -14,10 +14,10 @@
         <div class="empty-card border border-border bg-card">
             <BarChart3 class="empty-icon text-muted-foreground" />
             <p class="text-muted-foreground">No analysis results for this session.</p>
-            <Button :disabled="running" @click="handleRunAnalysis">
+            <Button :disabled="!canWrite || running" @click="handleRunAnalysis">
                 <Loader2 v-if="running" class="h-4 w-4 animate-spin" />
                 <Play v-else class="h-4 w-4" />
-                Run Analysis
+                {{ canWrite ? 'Run Analysis' : 'Demo: Read-only' }}
             </Button>
         </div>
     </div>
@@ -363,6 +363,9 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Loader2, AlertTriangle, ArrowLeft, BarChart3, Play } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
+import { useAuth } from '@/composables/useAuth'
+
+const { canWrite } = useAuth()
 import { getWaveformCompare } from '@/api/waveforms'
 import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'

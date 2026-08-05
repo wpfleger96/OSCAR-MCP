@@ -376,6 +376,60 @@ async def logout(request: Request) -> JSONResponse:
     return response
 
 
+@router.post("/demo-login", response_model=MessageResponse)
+async def demo_login(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JSONResponse:
+    """Sign in as the demo account (read-only, no password required).
+
+    Looks up the single active demo user and issues a session cookie.
+    Returns 404 (generic) when no demo account is configured so callers
+    cannot distinguish "demo user disabled" from "demo user absent".
+    """
+    from snore.api.config import get_config  # noqa: PLC0415
+
+    cfg = get_config()
+
+    demo_user = (
+        (
+            await db.execute(
+                select(models.User).where(
+                    models.User.role == "demo",
+                    models.User.disabled_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+    if demo_user is None:
+        raise HTTPException(status_code=404, detail="Demo not available")
+
+    factory = ActorContextFactory(db)
+    actor = await factory.make(
+        user_id=demo_user.id,
+        active_profile_id=demo_user.default_profile_id,
+        mode=cfg.auth_mode,
+    )
+
+    response = JSONResponse(
+        content={"message": "Logged in as demo"},
+        headers=_NO_STORE,
+    )
+    if cfg.is_multiuser:
+        set_session_cookie(
+            response,
+            secret=cfg.session_secret,
+            user_id=actor.user_id,
+            active_profile_id=actor.profile_id,
+            session_version=demo_user.session_version,
+            secure=cfg.secure_cookie,
+        )
+    return response
+
+
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status(
     request: Request,

@@ -7,7 +7,7 @@
             <input v-model="fromDate" type="date" class="date-input" />
             <input v-model="toDate" type="date" class="date-input" />
             <Toggle v-model:pressed="analyzedOnly" variant="outline"> Analyzed Only </Toggle>
-            <Button variant="outline" size="sm" @click="batchDialogOpen = true">
+            <Button v-if="canWrite" variant="outline" size="sm" @click="batchDialogOpen = true">
                 <Play class="mr-2 h-4 w-4" />
                 Run Batch
             </Button>
@@ -61,7 +61,7 @@
                         </TableCell>
                         <TableCell>
                             <Button
-                                v-if="s.has_analysis"
+                                v-if="canWrite && s.has_analysis"
                                 variant="ghost"
                                 size="icon"
                                 title="Delete analysis"
@@ -211,6 +211,9 @@ import {
 } from '@/api/analysis'
 import { formatDateShort } from '@/utils/formatting'
 import type { AnalysisListItem, BatchAnalysisResult, AnalysisDeletePreview } from '@/types'
+import { useAuth } from '@/composables/useAuth'
+
+const { canWrite } = useAuth()
 
 const sessions = ref<AnalysisListItem[]>([])
 const loading = ref(true)

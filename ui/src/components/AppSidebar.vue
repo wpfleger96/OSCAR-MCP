@@ -29,7 +29,7 @@
             </RouterLink>
 
             <span class="nav-group-label">Tools</span>
-            <RouterLink to="/import" class="nav-item">
+            <RouterLink v-if="canWrite" to="/import" class="nav-item">
                 <Upload class="h-4 w-4" />
                 <span>Import</span>
             </RouterLink>
@@ -146,8 +146,16 @@ import { useAuth } from '@/composables/useAuth'
 
 const router = useRouter()
 const { isDark, toggleDark } = useDarkMode()
-const { user, isAuthenticated, isLocal, profiles, activeProfileId, setActiveProfile, logout } =
-    useAuth()
+const {
+    user,
+    isAuthenticated,
+    isLocal,
+    profiles,
+    activeProfileId,
+    canWrite,
+    setActiveProfile,
+    logout,
+} = useAuth()
 
 const displayName = computed(() => user.value?.display_name || user.value?.email || 'Account')
 
