@@ -64,4 +64,5 @@ def serve(host: str, port: int, reload: bool, db: str | None) -> None:
         host=host,
         port=port,
         reload=reload,
+        reload_dirs=["src"] if reload else None,
     )
