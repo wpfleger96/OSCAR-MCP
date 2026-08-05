@@ -885,7 +885,7 @@ class RawCaSessionData(BaseModel):
     session_start: datetime  # naive — tier-2 anchor
     duration_seconds: float
     coverage: SessionCoverage
-    is_ok: bool  # analysis_status == OK and algo_versions is not None
+    is_ok: bool  # analysis_status == OK and algo_versions is not None and ar_id is not None
     pre_waveform: RawWaveformWindow  # MV, THERAPY_PRESSURE, EPAP channels
     ca_events: list[RawCaEvent]
     pb_json: (
@@ -897,10 +897,9 @@ class RawCaAnalysis(BaseModel):
     """Raw fetch result for CA analysis. Pass to compute_ca_analysis (ORM-free).
 
     session_data being empty signals an empty day; compute_ca_analysis maps it
-    to a NOT_RUN CaAnalysisResult sentinel consistent with get_ca_analysis.
-    Day-level state (day_status, algorithm_identity, null_reason,
-    night_level_refused) is pre-reduced during fetch so compute_ca_analysis
-    performs only numpy/statistics work.
+    to a CaAnalysisResult using the pre-reduced day-level fields below.
+    Day-level state (day_status, algorithm_identity, null_reason) is pre-reduced
+    during fetch so compute_ca_analysis performs only numpy/statistics work.
     """
 
     therapy_date: date
@@ -910,7 +909,6 @@ class RawCaAnalysis(BaseModel):
     day_status: DayAnalysisStatus
     algorithm_identity: AlgorithmIdentity | None
     null_reason: NullReason | None
-    night_level_refused: bool
 
 
 # ---------------------------------------------------------------------------
@@ -3400,7 +3398,6 @@ class BreathService:
                 day_status=DayAnalysisStatus.NOT_RUN,
                 algorithm_identity=None,
                 null_reason=NullReason.ANALYSIS_NOT_RUN,
-                night_level_refused=False,
             )
 
         # Build coverage; identify OK sessions
@@ -3538,7 +3535,6 @@ class BreathService:
             day_status=ca_day_status,
             algorithm_identity=algo_identity,
             null_reason=ca_null_reason,
-            night_level_refused=night_level_refused,
         )
 
     async def get_ca_analysis(
@@ -3585,10 +3581,10 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
         return CaAnalysisResult(
             query_date=raw.therapy_date,
             device_id=raw.device_id,
-            day_status=DayAnalysisStatus.NOT_RUN,
+            day_status=raw.day_status,
             session_coverage=[],
-            algorithm_identity=None,
-            null_reason=NullReason.ANALYSIS_NOT_RUN,
+            algorithm_identity=raw.algorithm_identity,
+            null_reason=raw.null_reason,
             ca_events=[],
             periodic_breathing_pct=None,
             pb_reason=NullReason.NOT_AVAILABLE,
@@ -3597,6 +3593,7 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
         )
 
     coverage = [sd.coverage for sd in raw.session_data]
+    night_level_refused = raw.day_status == DayAnalysisStatus.MIXED_VERSION
 
     # Helper: linear regression slope (rise/run), returns L/min per SECOND
     def _mv_slope(xs: list[float], ys: list[float]) -> float | None:
@@ -3716,7 +3713,7 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
             )
 
         # Night-level metrics: OK sessions ONLY (eligibility gate)
-        if sd.is_ok and not raw.night_level_refused:
+        if sd.is_ok and not night_level_refused:
             total_eligible_s += sd.duration_seconds
 
             # PB% from persisted AnalysisResult JSON
@@ -3758,14 +3755,14 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                             combined_bin_means.append(float(v_arr[lo:hi].mean()))
 
     # Compute cross-session MV variance from combined bin means (OK sessions only)
-    if not raw.night_level_refused and len(combined_bin_means) >= 2:
+    if not night_level_refused and len(combined_bin_means) >= 2:
         mv_rolling_var = statistics.variance(combined_bin_means)
         mv_var_reason = None
 
     # Compute pb_pct over eligible (OK) sessions only
     pb_pct: float | None = None
     pb_reason: NullReason | None = NullReason.NOT_AVAILABLE
-    if raw.night_level_refused:
+    if night_level_refused:
         pb_reason = NullReason.ALGO_VERSION_MISMATCH
         mv_var_reason = NullReason.ALGO_VERSION_MISMATCH
     elif pb_seen_any:
