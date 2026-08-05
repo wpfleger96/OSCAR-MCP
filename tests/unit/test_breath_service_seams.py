@@ -448,6 +448,109 @@ class TestFindWindows:
         assert len(result.windows) > 0
         assert result.windows[0].worst_mid_insp_flattening == pytest.approx(0.35)
 
+    async def test_worst_flattening_none_flattening_breaths_skipped(
+        self, async_db_session
+    ):
+        """Breaths with mid_insp_flattening=None are never selected as anchors.
+
+        Real fragment breaths skip the classifier and arrive with
+        mid_insp_flattening=None. With default options (no threshold), the
+        eligibility filter must exclude them unconditionally so the f-string
+        format in reason_summary never sees a None value.
+        """
+        from snore.analysis.types import ComputedBreath  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 2, 1)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        # Build a mix: two breaths with real flattening values, one with None.
+        base_breath = {
+            "breath_number": 0,
+            "start_offset_s": 0.0,
+            "end_offset_s": 3.0,
+            "inspiration_time_s": 1.2,
+            "expiration_time_s": 1.8,
+            "total_time_s": 3.0,
+            "i_e_ratio": 0.67,
+            "duty_cycle": 0.4,
+            "peak_flow_lpm": 30.0,
+            "peak_exp_flow_lpm": 20.0,
+            "tidal_volume_ml": 400.0,
+            "respiratory_rate_rolling": 15.0,
+            "flatness_index": 0.2,
+            "flow_class": 3,
+            "flow_confidence": 0.9,
+            "is_recovery_breath": False,
+            "inferred_trigger_type": "normal",
+            "trigger_confidence": 0.8,
+            "inferred_cycle_type": "normal",
+            "cycle_confidence": 0.75,
+            "trigger_cycle_applicable": True,
+            "trigger_cycle_reason": None,
+            "leak_valid": True,
+            "leak_valid_reason": None,
+            "ramp_active": None,
+            "ramp_active_reason": "not_available",
+            "mask_off": False,
+            "mask_off_reason": None,
+        }
+
+        breaths = []
+        for i, mid_fl in enumerate([0.8, None, 0.6, 0.7, 0.5, 0.4, 0.3]):
+            b = ComputedBreath(
+                **{
+                    **base_breath,
+                    "breath_number": i + 1,
+                    "mid_insp_flattening": mid_fl,
+                    "start_offset_s": float(i * 4),
+                    "end_offset_s": float(i * 4 + 3),
+                }
+            )
+            breaths.append(b)
+
+        from snore.analysis.modes.types import ModeResult  # noqa: PLC0415
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.analysis.types import AnalysisComputation  # noqa: PLC0415
+        from snore.analysis.types import (
+            AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+        )
+
+        result_dto = AnalysisResultDTO(
+            session_id=session.id,
+            session_duration_hours=7.0,
+            total_breaths=len(breaths),
+            machine_events=[],
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
+            timestamp_start=session.start_time.timestamp(),
+            timestamp_end=(session.end_time or session.start_time).timestamp(),
+        )
+        computation = AnalysisComputation(
+            summary=result_dto, breaths=breaths, primary_mode="aasm"
+        )
+        await AnalysisService(async_db_session, profile_id=profile_id).store_result(
+            computation, processing_time_ms=10
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=5,
+            device_id=dev.id,
+        )
+
+        assert result.day_status == DayAnalysisStatus.OK
+        assert len(result.windows) > 0
+        for w in result.windows:
+            assert w.worst_mid_insp_flattening is not None
+
 
 # ---------------------------------------------------------------------------
 # compare_epochs

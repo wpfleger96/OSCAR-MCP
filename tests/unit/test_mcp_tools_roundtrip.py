@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -144,6 +144,65 @@ class TestGetSettingsTimelineRoundtrip:
         payload = json.loads(result.content[0].text)
         assert payload["epochs"] == []
         assert payload["total_epochs"] == 0
+        assert payload["device_capabilities_by_device"] == {}
+
+    async def test_device_capabilities_at_top_level_not_per_epoch(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
+        """Device capabilities appear in device_capabilities_by_device, not per epoch."""
+        from snore.mcp.schemas import DeviceCapabilities  # noqa: PLC0415
+        from snore.services.schemas import RxPeriodResponse  # noqa: PLC0415
+
+        period = RxPeriodResponse(
+            device_id=3,
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 3, 31),
+            settings={"mode": "CPAP"},
+            days_count=90,
+        )
+        mock_caps = DeviceCapabilities(
+            manufacturer="ResMed",
+            model="AirSense",
+            serial_number="SN001",
+            has_flow_waveform=True,
+            has_pressure_waveform=True,
+            has_leak_waveform=True,
+            has_spo2=False,
+            has_events=True,
+            has_analysis=True,
+        )
+        with (
+            patch(
+                "snore.analysis.rx_tracker.RxTracker.get_history",
+                new_callable=AsyncMock,
+                return_value=[period],
+            ),
+            patch(
+                "snore.mcp.tools.settings.build_device_capabilities",
+                new_callable=AsyncMock,
+                return_value=mock_caps,
+            ),
+            patch(
+                "snore.mcp.tools.settings._has_analysis",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            async with mcp_client_factory(mock_db_session) as client:
+                result = await client.call_tool(
+                    "get_settings_timeline",
+                    {"start": "2024-01-01", "end": "2024-12-31"},
+                )
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert len(payload["epochs"]) == 1
+        epoch = payload["epochs"][0]
+        assert "device_capabilities" not in epoch
+        assert "3" in payload["device_capabilities_by_device"]
+        caps = payload["device_capabilities_by_device"]["3"]
+        assert caps["manufacturer"] == "ResMed"
+        assert caps["has_flow_waveform"] is True
 
     async def test_invalid_date_range_returns_error(
         self, mock_db_session: Any, mcp_client_factory: Any
@@ -216,6 +275,19 @@ class TestGetNightlySummaryRoundtrip:
 
         # DB was never touched — scope_provider was never called
         mock_db_session.execute.assert_not_called()
+
+    async def test_page_size_91_raises_tool_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
+        """page_size=91 is rejected with a clean validation error."""
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        async with mcp_client_factory(mock_db_session) as client:
+            with pytest.raises(ToolError, match="page_size must be between 1 and 90"):
+                await client.call_tool(
+                    "get_nightly_summary",
+                    {"start": "2024-01-01", "end": "2024-01-31", "page_size": 91},
+                )
 
 
 # ---------------------------------------------------------------------------

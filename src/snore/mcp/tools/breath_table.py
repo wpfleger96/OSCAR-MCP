@@ -95,7 +95,8 @@ async def get_breath_table(
         msg = str(exc)
         if "No sessions found" in msg:
             raise ValidationError(
-                f"{msg} Use get_data_overview to check which dates have imported data."
+                f"No therapy data found for date {therapy_date}. "
+                "Use get_data_overview to check which dates have imported data."
             ) from exc
         raise ValidationError(msg) from exc
 

@@ -238,15 +238,29 @@ class TestBuildInstructions:
 class TestValidatePageArgs:
     """validate_page_args rejects out-of-range pagination values."""
 
-    def test_valid_args_return_capped_page_size(self) -> None:
+    def test_valid_args_return_page_size(self) -> None:
         from snore.mcp.validation import validate_page_args
 
         assert validate_page_args(1, 30) == 30
 
-    def test_page_size_is_capped_at_90(self) -> None:
+    def test_page_size_90_is_valid(self) -> None:
         from snore.mcp.validation import validate_page_args
 
-        assert validate_page_args(1, 200) == 90
+        assert validate_page_args(1, 90) == 90
+
+    def test_page_size_91_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
+            validate_page_args(1, 91)
+
+    def test_page_size_200_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
+            validate_page_args(1, 200)
 
     def test_page_zero_raises(self) -> None:
         from snore.mcp.errors import ValidationError
@@ -266,14 +280,14 @@ class TestValidatePageArgs:
         from snore.mcp.errors import ValidationError
         from snore.mcp.validation import validate_page_args
 
-        with pytest.raises(ValidationError, match="page_size must be >= 1"):
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
             validate_page_args(1, 0)
 
     def test_page_size_negative_raises(self) -> None:
         from snore.mcp.errors import ValidationError
         from snore.mcp.validation import validate_page_args
 
-        with pytest.raises(ValidationError, match="page_size must be >= 1"):
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
             validate_page_args(1, -10)
 
 

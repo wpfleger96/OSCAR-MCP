@@ -109,7 +109,6 @@ async def get_events(
 
         rows.append(
             EventRow(
-                id=None,  # BreathService seam does not expose internal event IDs
                 session_id=ev.session_id,
                 session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
                 event_type=ev.event_type,

@@ -51,6 +51,7 @@ __all__ = [
     "MultiSessionAmbiguityError",
     "DeviceAmbiguityError",
     "DeviceNotOwnedError",
+    "NoSessionsInRangeError",
     "BreathRow",
     "BreathBin",
     "BreathPage",
@@ -182,6 +183,15 @@ class DeviceAmbiguityError(Exception):
             f"Multiple devices have sessions on {therapy_date}: "
             "pass device_id to disambiguate"
         )
+
+
+class NoSessionsInRangeError(ValueError):
+    """Raised by _resolve_range when no owned sessions exist in the queried date range."""
+
+    def __init__(self, date_start: date, date_end: date) -> None:
+        self.date_start = date_start
+        self.date_end = date_end
+        super().__init__(f"No sessions found in range {date_start} to {date_end}")
 
 
 class BreathQueryRange(BaseModel):
@@ -1102,7 +1112,7 @@ class BreathService:
         )
         rows = (await self._db.execute(stmt)).all()
         if not rows:
-            raise ValueError(f"No sessions found in range {date_start} to {date_end}")
+            raise NoSessionsInRangeError(date_start, date_end)
         # Distinct device_ids, order-preserving
         device_ids_seen: list[int] = list(
             dict.fromkeys(r.Session.device_id for r in rows)
@@ -1468,7 +1478,7 @@ class BreathService:
                 is_binned=True,
                 total_breaths=total_breaths,
                 page=1,
-                page_size=len(bins),
+                page_size=query.page_size,
                 bins=bins,
                 session_id=session_id,
             )
@@ -1634,12 +1644,7 @@ class BreathService:
                     windows=[],
                 )
 
-        # Only pass primary_mode when criterion uses recovery markers
-        result_primary_mode = (
-            uniform_primary_mode
-            if criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY
-            else None
-        )
+        result_primary_mode = uniform_primary_mode
 
         # ar_by_session populated during the coverage loop above
         ar_status_by_session: dict[int, AnalysisStatus] = {
@@ -1731,12 +1736,14 @@ class BreathService:
             # Filter eligible anchors per §6 step 1
             eligible_indices: list[int] = []
             for i, b in enumerate(breath_rows):
+                if b.mid_insp_flattening is None:
+                    continue
                 if b.leak_valid is True or (
                     opts.include_unknown_leak and b.leak_valid is None
                 ):
-                    if opts.flattening_threshold is None or (
-                        b.mid_insp_flattening is not None
-                        and b.mid_insp_flattening >= opts.flattening_threshold
+                    if (
+                        opts.flattening_threshold is None
+                        or b.mid_insp_flattening >= opts.flattening_threshold
                     ):
                         eligible_indices.append(i)
 

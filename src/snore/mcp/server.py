@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.types import Image
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.session import (
@@ -321,6 +322,16 @@ def tool_error_boundary(
             return await func(*args, **kwargs)
         except ToolError:
             raise
+        except PydanticValidationError as exc:
+            parts: list[str] = []
+            for err in exc.errors():
+                msg = err["msg"].removeprefix("Value error, ")
+                loc = err.get("loc", ())
+                if loc:
+                    parts.append(f"{'.'.join(str(p) for p in loc)}: {msg}")
+                else:
+                    parts.append(msg)
+            raise ToolError("; ".join(parts)) from exc
         except (ValidationError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
         except Exception as exc:
@@ -1089,7 +1100,10 @@ def _register_tools(mcp: FastMCP) -> None:
         rather than causing an error.
 
         A date with no sessions returns a valid single-panel PNG with a "No waveform
-        data" label rather than a tool error.
+        data" label rather than a tool error — but only when ``device_id`` is provided
+        (owned device, empty date) or when a single device is auto-resolved.  When no
+        device can be resolved (no sessions in range and no ``device_id`` supplied)
+        the tool raises an error instead.
 
         Args:
             date: Session date in YYYY-MM-DD format.
