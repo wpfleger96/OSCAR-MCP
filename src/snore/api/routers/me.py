@@ -81,14 +81,14 @@ class PasswordChangeRequest(BaseModel):
 
 
 class UserPreferences(BaseModel):
-    landing_page: Literal["dashboard", "sessions", "days"] = "dashboard"
+    landing_page: Literal["dashboard", "sessions", "stats"] = "dashboard"
     date_format: Literal["iso", "locale", "short"] = "iso"
 
 
 class UserPreferencesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    landing_page: Literal["dashboard", "sessions", "days"] | None = None
+    landing_page: Literal["dashboard", "sessions", "stats"] | None = None
     date_format: Literal["iso", "locale", "short"] | None = None
 
 
