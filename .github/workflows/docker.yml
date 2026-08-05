@@ -7,9 +7,14 @@ on:
     tags:
       - 'v*'
 
+# Queue publish runs per ref so an older build can never overwrite a newer
+# `latest` tag.  cancel-in-progress: false means we wait, not skip.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: wpfleger96/snore
 
 jobs:
   build-and-push:
@@ -20,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -36,7 +41,8 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # metadata-action lowercases image names automatically.
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{raw}}
@@ -46,6 +52,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          # linux/amd64 only — deployment target is amd64 Proxmox LXC;
+          # QEMU-emulated arm64 adds CI time for zero consumers.
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

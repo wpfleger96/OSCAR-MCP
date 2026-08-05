@@ -280,6 +280,8 @@ def create_app() -> FastAPI:
         profiles.router, prefix=f"{API_V1_PREFIX}/profiles", tags=["profiles"]
     )
 
+    # Excluded from the OpenAPI schema deliberately — keeps the health probe
+    # out of generated API clients and avoids ui/src/types/generated.ts churn.
     @app.get("/health", include_in_schema=False)
     async def health() -> dict[str, str]:
         return {"status": "ok"}
