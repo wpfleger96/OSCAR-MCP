@@ -30,7 +30,7 @@
                 {{ error }}
             </div>
 
-            <Button :disabled="!fromDate || !toDate || running" @click="handleRun">
+            <Button :disabled="!canWrite || !fromDate || !toDate || running" @click="handleRun">
                 <Loader2 v-if="running" class="mr-2 h-4 w-4 animate-spin" />
                 Run Validation
             </Button>
@@ -166,6 +166,9 @@ import {
 import { Loader2, AlertTriangle } from '@lucide/vue'
 import { formatDateShort } from '@/utils/formatting'
 import { runValidation } from '@/api/validation'
+import { useAuth } from '@/composables/useAuth'
+
+const { canWrite } = useAuth()
 import type { ValidationReport, SessionValidation } from '@/types'
 
 const fromDate = ref('')

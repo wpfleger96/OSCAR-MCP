@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
 
 vi.mock('@/composables/useAuth')
@@ -24,6 +24,7 @@ describe('LoginView', () => {
     beforeEach(() => {
         vi.mocked(useAuth).mockReturnValue({
             login: vi.fn(),
+            demoLogin: vi.fn(),
             logout: vi.fn(),
             clearAuth: vi.fn(),
             fetchStatus: vi.fn(),
@@ -35,6 +36,8 @@ describe('LoginView', () => {
             profiles: { value: [] } as never,
             activeProfileId: { value: null } as never,
             authMode: { value: null } as never,
+            role: { value: null } as never,
+            canWrite: { value: true } as never,
             profileKey: { value: 0 } as never,
         })
     })
@@ -92,11 +95,50 @@ describe('LoginView', () => {
         expect(wrapper.find('[role="alert"]').text()).toContain('Too many attempts')
     })
 
-    it('test_demo_button_is_disabled', () => {
+    it('test_demo_button_is_enabled', () => {
         const wrapper = mount(LoginView, {
             global: { plugins: [makeRouter()] },
         })
         const demoBtn = wrapper.find('.demo-btn')
-        expect(demoBtn.attributes('disabled')).toBeDefined()
+        expect(demoBtn.attributes('disabled')).toBeUndefined()
+    })
+
+    it('test_demo_button_click_calls_demoLogin_and_navigates_to_dashboard', async () => {
+        const demoLoginMock = vi.fn().mockResolvedValueOnce(undefined)
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            demoLogin: demoLoginMock,
+        })
+        const router = makeRouter()
+        const wrapper = mount(LoginView, {
+            global: { plugins: [router] },
+        })
+
+        await wrapper.find('.demo-btn').trigger('click')
+        // flushPromises drains all microtasks (the async demoLogin + router.push).
+        await flushPromises()
+
+        expect(demoLoginMock).toHaveBeenCalledOnce()
+        expect(router.currentRoute.value.path).toBe('/dashboard')
+    })
+
+    it('test_demo_button_shows_unavailable_on_404', async () => {
+        const demoLoginMock = vi.fn().mockRejectedValueOnce({
+            response: { status: 404 },
+            message: 'Not Found',
+        })
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            demoLogin: demoLoginMock,
+        })
+        const wrapper = mount(LoginView, {
+            global: { plugins: [makeRouter()] },
+        })
+
+        await wrapper.find('.demo-btn').trigger('click')
+        await wrapper.vm.$nextTick()
+        await wrapper.vm.$nextTick()
+
+        expect(wrapper.find('[role="alert"]').text()).toBe('Demo unavailable')
     })
 })

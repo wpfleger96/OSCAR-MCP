@@ -37,7 +37,7 @@
                 Clear
             </Button>
             <Button
-                v-if="selectedIds.size > 0"
+                v-if="canWrite && selectedIds.size > 0"
                 variant="destructive"
                 size="sm"
                 @click="confirmBulkDelete"
@@ -145,6 +145,7 @@
                         <TableCell>
                             <div class="row-actions">
                                 <Button
+                                    v-if="canWrite"
                                     variant="ghost"
                                     size="icon"
                                     :title="session.enabled ? 'Disable' : 'Enable'"
@@ -167,6 +168,7 @@
                                     <BarChart3 class="h-4 w-4" />
                                 </Button>
                                 <Button
+                                    v-if="canWrite"
                                     variant="ghost"
                                     size="icon"
                                     title="Delete"
@@ -260,6 +262,9 @@ import { getDevices } from '@/api/devices'
 import { ahiClass } from '@/utils/format'
 import { formatDateTime, formatIso, parseLocalDate } from '@/utils/formatting'
 import type { SessionListItem, DeletePreview, DeviceInfo } from '@/types'
+import { useAuth } from '@/composables/useAuth'
+
+const { canWrite } = useAuth()
 
 const router = useRouter()
 const route = useRoute()

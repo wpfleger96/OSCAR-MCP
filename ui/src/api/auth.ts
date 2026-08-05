@@ -24,6 +24,8 @@ export const loginUser = apiPost<MessageResponse, [body: LoginRequest]>('/auth/l
     data: body,
 }))
 
+export const demoLoginUser = apiPost<MessageResponse>('/auth/demo-login')
+
 export const logoutUser = apiPost<MessageResponse>('/auth/logout')
 
 export const switchProfile = apiPost<MessageResponse, [body: ActiveProfileRequest]>(

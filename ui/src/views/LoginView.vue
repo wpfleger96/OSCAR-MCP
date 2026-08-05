@@ -62,7 +62,11 @@
                 Sign in with Google
             </a>
 
-            <button class="demo-btn" disabled title="Demo coming soon">Sign in as Demo</button>
+            <p v-if="demoError" role="alert" class="login-error">{{ demoError }}</p>
+            <button class="demo-btn" :disabled="demoLoading" @click="handleDemoLogin">
+                <Loader2 v-if="demoLoading" class="h-4 w-4 animate-spin mr-2" />
+                {{ demoLoading ? 'Signing in…' : 'Sign in as Demo' }}
+            </button>
         </div>
     </div>
 </template>
@@ -75,12 +79,14 @@ import { Button } from '@/components/ui/button'
 import { useAuth } from '@/composables/useAuth'
 
 const router = useRouter()
-const { login } = useAuth()
+const { login, demoLogin } = useAuth()
 
 const email = ref('')
 const password = ref('')
 const loading = ref(false)
 const errorMessage = ref<string | null>(null)
+const demoLoading = ref(false)
+const demoError = ref<string | null>(null)
 
 async function handleLogin() {
     errorMessage.value = null
@@ -101,6 +107,26 @@ async function handleLogin() {
         }
     } finally {
         loading.value = false
+    }
+}
+
+async function handleDemoLogin() {
+    demoError.value = null
+    demoLoading.value = true
+    try {
+        await demoLogin()
+        router.push('/dashboard')
+    } catch (e: unknown) {
+        const status = (e as { response?: { status?: number } }).response?.status
+        if (status === 404) {
+            demoError.value = 'Demo unavailable'
+        } else if (!navigator.onLine || (e instanceof Error && e.message === 'Network Error')) {
+            demoError.value = 'Unable to reach server'
+        } else {
+            demoError.value = 'Demo sign-in failed'
+        }
+    } finally {
+        demoLoading.value = false
     }
 }
 </script>
@@ -241,6 +267,7 @@ async function handleLogin() {
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 0.25rem;
     width: 100%;
     padding: 0.6rem 1rem;
     border: 1px solid var(--color-border);
@@ -249,7 +276,16 @@ async function handleLogin() {
     color: var(--color-muted-foreground);
     font-size: 0.875rem;
     font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.demo-btn:hover:not(:disabled) {
+    background: var(--color-accent);
+}
+
+.demo-btn:disabled {
+    opacity: 0.6;
     cursor: not-allowed;
-    opacity: 0.5;
 }
 </style>
