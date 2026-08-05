@@ -685,47 +685,43 @@ def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
     missing_channels: list[WaveformChannelName] = list(raw.missing_channels)
 
     for raw_ch in raw.channels:
+        if raw_ch.sample_count <= 0 or not raw_ch.raw_bytes:
+            missing_channels.append(raw_ch.waveform_type)
+            continue
         try:
-            if raw_ch.sample_count <= 0 or not raw_ch.raw_bytes:
-                missing_channels.append(raw_ch.waveform_type)
-                continue
             timestamps, values = deserialize_waveform_blob(
                 raw_ch.raw_bytes, raw_ch.sample_count
             )
-            # Slice to requested window
-            mask = (timestamps >= request.offset_start) & (
-                timestamps <= request.offset_end
-            )
-            ts_slice = timestamps[mask]
-            v_slice = values[mask]
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid waveform data for channel '{raw_ch.waveform_type.value}'"
+            ) from exc
+        # Slice to requested window
+        mask = (timestamps >= request.offset_start) & (timestamps <= request.offset_end)
+        ts_slice = timestamps[mask]
+        v_slice = values[mask]
 
-            original_count = int(len(ts_slice))
-            is_downsampled = False
-            if request.max_points is not None and original_count > request.max_points:
-                # LTTB downsampling: lttb_downsample(timestamps, values, target_points)
-                if len(ts_slice) >= 3:
-                    ts_ds, v_ds = lttb_downsample(ts_slice, v_slice, request.max_points)
-                    ts_slice = ts_ds
-                    v_slice = v_ds
-                    is_downsampled = True
+        original_count = int(len(ts_slice))
+        is_downsampled = False
+        if request.max_points is not None and original_count > request.max_points:
+            # LTTB downsampling: lttb_downsample(timestamps, values, target_points)
+            if len(ts_slice) >= 3:
+                ts_ds, v_ds = lttb_downsample(ts_slice, v_slice, request.max_points)
+                ts_slice = ts_ds
+                v_slice = v_ds
+                is_downsampled = True
 
-            channels_out.append(
-                WaveformChannel(
-                    channel_type=raw_ch.waveform_type,
-                    unit=raw_ch.unit,
-                    sample_rate=raw_ch.sample_rate,
-                    offset_seconds=ts_slice.tolist(),
-                    values=v_slice.tolist(),
-                    original_sample_count=original_count,
-                    is_downsampled=is_downsampled,
-                )
+        channels_out.append(
+            WaveformChannel(
+                channel_type=raw_ch.waveform_type,
+                unit=raw_ch.unit,
+                sample_rate=raw_ch.sample_rate,
+                offset_seconds=ts_slice.tolist(),
+                values=v_slice.tolist(),
+                original_sample_count=original_count,
+                is_downsampled=is_downsampled,
             )
-        except ValueError:
-            # Corrupt blob / sample-count mismatch: let sanitized ValueError
-            # propagate.  Only genuinely absent channels are silently moved to
-            # missing_channels.
-            raise
-        # Any other exception propagates — do NOT swallow unexpected failures
+        )
 
     missing_reason: NullReason | None = (
         NullReason.CHANNEL_ABSENT if missing_channels else None
@@ -3230,17 +3226,22 @@ class BreathService:
                 )
         return results
 
-    async def get_waveform_window(
+    async def fetch_waveform_window(
         self, request: WaveformWindowRequest
-    ) -> WaveformWindow:
-        """Convenience orchestrator: resolve → fetch blobs → compute. Never closes self._db.
+    ) -> RawWaveformWindow:
+        """Resolve, validate, and fetch raw waveform blobs for a window request.
 
-        Uses ``_resolve_range`` for device validation and session selection (raises
-        ``DeviceAmbiguityError`` for multi-device, ``DeviceNotOwnedError`` for foreign
-        device_id), then calls private ``_fetch_waveform_blobs`` directly with the
-        already-scoped session.  The public ``fetch_waveform_window_raw`` is not called
-        here; that function enforces the full identity tuple (profile + date + device)
-        and is intended for direct callers such as future MCP render/raw tools.
+        MCP raw/render seam (plan docs/mcp-server-plan.md §9): the fetch step runs
+        inside the caller's DB scope while ``compute_waveform_window`` (pure, CPU-only)
+        runs after the scope closes.  Direct callers that need the raw bytes or want
+        to render a PNG call this method, then pass the returned ``RawWaveformWindow``
+        to ``compute_waveform_window`` independently.
+
+        Raises ``DeviceAmbiguityError`` for multi-device profiles with no device_id,
+        ``DeviceNotOwnedError`` for a foreign device_id, ``ValueError`` when an
+        explicit session_id is provided but the date has no sessions, and
+        ``MultiSessionAmbiguityError`` when the date has multiple sessions and no
+        session_id was specified.
         """
         resolved_device_id, sessions_by_date = await self._resolve_range(
             request.therapy_date, request.therapy_date, request.device_id
@@ -3256,14 +3257,12 @@ class BreathService:
                     f"Session {request.session_id} not found for date "
                     f"{request.therapy_date} on device {resolved_device_id}"
                 )
-            return compute_waveform_window(
-                RawWaveformWindow(
-                    request=request,
-                    session_id=0,
-                    session_start_wall_clock=datetime.min,
-                    channels=[],
-                    missing_channels=list(request.channels),
-                )
+            return RawWaveformWindow(
+                request=request,
+                session_id=0,
+                session_start_wall_clock=datetime.min,
+                channels=[],
+                missing_channels=list(request.channels),
             )
 
         if request.session_id is not None:
@@ -3271,8 +3270,8 @@ class BreathService:
             session_ids = {s.id for s in day_sessions}
             if request.session_id not in session_ids:
                 raise ValueError(
-                    f"Session {request.session_id} not found on profile {self._profile_id} "
-                    f"for date {request.therapy_date} on device {resolved_device_id}"
+                    f"Session {request.session_id} not found for date "
+                    f"{request.therapy_date} on device {resolved_device_id}"
                 )
             session_row = next(s for s in day_sessions if s.id == request.session_id)
         elif len(day_sessions) > 1:
@@ -3294,9 +3293,21 @@ class BreathService:
         resolved_request = request.model_copy(
             update={"device_id": resolved_device_id, "session_id": session_row.id}
         )
-        raw = await _fetch_waveform_blobs(
+        return await _fetch_waveform_blobs(
             self._db, resolved_request, session_row.id, session_row.start_time
         )
+
+    async def get_waveform_window(
+        self, request: WaveformWindowRequest
+    ) -> WaveformWindow:
+        """Convenience orchestrator: resolve → fetch blobs → compute. Never closes self._db.
+
+        Uses ``_resolve_range`` for device validation and session selection (raises
+        ``DeviceAmbiguityError`` for multi-device, ``DeviceNotOwnedError`` for foreign
+        device_id), then delegates to ``fetch_waveform_window`` (the MCP seam) and
+        applies ``compute_waveform_window`` (pure) to produce the final DTO.
+        """
+        raw = await self.fetch_waveform_window(request)
         return compute_waveform_window(raw)
 
     async def get_ca_analysis(
@@ -3305,8 +3316,16 @@ class BreathService:
         """Per-CA context + night-level periodic-breathing stats.
 
         Returns CA events from ALL sessions on the resolved device.
+
+        Compute runs within the caller's DB session scope.  For the single-user
+        stdio server (post-Fix-3 optimisation) this is acceptable — the hot path
+        is a handful of numpy slices rather than per-event DB round-trips.
+        Revisit when PR-C introduces actor-scoped sessions and longer-lived DB
+        contexts.
         """
         import statistics  # noqa: PLC0415
+
+        import numpy as np  # noqa: PLC0415
 
         from sqlalchemy import select  # noqa: PLC0415
 
@@ -3414,6 +3433,39 @@ class BreathService:
             session_duration_s = session_row.duration_seconds or 0.0
             is_ok = session_id in ok_session_ids
 
+            # Pre-fetch MV + THERAPY_PRESSURE + EPAP blobs once per session.
+            # Corrupt blobs still raise ValueError per plan IMPORTANT-8.
+            session_cap = max(session_duration_s, 1.0)
+            pre_raw = await _fetch_waveform_blobs(
+                self._db,
+                WaveformWindowRequest(
+                    therapy_date=therapy_date,
+                    session_id=session_id,
+                    device_id=resolved_device_id,
+                    channels=[
+                        WaveformChannelName.MV,
+                        WaveformChannelName.THERAPY_PRESSURE,
+                        WaveformChannelName.EPAP,
+                    ],
+                    offset_start=0.0,
+                    offset_end=session_cap,
+                    window_cap_seconds=session_cap,
+                ),
+                session_id,
+                session_start,
+            )
+            pre_window = compute_waveform_window(pre_raw)
+            # Map channel_type → numpy arrays for O(log n) per-event slicing via
+            # searchsorted.  compute_waveform_window already deserializes once per
+            # channel; converting to ndarray here avoids per-event Python list scans.
+            pre_ch: dict[WaveformChannelName, tuple[np.ndarray, np.ndarray]] = {
+                ch.channel_type: (
+                    np.array(ch.offset_seconds),
+                    np.array(ch.values),
+                )
+                for ch in pre_window.channels
+            }
+
             ca_rows = (
                 (
                     await self._db.execute(
@@ -3440,46 +3492,34 @@ class BreathService:
                 stability_index: float | None = None
                 stability_reason: NullReason | None = NullReason.NOT_AVAILABLE
 
-                if offset_s > 0.0:
+                if offset_s > 0.0 and WaveformChannelName.MV in pre_ch:
                     # plan §12 line 976: stability_index uses 60-second window
                     mv_win_start = max(0.0, offset_s - 60.0)
-                    raw_mv = await _fetch_waveform_blobs(
-                        self._db,
-                        WaveformWindowRequest(
-                            therapy_date=therapy_date,
-                            session_id=session_id,
-                            device_id=resolved_device_id,
-                            channels=[WaveformChannelName.MV],
-                            offset_start=mv_win_start,
-                            offset_end=offset_s,
-                        ),
-                        session_id,
-                        session_start,
-                    )
-                    mv_win = compute_waveform_window(raw_mv)
-                    for ch in mv_win.channels:
-                        if (
-                            ch.channel_type == WaveformChannelName.MV
-                            and len(ch.values) >= 2
-                        ):
-                            # plan §12 line 976: slope in L/min per MINUTE
-                            # _mv_slope returns L/min per SECOND (offset_seconds as x)
-                            slope_per_s = _mv_slope(ch.offset_seconds, ch.values)
-                            if slope_per_s is not None:
-                                # convert: multiply by 60 s/min → L/min per minute
-                                preceding_mv_slope = slope_per_s * 60.0
-                            preceding_mv_reason = (
-                                None
-                                if preceding_mv_slope is not None
-                                else NullReason.NOT_AVAILABLE
-                            )
-                            if len(ch.values) >= 3:
-                                mean_mv = sum(ch.values) / len(ch.values)
-                                if mean_mv != 0.0:
-                                    stability_index = (
-                                        statistics.stdev(ch.values) / mean_mv
-                                    )
-                                    stability_reason = None
+                    off_mv, val_mv = pre_ch[WaveformChannelName.MV]
+                    # searchsorted: O(log n) per event, inclusive both ends
+                    lo = int(np.searchsorted(off_mv, mv_win_start, side="left"))
+                    hi = int(np.searchsorted(off_mv, offset_s, side="right"))
+                    ts_slice = off_mv[lo:hi]
+                    v_slice = val_mv[lo:hi]
+                    if len(ts_slice) >= 2:
+                        # plan §12 line 976: slope in L/min per MINUTE
+                        # _mv_slope returns L/min per SECOND (offset_seconds as x)
+                        slope_per_s = _mv_slope(ts_slice.tolist(), v_slice.tolist())
+                        if slope_per_s is not None:
+                            # convert: multiply by 60 s/min → L/min per minute
+                            preceding_mv_slope = slope_per_s * 60.0
+                        preceding_mv_reason = (
+                            None
+                            if preceding_mv_slope is not None
+                            else NullReason.NOT_AVAILABLE
+                        )
+                        if len(ts_slice) >= 3:
+                            mean_mv = float(v_slice.mean())
+                            if mean_mv != 0.0:
+                                stability_index = (
+                                    statistics.stdev(v_slice.tolist()) / mean_mv
+                                )
+                                stability_reason = None
 
                 # --- ps_delivered_cmh2o: mean(THERAPY_PRESSURE - EPAP) over ±5 s ---
                 ps_delivered: float | None = None
@@ -3488,35 +3528,24 @@ class BreathService:
                 ps_win_start = max(0.0, offset_s - 5.0)
                 ps_win_end = offset_s + 5.0
                 if ps_win_end > 0.0:
-                    raw_ps = await _fetch_waveform_blobs(
-                        self._db,
-                        WaveformWindowRequest(
-                            therapy_date=therapy_date,
-                            session_id=session_id,
-                            device_id=resolved_device_id,
-                            channels=[
-                                WaveformChannelName.THERAPY_PRESSURE,
-                                WaveformChannelName.EPAP,
-                            ],
-                            offset_start=ps_win_start,
-                            offset_end=ps_win_end,
-                        ),
-                        session_id,
-                        session_start,
-                    )
-                    ps_win = compute_waveform_window(raw_ps)
-                    therapy_vals: list[float] = []
-                    epap_vals: list[float] = []
-                    for ch in ps_win.channels:
-                        if ch.channel_type == WaveformChannelName.THERAPY_PRESSURE:
-                            therapy_vals = ch.values
-                        elif ch.channel_type == WaveformChannelName.EPAP:
-                            epap_vals = ch.values
-                    if therapy_vals and epap_vals:
-                        min_len = min(len(therapy_vals), len(epap_vals))
-                        diffs = [therapy_vals[i] - epap_vals[i] for i in range(min_len)]
-                        if diffs:
-                            ps_delivered = sum(diffs) / len(diffs)
+                    if (
+                        WaveformChannelName.THERAPY_PRESSURE in pre_ch
+                        and WaveformChannelName.EPAP in pre_ch
+                    ):
+                        off_tp, val_tp = pre_ch[WaveformChannelName.THERAPY_PRESSURE]
+                        off_ep, val_ep = pre_ch[WaveformChannelName.EPAP]
+                        # searchsorted: O(log n) per event, inclusive both ends
+                        tp_lo = int(np.searchsorted(off_tp, ps_win_start, side="left"))
+                        tp_hi = int(np.searchsorted(off_tp, ps_win_end, side="right"))
+                        ep_lo = int(np.searchsorted(off_ep, ps_win_start, side="left"))
+                        ep_hi = int(np.searchsorted(off_ep, ps_win_end, side="right"))
+                        tp_slice = val_tp[tp_lo:tp_hi]
+                        ep_slice = val_ep[ep_lo:ep_hi]
+                        if len(tp_slice) > 0 and len(ep_slice) > 0:
+                            min_len = min(len(tp_slice), len(ep_slice))
+                            ps_delivered = float(
+                                np.mean(tp_slice[:min_len] - ep_slice[:min_len])
+                            )
                             ps_reason = None
 
                 ca_details.append(
@@ -3579,42 +3608,20 @@ class BreathService:
                             pb_seen_any = True
 
                 # MV rolling variance: collect bin means across ALL OK sessions
-                # (combined; variance computed once after the loop)
-                session_cap = max(session_duration_s, 1.0)
-                raw_mv_full = await _fetch_waveform_blobs(
-                    self._db,
-                    WaveformWindowRequest(
-                        therapy_date=therapy_date,
-                        session_id=session_id,
-                        device_id=resolved_device_id,
-                        channels=[WaveformChannelName.MV],
-                        offset_start=0.0,
-                        offset_end=session_cap,
-                        window_cap_seconds=session_cap,
-                    ),
-                    session_id,
-                    session_start,
-                )
-                mv_full = compute_waveform_window(raw_mv_full)
-                for ch in mv_full.channels:
-                    if (
-                        ch.channel_type == WaveformChannelName.MV
-                        and len(ch.values) >= 6
-                    ):
+                # (combined; variance computed once after the loop).
+                # Vectorized with numpy: one searchsorted pass per bin rather than
+                # a full-list comprehension, and max() hoisted out of the loop.
+                if WaveformChannelName.MV in pre_ch:
+                    ts_arr, v_arr = pre_ch[WaveformChannelName.MV]
+                    if ts_arr.size >= 6:
+                        max_t = float(ts_arr.max())
                         bin_size = 600.0
-                        offsets_full = ch.offset_seconds
-                        vals_full = ch.values
-                        bin_start_t = 0.0
-                        while bin_start_t < max(offsets_full):
-                            bin_end_t = bin_start_t + bin_size
-                            bv = [
-                                v
-                                for t, v in zip(offsets_full, vals_full, strict=True)
-                                if bin_start_t <= t < bin_end_t
-                            ]
-                            if bv:
-                                combined_bin_means.append(sum(bv) / len(bv))
-                            bin_start_t = bin_end_t
+                        for bin_start in np.arange(0.0, max_t, bin_size):
+                            bin_end = float(bin_start) + bin_size
+                            lo = int(np.searchsorted(ts_arr, bin_start, side="left"))
+                            hi = int(np.searchsorted(ts_arr, bin_end, side="left"))
+                            if lo < hi:
+                                combined_bin_means.append(float(v_arr[lo:hi].mean()))
 
         # Compute cross-session MV variance from combined bin means (OK sessions only)
         if not night_level_refused and len(combined_bin_means) >= 2:

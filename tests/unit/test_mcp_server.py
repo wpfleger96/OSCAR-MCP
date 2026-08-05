@@ -285,8 +285,8 @@ class TestValidateMinDuration:
 class TestStage2ToolsRegistered:
     """The three Stage-2 tools appear in make_server() tool listing."""
 
-    async def test_seven_tools_registered(self) -> None:
-        """make_server() registers exactly seven tools (four Stage-1 + three Stage-2)."""
+    async def test_ten_tools_registered(self) -> None:
+        """make_server() registers exactly ten tools (four Stage-1 + three Stage-2 + three Stage-3)."""
         from collections.abc import AsyncIterator
         from contextlib import asynccontextmanager
         from unittest.mock import MagicMock, patch
@@ -321,7 +321,11 @@ class TestStage2ToolsRegistered:
         # Stage-1 tools still present
         assert "get_data_overview" in tool_names
         assert "get_events" in tool_names
-        assert len(tool_names) == 7
+        # Stage-3 tools
+        assert "get_waveform" in tool_names
+        assert "render_window" in tool_names
+        assert "get_ca_analysis" in tool_names
+        assert len(tool_names) == 10
 
     async def test_compare_epochs_schema_has_epochs_parameter(self) -> None:
         """compare_epochs tool schema includes an 'epochs' parameter."""
@@ -358,6 +362,102 @@ class TestStage2ToolsRegistered:
         assert "epochs" in (schema.get("properties") or {}), (
             f"compare_epochs inputSchema missing 'epochs': {schema}"
         )
+
+
+class TestChannelVocabInSync:
+    """Channel vocabulary in get_waveform and render_window docstrings must be identical
+    and must cover all WaveformChannelName enum members."""
+
+    async def _get_tools(self) -> list:
+        from collections.abc import AsyncIterator
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock, patch
+
+        import fastmcp
+
+        from snore.mcp.server import SNORERuntime, make_server
+
+        @asynccontextmanager
+        async def _fake_lifespan(
+            app: MagicMock, db_flag: str | None = None, profile_name: str = "neutral"
+        ) -> AsyncIterator[SNORERuntime]:
+            session = MagicMock()
+
+            @asynccontextmanager
+            async def _noop_scope(s: MagicMock) -> AsyncIterator[MagicMock]:
+                yield s
+
+            yield SNORERuntime(
+                scope_provider=lambda: _noop_scope(session),
+                profile_id=1,
+            )
+
+        mcp = make_server()
+        with patch("snore.mcp.server._lifespan", _fake_lifespan):
+            async with fastmcp.Client(mcp) as client:
+                return await client.list_tools()
+
+    @staticmethod
+    def _extract_channel_lines(description: str) -> list[str]:
+        """Extract lines from the channel vocabulary block (lines that name a channel)."""
+        channel_names = [
+            "flow",
+            "pressure",
+            "therapy_pressure",
+            "epap",
+            "leak",
+            "mv",
+            "rr",
+            "tv",
+            "spo2",
+            "pulse",
+            "fl",
+            "snore",
+        ]
+        return [
+            line.strip()
+            for line in description.splitlines()
+            if any(f"`{name}`" in line for name in channel_names)
+        ]
+
+    async def test_channel_vocab_in_sync(self) -> None:
+        """get_waveform and render_window channel vocabulary blocks are identical."""
+        tools = await self._get_tools()
+        tool_map = {t.name: t for t in tools}
+
+        gw_desc = tool_map["get_waveform"].description or ""
+        rw_desc = tool_map["render_window"].description or ""
+
+        gw_lines = self._extract_channel_lines(gw_desc)
+        rw_lines = self._extract_channel_lines(rw_desc)
+
+        assert gw_lines, "get_waveform description has no channel lines"
+        assert rw_lines, "render_window description has no channel lines"
+        assert gw_lines == rw_lines, (
+            "Channel vocabulary mismatch between get_waveform and render_window.\n"
+            f"get_waveform:  {gw_lines}\n"
+            f"render_window: {rw_lines}"
+        )
+
+    async def test_all_channel_names_in_both_tools(self) -> None:
+        """Every WaveformChannelName enum value must appear in both tool descriptions."""
+        from snore.services.breath_service import WaveformChannelName  # noqa: PLC0415
+
+        tools = await self._get_tools()
+        tool_map = {t.name: t for t in tools}
+
+        gw_desc = tool_map["get_waveform"].description or ""
+        rw_desc = tool_map["render_window"].description or ""
+
+        missing_gw = [
+            ch.value for ch in WaveformChannelName if f"`{ch.value}`" not in gw_desc
+        ]
+        missing_rw = [
+            ch.value for ch in WaveformChannelName if f"`{ch.value}`" not in rw_desc
+        ]
+
+        assert not missing_gw, f"get_waveform missing channels: {missing_gw}"
+        assert not missing_rw, f"render_window missing channels: {missing_rw}"
 
 
 class TestLifespanStartupFailure:
