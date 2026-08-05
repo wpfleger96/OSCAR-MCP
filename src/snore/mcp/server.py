@@ -217,6 +217,8 @@ async def _lifespan(
         if actor_scoped:
             from snore.mcp.auth import actor_scope  # noqa: PLC0415
 
+            # profile_name shapes only the instructions text; per-request actors
+            # carry their own profile_id, so no profile row is resolved here.
             runtime = ActorRuntime(scope_provider=actor_scope)
             logger.info(
                 "SNORE MCP server started — db=%r profile=actor-scoped (OAuth)",

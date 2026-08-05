@@ -237,6 +237,33 @@ class TestMcpCliHttpPath:
             transport="http", host="0.0.0.0", port=9000
         )
 
+    def test_http_make_server_called_with_auth_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """make_server() must receive the constructed auth provider via the auth= kwarg."""
+        monkeypatch.setenv("SNORE_MCP_BASE_URL", "https://mcp.example.com")
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id")
+        monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "client-secret")
+
+        mock_auth_mod = _make_mock_auth_module()
+        mock_server = MagicMock()
+
+        from snore.cli.commands.mcp import mcp
+
+        with patch.dict(sys.modules, {"snore.mcp.auth": mock_auth_mod}):
+            with patch(
+                "snore.mcp.server.make_server", return_value=mock_server
+            ) as mock_make_server:
+                runner = CliRunner()
+                result = runner.invoke(mcp, ["--transport", "http"])
+
+        assert result.exit_code == 0, result.output
+        mock_make_server.assert_called_once_with(
+            db_flag=None,
+            profile_name="neutral",
+            auth=mock_auth_mod.make_auth_provider.return_value,
+        )
+
     def test_auth_provider_construction_failure_exits_nonzero(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

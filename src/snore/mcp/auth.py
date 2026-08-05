@@ -19,6 +19,8 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
+import httpx
+
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 from sqlalchemy import select
@@ -45,6 +47,7 @@ def make_auth_provider(
     base_url: str,
     google_client_id: str,
     google_client_secret: str,
+    http_client: httpx.AsyncClient | None = None,
 ) -> AuthProvider:
     """Construct a GoogleProvider for HTTP transport.
 
@@ -54,6 +57,13 @@ def make_auth_provider(
                              for loopback addresses (127.x.x.x, ::1, localhost).
         google_client_id:    OAuth client ID (GOOGLE_CLIENT_ID).
         google_client_secret: OAuth client secret (GOOGLE_CLIENT_SECRET).
+        http_client:         httpx.AsyncClient for connection pooling to Google
+                             endpoints.  When None (default), a long-lived client
+                             is created inside this function and passed to
+                             GoogleProvider.  The client is intentionally
+                             process-lifetime: the MCP server process owns it and
+                             connections close with the process.  Pass an explicit
+                             client in tests to control the transport.
 
     Returns:
         Configured GoogleProvider instance.
@@ -63,19 +73,25 @@ def make_auth_provider(
                     the loopback-HTTP / HTTPS-required policy.
 
     Performance note:
-        fastmcp's GoogleProvider re-validates the upstream Google token via a
-        live tokeninfo HTTP call on every authenticated request (in
-        OAuthProxy.load_access_token).  GoogleProvider does not expose a
-        token_verifier seam at construction time, so a clean in-process TTL
-        cache cannot be injected without patching fastmcp internals.  Google
-        tokeninfo outages or rate-limits will therefore affect all authenticated
-        requests.
+        fastmcp performs both a tokeninfo and a userinfo call to Google on every
+        authenticated request (``OAuthProxy.load_access_token`` delegates to
+        ``GoogleTokenVerifier.verify_token``; the userinfo result is not used by
+        SNORE).  There is no token_verifier construction seam in fastmcp to skip
+        the userinfo call without patching internals.  Google tokeninfo outages
+        or rate-limits will therefore affect all authenticated requests.
+        Connection pooling via the shared ``http_client`` reuses TLS connections
+        to Google's endpoints across requests.
+
+    Deployment note:
+        Dynamic client registration accepts any client redirect URI by design
+        (MCP spec pattern, fastmcp ``allowed_client_redirect_uris=None`` default);
+        operators serving untrusted multi-tenant contexts should restrict it.
     """
     from fastmcp.server.auth.providers.google import GoogleProvider  # noqa: PLC0415
 
     from snore.api.config import (  # noqa: PLC0415
         ConfigError,
-        _validate_origin_url,
+        validate_origin_url,
     )
 
     _require_nonempty(base_url, "base_url", "SNORE_MCP_BASE_URL")
@@ -85,16 +101,18 @@ def make_auth_provider(
     )
 
     try:
-        _validate_origin_url(base_url, require_http_loopback=True)
+        validate_origin_url(base_url, require_http_loopback=True)
     except ConfigError as exc:
         raise ValueError(
             f"SNORE_MCP_BASE_URL must be a valid HTTPS (or loopback HTTP) URL: {exc}"
         ) from exc
 
+    _client = http_client if http_client is not None else httpx.AsyncClient()
     return GoogleProvider(
         client_id=google_client_id,
         client_secret=google_client_secret,
         base_url=base_url,
+        http_client=_client,
     )
 
 
@@ -130,7 +148,7 @@ async def resolve_actor(db: AsyncSession, token: AccessToken) -> ActorContext:
         fastmcp.exceptions.ToolError: On any identity-resolution failure.
     """
     sub = token.claims.get("sub")
-    if not sub:
+    if not sub or not isinstance(sub, str):
         raise ToolError(
             "Authentication token is missing the required 'sub' claim. "
             "Re-authenticate and try again."

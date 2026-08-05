@@ -2,15 +2,47 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
+from unittest.mock import MagicMock
+
 import pytest
 
 from snore.mcp.profiles import get_profile
 from snore.mcp.server import (
     RESPONSE_SIZE_LIMIT,
+    StaticRuntime,
     _build_instructions,
     _check_response_size,
     tool_error_boundary,
 )
+
+# ---------------------------------------------------------------------------
+# Shared lifespan stub — used by TestStage2ToolsRegistered and
+# TestChannelVocabInSync to patch snore.mcp.server._lifespan without
+# touching the real DB.  Extracted once to eliminate the ~3x duplication.
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _noop_scope(session: MagicMock) -> AsyncIterator[MagicMock]:
+    yield session
+
+
+@asynccontextmanager
+async def _fake_static_lifespan(
+    app: Any,
+    db_flag: str | None = None,
+    profile_name: str = "neutral",
+    *,
+    actor_scoped: bool = False,
+) -> AsyncIterator[StaticRuntime]:
+    session = MagicMock()
+    yield StaticRuntime(
+        scope_provider=lambda: _noop_scope(session),
+        profile_id=1,
+    )
 
 
 class TestToolErrorBoundary:
@@ -299,34 +331,14 @@ class TestStage2ToolsRegistered:
 
     async def test_make_server_registers_exactly_ten_tools(self) -> None:
         """make_server() registers exactly ten tools (four Stage-1 + three Stage-2 + three Stage-3)."""
-        from collections.abc import AsyncIterator
-        from contextlib import asynccontextmanager
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         import fastmcp
 
-        from snore.mcp.server import StaticRuntime, make_server
-
-        @asynccontextmanager
-        async def _fake_lifespan(
-            app: MagicMock,
-            db_flag: str | None = None,
-            profile_name: str = "neutral",
-            *,
-            actor_scoped: bool = False,
-        ) -> AsyncIterator[StaticRuntime]:
-            session = MagicMock()
-            yield StaticRuntime(
-                scope_provider=lambda: _noop_scope(session),
-                profile_id=1,
-            )
-
-        @asynccontextmanager
-        async def _noop_scope(s: MagicMock) -> AsyncIterator[MagicMock]:
-            yield s
+        from snore.mcp.server import make_server
 
         mcp = make_server()
-        with patch("snore.mcp.server._lifespan", _fake_lifespan):
+        with patch("snore.mcp.server._lifespan", _fake_static_lifespan):
             async with fastmcp.Client(mcp) as client:
                 tools = await client.list_tools()
 
@@ -345,34 +357,14 @@ class TestStage2ToolsRegistered:
 
     async def test_compare_epochs_schema_has_epochs_parameter(self) -> None:
         """compare_epochs tool schema includes an 'epochs' parameter."""
-        from collections.abc import AsyncIterator
-        from contextlib import asynccontextmanager
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         import fastmcp
 
-        from snore.mcp.server import StaticRuntime, make_server
-
-        @asynccontextmanager
-        async def _fake_lifespan(
-            app: MagicMock,
-            db_flag: str | None = None,
-            profile_name: str = "neutral",
-            *,
-            actor_scoped: bool = False,
-        ) -> AsyncIterator[StaticRuntime]:
-            session = MagicMock()
-            yield StaticRuntime(
-                scope_provider=lambda: _noop_scope(session),
-                profile_id=1,
-            )
-
-        @asynccontextmanager
-        async def _noop_scope(s: MagicMock) -> AsyncIterator[MagicMock]:
-            yield s
+        from snore.mcp.server import make_server
 
         mcp = make_server()
-        with patch("snore.mcp.server._lifespan", _fake_lifespan):
+        with patch("snore.mcp.server._lifespan", _fake_static_lifespan):
             async with fastmcp.Client(mcp) as client:
                 tools = await client.list_tools()
 
@@ -389,35 +381,14 @@ class TestChannelVocabInSync:
     and must cover all WaveformChannelName enum members."""
 
     async def _get_tools(self) -> list:
-        from collections.abc import AsyncIterator
-        from contextlib import asynccontextmanager
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         import fastmcp
 
-        from snore.mcp.server import StaticRuntime, make_server
-
-        @asynccontextmanager
-        async def _fake_lifespan(
-            app: MagicMock,
-            db_flag: str | None = None,
-            profile_name: str = "neutral",
-            *,
-            actor_scoped: bool = False,
-        ) -> AsyncIterator[StaticRuntime]:
-            session = MagicMock()
-
-            @asynccontextmanager
-            async def _noop_scope(s: MagicMock) -> AsyncIterator[MagicMock]:
-                yield s
-
-            yield StaticRuntime(
-                scope_provider=lambda: _noop_scope(session),
-                profile_id=1,
-            )
+        from snore.mcp.server import make_server
 
         mcp = make_server()
-        with patch("snore.mcp.server._lifespan", _fake_lifespan):
+        with patch("snore.mcp.server._lifespan", _fake_static_lifespan):
             async with fastmcp.Client(mcp) as client:
                 return await client.list_tools()
 
@@ -523,6 +494,76 @@ class TestLifespanStartupFailure:
                     pass  # pragma: no cover
 
         cleanup_mock.assert_awaited_once()
+
+
+class TestLifespanActorScoped:
+    """_lifespan with actor_scoped=True yields ActorRuntime and skips the profile query."""
+
+    async def test_actor_scoped_skips_profile_query_and_yields_actor_runtime(
+        self,
+    ) -> None:
+        """actor_scoped=True: session_scope is never called; runtime is ActorRuntime."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from snore.mcp.server import ActorRuntime, _lifespan
+
+        cleanup_mock = AsyncMock()
+        session_scope_mock = MagicMock()  # must NOT be called
+        mock_target = MagicMock()
+        mock_target.resolve_async_url.return_value = "sqlite+aiosqlite:///:memory:"
+
+        with (
+            patch("snore.mcp.server.DatabaseTarget") as mock_target_cls,
+            patch("snore.mcp.server.init_database_from_url", new_callable=AsyncMock),
+            patch("snore.mcp.server.cleanup_database", cleanup_mock),
+            patch("snore.mcp.server.session_scope", session_scope_mock),
+            patch("snore.parsers.register_all.ensure_registered_parsers"),
+        ):
+            mock_target_cls.from_env_and_flags.return_value = mock_target
+
+            async with _lifespan(None, actor_scoped=True) as rt:
+                assert isinstance(rt, ActorRuntime)
+
+        # Profile-existence query must never run in actor-scoped mode.
+        session_scope_mock.assert_not_called()
+
+    async def test_actor_scoped_false_yields_static_runtime(
+        self,
+    ) -> None:
+        """actor_scoped=False (default): a found profile row → StaticRuntime."""
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from snore.mcp.server import StaticRuntime, _lifespan
+
+        cleanup_mock = AsyncMock()
+        mock_target = MagicMock()
+        mock_target.resolve_async_url.return_value = "sqlite+aiosqlite:///:memory:"
+
+        # Build a mock DB session where .scalars().first() returns a profile row.
+        mock_db = MagicMock()
+        profile_row = MagicMock()
+        profile_row.id = 7
+        result_mock = MagicMock()
+        result_mock.scalars.return_value.first.return_value = profile_row
+        mock_db.execute = AsyncMock(return_value=result_mock)
+
+        @asynccontextmanager
+        async def _mock_session_scope():
+            yield mock_db
+
+        with (
+            patch("snore.mcp.server.DatabaseTarget") as mock_target_cls,
+            patch("snore.mcp.server.init_database_from_url", new_callable=AsyncMock),
+            patch("snore.mcp.server.cleanup_database", cleanup_mock),
+            patch("snore.mcp.server.session_scope", _mock_session_scope),
+            patch("snore.parsers.register_all.ensure_registered_parsers"),
+        ):
+            mock_target_cls.from_env_and_flags.return_value = mock_target
+
+            async with _lifespan(None) as rt:
+                assert isinstance(rt, StaticRuntime)
+                assert rt.profile_id == 7
 
 
 class TestStaticRuntime:

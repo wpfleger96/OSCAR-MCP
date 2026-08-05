@@ -274,8 +274,11 @@ def _server_url(
     db_path = str(tmp_path_factory.mktemp("http_auth") / "test_http_auth.db")
 
     server = make_server(db_flag=db_path, auth=_verifier)
-    # host_origin_protection=False: suppress localhost Host-header validation
-    # that would reject test requests originating from 127.0.0.1.
+    # host_origin_protection=False: disables HostOriginGuardMiddleware so Host/Origin
+    # headers are never validated; without this, any FASTMCP_HTTP_HOST_ORIGIN_PROTECTION
+    # env override (e.g. "auto" or True) would activate the guard which validates
+    # Host headers for loopback-bound servers — the fastmcp default is False and we
+    # set it explicitly here to prevent CI environment variables from breaking tests.
     app = server.http_app(host_origin_protection=False)
     # port=0: the OS assigns an ephemeral port, eliminating the TOCTOU race
     # between _free_port() closing its probe socket and uvicorn binding.

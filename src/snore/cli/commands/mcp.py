@@ -82,15 +82,18 @@ def mcp(db: str | None, profile: str, transport: str, host: str, port: int) -> N
     logger.debug("snore mcp: profile=%s db=%r transport=%s", profile, db, transport)
 
     if transport == "http":
-        _env_vars = [
-            ("SNORE_MCP_BASE_URL", os.environ.get("SNORE_MCP_BASE_URL", "").strip()),
-            ("GOOGLE_CLIENT_ID", os.environ.get("GOOGLE_CLIENT_ID", "").strip()),
-            (
-                "GOOGLE_CLIENT_SECRET",
-                os.environ.get("GOOGLE_CLIENT_SECRET", "").strip(),
-            ),
+        base_url = os.environ.get("SNORE_MCP_BASE_URL", "").strip()
+        google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+        google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+        missing = [
+            name
+            for name, val in [
+                ("SNORE_MCP_BASE_URL", base_url),
+                ("GOOGLE_CLIENT_ID", google_client_id),
+                ("GOOGLE_CLIENT_SECRET", google_client_secret),
+            ]
+            if not val
         ]
-        missing = [name for name, val in _env_vars if not val]
         if missing:
             raise click.UsageError(
                 f"HTTP transport requires environment variables: {', '.join(missing)}"
@@ -98,7 +101,6 @@ def mcp(db: str | None, profile: str, transport: str, host: str, port: int) -> N
 
         from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
 
-        base_url, google_client_id, google_client_secret = (val for _, val in _env_vars)
         try:
             auth = make_auth_provider(
                 base_url=base_url,

@@ -361,6 +361,21 @@ class TestResolveActorErrors:
         assert sub not in msg
         assert "No SNORE account" in msg or "Sign in" in msg
 
+    async def test_resolve_actor_empty_string_sub_raises_tool_error(
+        self, _db: Any
+    ) -> None:
+        """Token with sub='' is treated the same as a missing sub claim."""
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        token = _fake_token({"sub": ""})  # empty string — falsy, same guard as missing
+
+        async with session_scope() as db:
+            with pytest.raises(ToolError, match="sub"):
+                await resolve_actor(db, token)
+
 
 # ---------------------------------------------------------------------------
 # actor_scope tests
@@ -398,6 +413,26 @@ class TestActorScope:
             assert actor_inside.user_id == seeded_db["user_id"]
 
         # After the scope exits, _current_actor is reset → current_actor() raises.
+        with pytest.raises(RuntimeError, match="actor_scope"):
+            auth_mod.current_actor()
+
+    async def test_actor_scope_resets_actor_when_body_raises(
+        self, seeded_db: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ContextVar is reset even when the body of actor_scope() raises an exception."""
+        import snore.mcp.auth as auth_mod  # noqa: PLC0415
+
+        fake_token = _fake_token({"sub": seeded_db["sub"]})
+        monkeypatch.setattr(auth_mod, "get_access_token", lambda: fake_token)
+
+        class _Sentinel(Exception):
+            pass
+
+        with pytest.raises(_Sentinel):
+            async with auth_mod.actor_scope():
+                raise _Sentinel("body raised")
+
+        # The finally block in actor_scope() must have reset the ContextVar.
         with pytest.raises(RuntimeError, match="actor_scope"):
             auth_mod.current_actor()
 
