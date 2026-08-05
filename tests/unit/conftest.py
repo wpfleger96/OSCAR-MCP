@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import fastmcp
 import pytest
 
-from snore.mcp.server import SNORERuntime
+from snore.mcp.server import StaticRuntime
 
 
 @pytest.fixture
@@ -80,8 +80,10 @@ def mcp_client_factory() -> Any:
             app: Any,
             db_flag: str | None = None,
             profile_name: str = "neutral",
+            *,
+            actor_scoped: bool = False,
         ) -> Any:  # noqa: RUF029
-            yield SNORERuntime(
+            yield StaticRuntime(
                 scope_provider=lambda: _mock_scope(session),
                 profile_id=1,
             )

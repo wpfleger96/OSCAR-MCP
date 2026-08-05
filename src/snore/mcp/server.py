@@ -12,16 +12,18 @@ Design doctrine:
   - Vendor dispatch stays in the parser/service layer (G4)
 
 DB-access pattern (M2 / Thufir MINOR):
-  ``_lifespan`` builds a ``SNORERuntime`` and yields it as the FastMCP lifespan
-  context.  Every tool and resource receives a ``ctx: Context`` parameter;
-  FastMCP injects it by type annotation and excludes it from the client-facing
-  schema.  Tools call ``runtime = _runtime(ctx)`` to extract it and then
-  ``runtime.scope_provider()`` instead of ``session_scope()`` directly.
+  ``_lifespan`` builds a ``SNORERuntime`` (Protocol) and yields it as the
+  FastMCP lifespan context.  Every tool and resource receives a ``ctx: Context``
+  parameter; FastMCP injects it by type annotation and excludes it from the
+  client-facing schema.  Tools call ``runtime = _runtime(ctx)`` to extract it
+  and then ``runtime.scope_provider()`` instead of ``session_scope()`` directly.
 
-  The swap site for PR-C (actor-scoped session factory) is the
-  ``SNORERuntime(scope_provider=...)`` construction inside ``_lifespan`` — no
-  tool code needs to change.  Do NOT call ``session_scope()`` directly from
-  tools.
+  Two concrete implementations exist:
+    ``StaticRuntime`` — frozen dataclass used by the stdio path; profile_id is
+      looked up at startup from the first live profile row.
+    ``ActorRuntime`` — used by the OAuth HTTP path; scope_provider is
+      ``actor_scope`` from ``snore.mcp.auth``; profile_id is read from the
+      per-request ``ActorContext`` on each property access.
 """
 
 from __future__ import annotations
@@ -34,9 +36,11 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from functools import wraps
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
+    from fastmcp.server.auth import AuthProvider
+
     from snore.services.breath_service import RawWaveformWindow
 
 from fastmcp import Context, FastMCP
@@ -67,24 +71,62 @@ from snore.mcp.validation import (
 logger = logging.getLogger(__name__)
 
 # DB-access seam (M2): tools call runtime.scope_provider(), never session_scope()
-# directly.  SNORERuntime is built in _lifespan and injected via FastMCP's
-# lifespan context; PR-C swaps in an actor-scoped factory at the construction
-# site in _lifespan without touching any tool code.
+# directly.  ``SNORERuntime`` is a Protocol (two implementations: StaticRuntime
+# for stdio, ActorRuntime for OAuth HTTP).  Built in _lifespan and injected via
+# FastMCP's lifespan context; no tool code needs changing for auth.
 # Type: a zero-arg callable returning an async context manager that yields AsyncSession.
 _ScopeProvider = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 
-@dataclass(frozen=True)
-class SNORERuntime:
-    """Lifespan-scoped runtime state injected into every tool and resource.
+class SNORERuntime(Protocol):
+    """Protocol implemented by StaticRuntime (stdio) and ActorRuntime (OAuth HTTP).
 
-    FastMCP yields this from ``_lifespan`` and makes it available as
-    ``ctx.lifespan_context``.  Frozen to prevent accidental mutation across
-    concurrent requests sharing the same lifespan.
+    FastMCP yields a conforming instance from ``_lifespan`` and makes it
+    available as ``ctx.lifespan_context``.  Tools access ``scope_provider``
+    and ``profile_id`` through this interface without knowing which
+    implementation is active.
+    """
+
+    @property
+    def scope_provider(self) -> _ScopeProvider: ...
+    @property
+    def profile_id(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class StaticRuntime:
+    """Stdio-path runtime: scope_provider and profile_id fixed at lifespan start.
+
+    Frozen to prevent accidental mutation across concurrent requests sharing
+    the same lifespan.  ``profile_id`` is resolved from the live profile with
+    the lowest ID at server startup.
     """
 
     scope_provider: _ScopeProvider
     profile_id: int
+
+
+class ActorRuntime:
+    """OAuth HTTP runtime: per-request actor provides scope and profile_id.
+
+    ``scope_provider`` is ``actor_scope`` from snore.mcp.auth (imported lazily
+    so stdio startup never loads OAuth extras).  ``profile_id`` delegates to
+    ``current_actor()`` on each access, reflecting whichever actor is bound to
+    the current request context var.
+    """
+
+    def __init__(self, scope_provider: _ScopeProvider) -> None:
+        self._scope_provider = scope_provider
+
+    @property
+    def scope_provider(self) -> _ScopeProvider:
+        return self._scope_provider
+
+    @property
+    def profile_id(self) -> int:
+        from snore.mcp.auth import current_actor  # noqa: PLC0415
+
+        return current_actor().profile_id
 
 
 def _runtime(ctx: Context) -> SNORERuntime:
@@ -142,21 +184,23 @@ See docs://capabilities for dataset-specific channel availability.
 
 @asynccontextmanager
 async def _lifespan(
-    app: Any, db_flag: str | None = None, profile_name: str = "neutral"
+    app: Any,
+    db_flag: str | None = None,
+    profile_name: str = "neutral",
+    *,
+    actor_scoped: bool = False,
 ) -> AsyncGenerator[SNORERuntime]:
-    """FastMCP lifespan: initialize DB, build SNORERuntime, resolve active profile.
+    """FastMCP lifespan: initialize DB, build runtime, yield to tools.
 
-    Yields a ``SNORERuntime`` as the lifespan context so every tool and resource
-    can access the scope-provider seam and profile_id without module globals.
-    Teardown calls ``cleanup_database()`` in a ``finally`` block so it runs even
-    if tool errors occur during shutdown.
+    Yields a ``SNORERuntime`` implementation as the lifespan context so every
+    tool and resource can access the scope-provider seam and profile_id without
+    module globals.  Teardown calls ``cleanup_database()`` in a ``finally``
+    block so it runs even if tool errors occur during shutdown.
 
-    PR-C's actor-scoped session factory swap happens at the ``SNORERuntime(...)``
-    construction below — nothing else in this file changes for that swap.
+    When ``actor_scoped=True`` (OAuth HTTP), the per-request actor carries its
+    own profile_id and scope; startup skips the first-live-profile query so an
+    empty database does not prevent server start.
     """
-    from sqlalchemy import select  # noqa: PLC0415
-
-    from snore.database import models  # noqa: PLC0415
     from snore.parsers.register_all import ensure_registered_parsers  # noqa: PLC0415
 
     target = DatabaseTarget.from_env_and_flags(db_flag=db_flag, warn_ignored=True)
@@ -169,37 +213,51 @@ async def _lifespan(
         # ensure_registered_parsers() themselves — this is the single call site).
         ensure_registered_parsers()
 
-        # Resolve the active profile — required by BreathService, DeviceService,
-        # and RxTracker (all scoped to a profile_id since multiuser Phase 1).
-        async with session_scope() as _db:
-            _profile_row = (
-                (
-                    await _db.execute(
-                        select(models.Profile)
-                        .where(models.Profile.deleting_at.is_(None))
-                        .order_by(models.Profile.id)
-                        .limit(1)
-                    )
-                )
-                .scalars()
-                .first()
+        runtime: SNORERuntime
+        if actor_scoped:
+            from snore.mcp.auth import actor_scope  # noqa: PLC0415
+
+            # profile_name shapes only the instructions text; per-request actors
+            # carry their own profile_id, so no profile row is resolved here.
+            runtime = ActorRuntime(scope_provider=actor_scope)
+            logger.info(
+                "SNORE MCP server started — db=%r profile=actor-scoped (OAuth)",
+                target.location,
             )
-            if _profile_row is None:
-                raise RuntimeError(
-                    "No profile found in database — run 'snore db init' first "
-                    "or import CPAP data to create a profile."
+        else:
+            from sqlalchemy import select  # noqa: PLC0415
+
+            from snore.database import models  # noqa: PLC0415
+
+            # Resolve the active profile — required by BreathService, DeviceService,
+            # and RxTracker (all scoped to a profile_id since multiuser Phase 1).
+            async with session_scope() as _db:
+                _profile_row = (
+                    (
+                        await _db.execute(
+                            select(models.Profile)
+                            .where(models.Profile.deleting_at.is_(None))
+                            .order_by(models.Profile.id)
+                            .limit(1)
+                        )
+                    )
+                    .scalars()
+                    .first()
                 )
-            profile_id = int(_profile_row.id)
+                if _profile_row is None:
+                    raise RuntimeError(
+                        "No profile found in database — run 'snore db init' first "
+                        "or import CPAP data to create a profile."
+                    )
+                profile_id = int(_profile_row.id)
 
-        # PR-C swap site: replace session_scope with an actor-scoped factory here.
-        runtime = SNORERuntime(scope_provider=session_scope, profile_id=profile_id)
-
-        logger.info(
-            "SNORE MCP server started — db=%r profile=%s profile_id=%d",
-            target.location,
-            profile_name,
-            runtime.profile_id,
-        )
+            runtime = StaticRuntime(scope_provider=session_scope, profile_id=profile_id)
+            logger.info(
+                "SNORE MCP server started — db=%r profile=%s profile_id=%d",
+                target.location,
+                profile_name,
+                runtime.profile_id,
+            )
     except Exception:
         await cleanup_database()
         raise
@@ -211,19 +269,34 @@ async def _lifespan(
         logger.info("SNORE MCP server stopped")
 
 
-def make_server(db_flag: str | None = None, profile_name: str = "neutral") -> FastMCP:
-    """Construct and return a configured FastMCP instance."""
+def make_server(
+    db_flag: str | None = None,
+    profile_name: str = "neutral",
+    auth: AuthProvider | None = None,
+) -> FastMCP:
+    """Construct and return a configured FastMCP instance.
+
+    When ``auth`` is provided (OAuth HTTP path), the server uses actor-scoped
+    sessions — each request's actor carries its own profile_id, and the
+    database startup check requiring at least one profile is skipped.
+    """
     profile = get_profile(profile_name)
 
     @asynccontextmanager
     async def _bound_lifespan(app: Any) -> AsyncGenerator[SNORERuntime]:
-        async with _lifespan(app, db_flag=db_flag, profile_name=profile_name) as rt:
+        async with _lifespan(
+            app,
+            db_flag=db_flag,
+            profile_name=profile_name,
+            actor_scoped=auth is not None,
+        ) as rt:
             yield rt
 
     mcp = FastMCP(
         name="snore",
         instructions=_build_instructions(profile),
         lifespan=_bound_lifespan,
+        auth=auth,
     )
 
     _register_resources(mcp)
@@ -253,12 +326,10 @@ def tool_error_boundary(
         except Exception as exc:
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
-            message = (
-                f"HTTP {status} from upstream service"
-                if status is not None
-                else str(exc)
-            )
-            raise ToolError(message) from exc
+            if status is not None:
+                raise ToolError(f"HTTP {status} from upstream service") from exc
+            logger.exception("Unexpected error in tool call")
+            raise ToolError("An unexpected error occurred.") from exc
 
     return wrapper
 
