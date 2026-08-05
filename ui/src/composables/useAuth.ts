@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import type { AuthStatusResponse } from '@/types'
-import { getAuthStatus, loginUser, logoutUser, switchProfile } from '@/api/auth'
+import { demoLoginUser, getAuthStatus, loginUser, logoutUser, switchProfile } from '@/api/auth'
 
 // Module-level singleton — shared across all callers (same pattern as useDarkMode).
 const status = ref<AuthStatusResponse | null>(null)
@@ -18,6 +18,11 @@ export function useAuth() {
     const profiles = computed(() => status.value?.profiles ?? [])
     const activeProfileId = computed(() => status.value?.active_profile_id ?? null)
     const authMode = computed(() => status.value?.auth_mode ?? null)
+    const role = computed(() => status.value?.user?.role ?? null)
+    // canWrite: local mode always allows writes; multiuser blocks the demo role.
+    const canWrite = computed(
+        () => isLocal.value || (status.value?.user?.role !== 'demo' && isAuthenticated.value),
+    )
 
     async function fetchStatus(): Promise<void> {
         const now = Date.now()
@@ -56,12 +61,12 @@ export function useAuth() {
 
     async function login(email: string, password: string): Promise<void> {
         await loginUser({ email, password })
-        // Invalidate any in-flight status fetch so the post-login fetch wins.
-        status.value = null
-        _fetchPromise = null
-        _generation++
-        _lastFetched = 0
-        await fetchStatus()
+        await refreshStatus()
+    }
+
+    async function demoLogin(): Promise<void> {
+        await demoLoginUser()
+        await refreshStatus()
     }
 
     function clearAuth(): void {
@@ -94,10 +99,13 @@ export function useAuth() {
         profiles,
         activeProfileId,
         authMode,
+        role,
+        canWrite,
         profileKey,
         fetchStatus,
         refreshStatus,
         login,
+        demoLogin,
         logout,
         clearAuth,
         setActiveProfile,
