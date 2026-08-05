@@ -21,6 +21,10 @@ _dev-auth-seed:
     SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
     uv run snore user invite dev@localhost --role admin
 
+# Build the Docker image locally for smoke-testing.
+docker-build:
+    docker build -t snore .
+
 # Full-stack multiuser smoke test: build the UI, start from a fresh throwaway DB,
 # seed an admin invite, and serve everything at http://127.0.0.1:8000.
 # Open the printed invite URL to walk the signup → login → import journey.
