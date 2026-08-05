@@ -3379,7 +3379,8 @@ class BreathService:
         Empty session_data signals an empty day; ``compute_ca_analysis`` maps it
         to the NOT_RUN sentinel result.
 
-        ``DeviceAmbiguityError`` propagates to the caller unchanged.
+        ``DeviceAmbiguityError`` and ``DeviceNotOwnedError`` propagate to the
+        caller unchanged.
         """
         from sqlalchemy import select  # noqa: PLC0415
 

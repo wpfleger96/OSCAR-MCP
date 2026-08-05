@@ -63,7 +63,10 @@ async def fetch_ca_raw(
         device_id: Filter to a specific device; required when multiple devices
             share the date.
     """
-    from snore.services.breath_service import BreathService  # noqa: PLC0415
+    from snore.services.breath_service import (  # noqa: PLC0415
+        BreathService,
+        DayAnalysisStatus,
+    )
 
     bs = BreathService(db_session, profile_id)
     try:
@@ -75,9 +78,9 @@ async def fetch_ca_raw(
     resolved_device_id = raw.device_id if raw.device_id > 0 else None
     caps = None
     if resolved_device_id is not None:
-        # Pass analysis_run=True when the day has analysis coverage (avoids an
-        # extra DB round-trip when day_status already confirms analysis ran).
-        analysis_run = str(raw.day_status) != "not_run"
+        # Derive analysis_run from day_status — avoids the extra DB round-trip
+        # inside build_device_capabilities either way.
+        analysis_run = raw.day_status != DayAnalysisStatus.NOT_RUN
         caps = await build_device_capabilities(
             db_session,
             profile_id,
