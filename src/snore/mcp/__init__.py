@@ -1,0 +1,1 @@
+"""SNORE MCP server package."""

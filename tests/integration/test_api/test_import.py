@@ -451,3 +451,173 @@ class TestImportJobOwnership:
                 pass
             job.cleanup_files()
             job.release_capacity()
+
+
+class TestImportTargetProfile:
+    """target_profile_id enforcement for file upload and path import endpoints."""
+
+    def test_upload_with_valid_target_profile_id_uses_that_profile(
+        self, api_client, monkeypatch
+    ):
+        """Upload with a valid owned profile_id lands in that profile, not the active one."""
+        import snore.api.routers.import_data as import_mod
+
+        from snore.api.import_jobs import get_job, remove_job
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+
+        # Create a second profile via the profiles API.
+        resp = api_client.post("/api/v1/profiles/", json={"name": "Second Profile"})
+        assert resp.status_code == 201
+        second_profile_id = resp.json()["id"]
+
+        job = None
+        try:
+            response = api_client.post(
+                "/api/v1/import",
+                data={"profile_id": str(second_profile_id)},
+                files=[
+                    ("files", ("test.edf", b"fake content", "application/octet-stream"))
+                ],
+            )
+            assert response.status_code == 202
+            job = get_job(response.json()["job_id"])
+            assert job is not None
+            assert job.target_profile_id == second_profile_id
+        finally:
+            if job is not None:
+                remove_job(job.job_id)
+                job.cleanup_files()
+                job.release_capacity()
+
+    def test_upload_with_foreign_profile_id_returns_403(self, api_client, monkeypatch):
+        """Upload with a profile_id that does not belong to this user returns 403."""
+        import snore.api.routers.import_data as import_mod
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+
+        response = api_client.post(
+            "/api/v1/import",
+            data={"profile_id": "999999"},
+            files=[
+                ("files", ("test.edf", b"fake content", "application/octet-stream"))
+            ],
+        )
+        assert response.status_code == 403
+
+    def test_upload_without_profile_id_uses_actor_profile(
+        self, api_client, monkeypatch
+    ):
+        """Upload without profile_id falls back to actor.profile_id (existing behaviour)."""
+        import snore.api.routers.import_data as import_mod
+
+        from snore.api.import_jobs import get_job, remove_job
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+
+        job = None
+        try:
+            response = api_client.post(
+                "/api/v1/import",
+                files=[
+                    ("files", ("test.edf", b"fake content", "application/octet-stream"))
+                ],
+            )
+            assert response.status_code == 202
+            job = get_job(response.json()["job_id"])
+            assert job is not None
+            assert job.target_profile_id is not None
+        finally:
+            if job is not None:
+                remove_job(job.job_id)
+                job.cleanup_files()
+                job.release_capacity()
+
+    def test_path_import_with_valid_profile_id_uses_that_profile(
+        self, localhost_api_client, monkeypatch
+    ):
+        """Path import with a valid owned profile_id lands in that profile."""
+        import snore.api.routers.import_data as import_mod
+
+        from snore.api.import_jobs import get_job, remove_job
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+
+        # Create a second profile via the profiles API.
+        resp = localhost_api_client.post(
+            "/api/v1/profiles/", json={"name": "Path Profile"}
+        )
+        assert resp.status_code == 201
+        second_profile_id = resp.json()["id"]
+
+        sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
+        job = None
+        try:
+            response = localhost_api_client.post(
+                "/api/v1/import/path",
+                json={"sources": sources, "profile_id": second_profile_id},
+            )
+            assert response.status_code == 202
+            job = get_job(response.json()["job_id"])
+            assert job is not None
+            assert job.target_profile_id == second_profile_id
+        finally:
+            if job is not None:
+                remove_job(job.job_id)
+                job.cleanup_files()
+                job.release_capacity()
+
+    def test_path_import_with_foreign_profile_id_returns_403(
+        self, localhost_api_client, monkeypatch
+    ):
+        """Path import with a profile_id not owned by this user returns 403."""
+        import snore.api.routers.import_data as import_mod
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+
+        sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
+        response = localhost_api_client.post(
+            "/api/v1/import/path",
+            json={"sources": sources, "profile_id": 999999},
+        )
+        assert response.status_code == 403
+
+    def test_path_import_profile_id_wire_field_routes_to_correct_profile(
+        self, localhost_api_client, monkeypatch
+    ):
+        """Wire contract: JSON field `profile_id` (not `target_profile_id`) selects the target.
+
+        This test uses the exact field name the frontend sends. Pydantic drops unknown
+        fields silently, so a field-name mismatch would cause fallback to actor.profile_id
+        and the assertion on job.target_profile_id would fail.
+        """
+        import snore.api.routers.import_data as import_mod
+
+        from snore.api.import_jobs import get_job, remove_job
+
+        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+
+        resp = localhost_api_client.post(
+            "/api/v1/profiles/", json={"name": "Wire Contract Profile"}
+        )
+        assert resp.status_code == 201
+        second_profile_id = resp.json()["id"]
+
+        sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
+        job = None
+        try:
+            response = localhost_api_client.post(
+                "/api/v1/import/path",
+                json={"sources": sources, "profile_id": second_profile_id},
+            )
+            assert response.status_code == 202
+            job = get_job(response.json()["job_id"])
+            assert job is not None
+            assert job.target_profile_id == second_profile_id, (
+                "profile_id wire field must route import to the specified profile"
+            )
+        finally:
+            if job is not None:
+                remove_job(job.job_id)
+                job.cleanup_files()
+                job.release_capacity()

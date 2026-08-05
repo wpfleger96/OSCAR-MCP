@@ -10,17 +10,20 @@ import threading
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from snore.api.deps import ActorDep
+from snore.api.deps import ActorDep, get_db
 from snore.api.guards import RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
+    JobPhase,
     JobType,
     cancel_job,
     create_job,
@@ -28,6 +31,7 @@ from snore.api.import_jobs import (
     remove_job,
     reserve_slot,
 )
+from snore.database import models
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
@@ -113,6 +117,7 @@ class DetectRequest(BaseModel):
 
 class ImportPathRequest(BaseModel):
     sources: list[ImportSource]
+    profile_id: int | None = None
 
 
 class JobResponse(BaseModel):
@@ -158,11 +163,35 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
 
     Ordering contract:
         1. Do the import work.
-        2. Publish terminal state (for SSE observers).
-        3. Clean parser spool + job temp.
-        4. Release capacity (slot owns the disk it admitted).
+        2. Call phase_complete(IMPORT) — non-terminal milestone for observers.
+        3. Run analysis phase (session IDs from import result).
+        4. Publish terminal state (always carries import_committed + import_result
+           when data was committed, even on analysis failure or cancellation).
+        5. Clean parser spool + job temp.
+        6. Release capacity (slot owns the disk it admitted).
     """
     import asyncio  # noqa: PLC0415
+
+    def _make_terminal(
+        event: str,
+        *,
+        message: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a terminal payload, injecting import_committed + import_result
+        when the import phase already committed."""
+        data: dict[str, Any] = {}
+        if message is not None:
+            data["message"] = message
+        if extra:
+            data.update(extra)
+        with job._lock:
+            committed = job._import_committed
+            import_result = job._import_result
+        if committed:
+            data["import_committed"] = True
+            data["import_result"] = import_result
+        return {"event": event, "data": data}
 
     try:
         service = ImportService()
@@ -206,17 +235,67 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         else:
             raise ValueError("Invalid job configuration")
 
+        # --- Phase 1 complete: import committed ---
+        import_result_dict = result.model_dump()
+        job.phase_complete(JobPhase.IMPORT, import_result_dict)
+
         if job.cancel_requested:
-            job._finish_cancelled()
+            job._finish(
+                succeeded=False,
+                terminal_msg=_make_terminal("error", message="Cancelled"),
+            )
             return
 
-        terminal_msg = {"event": "complete", "data": {"result": result.model_dump()}}
+        # --- Phase 2: analysis ---
+        imported_ids = result.imported_session_ids
+        if imported_ids:
+            job.report_progress(f"Analyzing {len(imported_ids)} imported session(s)...")
+            try:
+                from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
+                from snore.database.session import session_scope  # noqa: PLC0415
+                from snore.services.analysis_facade import (
+                    AnalysisFacade,  # noqa: PLC0415
+                )
+
+                async def _run_analysis() -> None:
+                    async with session_scope() as db:
+                        facade = AnalysisFacade(db, profile_id=target_profile_id)
+                        await facade.run_batch_analysis(
+                            session_ids=imported_ids,
+                            primary_mode=DEFAULT_MODE,
+                            progress_callback=lambda done, total: job.report_progress(
+                                f"Analyzed {done}/{total or '?'} sessions"
+                            ),
+                            # SQLite tolerates only one concurrent writer; keep sequential.
+                            max_workers=1,
+                        )
+
+                asyncio.run(_run_analysis())
+            except Exception as analysis_exc:
+                logger.warning(
+                    "Import job %s: analysis phase failed: %s",
+                    job.job_id,
+                    analysis_exc,
+                )
+                # Analysis failure does NOT roll back committed import data.
+                # Terminal payload includes import_committed so the client knows
+                # the data landed even though analysis failed.
+                job._finish(
+                    succeeded=False,
+                    terminal_msg=_make_terminal(
+                        "error",
+                        message=f"Analysis failed: {analysis_exc}",
+                    ),
+                )
+                return
+
+        terminal_msg = _make_terminal("complete", extra={"result": import_result_dict})
         job._finish(succeeded=True, terminal_msg=terminal_msg)
     except Exception as e:
         logger.exception("Import job %s failed", job.job_id)
         job._finish(
             succeeded=False,
-            terminal_msg={"event": "error", "data": {"message": str(e)}},
+            terminal_msg=_make_terminal("error", message=str(e)),
         )
     finally:
         # Ordering: publish terminal (done above), then clean, then release capacity.
@@ -264,7 +343,11 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                             "files": {
                                 "type": "array",
                                 "items": {"type": "string", "format": "binary"},
-                            }
+                            },
+                            "profile_id": {
+                                "type": "integer",
+                                "description": "Target profile ID (defaults to actor's active profile)",
+                            },
                         },
                     }
                 }
@@ -272,7 +355,11 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         }
     },
 )
-async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
+async def import_files(
+    request: Request,
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JobResponse:
     max_upload_bytes, max_upload_files, max_file_bytes = _get_upload_limits()
 
     # Step 1: Reserve admission slot BEFORE reading any body bytes.
@@ -297,9 +384,18 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
     # block uses this flag to decide whether to clean up the job.
     _job_cleanup = True
     tmp: str | None = None
+    _requested_profile_id: int | None = None
 
     try:
         async with request.form(max_files=max_upload_files) as form:
+            _profile_id_raw = form.get("profile_id")
+            if isinstance(_profile_id_raw, str):
+                try:
+                    _requested_profile_id = int(_profile_id_raw)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=422, detail="profile_id must be an integer"
+                    ) from None
             uploads = [
                 f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
             ]
@@ -364,11 +460,32 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                         ),
                     ) from None
 
+        # Resolve target profile: validate ownership if caller specified one.
+        if _requested_profile_id is not None:
+            owned = (
+                (
+                    await db.execute(
+                        select(models.Profile).where(
+                            models.Profile.id == _requested_profile_id,
+                            models.Profile.user_id == actor.user_id,
+                            models.Profile.deleting_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if owned is None:
+                raise HTTPException(status_code=403, detail="Profile not owned by user")
+            resolved_profile_id = _requested_profile_id
+        else:
+            resolved_profile_id = actor.profile_id
+
         # Transfer ownership to the job; the worker will clean up on completion.
         job.temp_dir = tmp_path
         tmp = None  # Job owns the directory now.
         job.convert_to_pending()
-        job.target_profile_id = actor.profile_id
+        job.target_profile_id = resolved_profile_id
         _job_cleanup = False  # Worker owns the job from here.
 
     finally:
@@ -382,10 +499,10 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
             job.cleanup_files()
             job.release_capacity()
 
-    # Derive profile-scoped backup root from actor.
+    # Derive profile-scoped backup root from the resolved target profile.
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
-    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(job.target_profile_id)
 
     # Start worker immediately — /progress is observer-only.
     _start_worker(job, profile_raw_root)
@@ -394,9 +511,32 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
 
 @local_only_router.post("/path", response_model=JobResponse, status_code=202)
 async def import_from_path(
-    body: ImportPathRequest, request: Request, actor: RequireWritable
+    body: ImportPathRequest,
+    request: Request,
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JobResponse:
     _require_localhost(request)
+
+    if body.profile_id is not None:
+        owned = (
+            (
+                await db.execute(
+                    select(models.Profile).where(
+                        models.Profile.id == body.profile_id,
+                        models.Profile.user_id == actor.user_id,
+                        models.Profile.deleting_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Profile not owned by user")
+        resolved_profile_id = body.profile_id
+    else:
+        resolved_profile_id = actor.profile_id
 
     try:
         job = create_job(
@@ -405,11 +545,11 @@ async def import_from_path(
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail="Too many active imports.") from exc
 
-    job.target_profile_id = actor.profile_id
+    job.target_profile_id = resolved_profile_id
 
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
-    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(resolved_profile_id)
 
     _start_worker(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)

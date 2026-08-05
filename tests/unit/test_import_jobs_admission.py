@@ -730,6 +730,7 @@ class TestRunTxnIdempotency:
                     imp_count,
                     skip_count,
                     fail_count,
+                    _ids,
                 ) = await importer.import_sessions_batch(
                     [unified],
                     force=False,

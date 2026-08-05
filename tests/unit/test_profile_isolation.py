@@ -617,7 +617,9 @@ class TestAnalysisServiceStoreResultIsolation:
 
         from sqlalchemy import func, select
 
+        from snore.analysis.modes.types import ModeResult
         from snore.analysis.service import AnalysisService
+        from snore.analysis.types import AnalysisComputation
         from snore.analysis.types import AnalysisResult as AnalysisResultDTO
         from snore.database import models
         from snore.exceptions import NotFoundError
@@ -634,15 +636,22 @@ class TestAnalysisServiceStoreResultIsolation:
             session_duration_hours=8.0,
             total_breaths=0,
             machine_events=[],
-            mode_results={},
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
             timestamp_start=datetime(2025, 1, 1, 22, 0, 0).timestamp(),
             timestamp_end=datetime(2025, 1, 2, 6, 0, 0).timestamp(),
+        )
+        computation = AnalysisComputation(
+            summary=result_dto, breaths=[], primary_mode="aasm"
         )
 
         svc_a = AnalysisService(async_db_session, profile_id=profile_a.id)
 
         with pytest.raises(NotFoundError):
-            await svc_a.store_result(result_dto, processing_time_ms=1)
+            await svc_a.store_result(computation, processing_time_ms=1)
 
         # No row must have been inserted for the foreign session.
         row_count = (
@@ -663,7 +672,9 @@ class TestAnalysisServiceStoreResultIsolation:
 
         from sqlalchemy import func, select
 
+        from snore.analysis.modes.types import ModeResult
         from snore.analysis.service import AnalysisService
+        from snore.analysis.types import AnalysisComputation
         from snore.analysis.types import AnalysisResult as AnalysisResultDTO
         from snore.database import models
 
@@ -676,13 +687,20 @@ class TestAnalysisServiceStoreResultIsolation:
             session_duration_hours=8.0,
             total_breaths=0,
             machine_events=[],
-            mode_results={},
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
             timestamp_start=datetime(2025, 1, 1, 22, 0, 0).timestamp(),
             timestamp_end=datetime(2025, 1, 2, 6, 0, 0).timestamp(),
         )
+        computation = AnalysisComputation(
+            summary=result_dto, breaths=[], primary_mode="aasm"
+        )
 
         svc_a = AnalysisService(async_db_session, profile_id=profile_a.id)
-        await svc_a.store_result(result_dto, processing_time_ms=1)
+        await svc_a.store_result(computation, processing_time_ms=1)
         await async_db_session.flush()
 
         # After flush, the inserted row has a real PK.

@@ -47,7 +47,7 @@ import time
 import uuid
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +92,17 @@ ACTIVE_STATES = frozenset({JobState.PENDING_UPLOAD, JobState.PENDING, JobState.R
 class JobType(Enum):
     UPLOAD = "upload"
     PATH = "path"
+
+
+class JobPhase(StrEnum):
+    """Non-terminal phases within a RUNNING job.
+
+    Delivered via phase_complete() as a live milestone to attached observers.
+    NOT a terminal state — the job stays RUNNING through both phases.
+    """
+
+    IMPORT = "import"
+    ANALYSIS = "analysis"
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +196,12 @@ class ImportJob:
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )
+    # Import-phase durability fields — set after import commits, before analysis.
+    # Carried in EVERY terminal payload produced after import_committed=True
+    # (success, analysis failure, and cancellation) so that late observers and
+    # stalled observers always learn that data landed (plan §A1, pass-4 IMPORTANT-1).
+    _import_committed: bool = field(default=False, init=False, repr=False)
+    _import_result: dict[str, Any] | None = field(default=None, init=False, repr=False)
 
     @property
     def state(self) -> JobState:
@@ -201,6 +218,12 @@ class ImportJob:
         """True if cancellation has been requested (checked at batch boundaries)."""
         with self._lock:
             return self._cancel_flag
+
+    @property
+    def import_committed(self) -> bool:
+        """True after the import phase has committed to the database."""
+        with self._lock:
+            return self._import_committed
 
     def convert_to_pending(self) -> bool:
         """Transition PENDING_UPLOAD → PENDING (files received, body parsed).
@@ -254,6 +277,30 @@ class ImportJob:
             self._latest_progress = msg
         self._broadcast(msg)
 
+    def phase_complete(self, phase: JobPhase, import_result: dict[str, Any]) -> None:
+        """Record import-phase completion and broadcast a non-terminal milestone.
+
+        This is NOT a terminal state — the job stays RUNNING.  The event is
+        coalesced like any progress message: late/stalled observers may miss it.
+        The import outcome is persisted on the job itself so that every subsequent
+        terminal payload (success, analysis failure, or cancellation) carries it —
+        this is the durability guarantee (plan §A1, pass-4 IMPORTANT-1).
+
+        Must be called by the worker thread only, after the import transaction
+        commits and BEFORE the analysis phase begins.
+        """
+        with self._lock:
+            self._import_committed = True
+            self._import_result = import_result
+        milestone = {
+            "event": "phase_complete",
+            "data": {
+                "phase": phase.value,
+                "import_result": import_result,
+            },
+        }
+        self._broadcast(milestone)
+
     def try_start(self) -> bool:
         """Transition pending → running."""
         with self._lock:
@@ -274,7 +321,11 @@ class ImportJob:
             self._cancel_flag = True
             if self._state in (JobState.PENDING_UPLOAD, JobState.PENDING):
                 self._state = JobState.CANCELLED
-                terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
+                terminal_data: dict[str, Any] = {"message": "Cancelled"}
+                if self._import_committed and self._import_result is not None:
+                    terminal_data["import_committed"] = True
+                    terminal_data["import_result"] = self._import_result
+                terminal_msg = {"event": "error", "data": terminal_data}
                 self._terminal_msg = terminal_msg
                 self._terminal_at = time.monotonic()
                 observers = list(self._observers)
@@ -296,9 +347,21 @@ class ImportJob:
                 return False
             if self._cancel_flag:
                 self._state = JobState.CANCELLED
-                terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
+                cancel_data: dict[str, Any] = {"message": "Cancelled"}
+                if self._import_committed and self._import_result is not None:
+                    cancel_data["import_committed"] = True
+                    cancel_data["import_result"] = self._import_result
+                terminal_msg = {"event": "error", "data": cancel_data}
             else:
                 self._state = JobState.SUCCEEDED if succeeded else JobState.FAILED
+                # Embed import outcome in every terminal payload after import committed.
+                if self._import_committed and self._import_result is not None:
+                    data = terminal_msg.get("data", {})
+                    if isinstance(data, dict):
+                        data["import_committed"] = True
+                        data["import_result"] = self._import_result
+                        terminal_msg = dict(terminal_msg)
+                        terminal_msg["data"] = data
             self._terminal_msg = terminal_msg
             self._terminal_at = time.monotonic()
             observers = list(self._observers)
@@ -309,10 +372,14 @@ class ImportJob:
 
     def _finish_cancelled(self) -> bool:
         """Transition running → CANCELLED. Called by the worker thread."""
-        terminal_msg = {"event": "error", "data": {"message": "Cancelled"}}
         with self._lock:
             if self._state in TERMINAL_STATES:
                 return False
+            cancel_data: dict[str, Any] = {"message": "Cancelled"}
+            if self._import_committed and self._import_result is not None:
+                cancel_data["import_committed"] = True
+                cancel_data["import_result"] = self._import_result
+            terminal_msg = {"event": "error", "data": cancel_data}
             self._state = JobState.CANCELLED
             self._terminal_msg = terminal_msg
             self._terminal_at = time.monotonic()

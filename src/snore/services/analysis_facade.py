@@ -94,7 +94,10 @@ class AnalysisFacade:
                 func.row_number()
                 .over(
                     partition_by=models.AnalysisResult.session_id,
-                    order_by=models.AnalysisResult.created_at.desc(),
+                    order_by=[
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    ],
                 )
                 .label("recency_rank"),
             )
@@ -359,14 +362,17 @@ class AnalysisFacade:
             )
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
-            # Delete only the latest (highest created_at) result per owned session.
+            # Delete only the latest (highest created_at, then id) result per owned session.
             ranked = (
                 select(
                     models.AnalysisResult.id,
                     func.row_number()
                     .over(
                         partition_by=models.AnalysisResult.session_id,
-                        order_by=models.AnalysisResult.created_at.desc(),
+                        order_by=[
+                            models.AnalysisResult.created_at.desc(),
+                            models.AnalysisResult.id.desc(),
+                        ],
                     )
                     .label("rn"),
                 )
@@ -423,6 +429,7 @@ class AnalysisFacade:
         self,
         session_id: int,
         modes: list[str] | None = None,
+        primary_mode: str | None = None,
         store_results: bool = True,
     ) -> AnalysisResult:
         """Run analysis on a session.  Returns AnalysisResult (Pydantic model).
@@ -433,6 +440,14 @@ class AnalysisFacade:
         Owns a short read scope for the I/O phase and closes it before compute,
         so the injected request session is never held across NumPy/scipy work.
         CPU-bound compute runs in a thread via asyncio.to_thread().
+
+        Args:
+            session_id: Database session ID.
+            modes: Detection modes to run (None = default mode).
+            primary_mode: Mode whose recovery markers are persisted.  Must be a
+                member of ``modes`` when supplied; defaults to DEFAULT_MODE when
+                DEFAULT_MODE is in modes; required otherwise (ValueError).
+            store_results: Whether to persist results to DB.
         """
         import time  # noqa: PLC0415
 
@@ -460,13 +475,15 @@ class AnalysisFacade:
                 raise _NotFoundError(f"Session {session_id} not found")
 
             read_svc = AnalysisService(read_db, profile_id=self.profile_id)
-            raw = await read_svc.load_session_inputs_raw(session_id, modes=modes)
+            raw = await read_svc.load_session_inputs_raw(
+                session_id, modes=modes, primary_mode=primary_mode
+            )
         # Session closed; prepare DTO (NumPy deserialization) — still sync/fast.
         inputs = AnalysisService.prepare_inputs(raw)
 
         # Compute phase: CPU-bound scipy/NumPy runs in a thread.
         compute_svc = AnalysisService()  # no db_session — compute only
-        result = await asyncio.to_thread(compute_svc.compute_analysis, inputs)
+        computation = await asyncio.to_thread(compute_svc.compute_analysis, inputs)
 
         processing_time_ms = int((time.monotonic() - t_start) * 1000)
 
@@ -474,9 +491,9 @@ class AnalysisFacade:
             # Write phase: short INSERT-only scope.
             async with session_scope() as write_db:
                 write_svc = AnalysisService(write_db, profile_id=self.profile_id)
-                await write_svc.store_result(result, processing_time_ms)
+                await write_svc.store_result(computation, processing_time_ms)
 
-        return result
+        return computation.summary
 
     async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
@@ -503,7 +520,10 @@ class AnalysisFacade:
                 await self.db_session.execute(
                     select(models.AnalysisResult)
                     .filter_by(session_id=session_id)
-                    .order_by(models.AnalysisResult.created_at.desc())
+                    .order_by(
+                        models.AnalysisResult.created_at.desc(),
+                        models.AnalysisResult.id.desc(),
+                    )
                 )
             )
             .scalars()
@@ -518,7 +538,9 @@ class AnalysisFacade:
         self,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
+        session_ids: list[int] | None = None,
         modes: Sequence[str] | None = None,
+        primary_mode: str | None = None,
         store_results: bool = True,
         max_workers: int = 4,
         progress_callback: Callable[[int, int | None], None] | None = None,
@@ -531,7 +553,10 @@ class AnalysisFacade:
         Args:
             from_date: Filter sessions from this datetime (inclusive)
             to_date: Filter sessions to this datetime (inclusive)
+            session_ids: Explicit session IDs to analyze (overrides date filters when set)
             modes: Detection modes to run (None = default)
+            primary_mode: Mode whose recovery markers are persisted; defaults to
+                DEFAULT_MODE when included in ``modes``, required otherwise.
             store_results: Whether to store results in the database
             max_workers: Max parallel threads (capped to session count)
             progress_callback: Called with (completed, total) after each session
@@ -548,10 +573,13 @@ class AnalysisFacade:
             .join(models.Day, models.Session.day_id == models.Day.id)
             .where(self._profile_filter())
         )
-        if from_date:
-            stmt = stmt.where(models.Day.date >= from_date.date())
-        if to_date:
-            stmt = stmt.where(models.Day.date <= to_date.date())
+        if session_ids is not None:
+            stmt = stmt.where(models.Session.id.in_(session_ids))
+        else:
+            if from_date:
+                stmt = stmt.where(models.Day.date >= from_date.date())
+            if to_date:
+                stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
         # Count matched sessions up front without materializing rows so
@@ -573,6 +601,7 @@ class AnalysisFacade:
             session_stream=async_result,
             profile_id=self.profile_id,
             modes=modes,
+            primary_mode=primary_mode,
             store_results=store_results,
             max_workers=max_workers,
             progress_callback=progress_callback,
@@ -616,6 +645,7 @@ class BatchAnalysisCoordinator:
         session_stream: Any,  # AsyncResult from session.stream(); yields rows lazily
         profile_id: int,
         modes: Sequence[str] | None = None,
+        primary_mode: str | None = None,
         store_results: bool = True,
         max_workers: int = 4,
         progress_callback: Callable[[int, int | None], None] | None = None,
@@ -637,6 +667,8 @@ class BatchAnalysisCoordinator:
             profile_id: Profile that owns the sessions — threaded into each
                 ``AnalysisService`` read/write scope so all I/O is scoped.
             modes: Detection modes to run (``None`` = default).
+            primary_mode: Mode whose recovery markers are persisted; defaults to
+                DEFAULT_MODE when included in ``modes``, required otherwise.
             store_results: If True, write each result to the DB.
             max_workers: Concurrency cap (number of simultaneous coroutines).
             progress_callback: Called with (completed, total) after each session.
@@ -686,24 +718,26 @@ class BatchAnalysisCoordinator:
                         svc = AnalysisService(
                             read_session,
                             profile_id=profile_id,
-                            # Reuse modes_list from outer scope (snapshot).
                         )
                         raw = await svc.load_session_inputs_raw(
                             sid,
                             modes=modes_list,
+                            primary_mode=primary_mode,
                         )
 
                     # --- Compute phase: NumPy only in a thread, no session held ---
-                    result = await asyncio.to_thread(_compute_only, raw)
+                    computation = await asyncio.to_thread(_compute_only, raw)
                     processing_time_ms = int((time.monotonic() - t_start) * 1000)
 
                     # --- Write phase: persist result on the event loop ---
-                    if store_results and result is not None:
+                    if store_results and computation is not None:
                         async with session_scope() as write_session:
                             write_svc = AnalysisService(
                                 write_session, profile_id=profile_id
                             )
-                            await write_svc.store_result(result, processing_time_ms)
+                            await write_svc.store_result(
+                                computation, processing_time_ms
+                            )
 
                     return "success"
                 except Exception as e:

@@ -66,9 +66,15 @@ async def run_analysis(
     facade: AnalysisFacadeDep,
     _actor: RequireWritable,
 ) -> AnalysisResult:
-    return await facade.run_analysis(
-        session_id, modes=body.modes, store_results=body.store_results
-    )
+    try:
+        return await facade.run_analysis(
+            session_id,
+            modes=body.modes,
+            primary_mode=body.primary_mode,
+            store_results=body.store_results,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.delete("/analysis")
@@ -116,11 +122,15 @@ async def run_batch_analysis(
             status_code=400,
             detail="At least one of from_date or to_date is required",
         )
-    return await facade.run_batch_analysis(
-        from_date=datetime.combine(body.from_date, time.min)
-        if body.from_date
-        else None,
-        to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
-        modes=cast(list[str], body.modes),
-        store_results=body.store_results,
-    )
+    try:
+        return await facade.run_batch_analysis(
+            from_date=datetime.combine(body.from_date, time.min)
+            if body.from_date
+            else None,
+            to_date=datetime.combine(body.to_date, time.max) if body.to_date else None,
+            modes=cast(list[str], body.modes),
+            primary_mode=body.primary_mode,
+            store_results=body.store_results,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

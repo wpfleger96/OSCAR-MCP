@@ -160,6 +160,7 @@ class ImportService:
         total_imported = 0
         total_skipped = 0
         total_failed = 0
+        all_imported_ids: list[int] = []
 
         # Default backup root is namespaced by profile so raw files from
         # different profiles never share a directory — mirrors ExportService.
@@ -268,6 +269,7 @@ class ImportService:
             imported = 0
             skipped = 0
             failed = 0
+            source_imported_ids: list[int] = []
             session_iter_internal = iter(session_iter)
             import itertools as _itertools  # noqa: PLC0415
 
@@ -287,7 +289,7 @@ class ImportService:
                     *,
                     _chunk: list[UnifiedSession] = chunk,
                     _importer: SessionImporter = importer,
-                ) -> tuple[int, int, int]:
+                ) -> tuple[int, int, int, list[int]]:
                     return await _importer.import_sessions_batch(
                         iter(_chunk),
                         force=force,
@@ -297,14 +299,16 @@ class ImportService:
                         db=db,
                     )
 
-                ci, cs, cf = await run_txn(_import_chunk)
+                ci, cs, cf, chunk_ids = await run_txn(_import_chunk)
                 imported += ci
                 skipped += cs
                 failed += cf
+                source_imported_ids.extend(chunk_ids)
 
             total_imported += imported
             total_skipped += skipped
             total_failed += failed
+            all_imported_ids.extend(source_imported_ids)
 
             source_results.append(
                 ImportSourceResult(
@@ -313,6 +317,7 @@ class ImportService:
                     skipped=skipped,
                     failed=failed,
                     warnings=warnings,
+                    imported_session_ids=source_imported_ids,
                 )
             )
 
@@ -322,4 +327,5 @@ class ImportService:
             total_failed=total_failed,
             sources=source_results,
             warnings=[],
+            imported_session_ids=all_imported_ids,
         )

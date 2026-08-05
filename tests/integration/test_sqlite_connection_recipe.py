@@ -328,7 +328,7 @@ class TestImporterForcedFailureContinuation:
                 _pid = _p.id
 
                 importer = SessionImporter(_pid)
-                imported, skipped, failed = await importer.import_sessions_batch(
+                imported, skipped, failed, _ids = await importer.import_sessions_batch(
                     iter([good1, bad_session, good2]),
                     batch_size=3,
                     db=batch_db,
@@ -443,7 +443,7 @@ class TestImporterForcedFailureContinuation:
                 _pid2 = _p2.id
 
                 importer = SessionImporter(_pid2)
-                imported, skipped, failed = await importer.import_sessions_batch(
+                imported, skipped, failed, _ids = await importer.import_sessions_batch(
                     iter([good, bad]),
                     batch_size=2,
                     db=chunk_db,
@@ -707,7 +707,7 @@ class TestTypedBulkInsert:
         importer = SessionImporter(profile_id)
         async with session_scope() as db:
             async with db.begin_nested():
-                imported, day_id = await importer._import_single_session(
+                imported, day_id, _sid = await importer._import_single_session(
                     db, session_data
                 )
 

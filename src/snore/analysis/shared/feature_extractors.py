@@ -28,7 +28,43 @@ __all__ = [
     "PeakFeatures",
     "StatisticalFeatures",
     "SpectralFeatures",
+    "compute_mid_insp_flattening",
 ]
+
+
+def compute_mid_insp_flattening(insp_flow: np.ndarray) -> float | None:
+    """Compute mid-inspiratory flattening index (new; distinct from flatness_index).
+
+    Definition: mean flow in the middle third of inspiration ÷ peak
+    inspiratory flow.  A value near 1.0 indicates a full, unimpeded
+    mid-inspiration; a value below ~0.7 typically indicates flow limitation.
+
+    Versioned as ``FLATTENING_ALGO_VERSION`` in ``versioning.py``.
+
+    Args:
+        insp_flow: 1-D NumPy array of **inspiratory** (positive) flow values
+                   (L/min), time-ordered.  Should contain ≥6 samples for a
+                   meaningful result.
+
+    Returns:
+        Float in [0, 1], or ``None`` if the array is too short or peak is
+        non-positive.
+
+    Example:
+        >>> mid = compute_mid_insp_flattening(np.array([10, 30, 28, 26, 20, 8], dtype=float))
+        >>> 0.0 <= mid <= 1.0
+        True
+    """
+    if len(insp_flow) < 6:
+        return None
+    peak = float(np.max(insp_flow))
+    if peak <= 0:
+        return None
+    n = len(insp_flow)
+    mid_start = n // 3
+    mid_end = (2 * n) // 3
+    mid_mean = float(np.mean(insp_flow[mid_start:mid_end]))
+    return float(np.clip(mid_mean / peak, 0.0, 1.0))
 
 
 class WaveformFeatureExtractor:

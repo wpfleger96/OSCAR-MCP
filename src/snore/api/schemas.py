@@ -72,6 +72,14 @@ class BulkDeletePreviewRequest(BaseModel):
 
 class AnalysisRunRequest(BaseModel):
     modes: list[str] = Field(default_factory=lambda: ["aasm"])
+    primary_mode: str | None = Field(
+        default=None,
+        description=(
+            "Mode whose recovery markers are persisted. "
+            "Must be a member of `modes` when supplied; "
+            "defaults to 'aasm' when 'aasm' is in modes, required otherwise."
+        ),
+    )
     store_results: bool = True
 
 
@@ -98,6 +106,14 @@ class BatchAnalysisRequest(BaseModel):
     to_date: date | None = None
     modes: list[AnalysisMode] = Field(
         default_factory=lambda: cast(list[AnalysisMode], ["aasm"])
+    )
+    primary_mode: str | None = Field(
+        default=None,
+        description=(
+            "Mode whose recovery markers are persisted. "
+            "Must be a member of `modes` when supplied; "
+            "defaults to 'aasm' when 'aasm' is in modes, required otherwise."
+        ),
     )
     store_results: bool = True
     max_sessions: int = Field(default=1000, le=10000, ge=1)

@@ -1,5 +1,8 @@
 """Analysis pipeline type definitions."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -65,3 +68,76 @@ class AnalysisResult(BaseModel):
     )
     timestamp_start: float = Field(default=0.0, description="Session start timestamp")
     timestamp_end: float = Field(default=0.0, description="Session end timestamp")
+
+
+# ---------------------------------------------------------------------------
+# Per-breath compute envelope (plan step 5, Appendix A §1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ComputedBreath:
+    """Per-breath derived fields produced during compute_analysis.
+
+    This is the private compute-layer representation — it NEVER enters the
+    public AnalysisResult DTO or programmatic_result_json.  It is persisted
+    as a models.Breath row via AnalysisComputation.
+    """
+
+    breath_number: int
+    start_offset_s: float
+    end_offset_s: float
+
+    # Timing
+    inspiration_time_s: float | None
+    expiration_time_s: float | None
+    total_time_s: float | None
+    i_e_ratio: float | None
+    duty_cycle: float | None
+
+    # Amplitude
+    peak_flow_lpm: float | None  # peak inspiratory flow L/min
+    peak_exp_flow_lpm: float | None  # peak expiratory flow L/min
+    tidal_volume_ml: float | None
+    respiratory_rate_rolling: float | None
+
+    # Flow shape
+    flatness_index: float | None  # time-above-80%-peak
+    mid_insp_flattening: float | None  # mid-insp flow ÷ peak (new)
+
+    # Flow classification
+    flow_class: int | None
+    flow_confidence: float | None
+
+    # Recovery flag (from primary mode's RERA detector)
+    is_recovery_breath: bool | None
+
+    # Trigger/cycle (experimental)
+    inferred_trigger_type: str | None
+    trigger_confidence: float | None
+    inferred_cycle_type: str | None
+    cycle_confidence: float | None
+    trigger_cycle_applicable: bool | None
+    trigger_cycle_reason: str | None
+
+    # Quality flags
+    leak_valid: bool | None
+    leak_valid_reason: str | None
+    ramp_active: bool | None
+    ramp_active_reason: str | None
+    mask_off: bool | None
+    mask_off_reason: str | None
+
+
+@dataclass
+class AnalysisComputation:
+    """Private compute envelope returned by compute_analysis().
+
+    Contains both the public AnalysisResult summary (stored in
+    programmatic_result_json) and the per-breath list (stored as models.Breath
+    children of the AnalysisResult row).  Breaths NEVER enter the public DTO.
+    """
+
+    summary: AnalysisResult
+    breaths: list[ComputedBreath] = field(default_factory=list)
+    primary_mode: str = "aasm"

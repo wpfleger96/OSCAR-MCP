@@ -1,0 +1,171 @@
+"""get_events tool — BreathService.get_contextual_events() adapter.
+
+Timestamp contract (A6):
+- Event positions are stored as device wall-clock (naive datetime).
+- Output uses tier-2 (offset-free ISO 8601 + timezone_status="unknown")
+  for absolute times and tier-3 (offset_seconds from Session.start_time)
+  for in-session positions.  No UTC offsets are fabricated.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from snore.mcp.errors import ValidationError
+from snore.mcp.schemas import EventContext, EventRow, EventsResponse
+from snore.mcp.tools._capabilities import (
+    build_device_capabilities,
+    get_device_id_for_session,
+)
+from snore.mcp.tools._service_errors import raise_mapped_service_error
+
+
+async def get_events(
+    db_session: AsyncSession,
+    event_date: date,
+    profile_id: int,
+    device_id: int | None = None,
+    types: list[str] | None = None,
+    min_duration: float | None = None,
+    include_context: bool = True,
+    max_events: int = 500,
+) -> EventsResponse:
+    """Return respiratory events for a session date with inline waveform context.
+
+    Uses BreathService.get_contextual_events() to fetch events enriched with
+    pressure/leak at event time and MV in the prior 120 s.
+
+    Args:
+        db_session: Async database session.
+        event_date: The date to query (YYYY-MM-DD).
+        profile_id: Profile scope for BreathService ownership checks (required).
+        device_id: Optional device filter; required when multiple devices share a date.
+        types: Optional list of event types to filter (e.g. ["OA", "CA", "H"]).
+        min_duration: Minimum event duration in seconds (optional filter).
+        include_context: Whether to attach per-event waveform context block.
+        max_events: Maximum events to return (≥1, pre-validated by server wrapper).
+            total_events reflects the untruncated count; truncated=True when cut.
+    """
+    from snore.services.breath_service import (  # noqa: PLC0415
+        BreathService,
+        DeviceAmbiguityError,
+        DeviceNotOwnedError,
+    )
+
+    bs = BreathService(db_session, profile_id)
+    try:
+        contextual_events = await bs.get_contextual_events(
+            therapy_date=event_date,
+            event_types=types,
+            min_duration=min_duration,
+            device_id=device_id,
+        )
+    except (DeviceNotOwnedError, DeviceAmbiguityError) as exc:
+        raise_mapped_service_error(exc)
+    except ValueError as exc:
+        raise ValidationError(
+            f"No therapy data found for date {event_date}. "
+            "Use get_data_overview to check which dates have imported data."
+        ) from exc
+
+    if not contextual_events:
+        caps = (
+            await build_device_capabilities(
+                db_session,
+                profile_id,
+                device_id,
+                date_start=event_date,
+                date_end=event_date,
+            )
+            if device_id is not None
+            else None
+        )
+        return EventsResponse(
+            date=event_date.isoformat(),
+            session_id=None,
+            session_start_wall_clock=None,
+            timezone_status="unknown",
+            events=[],
+            total_events=0,
+            device_capabilities=caps,
+        )
+
+    total_events = len(contextual_events)
+    truncated = total_events > max_events
+    events_to_map = contextual_events[:max_events] if truncated else contextual_events
+
+    rows: list[EventRow] = []
+    for ev in events_to_map:
+        context: EventContext | None = None
+        if include_context:
+            context = EventContext(
+                pressure_at_event_cmh2o=ev.pressure_at_event_cmh2o,
+                leak_at_event_lpm=ev.leak_at_event_lpm,
+                mv_prior_120s_lpm=ev.mv_prior_120s_lpm,
+                minutes_since_session_start=round(ev.minutes_since_session_start, 2),
+            )
+
+        rows.append(
+            EventRow(
+                id=None,  # BreathService seam does not expose internal event IDs
+                session_id=ev.session_id,
+                session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
+                event_type=ev.event_type,
+                start_time_wall_clock=ev.event_start_wall_clock.isoformat(),
+                timezone_status="unknown",
+                offset_seconds=ev.offset_seconds,
+                duration_seconds=ev.duration_seconds,
+                spo2_drop_pct=None,
+                peak_flow_limitation=None,
+                pressure_reason=str(ev.pressure_reason)
+                if ev.pressure_reason is not None
+                else None,
+                leak_reason=str(ev.leak_reason) if ev.leak_reason is not None else None,
+                mv_reason=str(ev.mv_reason) if ev.mv_reason is not None else None,
+                context=context,
+            )
+        )
+
+    # Response-level session anchor: populated only when all events share one session.
+    session_ids = {ev.session_id for ev in contextual_events}
+    if len(session_ids) == 1:
+        anchor_session_id: int | None = contextual_events[0].session_id
+        anchor_session_start: str | None = contextual_events[
+            0
+        ].session_start_wall_clock.isoformat()
+    else:
+        anchor_session_id = None
+        anchor_session_start = None
+
+    # Resolve device_id for capabilities: use the explicit arg when given;
+    # otherwise query the session's device via the shared profile-scoped helper.
+    resolved_device_id = device_id
+    if resolved_device_id is None:
+        resolved_device_id = await get_device_id_for_session(
+            db_session, contextual_events[0].session_id, profile_id
+        )
+
+    caps = (
+        await build_device_capabilities(
+            db_session,
+            profile_id,
+            resolved_device_id,
+            date_start=event_date,
+            date_end=event_date,
+        )
+        if resolved_device_id is not None
+        else None
+    )
+
+    return EventsResponse(
+        date=event_date.isoformat(),
+        session_id=anchor_session_id,
+        session_start_wall_clock=anchor_session_start,
+        timezone_status="unknown",
+        events=rows,
+        total_events=total_events,
+        truncated=truncated,
+        device_capabilities=caps,
+    )
