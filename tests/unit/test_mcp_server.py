@@ -293,14 +293,18 @@ class TestStage2ToolsRegistered:
 
         import fastmcp
 
-        from snore.mcp.server import SNORERuntime, make_server
+        from snore.mcp.server import StaticRuntime, make_server
 
         @asynccontextmanager
         async def _fake_lifespan(
-            app: MagicMock, db_flag: str | None = None, profile_name: str = "neutral"
-        ) -> AsyncIterator[SNORERuntime]:
+            app: MagicMock,
+            db_flag: str | None = None,
+            profile_name: str = "neutral",
+            *,
+            actor_scoped: bool = False,
+        ) -> AsyncIterator[StaticRuntime]:
             session = MagicMock()
-            yield SNORERuntime(
+            yield StaticRuntime(
                 scope_provider=lambda: _noop_scope(session),
                 profile_id=1,
             )
@@ -335,14 +339,18 @@ class TestStage2ToolsRegistered:
 
         import fastmcp
 
-        from snore.mcp.server import SNORERuntime, make_server
+        from snore.mcp.server import StaticRuntime, make_server
 
         @asynccontextmanager
         async def _fake_lifespan(
-            app: MagicMock, db_flag: str | None = None, profile_name: str = "neutral"
-        ) -> AsyncIterator[SNORERuntime]:
+            app: MagicMock,
+            db_flag: str | None = None,
+            profile_name: str = "neutral",
+            *,
+            actor_scoped: bool = False,
+        ) -> AsyncIterator[StaticRuntime]:
             session = MagicMock()
-            yield SNORERuntime(
+            yield StaticRuntime(
                 scope_provider=lambda: _noop_scope(session),
                 profile_id=1,
             )
@@ -375,19 +383,23 @@ class TestChannelVocabInSync:
 
         import fastmcp
 
-        from snore.mcp.server import SNORERuntime, make_server
+        from snore.mcp.server import StaticRuntime, make_server
 
         @asynccontextmanager
         async def _fake_lifespan(
-            app: MagicMock, db_flag: str | None = None, profile_name: str = "neutral"
-        ) -> AsyncIterator[SNORERuntime]:
+            app: MagicMock,
+            db_flag: str | None = None,
+            profile_name: str = "neutral",
+            *,
+            actor_scoped: bool = False,
+        ) -> AsyncIterator[StaticRuntime]:
             session = MagicMock()
 
             @asynccontextmanager
             async def _noop_scope(s: MagicMock) -> AsyncIterator[MagicMock]:
                 yield s
 
-            yield SNORERuntime(
+            yield StaticRuntime(
                 scope_provider=lambda: _noop_scope(session),
                 profile_id=1,
             )
@@ -499,3 +511,97 @@ class TestLifespanStartupFailure:
                     pass  # pragma: no cover
 
         cleanup_mock.assert_awaited_once()
+
+
+class TestStaticRuntime:
+    """StaticRuntime satisfies SNORERuntime protocol and returns stored values."""
+
+    def test_profile_id_returns_stored_value(self) -> None:
+        from unittest.mock import MagicMock
+
+        from snore.mcp.server import StaticRuntime
+
+        rt = StaticRuntime(scope_provider=MagicMock(), profile_id=42)
+        assert rt.profile_id == 42
+
+    def test_scope_provider_returns_stored_callable(self) -> None:
+        from unittest.mock import MagicMock
+
+        from snore.mcp.server import StaticRuntime
+
+        provider = MagicMock()
+        rt = StaticRuntime(scope_provider=provider, profile_id=1)
+        assert rt.scope_provider is provider
+
+    def test_satisfies_snore_runtime_protocol(self) -> None:
+        """StaticRuntime structurally satisfies SNORERuntime for _runtime(ctx) usage."""
+        from unittest.mock import MagicMock
+
+        from snore.mcp.server import SNORERuntime, StaticRuntime
+
+        rt: SNORERuntime = StaticRuntime(scope_provider=MagicMock(), profile_id=7)
+        assert rt.profile_id == 7
+
+
+class TestActorRuntime:
+    """ActorRuntime delegates profile_id to current_actor() on each access."""
+
+    def test_profile_id_raises_when_no_actor_bound(self) -> None:
+        import sys
+
+        from unittest.mock import MagicMock, patch
+
+        from snore.mcp.server import ActorRuntime
+
+        mock_auth = MagicMock()
+        mock_auth.current_actor.side_effect = RuntimeError("no actor bound to context")
+
+        with patch.dict(sys.modules, {"snore.mcp.auth": mock_auth}):
+            rt = ActorRuntime(scope_provider=MagicMock())
+            with pytest.raises(RuntimeError, match="no actor bound to context"):
+                _ = rt.profile_id
+
+    def test_profile_id_returns_bound_actor_profile_id(self) -> None:
+        import sys
+
+        from unittest.mock import MagicMock, patch
+
+        from snore.mcp.server import ActorRuntime
+
+        mock_actor = MagicMock()
+        mock_actor.profile_id = 99
+
+        mock_auth = MagicMock()
+        mock_auth.current_actor.return_value = mock_actor
+
+        with patch.dict(sys.modules, {"snore.mcp.auth": mock_auth}):
+            rt = ActorRuntime(scope_provider=MagicMock())
+            assert rt.profile_id == 99
+
+    def test_scope_provider_stored_as_instance_attribute(self) -> None:
+        from unittest.mock import MagicMock
+
+        from snore.mcp.server import ActorRuntime
+
+        provider = MagicMock()
+        rt = ActorRuntime(scope_provider=provider)
+        assert rt.scope_provider is provider
+
+
+class TestMakeServerAuth:
+    """make_server() wires auth into FastMCP correctly."""
+
+    def test_no_auth_gives_none_on_mcp(self) -> None:
+        from snore.mcp.server import make_server
+
+        mcp = make_server()
+        assert mcp.auth is None
+
+    def test_auth_provider_stored_on_mcp(self) -> None:
+        from unittest.mock import MagicMock
+
+        from snore.mcp.server import make_server
+
+        mock_auth = MagicMock()
+        mcp = make_server(auth=mock_auth)
+        assert mcp.auth is mock_auth

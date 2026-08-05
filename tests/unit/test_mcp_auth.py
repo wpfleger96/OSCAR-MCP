@@ -1,0 +1,369 @@
+"""Unit tests for snore.mcp.auth — token → ActorContext resolution."""
+
+from __future__ import annotations
+
+import uuid
+
+from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from snore.auth.actor import ActorContext, AuthMode, Role
+from snore.database import models
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+async def _db(tmp_path: Path) -> AsyncGenerator[Any]:
+    """Isolated SQLite DB wired into snore.database.session globals.
+
+    Calls init_database / cleanup_database so that session_scope() inside
+    actor_scope() lands in the same file as the test data.
+    """
+    import snore.database.session as db_mod  # noqa: PLC0415
+
+    db_path = str(tmp_path / f"auth_test_{uuid.uuid4().hex[:8]}.db")
+    await db_mod.cleanup_database()
+    await db_mod.init_database(db_path)
+    yield
+    await db_mod.cleanup_database()
+
+
+@pytest.fixture()
+async def seeded_db(_db: Any, tmp_path: Path) -> dict[str, Any]:
+    """Seed a user + two profiles + auth_identity and return their IDs.
+
+    Layout:
+      - user: admin, not disabled, default_profile_id = profile2.id
+      - profile1: first live profile (lower id)
+      - profile2: second live profile (higher id), set as default
+      - auth_identity: provider='google', subject='google-sub-001'
+    """
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    async with session_scope() as db:
+        user = models.User(
+            canonical_email=f"auth_{uuid.uuid4().hex[:8]}@example.com",
+            role="admin",
+        )
+        db.add(user)
+        await db.flush()
+
+        profile1 = models.Profile(user_id=user.id, name="Profile One")
+        db.add(profile1)
+        await db.flush()
+
+        profile2 = models.Profile(user_id=user.id, name="Profile Two")
+        db.add(profile2)
+        await db.flush()
+
+        user.default_profile_id = profile2.id
+        await db.flush()
+
+        identity = models.AuthIdentity(
+            user_id=user.id,
+            provider="google",
+            subject="google-sub-001",
+            email=user.canonical_email,
+        )
+        db.add(identity)
+        await db.flush()
+
+        return {
+            "user_id": user.id,
+            "profile1_id": profile1.id,
+            "profile2_id": profile2.id,
+            "sub": "google-sub-001",
+        }
+
+
+@pytest.fixture()
+async def seeded_demo_user(_db: Any) -> dict[str, Any]:
+    """Seed a demo-role user + profile + auth_identity."""
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    async with session_scope() as db:
+        user = models.User(
+            canonical_email=f"demo_{uuid.uuid4().hex[:8]}@example.com",
+            role="demo",
+        )
+        db.add(user)
+        await db.flush()
+
+        profile = models.Profile(user_id=user.id, name="Demo Profile")
+        db.add(profile)
+        await db.flush()
+
+        user.default_profile_id = profile.id
+        await db.flush()
+
+        sub = f"google-demo-{uuid.uuid4().hex[:8]}"
+        identity = models.AuthIdentity(
+            user_id=user.id,
+            provider="google",
+            subject=sub,
+            email=user.canonical_email,
+        )
+        db.add(identity)
+        await db.flush()
+
+        return {"user_id": user.id, "profile_id": profile.id, "sub": sub}
+
+
+@pytest.fixture()
+async def seeded_disabled_user(_db: Any) -> dict[str, Any]:
+    """Seed a disabled user + profile + auth_identity."""
+    from datetime import UTC, datetime
+
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    async with session_scope() as db:
+        user = models.User(
+            canonical_email=f"disabled_{uuid.uuid4().hex[:8]}@example.com",
+            role="member",
+            disabled_at=datetime.now(UTC),
+        )
+        db.add(user)
+        await db.flush()
+
+        profile = models.Profile(user_id=user.id, name="Disabled Profile")
+        db.add(profile)
+        await db.flush()
+
+        sub = f"google-disabled-{uuid.uuid4().hex[:8]}"
+        identity = models.AuthIdentity(
+            user_id=user.id,
+            provider="google",
+            subject=sub,
+            email=user.canonical_email,
+        )
+        db.add(identity)
+        await db.flush()
+
+        return {"user_id": user.id, "sub": sub}
+
+
+def _fake_token(claims: dict[str, Any]) -> Any:
+    """Build a minimal AccessToken-like object with the given claims dict."""
+    token = MagicMock()
+    token.claims = claims
+    return token
+
+
+# ---------------------------------------------------------------------------
+# resolve_actor tests
+# ---------------------------------------------------------------------------
+
+
+class TestResolveActorKnownIdentity:
+    async def test_resolve_actor_known_identity_returns_actor(
+        self, seeded_db: dict[str, Any]
+    ) -> None:
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        token = _fake_token({"sub": seeded_db["sub"]})
+
+        async with session_scope() as db:
+            actor = await resolve_actor(db, token)
+
+        assert isinstance(actor, ActorContext)
+        assert actor.user_id == seeded_db["user_id"]
+        assert actor.mode is AuthMode.MULTIUSER
+        assert actor.role is Role.ADMIN
+
+    async def test_resolve_actor_profile_fallback_uses_default_profile(
+        self, seeded_db: dict[str, Any]
+    ) -> None:
+        """ActorContextFactory falls back to user.default_profile_id (profile2)."""
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        token = _fake_token({"sub": seeded_db["sub"]})
+
+        async with session_scope() as db:
+            actor = await resolve_actor(db, token)
+
+        # default_profile_id is profile2; the factory should resolve to it.
+        assert actor.profile_id == seeded_db["profile2_id"]
+
+    async def test_resolve_actor_demo_role_maps(
+        self, seeded_demo_user: dict[str, Any]
+    ) -> None:
+        """Demo-role actor has can_write == False."""
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        token = _fake_token({"sub": seeded_demo_user["sub"]})
+
+        async with session_scope() as db:
+            actor = await resolve_actor(db, token)
+
+        assert actor.role is Role.DEMO
+        assert actor.can_write is False
+
+
+class TestResolveActorErrors:
+    async def test_resolve_actor_missing_sub_claim_raises_tool_error(
+        self, _db: Any
+    ) -> None:
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        token = _fake_token({})  # no 'sub' key
+
+        async with session_scope() as db:
+            with pytest.raises(ToolError, match="sub"):
+                await resolve_actor(db, token)
+
+    async def test_resolve_actor_unknown_subject_raises_tool_error(
+        self, _db: Any
+    ) -> None:
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        unknown_sub = "google-nonexistent-sub-xyz"
+        token = _fake_token({"sub": unknown_sub})
+
+        async with session_scope() as db:
+            with pytest.raises(ToolError) as exc_info:
+                await resolve_actor(db, token)
+
+        # Message must not contain the subject value.
+        assert unknown_sub not in str(exc_info.value)
+        assert "SNORE account" in str(exc_info.value) or "Sign in" in str(
+            exc_info.value
+        )
+
+    async def test_resolve_actor_disabled_user_raises_tool_error(
+        self, seeded_disabled_user: dict[str, Any]
+    ) -> None:
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.mcp.auth import resolve_actor  # noqa: PLC0415
+
+        token = _fake_token({"sub": seeded_disabled_user["sub"]})
+
+        async with session_scope() as db:
+            with pytest.raises(ToolError) as exc_info:
+                await resolve_actor(db, token)
+
+        msg = str(exc_info.value)
+        # Must not leak the user id.
+        assert str(seeded_disabled_user["user_id"]) not in msg
+        # Must be actionable.
+        assert "disabled" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# actor_scope tests
+# ---------------------------------------------------------------------------
+
+
+class TestActorScope:
+    async def test_actor_scope_no_token_raises_tool_error(
+        self, _db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        import snore.mcp.auth as auth_mod  # noqa: PLC0415
+
+        monkeypatch.setattr(auth_mod, "get_access_token", lambda: None)
+
+        with pytest.raises(ToolError, match="Authentication required"):
+            async with auth_mod.actor_scope():
+                pass  # pragma: no cover
+
+    async def test_actor_scope_binds_and_resets_actor(
+        self, seeded_db: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Inside the scope current_actor() returns the actor; after exit it raises."""
+        import snore.mcp.auth as auth_mod  # noqa: PLC0415
+
+        fake_token = _fake_token({"sub": seeded_db["sub"]})
+        monkeypatch.setattr(auth_mod, "get_access_token", lambda: fake_token)
+
+        actor_inside: ActorContext | None = None
+
+        async with auth_mod.actor_scope():
+            actor_inside = auth_mod.current_actor()
+            assert isinstance(actor_inside, ActorContext)
+            assert actor_inside.user_id == seeded_db["user_id"]
+
+        # After the scope exits, _current_actor is reset → current_actor() raises.
+        with pytest.raises(RuntimeError, match="actor_scope"):
+            auth_mod.current_actor()
+
+
+# ---------------------------------------------------------------------------
+# current_actor tests
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentActor:
+    def test_current_actor_outside_scope_raises_runtime_error(self) -> None:
+        from snore.mcp.auth import current_actor  # noqa: PLC0415
+
+        with pytest.raises(RuntimeError, match="actor_scope"):
+            current_actor()
+
+
+# ---------------------------------------------------------------------------
+# make_auth_provider tests
+# ---------------------------------------------------------------------------
+
+
+class TestMakeAuthProvider:
+    def test_make_auth_provider_blank_base_url_raises_value_error(self) -> None:
+        from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="SNORE_MCP_BASE_URL"):
+            make_auth_provider(
+                base_url="   ",
+                google_client_id="client-id",
+                google_client_secret="secret",
+            )
+
+    def test_make_auth_provider_blank_client_id_raises_value_error(self) -> None:
+        from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="GOOGLE_CLIENT_ID"):
+            make_auth_provider(
+                base_url="https://example.com",
+                google_client_id="",
+                google_client_secret="secret",
+            )
+
+    def test_make_auth_provider_blank_client_secret_raises_value_error(self) -> None:
+        from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="GOOGLE_CLIENT_SECRET"):
+            make_auth_provider(
+                base_url="https://example.com",
+                google_client_id="client-id",
+                google_client_secret="",
+            )
+
+    def test_make_auth_provider_returns_provider(self) -> None:
+        from fastmcp.server.auth.auth import AuthProvider  # noqa: PLC0415
+
+        from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
+
+        provider = make_auth_provider(
+            base_url="https://example.com",
+            google_client_id="valid-client-id",
+            google_client_secret="valid-client-secret",
+        )
+
+        assert isinstance(provider, AuthProvider)
