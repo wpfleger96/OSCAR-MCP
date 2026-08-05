@@ -343,6 +343,53 @@ class TestPatchUser:
         )
         assert resp.status_code == 404
 
+    def test_role_null_only_returns_422(self, async_db_session, db_session):
+        """Sending {"role": null} alone (no other fields) must return 422."""
+        admin = _seed_user(db_session, role="admin")
+        target = _seed_user(db_session, role="member")
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.patch(
+            f"/api/v1/admin/users/{target.id}",
+            json={"role": None},
+        )
+        assert resp.status_code == 422
+
+    def test_same_role_assignment_is_noop_no_version_bump(
+        self, async_db_session, db_session
+    ):
+        """Assigning the same role the user already has returns 200 without bumping session_version."""
+        admin = _seed_user(db_session, role="admin")
+        target = _seed_user(db_session, role="member")
+        original_version = target.session_version
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.patch(
+            f"/api/v1/admin/users/{target.id}",
+            json={"role": "member"},
+        )
+        assert resp.status_code == 200
+
+        db_session.expunge_all()
+        updated = db_session.get(models.User, target.id)
+        assert updated.session_version == original_version
+
+    def test_whitespace_display_name_clears_to_none(self, async_db_session, db_session):
+        """A whitespace-only display_name strips to None in the persisted row."""
+        admin = _seed_user(db_session, role="admin")
+        target = _seed_user(db_session, role="member", display_name="Original Name")
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.patch(
+            f"/api/v1/admin/users/{target.id}",
+            json={"display_name": "   "},
+        )
+        assert resp.status_code == 200
+
+        db_session.expunge_all()
+        updated = db_session.get(models.User, target.id)
+        assert updated.display_name is None
+
 
 # ---------------------------------------------------------------------------
 # TestDisableEnable
@@ -547,3 +594,64 @@ class TestInvites:
         client = _make_client(async_db_session, actor=_member_actor(member.id))
         resp = client.delete(f"/api/v1/admin/invites/{invite.id}")
         assert resp.status_code == 403
+
+    def test_revoke_expired_invite_returns_409(self, async_db_session, db_session):
+        """Revoking an already-expired invite returns 409 (not pending)."""
+        admin = _seed_user(db_session, role="admin")
+        invite, _ = _seed_invite(db_session, created_by_id=admin.id, expired=True)
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.delete(f"/api/v1/admin/invites/{invite.id}")
+        assert resp.status_code == 409
+
+    def test_revoke_already_revoked_returns_409(self, async_db_session, db_session):
+        """Revoking an already-revoked invite returns 409 (not pending)."""
+        admin = _seed_user(db_session, role="admin")
+        invite, _ = _seed_invite(db_session, created_by_id=admin.id, revoked=True)
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.delete(f"/api/v1/admin/invites/{invite.id}")
+        assert resp.status_code == 409
+
+    def test_create_invite_normalizes_email(self, async_db_session, db_session):
+        """Email is strip+lowercased before storage; response email reflects normalized form."""
+        _set_config_with_public_url()
+
+        admin = _seed_user(db_session, role="admin")
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.post(
+            "/api/v1/admin/invites",
+            json={"email": "  Mixed@Case.COM  ", "role": "member"},
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["email"] == "mixed@case.com"
+
+        db_session.expunge_all()
+        invite_row = db_session.get(models.Invite, data["id"])
+        assert invite_row.email == "mixed@case.com"
+
+    def test_ttl_days_out_of_bounds_returns_422(self, async_db_session, db_session):
+        """ttl_days=0 and ttl_days=31 are both outside [1, 30] and must return 422."""
+        admin = _seed_user(db_session, role="admin")
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+
+        for ttl in (0, 31):
+            resp = client.post(
+                "/api/v1/admin/invites",
+                json={"email": "test@example.com", "role": "member", "ttl_days": ttl},
+            )
+            assert resp.status_code == 422, f"ttl_days={ttl} should return 422"
+
+    def test_create_invite_blank_email_returns_422(self, async_db_session, db_session):
+        """Spaces-only or no-at-sign email is rejected with 422."""
+        admin = _seed_user(db_session, role="admin")
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+
+        for bad_email in ("   ", "no-at-sign"):
+            resp = client.post(
+                "/api/v1/admin/invites",
+                json={"email": bad_email, "role": "member"},
+            )
+            assert resp.status_code == 422, f"email={bad_email!r} should return 422"
