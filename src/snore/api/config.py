@@ -342,7 +342,7 @@ def load_config(
     )
 
 
-def _validate_origin_url(url: str, *, require_http_loopback: bool = False) -> None:
+def validate_origin_url(url: str, *, require_http_loopback: bool = False) -> None:
     """Shared validator for http/https origin URLs.
 
     Accepts http and https only; rejects userinfo, path, query, fragment,
@@ -387,6 +387,9 @@ def _validate_origin_url(url: str, *, require_http_loopback: bool = False) -> No
                 raise ConfigError(
                     f"http:// must be localhost or a loopback IP, got {host!r}."
                 ) from None
+
+
+_validate_origin_url = validate_origin_url  # backwards-compat alias
 
 
 def _validate_public_base_url(url: str) -> None:
