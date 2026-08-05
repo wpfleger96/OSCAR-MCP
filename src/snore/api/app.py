@@ -25,6 +25,7 @@ from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, AuthPathMiddleware, RateLimitMiddleware
 from snore.api.routers import (
+    admin,
     analysis,
     days,
     db,
@@ -41,6 +42,7 @@ from snore.api.routers import (
     waveforms,
 )
 from snore.api.routers import auth as auth_router
+from snore.api.routers import me as me_router
 from snore.database.session import init_database, init_database_from_url
 
 API_V1_PREFIX = "/api/v1"
@@ -223,6 +225,13 @@ def create_app() -> FastAPI:
     app.include_router(
         auth_router.router, prefix=f"{API_V1_PREFIX}/auth", tags=["auth"]
     )
+    # Self-service account management; mounted under /auth/ to inherit rate
+    # limiting and body-cap middleware applied to that path prefix.
+    app.include_router(
+        me_router.router, prefix=f"{API_V1_PREFIX}/auth/me", tags=["auth"]
+    )
+    # Admin management endpoints (users, invites).
+    app.include_router(admin.router, prefix=f"{API_V1_PREFIX}/admin", tags=["admin"])
 
     app.include_router(
         devices.router, prefix=f"{API_V1_PREFIX}/devices", tags=["devices"]
