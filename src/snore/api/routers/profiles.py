@@ -7,6 +7,7 @@ holds it shared — do not add a DELETE route here, ever).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +28,8 @@ class ProfileResponse(BaseModel):
     id: int
     name: str
     user_id: int
+    created_at: datetime
+    is_default: bool
 
     model_config = {"from_attributes": True}
 
@@ -43,15 +46,30 @@ class RenameProfileRequest(BaseModel):
 @router.get("/", response_model=list[ProfileResponse])
 async def list_profiles(actor: RequireAuth, db: DbDep) -> list[ProfileResponse]:
     """List all live profiles for the current user."""
+    from snore.database import models as _models  # noqa: PLC0415
+
     svc = ProfileService(db)
     profiles = await svc.list_profiles(actor.user_id)
-    return [ProfileResponse.model_validate(p) for p in profiles]
+    user = await db.get(_models.User, actor.user_id)
+    default_id = user.default_profile_id if user else None
+    return [
+        ProfileResponse(
+            id=p.id,
+            name=p.name,
+            user_id=p.user_id,
+            created_at=p.created_at,
+            is_default=(p.id == default_id),
+        )
+        for p in profiles
+    ]
 
 
 @router.post("/", response_model=ProfileResponse, status_code=201)
 async def create_profile(
     body: CreateProfileRequest, actor: RequireWritable, db: DbDep
 ) -> ProfileResponse:
+    from snore.database import models as _models  # noqa: PLC0415
+
     svc = ProfileService(db)
     try:
         profile = await svc.create_profile(actor.user_id, body.name)
@@ -59,13 +77,23 @@ async def create_profile(
         raise HTTPException(
             status_code=409, detail=f"A profile named '{body.name}' already exists"
         ) from exc
-    return ProfileResponse.model_validate(profile)
+    user = await db.get(_models.User, actor.user_id)
+    default_id = user.default_profile_id if user else None
+    return ProfileResponse(
+        id=profile.id,
+        name=profile.name,
+        user_id=profile.user_id,
+        created_at=profile.created_at,
+        is_default=(profile.id == default_id),
+    )
 
 
 @router.patch("/{profile_id}", response_model=ProfileResponse)
 async def update_profile(
     profile_id: int, body: RenameProfileRequest, actor: RequireWritable, db: DbDep
 ) -> ProfileResponse:
+    from snore.database import models as _models  # noqa: PLC0415
+
     svc = ProfileService(db)
     try:
         if body.name is not None:
@@ -83,4 +111,12 @@ async def update_profile(
             status_code=409,
             detail=f"A profile named '{body.name}' already exists",
         ) from err
-    return ProfileResponse.model_validate(profile)
+    user = await db.get(_models.User, actor.user_id)
+    default_id = user.default_profile_id if user else None
+    return ProfileResponse(
+        id=profile.id,
+        name=profile.name,
+        user_id=profile.user_id,
+        created_at=profile.created_at,
+        is_default=(profile.id == default_id),
+    )

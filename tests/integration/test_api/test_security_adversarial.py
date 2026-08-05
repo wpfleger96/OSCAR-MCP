@@ -1423,12 +1423,13 @@ class TestP2InviteTokenNotInUrl:
         )
 
     def test_invite_token_absent_from_server_access_log(self, tmp_path):
-        """POST to /auth/invites/lookup with token in body must not log the token.
+        """POST to /auth/invites/lookup and /auth/invites/google with token in body
+        must not log the token.
 
-        Starts a real snore serve process, sends a request with a known token
-        in the request body (not URL), then asserts the raw token string is
+        Starts a real snore serve process, sends requests with known tokens in
+        the request bodies (not URLs), then asserts the raw token strings are
         absent from all server output.  Uvicorn's access log only records the
-        path; with body-based tokens the path is always '/api/v1/auth/invites/lookup'.
+        path; with body-based tokens the paths are always fixed strings.
         SNORE_MULTIUSER_PLAN.md:233.
         """
         import json
@@ -1437,12 +1438,15 @@ class TestP2InviteTokenNotInUrl:
         import urllib.request
 
         token = uuid.uuid4().hex
+        google_token = uuid.uuid4().hex
         port = 18772
 
         env = os.environ.copy()
         env["SNORE_AUTH_MODE"] = "multiuser"
         env["SNORE_SESSION_SECRET"] = "test-secret-at-least-32-chars-long-abcdef"
         env["SNORE_PUBLIC_BASE_URL"] = f"http://127.0.0.1:{port}"
+        env["GOOGLE_CLIENT_ID"] = "test-client-id.apps.googleusercontent.com"
+        env["GOOGLE_CLIENT_SECRET"] = "test-client-secret"
         env["SNORE_BIND_HOST"] = "127.0.0.1"
         env["SNORE_DB_PATH"] = str(tmp_path / "test.db")
 
@@ -1469,19 +1473,36 @@ class TestP2InviteTokenNotInUrl:
             else:
                 pytest.fail("Server did not start within timeout")
 
-            # Send POST with known token in request body (not URL).
+            base_url = f"http://127.0.0.1:{port}"
+
+            # Test 1: POST /auth/invites/lookup — token in body (not URL).
             req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/api/v1/auth/invites/lookup",
+                f"{base_url}/api/v1/auth/invites/lookup",
                 data=json.dumps({"token": token}).encode(),
                 headers={
                     "Content-Type": "application/json",
-                    "Origin": f"http://127.0.0.1:{port}",
+                    "Origin": base_url,
                 },
             )
             try:
                 urllib.request.urlopen(req, timeout=5)
             except urllib.error.HTTPError:
                 pass  # valid=false → 200 is fine; any 4xx is also acceptable
+
+            # Test 2: POST /auth/invites/google — token in body (not URL).
+            # Uses a different token so any leak is unambiguous.
+            req2 = urllib.request.Request(
+                f"{base_url}/api/v1/auth/invites/google",
+                data=json.dumps({"token": google_token}).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": base_url,
+                },
+            )
+            try:
+                urllib.request.urlopen(req2, timeout=5)
+            except urllib.error.HTTPError:
+                pass  # 400 (invalid invite) is expected; just checking logs
 
         finally:
             proc.terminate()
@@ -1491,10 +1512,15 @@ class TestP2InviteTokenNotInUrl:
                 proc.kill()
                 output, _ = proc.communicate()
 
-        # The raw token must NOT appear anywhere in the server output.
+        # The raw tokens must NOT appear anywhere in the server output.
         assert token not in output, (
             f"Raw invite token found in server access log output.\n"
             f"SNORE_MULTIUSER_PLAN.md:233 — tokens must never appear in logs.\n"
+            f"Output snippet: {output[:500]!r}"
+        )
+        assert google_token not in output, (
+            f"Raw Google invite token found in server access log output.\n"
+            f"POST /auth/invites/google token must stay in request body only.\n"
             f"Output snippet: {output[:500]!r}"
         )
 
@@ -1573,6 +1599,10 @@ class TestP2CsrfFailsClosedOnNoneOrigin:
             trusted_proxies=frozenset(),
             dev_origins=frozenset(),
             cors_origins=["http://localhost:5173"],
+            google_client_id="",
+            google_client_secret="",
+            oauth_attempt_ttl_seconds=600,
+            pre_auth_cookie_ttl_seconds=600,
             max_upload_bytes=512 * 1024 * 1024,
             max_file_bytes=256 * 1024 * 1024,
             max_jobs_per_user=3,

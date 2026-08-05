@@ -62,6 +62,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = load_config(bind_host_override=bind_host)
     set_config(cfg)
 
+    if cfg.is_multiuser and not cfg.is_google_configured:
+        logger.warning(
+            "Google OAuth not configured (GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET absent)"
+            " — /auth/google endpoints will return 503"
+        )
+
     # Honour the canonical URL exported by `snore serve` first; fall back to
     # SNORE_DB_PATH for direct uvicorn invocations and the e2e test harness.
     database_url = os.environ.get("SNORE_DATABASE_URL")
