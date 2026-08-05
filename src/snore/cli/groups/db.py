@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
+from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -195,6 +197,576 @@ def drop(db: str | None, force: bool) -> None:
 
     except Exception as e:
         raise click.ClickException(f"Error dropping database: {e}") from e
+
+
+@db.command("scrub-demo")
+@db_option
+@click.option(
+    "--source-profile",
+    "source_profile_id",
+    required=True,
+    type=int,
+    help="Profile ID to copy data from",
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt")
+def scrub_demo(db: str | None, source_profile_id: int, yes: bool) -> None:
+    """Populate the demo account from a source profile.
+
+    Reproducible, idempotent scrub: running twice replaces prior demo data.
+
+    PII scrubs applied:
+    - profiles: name='Demo', username/first_name/last_name -> None,
+      date_of_birth -> None, height_cm -> None, settings -> {}
+    - devices: serial_number -> 'DEMO-NNN', firmware/hardware/product_code -> None;
+      manufacturer and model are kept (device product names, not PII).
+    - sessions: import_source -> 'demo'
+    - settings: all keys and values are copied unchanged. Device settings are
+      an enum-like fixed set (pressure, ramp, EPR, etc.) — therapy configuration
+      data, not identity PII. Preserving them lets demo viewers see realistic
+      therapy settings.
+    - detected_patterns: notes -> None
+    - Date rotation: all dates/datetimes shifted by a consistent whole-day
+      offset so the most recent source day lands exactly 7 days before today.
+    - Raw backup files are NOT copied (filesystem isolation).
+    """
+    if not yes:
+        click.confirm(
+            f"Scrub demo data from source profile {source_profile_id}? "
+            "This will replace all existing demo data.",
+            abort=True,
+        )
+
+    async def _run() -> None:
+        async with db_session(db) as session:
+            await _do_scrub_demo(session, source_profile_id)
+
+    asyncio.run(_run())
+
+
+_DEMO_EMAIL = "demo@snore.local"
+
+
+async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
+    """Async implementation of the scrub-demo command.
+
+    Algorithm (single transaction — atomicity beats WAL-peak concerns at this scale;
+    peak disk usage during scrub is roughly 2–3× the dataset size while old and new
+    data co-exist before the cascade-delete of existing demo devices completes):
+
+    Step 1 — verify source profile exists.
+    Step 2 — find-or-create demo user (role='demo', password_hash=NULL).
+    Step 3 — find-or-create demo profile; on re-run delete old device chain + reset
+              PII fields (username, height_cm, settings) on the profile row itself.
+    Step 4 — compute whole-day date offset (most recent source day → today-7).
+    Step 5 — copy device/day/session chain with PII scrubs and date shift:
+              - waveforms copied via INSERT...SELECT at the SQL layer so blobs never
+                enter Python memory;
+              - events, statistics, settings, analysis_results fetched in one batch
+                per device (WHERE session_id IN (...)) to avoid per-session round-trips;
+              - detected_patterns and breaths batched per analysis result batch.
+    Step 6 — post-scrub integrity checks (ClickException, not bare assert).
+    Step 7 — print summary.
+
+    To revoke a demo session: bump ``users.session_version`` for the demo user;
+    all outstanding session cookies will be invalidated on the next request.
+
+    See the Click command docstring for full semantics and PII scrub policy.
+    """
+    from datetime import datetime  # noqa: PLC0415
+
+    from sqlalchemy import select, text  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+
+    from snore.database.models import (  # noqa: PLC0415
+        AnalysisResult,
+        Breath,
+        Day,
+        DetectedPattern,
+        Device,
+        Event,
+        Profile,
+        Setting,
+        Statistics,
+        User,
+    )
+    from snore.database.models import (
+        Session as DbSession,
+    )
+
+    db: AsyncSession = session
+
+    # ---- 1. Verify source profile exists ----
+    source_profile = await db.get(Profile, source_profile_id)
+    if source_profile is None:
+        raise click.ClickException(f"Source profile {source_profile_id} not found")
+
+    # ---- 2. Find-or-create demo user ----
+    # Each query uses a unique variable name so mypy can track the return type.
+    user_q = select(User).where(User.canonical_email == _DEMO_EMAIL)
+    demo_user: User | None = (await db.execute(user_q)).scalars().first()
+
+    if demo_user is None:
+        demo_user = User(
+            canonical_email=_DEMO_EMAIL,
+            display_name="Demo",
+            role="demo",
+            password_hash=None,
+            session_version=0,
+        )
+        db.add(demo_user)
+        await db.flush()
+        console.print(f"Created demo user (id={demo_user.id})")
+    else:
+        console.print(f"Using existing demo user (id={demo_user.id})")
+
+    assert demo_user is not None  # narrowing for mypy
+
+    # ---- 3. Find-or-create demo profile ----
+    profile_q = select(Profile).where(
+        Profile.user_id == demo_user.id,
+        Profile.name == "Demo",
+    )
+    demo_profile: Profile | None = (await db.execute(profile_q)).scalars().first()
+
+    if demo_profile is None:
+        demo_profile = Profile(
+            user_id=demo_user.id,
+            name="Demo",
+            username=None,
+            first_name=None,
+            last_name=None,
+            date_of_birth=None,
+            height_cm=None,
+            settings={},
+        )
+        db.add(demo_profile)
+        await db.flush()
+        demo_user.default_profile_id = demo_profile.id
+        await db.flush()
+        console.print(f"Created demo profile (id={demo_profile.id})")
+    else:
+        console.print(f"Replacing existing demo profile data (id={demo_profile.id})")
+        # Re-run path: reset PII fields on the profile row itself (new devices will
+        # be recreated below; these column values persist on the existing row).
+        demo_profile.username = None
+        demo_profile.height_cm = None
+        demo_profile.settings = {}
+        # Delete existing device chain — cascade handles sessions/events/etc.
+        cleanup_dev_q = select(Device).where(Device.profile_id == demo_profile.id)
+        existing_devices = (await db.execute(cleanup_dev_q)).scalars().all()
+        for dev in existing_devices:
+            await db.delete(dev)
+        await db.flush()
+
+    assert demo_profile is not None  # narrowing for mypy
+
+    # Ensure demo_user.default_profile_id points to the demo profile.
+    if demo_user.default_profile_id != demo_profile.id:
+        demo_user.default_profile_id = demo_profile.id
+        await db.flush()
+
+    # ---- 4. Compute date shift ----
+    # Find the most recent date across all source days.
+    max_date_q = (
+        select(Day.date)
+        .join(Device, Day.device_id == Device.id)
+        .where(Device.profile_id == source_profile_id)
+        .order_by(Day.date.desc())
+        .limit(1)
+    )
+    max_date_row = (await db.execute(max_date_q)).scalars().first()
+
+    if max_date_row is None:
+        console.print("[yellow]Source profile has no days — nothing to copy.[/yellow]")
+        return
+
+    max_date: date = max_date_row
+    today = date.today()
+    target_date = today - timedelta(days=7)
+    day_offset = target_date - max_date
+    console.print(
+        f"Date shift: {day_offset.days:+d} days "
+        f"(most recent source day {max_date} -> {target_date})"
+    )
+
+    def shift_date(d: date | None) -> date | None:
+        return d + day_offset if d is not None else None
+
+    def shift_dt(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        return dt + day_offset
+
+    # ---- 5. Copy device/day/session chain ----
+    source_dev_q = select(Device).where(Device.profile_id == source_profile_id)
+    source_devices = (await db.execute(source_dev_q)).scalars().all()
+
+    counts: dict[str, int] = {
+        "devices": 0,
+        "days": 0,
+        "sessions": 0,
+        "waveforms": 0,
+        "events": 0,
+        "statistics": 0,
+        "settings": 0,
+        "analysis_results": 0,
+        "detected_patterns": 0,
+        "breaths": 0,
+    }
+
+    # Map source device id → demo device id (needed for session.device_id).
+    device_id_map: dict[int, int] = {}
+    # Map source day id → demo day id (needed for session.day_id composite FK).
+    day_id_map: dict[int, int] = {}
+    # Map source session id → demo session id (needed for child table copies).
+    src_to_demo_session: dict[int, int] = {}
+
+    # --- Phase A: devices and days ---
+    for dev_idx, src_dev in enumerate(source_devices):
+        demo_serial = f"DEMO-{dev_idx + 1:03d}"
+        demo_dev = Device(
+            profile_id=demo_profile.id,
+            manufacturer=src_dev.manufacturer,
+            model=src_dev.model,
+            serial_number=demo_serial,
+            firmware_version=None,
+            hardware_version=None,
+            product_code=None,
+        )
+        db.add(demo_dev)
+        await db.flush()
+        device_id_map[src_dev.id] = demo_dev.id
+        counts["devices"] += 1
+
+        days_q = select(Day).where(Day.device_id == src_dev.id)
+        src_days = (await db.execute(days_q)).scalars().all()
+        for src_day in src_days:
+            demo_day = Day(
+                device_id=demo_dev.id,
+                date=shift_date(src_day.date),
+                session_count=src_day.session_count,
+                total_therapy_hours=src_day.total_therapy_hours,
+                obstructive_apneas=src_day.obstructive_apneas,
+                central_apneas=src_day.central_apneas,
+                hypopneas=src_day.hypopneas,
+                reras=src_day.reras,
+                ahi=src_day.ahi,
+                oai=src_day.oai,
+                cai=src_day.cai,
+                hi=src_day.hi,
+                pressure_min=src_day.pressure_min,
+                pressure_max=src_day.pressure_max,
+                pressure_median=src_day.pressure_median,
+                pressure_mean=src_day.pressure_mean,
+                pressure_95th=src_day.pressure_95th,
+                epap_min=src_day.epap_min,
+                epap_max=src_day.epap_max,
+                epap_median=src_day.epap_median,
+                epap_mean=src_day.epap_mean,
+                epap_95th=src_day.epap_95th,
+                leak_min=src_day.leak_min,
+                leak_max=src_day.leak_max,
+                leak_median=src_day.leak_median,
+                leak_mean=src_day.leak_mean,
+                leak_95th=src_day.leak_95th,
+                spo2_min=src_day.spo2_min,
+                spo2_max=src_day.spo2_max,
+                spo2_mean=src_day.spo2_mean,
+            )
+            db.add(demo_day)
+            await db.flush()
+            day_id_map[src_day.id] = demo_day.id
+            counts["days"] += 1
+
+    # --- Phase B: sessions ---
+    # Fetch all source sessions in one query per device, create demo sessions,
+    # and copy waveforms via INSERT...SELECT (SQL-layer; blobs never enter Python).
+    source_dev_ids = [d.id for d in source_devices]
+    all_sessions_q = select(DbSession).where(DbSession.device_id.in_(source_dev_ids))
+    all_src_sessions = (await db.execute(all_sessions_q)).scalars().all()
+
+    for src_sess in all_src_sessions:
+        demo_device_id = device_id_map[src_sess.device_id]
+        demo_day_id = day_id_map.get(src_sess.day_id) if src_sess.day_id else None
+
+        demo_sess = DbSession(
+            device_id=demo_device_id,
+            day_id=demo_day_id,
+            device_session_id=src_sess.device_session_id,
+            start_time=shift_dt(src_sess.start_time),
+            end_time=shift_dt(src_sess.end_time),
+            duration_seconds=src_sess.duration_seconds,
+            therapy_mode=src_sess.therapy_mode,
+            import_source="demo",
+            parser_version=src_sess.parser_version,
+            data_quality_notes=src_sess.data_quality_notes,
+            has_waveform_data=src_sess.has_waveform_data,
+            has_event_data=src_sess.has_event_data,
+            has_statistics=src_sess.has_statistics,
+            enabled=src_sess.enabled,
+        )
+        db.add(demo_sess)
+        await db.flush()
+        src_to_demo_session[src_sess.id] = demo_sess.id
+        counts["sessions"] += 1
+
+        # Waveforms have no date columns and no PII — copy at the SQL layer
+        # so LargeBinary blobs never enter Python memory.
+        wf_result = await db.execute(
+            text(
+                "INSERT INTO waveforms "
+                "(session_id, waveform_type, sample_rate, unit, "
+                "min_value, max_value, mean_value, data_blob, sample_count) "
+                "SELECT :new_sid, waveform_type, sample_rate, unit, "
+                "min_value, max_value, mean_value, data_blob, sample_count "
+                "FROM waveforms WHERE session_id = :old_sid"
+            ),
+            {"new_sid": demo_sess.id, "old_sid": src_sess.id},
+        )
+        counts["waveforms"] += wf_result.rowcount  # type: ignore[attr-defined]
+
+    # --- Phase C: batch-fetch scalar child tables, insert with session mapping ---
+    source_session_ids = list(src_to_demo_session.keys())
+
+    if source_session_ids:
+        # Events — date-shifted.
+        events_q = select(Event).where(Event.session_id.in_(source_session_ids))
+        for src_evt in (await db.execute(events_q)).scalars().all():
+            db.add(
+                Event(
+                    session_id=src_to_demo_session[src_evt.session_id],
+                    event_type=src_evt.event_type,
+                    start_time=shift_dt(src_evt.start_time),
+                    duration_seconds=src_evt.duration_seconds,
+                    spo2_drop=src_evt.spo2_drop,
+                    peak_flow_limitation=src_evt.peak_flow_limitation,
+                )
+            )
+            counts["events"] += 1
+
+        # Statistics — no date/PII columns.
+        stats_q = select(Statistics).where(
+            Statistics.session_id.in_(source_session_ids)
+        )
+        for src_stats in (await db.execute(stats_q)).scalars().all():
+            db.add(
+                Statistics(
+                    session_id=src_to_demo_session[src_stats.session_id],
+                    obstructive_apneas=src_stats.obstructive_apneas,
+                    central_apneas=src_stats.central_apneas,
+                    mixed_apneas=src_stats.mixed_apneas,
+                    hypopneas=src_stats.hypopneas,
+                    reras=src_stats.reras,
+                    flow_limitations=src_stats.flow_limitations,
+                    ahi=src_stats.ahi,
+                    oai=src_stats.oai,
+                    cai=src_stats.cai,
+                    hi=src_stats.hi,
+                    rei=src_stats.rei,
+                    pressure_min=src_stats.pressure_min,
+                    pressure_max=src_stats.pressure_max,
+                    pressure_median=src_stats.pressure_median,
+                    pressure_mean=src_stats.pressure_mean,
+                    pressure_95th=src_stats.pressure_95th,
+                    epap_min=src_stats.epap_min,
+                    epap_max=src_stats.epap_max,
+                    epap_median=src_stats.epap_median,
+                    epap_mean=src_stats.epap_mean,
+                    epap_95th=src_stats.epap_95th,
+                    ipap_median=src_stats.ipap_median,
+                    ipap_95th=src_stats.ipap_95th,
+                    ipap_max=src_stats.ipap_max,
+                    leak_min=src_stats.leak_min,
+                    leak_max=src_stats.leak_max,
+                    leak_median=src_stats.leak_median,
+                    leak_mean=src_stats.leak_mean,
+                    leak_95th=src_stats.leak_95th,
+                    leak_percentile_70=src_stats.leak_percentile_70,
+                    respiratory_rate_min=src_stats.respiratory_rate_min,
+                    respiratory_rate_max=src_stats.respiratory_rate_max,
+                    respiratory_rate_mean=src_stats.respiratory_rate_mean,
+                    tidal_volume_min=src_stats.tidal_volume_min,
+                    tidal_volume_max=src_stats.tidal_volume_max,
+                    tidal_volume_mean=src_stats.tidal_volume_mean,
+                    minute_ventilation_min=src_stats.minute_ventilation_min,
+                    minute_ventilation_max=src_stats.minute_ventilation_max,
+                    minute_ventilation_mean=src_stats.minute_ventilation_mean,
+                    spo2_min=src_stats.spo2_min,
+                    spo2_max=src_stats.spo2_max,
+                    spo2_mean=src_stats.spo2_mean,
+                    spo2_time_below_90=src_stats.spo2_time_below_90,
+                    pulse_min=src_stats.pulse_min,
+                    pulse_max=src_stats.pulse_max,
+                    pulse_mean=src_stats.pulse_mean,
+                    usage_hours=src_stats.usage_hours,
+                )
+            )
+            counts["statistics"] += 1
+
+        # Settings — device therapy config (enum-like constants, not identity PII).
+        settings_q = select(Setting).where(Setting.session_id.in_(source_session_ids))
+        for src_setting in (await db.execute(settings_q)).scalars().all():
+            db.add(
+                Setting(
+                    session_id=src_to_demo_session[src_setting.session_id],
+                    key=src_setting.key,
+                    value=src_setting.value,
+                )
+            )
+            counts["settings"] += 1
+
+        # --- Phase D: analysis results ---
+        ar_q = select(AnalysisResult).where(
+            AnalysisResult.session_id.in_(source_session_ids)
+        )
+        src_analyses = (await db.execute(ar_q)).scalars().all()
+
+        src_to_demo_ar: dict[int, int] = {}
+        for src_ar in src_analyses:
+            demo_ar = AnalysisResult(
+                session_id=src_to_demo_session[src_ar.session_id],
+                timestamp_start=shift_dt(src_ar.timestamp_start),
+                timestamp_end=shift_dt(src_ar.timestamp_end),
+                programmatic_result_json=src_ar.programmatic_result_json,
+                processing_time_ms=src_ar.processing_time_ms,
+                engine_versions_json=src_ar.engine_versions_json,
+            )
+            db.add(demo_ar)
+            await db.flush()
+            src_to_demo_ar[src_ar.id] = demo_ar.id
+            counts["analysis_results"] += 1
+
+        # --- Phase E: detected_patterns and breaths (batched by analysis result IDs) ---
+        source_ar_ids = list(src_to_demo_ar.keys())
+        if source_ar_ids:
+            patterns_q = select(DetectedPattern).where(
+                DetectedPattern.analysis_result_id.in_(source_ar_ids)
+            )
+            for src_pat in (await db.execute(patterns_q)).scalars().all():
+                db.add(
+                    DetectedPattern(
+                        analysis_result_id=src_to_demo_ar[src_pat.analysis_result_id],
+                        pattern_id=src_pat.pattern_id,
+                        start_time=shift_dt(src_pat.start_time),
+                        duration=src_pat.duration,
+                        confidence=src_pat.confidence,
+                        detected_by=src_pat.detected_by,
+                        metrics_json=src_pat.metrics_json,
+                        notes=None,  # PII scrub
+                    )
+                )
+                counts["detected_patterns"] += 1
+
+            # Breaths use session-relative offsets (seconds) — no date shift needed.
+            # Both FKs (analysis_result_id, session_id) must be remapped.
+            breaths_q = select(Breath).where(
+                Breath.analysis_result_id.in_(source_ar_ids)
+            )
+            for src_breath in (await db.execute(breaths_q)).scalars().all():
+                db.add(
+                    Breath(
+                        analysis_result_id=src_to_demo_ar[
+                            src_breath.analysis_result_id
+                        ],
+                        session_id=src_to_demo_session[src_breath.session_id],
+                        breath_number=src_breath.breath_number,
+                        start_offset_s=src_breath.start_offset_s,
+                        end_offset_s=src_breath.end_offset_s,
+                        inspiration_time_s=src_breath.inspiration_time_s,
+                        expiration_time_s=src_breath.expiration_time_s,
+                        total_time_s=src_breath.total_time_s,
+                        i_e_ratio=src_breath.i_e_ratio,
+                        duty_cycle=src_breath.duty_cycle,
+                        peak_flow_lpm=src_breath.peak_flow_lpm,
+                        peak_exp_flow_lpm=src_breath.peak_exp_flow_lpm,
+                        tidal_volume_ml=src_breath.tidal_volume_ml,
+                        respiratory_rate_rolling=src_breath.respiratory_rate_rolling,
+                        flatness_index=src_breath.flatness_index,
+                        mid_insp_flattening=src_breath.mid_insp_flattening,
+                        flow_class=src_breath.flow_class,
+                        flow_confidence=src_breath.flow_confidence,
+                        is_recovery_breath=src_breath.is_recovery_breath,
+                        inferred_trigger_type=src_breath.inferred_trigger_type,
+                        trigger_confidence=src_breath.trigger_confidence,
+                        inferred_cycle_type=src_breath.inferred_cycle_type,
+                        cycle_confidence=src_breath.cycle_confidence,
+                        trigger_cycle_applicable=src_breath.trigger_cycle_applicable,
+                        trigger_cycle_reason=src_breath.trigger_cycle_reason,
+                        leak_valid=src_breath.leak_valid,
+                        leak_valid_reason=src_breath.leak_valid_reason,
+                        ramp_active=src_breath.ramp_active,
+                        ramp_active_reason=src_breath.ramp_active_reason,
+                        mask_off=src_breath.mask_off,
+                        mask_off_reason=src_breath.mask_off_reason,
+                    )
+                )
+                counts["breaths"] += 1
+
+    await db.flush()
+
+    # ---- 6. Post-scrub integrity checks ----
+    # Using explicit ClickException (not bare assert) so checks survive python -O.
+
+    # a. No source serial numbers remain in demo devices.
+    assert_device_stmt = select(Device).where(Device.profile_id == demo_profile.id)
+    demo_devices_check = (await db.execute(assert_device_stmt)).scalars().all()
+    source_serials = {d.serial_number for d in source_devices}
+    for dev in demo_devices_check:
+        if dev.serial_number in source_serials:
+            raise click.ClickException(
+                f"Integrity check failed: demo device still has source serial "
+                f"{dev.serial_number!r}"
+            )
+
+    # b. Demo profile has no PII fields.
+    await db.refresh(demo_profile)
+    for field, val in [
+        ("first_name", demo_profile.first_name),
+        ("last_name", demo_profile.last_name),
+        ("date_of_birth", demo_profile.date_of_birth),
+        ("username", demo_profile.username),
+        ("height_cm", demo_profile.height_cm),
+    ]:
+        if val is not None:
+            raise click.ClickException(
+                f"Integrity check failed: demo profile.{field} is not None"
+            )
+    if demo_profile.settings:
+        raise click.ClickException(
+            "Integrity check failed: demo profile.settings is not empty"
+        )
+
+    # c. No detected_patterns.notes survive the scrub.
+    assert_pattern_stmt = (
+        select(DetectedPattern)
+        .join(AnalysisResult, DetectedPattern.analysis_result_id == AnalysisResult.id)
+        .join(DbSession, AnalysisResult.session_id == DbSession.id)
+        .join(Device, DbSession.device_id == Device.id)
+        .where(Device.profile_id == demo_profile.id)
+        .where(DetectedPattern.notes.is_not(None))
+    )
+    bad_patterns = (await db.execute(assert_pattern_stmt)).scalars().all()
+    if bad_patterns:
+        raise click.ClickException(
+            f"Integrity check failed: {len(bad_patterns)} demo detected_patterns "
+            "still have notes"
+        )
+
+    # d. No raw backup files for demo profile (scrub must never copy filesystem data).
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    raw_dir = Path(DEFAULT_RAW_BACKUP_DIR) / str(demo_profile.id)
+    if raw_dir.exists():
+        raise click.ClickException(
+            f"Integrity check failed: raw backup dir exists for demo profile: {raw_dir}"
+        )
+
+    # ---- 7. Summary ----
+    print_success("Scrub-demo complete")
+    print_subsection("Rows copied")
+    for table, count in counts.items():
+        print_kv(table, str(count))
+    print_kv("day offset", f"{day_offset.days:+d} days")
 
 
 @db.command("purge-quarantine")

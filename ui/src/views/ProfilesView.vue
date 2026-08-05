@@ -52,13 +52,17 @@
                             </div>
                             <div class="profile-actions">
                                 <button
+                                    v-if="canWrite"
                                     class="action-btn action-btn--ghost"
                                     @click="startEdit(profile)"
                                 >
                                     Rename
                                 </button>
                                 <button
-                                    v-if="!(profile.is_default ?? profile.id === activeProfileId)"
+                                    v-if="
+                                        canWrite &&
+                                        !(profile.is_default ?? profile.id === activeProfileId)
+                                    "
                                     class="action-btn action-btn--ghost"
                                     @click="setDefault(profile.id)"
                                 >
@@ -72,7 +76,7 @@
 
             <p v-if="actionError" class="action-error">{{ actionError }}</p>
 
-            <div class="section-card">
+            <div v-if="canWrite" class="section-card">
                 <h2>Create profile</h2>
                 <form class="create-form" @submit.prevent="handleCreate">
                     <input
@@ -101,7 +105,7 @@ import { listProfiles, createProfile, updateProfile, setDefaultProfile } from '@
 import { useAuth } from '@/composables/useAuth'
 import type { ProfileResponse } from '@/types'
 
-const { activeProfileId, refreshStatus } = useAuth()
+const { activeProfileId, canWrite, refreshStatus } = useAuth()
 
 const profiles = ref<ProfileResponse[]>([])
 const loading = ref(true)
