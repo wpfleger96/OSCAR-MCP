@@ -326,7 +326,17 @@ def _resolve_spa_dist() -> Path | None:
 def _mount_spa(app: FastAPI) -> None:
     dist = _resolve_spa_dist()
     if dist is None:
+        logger.info("No ui/dist found — SPA not mounted")
         return
+
+    import datetime as _dt
+
+    mtime = (dist / "index.html").stat().st_mtime
+    built = _dt.datetime.fromtimestamp(mtime, tz=_dt.UTC).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+    logger.info("Serving SPA from %s (built %s)", dist, built)
+
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="spa-assets")
 
     @app.middleware("http")
