@@ -14,7 +14,7 @@ import math
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +51,7 @@ __all__ = [
     "MultiSessionAmbiguityError",
     "DeviceAmbiguityError",
     "DeviceNotOwnedError",
+    "NoSessionsInRangeError",
     "BreathRow",
     "BreathBin",
     "BreathPage",
@@ -75,9 +76,13 @@ __all__ = [
     "DeviceCapabilities",
     "CaDetail",
     "CaAnalysisResult",
+    "RawCaEvent",
+    "RawCaSessionData",
+    "RawCaAnalysis",
     # Functions
     "fetch_waveform_window_raw",
     "compute_waveform_window",
+    "compute_ca_analysis",
     # Service
     "BreathService",
 ]
@@ -178,6 +183,15 @@ class DeviceAmbiguityError(Exception):
             f"Multiple devices have sessions on {therapy_date}: "
             "pass device_id to disambiguate"
         )
+
+
+class NoSessionsInRangeError(ValueError):
+    """Raised by _resolve_range when no owned sessions exist in the queried date range."""
+
+    def __init__(self, date_start: date, date_end: date) -> None:
+        self.date_start = date_start
+        self.date_end = date_end
+        super().__init__(f"No sessions found in range {date_start} to {date_end}")
 
 
 class BreathQueryRange(BaseModel):
@@ -858,6 +872,56 @@ class CaAnalysisResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# §12 — CA-analysis fetch/compute seam (plan §9 conformance)
+# ---------------------------------------------------------------------------
+
+
+class RawCaEvent(BaseModel):
+    """One CA event row (ORM-free). Input to compute_ca_analysis."""
+
+    start_time: datetime  # naive — matches models.Event.start_time
+    duration_seconds: float | None
+
+
+class RawCaSessionData(BaseModel):
+    """Per-session raw data for CA analysis (ORM-free).
+
+    pre_waveform carries MV, THERAPY_PRESSURE, and EPAP blobs as raw bytes;
+    compute_ca_analysis calls compute_waveform_window on each entry, preserving
+    the single pre-fetch optimisation from the original get_ca_analysis.
+    """
+
+    session_id: int
+    session_start: datetime  # naive — tier-2 anchor
+    duration_seconds: float
+    coverage: SessionCoverage
+    is_ok: bool  # analysis_status == OK and algo_versions is not None and ar_id is not None
+    pre_waveform: RawWaveformWindow  # MV, THERAPY_PRESSURE, EPAP channels
+    ca_events: list[RawCaEvent]
+    pb_json: (
+        dict[str, Any] | None
+    )  # programmatic_result_json for OK sessions; None otherwise
+
+
+class RawCaAnalysis(BaseModel):
+    """Raw fetch result for CA analysis. Pass to compute_ca_analysis (ORM-free).
+
+    session_data being empty signals an empty day; compute_ca_analysis maps it
+    to a CaAnalysisResult using the pre-reduced day-level fields below.
+    Day-level state (day_status, algorithm_identity, null_reason) is pre-reduced
+    during fetch so compute_ca_analysis performs only numpy/statistics work.
+    """
+
+    therapy_date: date
+    device_id: int
+    session_data: list[RawCaSessionData]
+    # Pre-reduced day-level state (computed from coverage during fetch; no DB access)
+    day_status: DayAnalysisStatus
+    algorithm_identity: AlgorithmIdentity | None
+    null_reason: NullReason | None
+
+
+# ---------------------------------------------------------------------------
 # §13 — BreathService helpers
 # ---------------------------------------------------------------------------
 
@@ -1048,7 +1112,7 @@ class BreathService:
         )
         rows = (await self._db.execute(stmt)).all()
         if not rows:
-            raise ValueError(f"No sessions found in range {date_start} to {date_end}")
+            raise NoSessionsInRangeError(date_start, date_end)
         # Distinct device_ids, order-preserving
         device_ids_seen: list[int] = list(
             dict.fromkeys(r.Session.device_id for r in rows)
@@ -1414,7 +1478,7 @@ class BreathService:
                 is_binned=True,
                 total_breaths=total_breaths,
                 page=1,
-                page_size=len(bins),
+                page_size=query.page_size,
                 bins=bins,
                 session_id=session_id,
             )
@@ -1580,12 +1644,7 @@ class BreathService:
                     windows=[],
                 )
 
-        # Only pass primary_mode when criterion uses recovery markers
-        result_primary_mode = (
-            uniform_primary_mode
-            if criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY
-            else None
-        )
+        result_primary_mode = uniform_primary_mode
 
         # ar_by_session populated during the coverage loop above
         ar_status_by_session: dict[int, AnalysisStatus] = {
@@ -1677,18 +1736,21 @@ class BreathService:
             # Filter eligible anchors per §6 step 1
             eligible_indices: list[int] = []
             for i, b in enumerate(breath_rows):
+                if b.mid_insp_flattening is None:
+                    continue
                 if b.leak_valid is True or (
                     opts.include_unknown_leak and b.leak_valid is None
                 ):
-                    if opts.flattening_threshold is None or (
-                        b.mid_insp_flattening is not None
-                        and b.mid_insp_flattening >= opts.flattening_threshold
+                    if (
+                        opts.flattening_threshold is None
+                        or b.mid_insp_flattening >= opts.flattening_threshold
                     ):
                         eligible_indices.append(i)
 
             # Sort by mid_insp_flattening descending (§6 step 2)
             eligible_indices.sort(
-                key=lambda i: breath_rows[i].mid_insp_flattening or 0.0, reverse=True
+                key=lambda i: cast(float, breath_rows[i].mid_insp_flattening),
+                reverse=True,
             )
 
             session_start = session_starts[sid]
@@ -1937,7 +1999,10 @@ class BreathService:
 
         from sqlalchemy import select  # noqa: PLC0415
 
-        from snore.analysis.rx_tracker import RX_KEYS  # noqa: PLC0415
+        from snore.analysis.rx_tracker import (  # noqa: PLC0415
+            RX_KEYS,
+            changed_setting_keys,
+        )
         from snore.database import models  # noqa: PLC0415
 
         # Validate date order for each epoch before anything else
@@ -2113,11 +2178,7 @@ class BreathService:
                     changed_keys: set[str] = set()
                     prev_rx = session_rx_dated[0][1]
                     for snap_date, snap_rx in session_rx_dated[1:]:
-                        diffs = {
-                            k
-                            for k in set(prev_rx) | set(snap_rx)
-                            if prev_rx.get(k) != snap_rx.get(k)
-                        }
+                        diffs = changed_setting_keys(prev_rx, snap_rx)
                         if diffs:
                             changed_keys |= diffs
                             change_dates.append(snap_date)
@@ -3310,23 +3371,23 @@ class BreathService:
         raw = await self.fetch_waveform_window(request)
         return compute_waveform_window(raw)
 
-    async def get_ca_analysis(
+    async def fetch_ca_analysis(
         self, therapy_date: date, device_id: int | None = None
-    ) -> CaAnalysisResult:
-        """Per-CA context + night-level periodic-breathing stats.
+    ) -> RawCaAnalysis:
+        """Fetch all DB data for CA analysis (in-scope fetch seam).
 
-        Returns CA events from ALL sessions on the resolved device.
+        Resolves device, iterates sessions, pre-fetches MV/THERAPY_PRESSURE/EPAP
+        waveform blobs (one fetch per session), queries CA events, and loads
+        OK-session programmatic_result_json for PB% computation.
 
-        Compute runs within the caller's DB session scope.  For the single-user
-        stdio server (post-Fix-3 optimisation) this is acceptable — the hot path
-        is a handful of numpy slices rather than per-event DB round-trips.
-        Revisit when PR-C introduces actor-scoped sessions and longer-lived DB
-        contexts.
+        Returns a ``RawCaAnalysis`` carrying every input that
+        ``compute_ca_analysis`` needs — no ORM handles or DB sessions escape.
+        Empty session_data signals an empty day; ``compute_ca_analysis`` maps it
+        to the NOT_RUN sentinel result.
+
+        ``DeviceAmbiguityError`` and ``DeviceNotOwnedError`` propagate to the
+        caller unchanged.
         """
-        import statistics  # noqa: PLC0415
-
-        import numpy as np  # noqa: PLC0415
-
         from sqlalchemy import select  # noqa: PLC0415
 
         from snore.database import models  # noqa: PLC0415
@@ -3338,49 +3399,35 @@ class BreathService:
         all_day_sessions = sessions_by_date.get(therapy_date, [])
 
         if not all_day_sessions:
-            return CaAnalysisResult(
-                query_date=therapy_date,
+            return RawCaAnalysis(
+                therapy_date=therapy_date,
                 device_id=resolved_device_id,
+                session_data=[],
                 day_status=DayAnalysisStatus.NOT_RUN,
-                session_coverage=[],
                 algorithm_identity=None,
                 null_reason=NullReason.ANALYSIS_NOT_RUN,
-                ca_events=[],
-                periodic_breathing_pct=None,
-                pb_reason=NullReason.NOT_AVAILABLE,
-                mv_rolling_variance=None,
-                mv_variance_reason=NullReason.NOT_AVAILABLE,
             )
 
-        # -----------------------------------------------------------------------
-        # Build coverage; identify OK sessions for eligibility gate
-        # -----------------------------------------------------------------------
+        # Build coverage; identify OK sessions
         coverage: list[SessionCoverage] = []
-        # (session_row, algo, ar_id) for OK sessions only
-        ok_sessions_info: list[tuple[Any, AlgoVersions, int]] = []
-        ok_session_ids: set[int] = set()
         identities_for_reduce: list[AlgorithmIdentity] = []
+        ok_session_ids: set[int] = set()
+        ar_id_by_session: dict[int, int] = {}
         algo_identity: AlgorithmIdentity | None = None
 
         for sess in all_day_sessions:
             status, algo, ar_id = await self._latest_analysis_for_session(sess.id)
-            coverage.append(
-                SessionCoverage(
-                    session_id=sess.id, analysis_status=status, algo_versions=algo
-                )
+            cov = SessionCoverage(
+                session_id=sess.id, analysis_status=status, algo_versions=algo
             )
+            coverage.append(cov)
             if status == AnalysisStatus.OK and algo is not None and ar_id is not None:
-                ok_sessions_info.append((sess, algo, ar_id))
                 ok_session_ids.add(sess.id)
+                ar_id_by_session[sess.id] = ar_id
                 identities_for_reduce.append(algo.identity)
                 algo_identity = algo.identity
 
         ca_day_status = self._reduce_day_status(coverage, identities_for_reduce)
-
-        # ar_id lookup from the first pass — avoids re-calling _latest_analysis_for_session
-        ar_id_by_session: dict[int, int | None] = {
-            sess.id: ar_id for sess, _, ar_id in ok_sessions_info
-        }
 
         # plan §12 lines 984-993: MIXED_VERSION must return algorithm_identity=None
         if ca_day_status == DayAnalysisStatus.MIXED_VERSION:
@@ -3399,37 +3446,16 @@ class BreathService:
         else:
             ca_null_reason = NullReason.ANALYSIS_NOT_RUN
 
-        # MIXED_VERSION: refuse night-level fields (plan §12)
         night_level_refused = ca_day_status == DayAnalysisStatus.MIXED_VERSION
 
-        # Helper: linear regression slope (rise/run), returns L/min per SECOND
-        def _mv_slope(xs: list[float], ys: list[float]) -> float | None:
-            n = len(xs)
-            if n < 2:
-                return None
-            x_mean = sum(xs) / n
-            y_mean = sum(ys) / n
-            num = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys, strict=True))
-            den = sum((x - x_mean) ** 2 for x in xs)
-            return num / den if den != 0.0 else None
+        # Coverage lookup for DTO construction
+        cov_by_session: dict[int, SessionCoverage] = {c.session_id: c for c in coverage}
 
-        # -----------------------------------------------------------------------
-        # CA events: ALL sessions (import-time, independent of analysis status)
-        # Night-level metrics (PB%, MV variance): OK sessions ONLY (eligibility gate)
-        # -----------------------------------------------------------------------
-        ca_details: list[CaDetail] = []
-        total_pb_s = 0.0
-        total_eligible_s = 0.0  # sum of OK session durations only
-        pb_seen_any = False
-        # Combined MV bin means from ALL OK sessions for cross-session variance
-        combined_bin_means: list[float] = []
-        mv_rolling_var: float | None = None
-        mv_var_reason: NullReason | None = NullReason.NOT_AVAILABLE
-
+        # Fetch per-session data
+        session_data: list[RawCaSessionData] = []
         for session_row in all_day_sessions:
             session_id = session_row.id
             session_start = session_row.start_time
-            session_start_f = session_start.timestamp()
             session_duration_s = session_row.duration_seconds or 0.0
             is_ok = session_id in ok_session_ids
 
@@ -3454,18 +3480,8 @@ class BreathService:
                 session_id,
                 session_start,
             )
-            pre_window = compute_waveform_window(pre_raw)
-            # Map channel_type → numpy arrays for O(log n) per-event slicing via
-            # searchsorted.  compute_waveform_window already deserializes once per
-            # channel; converting to ndarray here avoids per-event Python list scans.
-            pre_ch: dict[WaveformChannelName, tuple[np.ndarray, np.ndarray]] = {
-                ch.channel_type: (
-                    np.array(ch.offset_seconds),
-                    np.array(ch.values),
-                )
-                for ch in pre_window.channels
-            }
 
+            # Fetch CA events for this session
             ca_rows = (
                 (
                     await self._db.execute(
@@ -3480,95 +3496,17 @@ class BreathService:
                 .scalars()
                 .all()
             )
-
-            for ev in ca_rows:
-                ev_start_f = ev.start_time.timestamp()
-                offset_s = ev_start_f - session_start_f
-
-                # --- preceding_mv_slope + stability_index ---
-                # Window: prior 60 s (plan §12 line 976: stability uses 60-second window)
-                preceding_mv_slope: float | None = None
-                preceding_mv_reason: NullReason | None = NullReason.NOT_AVAILABLE
-                stability_index: float | None = None
-                stability_reason: NullReason | None = NullReason.NOT_AVAILABLE
-
-                if offset_s > 0.0 and WaveformChannelName.MV in pre_ch:
-                    # plan §12 line 976: stability_index uses 60-second window
-                    mv_win_start = max(0.0, offset_s - 60.0)
-                    off_mv, val_mv = pre_ch[WaveformChannelName.MV]
-                    # searchsorted: O(log n) per event, inclusive both ends
-                    lo = int(np.searchsorted(off_mv, mv_win_start, side="left"))
-                    hi = int(np.searchsorted(off_mv, offset_s, side="right"))
-                    ts_slice = off_mv[lo:hi]
-                    v_slice = val_mv[lo:hi]
-                    if len(ts_slice) >= 2:
-                        # plan §12 line 976: slope in L/min per MINUTE
-                        # _mv_slope returns L/min per SECOND (offset_seconds as x)
-                        slope_per_s = _mv_slope(ts_slice.tolist(), v_slice.tolist())
-                        if slope_per_s is not None:
-                            # convert: multiply by 60 s/min → L/min per minute
-                            preceding_mv_slope = slope_per_s * 60.0
-                        preceding_mv_reason = (
-                            None
-                            if preceding_mv_slope is not None
-                            else NullReason.NOT_AVAILABLE
-                        )
-                        if len(ts_slice) >= 3:
-                            mean_mv = float(v_slice.mean())
-                            if mean_mv != 0.0:
-                                stability_index = (
-                                    statistics.stdev(v_slice.tolist()) / mean_mv
-                                )
-                                stability_reason = None
-
-                # --- ps_delivered_cmh2o: mean(THERAPY_PRESSURE - EPAP) over ±5 s ---
-                ps_delivered: float | None = None
-                ps_reason: NullReason | None = NullReason.NOT_AVAILABLE
-
-                ps_win_start = max(0.0, offset_s - 5.0)
-                ps_win_end = offset_s + 5.0
-                if ps_win_end > 0.0:
-                    if (
-                        WaveformChannelName.THERAPY_PRESSURE in pre_ch
-                        and WaveformChannelName.EPAP in pre_ch
-                    ):
-                        off_tp, val_tp = pre_ch[WaveformChannelName.THERAPY_PRESSURE]
-                        off_ep, val_ep = pre_ch[WaveformChannelName.EPAP]
-                        # searchsorted: O(log n) per event, inclusive both ends
-                        tp_lo = int(np.searchsorted(off_tp, ps_win_start, side="left"))
-                        tp_hi = int(np.searchsorted(off_tp, ps_win_end, side="right"))
-                        ep_lo = int(np.searchsorted(off_ep, ps_win_start, side="left"))
-                        ep_hi = int(np.searchsorted(off_ep, ps_win_end, side="right"))
-                        tp_slice = val_tp[tp_lo:tp_hi]
-                        ep_slice = val_ep[ep_lo:ep_hi]
-                        if len(tp_slice) > 0 and len(ep_slice) > 0:
-                            min_len = min(len(tp_slice), len(ep_slice))
-                            ps_delivered = float(
-                                np.mean(tp_slice[:min_len] - ep_slice[:min_len])
-                            )
-                            ps_reason = None
-
-                ca_details.append(
-                    CaDetail(
-                        session_id=session_id,
-                        session_start_wall_clock=session_start,
-                        timezone_status=TimezoneStatus.UNKNOWN,
-                        offset_seconds=offset_s,
-                        duration_seconds=ev.duration_seconds,
-                        preceding_mv_slope=preceding_mv_slope,
-                        preceding_mv_reason=preceding_mv_reason,
-                        ps_delivered_cmh2o=ps_delivered,
-                        ps_reason=ps_reason,
-                        stability_index=stability_index,
-                        stability_reason=stability_reason,
-                    )
+            raw_events = [
+                RawCaEvent(
+                    start_time=ev.start_time,
+                    duration_seconds=ev.duration_seconds,
                 )
+                for ev in ca_rows
+            ]
 
-            # Night-level metrics: OK sessions ONLY (eligibility gate)
+            # Load programmatic_result_json for OK sessions (PB% computation)
+            pb_json: dict[str, Any] | None = None
             if is_ok and not night_level_refused:
-                total_eligible_s += session_duration_s
-
-                # PB% from persisted AnalysisResult
                 ar_id = ar_id_by_session.get(session_id)
                 if ar_id is not None:
                     ar_row = (
@@ -3583,81 +3521,277 @@ class BreathService:
                         .first()
                     )
                     if ar_row is not None and ar_row.programmatic_result_json:
-                        from snore.analysis.types import (
-                            AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
-                        )
+                        pb_json = ar_row.programmatic_result_json
 
-                        dto = AnalysisResultDTO.model_validate(
-                            ar_row.programmatic_result_json
-                        )
-                        episodes = dto.periodic_breathing_episodes or []
-                        if episodes:
-                            pb_seen_any = True
-                            for ep in episodes:
-                                start_t = float(
-                                    ep.get("start_time", ep.get("start", 0))
-                                )
-                                end_t = float(
-                                    ep.get(
-                                        "end_time",
-                                        ep.get("end", start_t + ep.get("duration", 0)),
-                                    )
-                                )
-                                total_pb_s += max(0.0, end_t - start_t)
-                        elif dto.periodic_breathing is not None:
-                            pb_seen_any = True
+            session_data.append(
+                RawCaSessionData(
+                    session_id=session_id,
+                    session_start=session_start,
+                    duration_seconds=session_duration_s,
+                    coverage=cov_by_session[session_id],
+                    is_ok=is_ok,
+                    pre_waveform=pre_raw,
+                    ca_events=raw_events,
+                    pb_json=pb_json,
+                )
+            )
 
-                # MV rolling variance: collect bin means across ALL OK sessions
-                # (combined; variance computed once after the loop).
-                # Vectorized with numpy: one searchsorted pass per bin rather than
-                # a full-list comprehension, and max() hoisted out of the loop.
-                if WaveformChannelName.MV in pre_ch:
-                    ts_arr, v_arr = pre_ch[WaveformChannelName.MV]
-                    if ts_arr.size >= 6:
-                        max_t = float(ts_arr.max())
-                        bin_size = 600.0
-                        for bin_start in np.arange(0.0, max_t, bin_size):
-                            bin_end = float(bin_start) + bin_size
-                            lo = int(np.searchsorted(ts_arr, bin_start, side="left"))
-                            hi = int(np.searchsorted(ts_arr, bin_end, side="left"))
-                            if lo < hi:
-                                combined_bin_means.append(float(v_arr[lo:hi].mean()))
-
-        # Compute cross-session MV variance from combined bin means (OK sessions only)
-        if not night_level_refused and len(combined_bin_means) >= 2:
-            mv_rolling_var = statistics.variance(combined_bin_means)
-            mv_var_reason = None
-
-        # Compute pb_pct over eligible (OK) sessions only
-        pb_pct: float | None = None
-        pb_reason: NullReason | None = NullReason.NOT_AVAILABLE
-        if night_level_refused:
-            pb_reason = NullReason.ALGO_VERSION_MISMATCH
-            mv_var_reason = NullReason.ALGO_VERSION_MISMATCH
-        elif pb_seen_any:
-            if total_eligible_s > 0:
-                pb_pct = total_pb_s / total_eligible_s * 100.0
-                pb_reason = None
-            else:
-                # session.duration_seconds was NULL — cannot compute a meaningful %
-                pb_pct = None
-                pb_reason = NullReason.NOT_AVAILABLE
-
-        return CaAnalysisResult(
-            query_date=therapy_date,
+        return RawCaAnalysis(
+            therapy_date=therapy_date,
             device_id=resolved_device_id,
+            session_data=session_data,
             day_status=ca_day_status,
-            session_coverage=coverage,
             algorithm_identity=algo_identity,
             null_reason=ca_null_reason,
-            ca_events=ca_details,
-            periodic_breathing_pct=pb_pct,
-            pb_reason=pb_reason,
-            mv_rolling_variance=mv_rolling_var,
-            mv_variance_reason=mv_var_reason,
         )
+
+    async def get_ca_analysis(
+        self, therapy_date: date, device_id: int | None = None
+    ) -> CaAnalysisResult:
+        """Convenience orchestrator: fetch CA data → compute CA analysis. Never closes self._db.
+
+        Uses ``fetch_ca_analysis`` (in-scope) to collect all DB data, then applies
+        ``compute_ca_analysis`` (pure) to produce the final ``CaAnalysisResult``.
+        See ``compute_ca_analysis`` for the numpy/statistics implementation.
+        """
+        raw = await self.fetch_ca_analysis(
+            therapy_date=therapy_date, device_id=device_id
+        )
+        return compute_ca_analysis(raw)
 
     @staticmethod
     def _current_algorithm_identity() -> AlgorithmIdentity:
         """Current algorithm identity for STALE_VERSION detection."""
         return AlgorithmIdentity.current()
+
+
+# ---------------------------------------------------------------------------
+# §12 — compute_ca_analysis (module-level pure function)
+# ---------------------------------------------------------------------------
+
+
+def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
+    """Pure — no DB access. Runs numpy/statistics on pre-fetched raw CA data.
+
+    Deserializes waveform blobs via ``compute_waveform_window``, slices
+    per-event windows with searchsorted, computes MV slope/stability/PS,
+    accumulates cross-session MV bin means, and derives PB% and rolling
+    MV variance.
+
+    Empty ``raw.session_data`` (signalling an empty day) is mapped to a
+    NOT_RUN ``CaAnalysisResult`` sentinel consistent with ``get_ca_analysis``.
+    """
+    import statistics  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+
+    if not raw.session_data:
+        return CaAnalysisResult(
+            query_date=raw.therapy_date,
+            device_id=raw.device_id,
+            day_status=raw.day_status,
+            session_coverage=[],
+            algorithm_identity=raw.algorithm_identity,
+            null_reason=raw.null_reason,
+            ca_events=[],
+            periodic_breathing_pct=None,
+            pb_reason=NullReason.NOT_AVAILABLE,
+            mv_rolling_variance=None,
+            mv_variance_reason=NullReason.NOT_AVAILABLE,
+        )
+
+    coverage = [sd.coverage for sd in raw.session_data]
+    night_level_refused = raw.day_status == DayAnalysisStatus.MIXED_VERSION
+
+    # Helper: linear regression slope (rise/run), returns L/min per SECOND
+    def _mv_slope(xs: list[float], ys: list[float]) -> float | None:
+        n = len(xs)
+        if n < 2:
+            return None
+        x_mean = sum(xs) / n
+        y_mean = sum(ys) / n
+        num = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys, strict=True))
+        den = sum((x - x_mean) ** 2 for x in xs)
+        return num / den if den != 0.0 else None
+
+    ca_details: list[CaDetail] = []
+    total_pb_s = 0.0
+    total_eligible_s = 0.0
+    pb_seen_any = False
+    # Combined MV bin means from ALL OK sessions for cross-session variance
+    combined_bin_means: list[float] = []
+    mv_rolling_var: float | None = None
+    mv_var_reason: NullReason | None = NullReason.NOT_AVAILABLE
+
+    for sd in raw.session_data:
+        session_start_f = sd.session_start.timestamp()
+
+        # Deserialize pre-fetched waveform blobs → numpy arrays (mirrors get_ca_analysis).
+        # compute_waveform_window deserializes once per channel; converting to ndarray
+        # here enables O(log n) per-event slicing via searchsorted.
+        pre_window = compute_waveform_window(sd.pre_waveform)
+        pre_ch: dict[WaveformChannelName, tuple[np.ndarray, np.ndarray]] = {
+            ch.channel_type: (
+                np.array(ch.offset_seconds),
+                np.array(ch.values),
+            )
+            for ch in pre_window.channels
+        }
+
+        for raw_ev in sd.ca_events:
+            ev_start_f = raw_ev.start_time.timestamp()
+            offset_s = ev_start_f - session_start_f
+
+            # --- preceding_mv_slope + stability_index ---
+            # Window: prior 60 s (plan §12 line 976: stability uses 60-second window)
+            preceding_mv_slope: float | None = None
+            preceding_mv_reason: NullReason | None = NullReason.NOT_AVAILABLE
+            stability_index: float | None = None
+            stability_reason: NullReason | None = NullReason.NOT_AVAILABLE
+
+            if offset_s > 0.0 and WaveformChannelName.MV in pre_ch:
+                mv_win_start = max(0.0, offset_s - 60.0)
+                off_mv, val_mv = pre_ch[WaveformChannelName.MV]
+                # searchsorted: O(log n) per event, inclusive both ends
+                lo = int(np.searchsorted(off_mv, mv_win_start, side="left"))
+                hi = int(np.searchsorted(off_mv, offset_s, side="right"))
+                ts_slice = off_mv[lo:hi]
+                v_slice = val_mv[lo:hi]
+                if len(ts_slice) >= 2:
+                    # plan §12 line 976: slope in L/min per MINUTE
+                    # _mv_slope returns L/min per SECOND (offset_seconds as x)
+                    slope_per_s = _mv_slope(ts_slice.tolist(), v_slice.tolist())
+                    if slope_per_s is not None:
+                        # convert: multiply by 60 s/min → L/min per minute
+                        preceding_mv_slope = slope_per_s * 60.0
+                    preceding_mv_reason = (
+                        None
+                        if preceding_mv_slope is not None
+                        else NullReason.NOT_AVAILABLE
+                    )
+                    if len(ts_slice) >= 3:
+                        mean_mv = float(v_slice.mean())
+                        if mean_mv != 0.0:
+                            stability_index = (
+                                statistics.stdev(v_slice.tolist()) / mean_mv
+                            )
+                            stability_reason = None
+
+            # --- ps_delivered_cmh2o: mean(THERAPY_PRESSURE - EPAP) over ±5 s ---
+            ps_delivered: float | None = None
+            ps_reason: NullReason | None = NullReason.NOT_AVAILABLE
+
+            ps_win_start = max(0.0, offset_s - 5.0)
+            ps_win_end = offset_s + 5.0
+            if ps_win_end > 0.0:
+                if (
+                    WaveformChannelName.THERAPY_PRESSURE in pre_ch
+                    and WaveformChannelName.EPAP in pre_ch
+                ):
+                    off_tp, val_tp = pre_ch[WaveformChannelName.THERAPY_PRESSURE]
+                    off_ep, val_ep = pre_ch[WaveformChannelName.EPAP]
+                    # searchsorted: O(log n) per event, inclusive both ends
+                    tp_lo = int(np.searchsorted(off_tp, ps_win_start, side="left"))
+                    tp_hi = int(np.searchsorted(off_tp, ps_win_end, side="right"))
+                    ep_lo = int(np.searchsorted(off_ep, ps_win_start, side="left"))
+                    ep_hi = int(np.searchsorted(off_ep, ps_win_end, side="right"))
+                    tp_slice = val_tp[tp_lo:tp_hi]
+                    ep_slice = val_ep[ep_lo:ep_hi]
+                    if len(tp_slice) > 0 and len(ep_slice) > 0:
+                        min_len = min(len(tp_slice), len(ep_slice))
+                        ps_delivered = float(
+                            np.mean(tp_slice[:min_len] - ep_slice[:min_len])
+                        )
+                        ps_reason = None
+
+            ca_details.append(
+                CaDetail(
+                    session_id=sd.session_id,
+                    session_start_wall_clock=sd.session_start,
+                    timezone_status=TimezoneStatus.UNKNOWN,
+                    offset_seconds=offset_s,
+                    duration_seconds=raw_ev.duration_seconds,
+                    preceding_mv_slope=preceding_mv_slope,
+                    preceding_mv_reason=preceding_mv_reason,
+                    ps_delivered_cmh2o=ps_delivered,
+                    ps_reason=ps_reason,
+                    stability_index=stability_index,
+                    stability_reason=stability_reason,
+                )
+            )
+
+        # Night-level metrics: OK sessions ONLY (eligibility gate)
+        if sd.is_ok and not night_level_refused:
+            total_eligible_s += sd.duration_seconds
+
+            # PB% from persisted AnalysisResult JSON
+            if sd.pb_json is not None:
+                from snore.analysis.types import (
+                    AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+                )
+
+                dto = AnalysisResultDTO.model_validate(sd.pb_json)
+                episodes = dto.periodic_breathing_episodes or []
+                if episodes:
+                    pb_seen_any = True
+                    for ep in episodes:
+                        start_t = float(ep.get("start_time", ep.get("start", 0)))
+                        end_t = float(
+                            ep.get(
+                                "end_time",
+                                ep.get("end", start_t + ep.get("duration", 0)),
+                            )
+                        )
+                        total_pb_s += max(0.0, end_t - start_t)
+                elif dto.periodic_breathing is not None:
+                    pb_seen_any = True
+
+            # MV rolling variance: collect bin means across ALL OK sessions
+            # (combined; variance computed once after the loop).
+            # Vectorized with numpy: one searchsorted pass per bin rather than
+            # a full-list comprehension, and max() hoisted out of the loop.
+            if WaveformChannelName.MV in pre_ch:
+                ts_arr, v_arr = pre_ch[WaveformChannelName.MV]
+                if ts_arr.size >= 6:
+                    max_t = float(ts_arr.max())
+                    bin_size = 600.0
+                    for bin_start in np.arange(0.0, max_t, bin_size):
+                        bin_end = float(bin_start) + bin_size
+                        lo = int(np.searchsorted(ts_arr, bin_start, side="left"))
+                        hi = int(np.searchsorted(ts_arr, bin_end, side="left"))
+                        if lo < hi:
+                            combined_bin_means.append(float(v_arr[lo:hi].mean()))
+
+    # Compute cross-session MV variance from combined bin means (OK sessions only)
+    if not night_level_refused and len(combined_bin_means) >= 2:
+        mv_rolling_var = statistics.variance(combined_bin_means)
+        mv_var_reason = None
+
+    # Compute pb_pct over eligible (OK) sessions only
+    pb_pct: float | None = None
+    pb_reason: NullReason | None = NullReason.NOT_AVAILABLE
+    if night_level_refused:
+        pb_reason = NullReason.ALGO_VERSION_MISMATCH
+        mv_var_reason = NullReason.ALGO_VERSION_MISMATCH
+    elif pb_seen_any:
+        if total_eligible_s > 0:
+            pb_pct = total_pb_s / total_eligible_s * 100.0
+            pb_reason = None
+        else:
+            # session.duration_seconds was NULL — cannot compute a meaningful %
+            pb_pct = None
+            pb_reason = NullReason.NOT_AVAILABLE
+
+    return CaAnalysisResult(
+        query_date=raw.therapy_date,
+        device_id=raw.device_id,
+        day_status=raw.day_status,
+        session_coverage=coverage,
+        algorithm_identity=raw.algorithm_identity,
+        null_reason=raw.null_reason,
+        ca_events=ca_details,
+        periodic_breathing_pct=pb_pct,
+        pb_reason=pb_reason,
+        mv_rolling_variance=mv_rolling_var,
+        mv_variance_reason=mv_var_reason,
+    )

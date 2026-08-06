@@ -584,6 +584,31 @@ class TestGetWaveformClient:
                     },
                 )
 
+    async def test_get_waveform_cap_error_message_omits_pydantic_internals(
+        self, mock_db_session: MagicMock, mcp_client_factory: object
+    ) -> None:
+        """120 s cap violation → ToolError contains the human message only.
+
+        The error must include the relevant cap text and must NOT expose pydantic
+        schema internals (class name, input_value repr, pydantic.dev URLs).
+        """
+        async with mcp_client_factory(mock_db_session) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.call_tool(
+                    "get_waveform",
+                    {
+                        "date": "2024-01-01",
+                        "offset_start": 0.0,
+                        "offset_end": 121.0,  # 121 s > 120 s cap
+                    },
+                )
+
+        err = str(exc_info.value)
+        assert "exceeds the 120 s cap" in err
+        assert "pydantic" not in err.lower()
+        assert "input_value" not in err
+        assert "validation error for" not in err.lower()
+
 
 # ---------------------------------------------------------------------------
 # TestRenderWindowClient — expected-failing until server wires render_window

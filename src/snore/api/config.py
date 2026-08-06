@@ -118,8 +118,9 @@ class AppConfig:
     oauth_attempt_ttl_seconds: int  # Window for completing an OAuth flow; default 600.
     pre_auth_cookie_ttl_seconds: int  # Browser-binding cookie TTL; default 600.
     # Upload / job resource bounds
-    max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
+    max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 2 GiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
+    max_upload_files: int  # Per-upload file count ceiling; default 10 000.
     max_jobs_per_user: int  # Per-user active-job cap; default 3.
     max_jobs_global: int  # Global active-job cap; default 10.
 
@@ -242,7 +243,7 @@ def load_config(
     # Resource bounds — read with safe int parsing.
     try:
         max_upload_bytes = int(
-            os.environ.get("SNORE_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))
+            os.environ.get("SNORE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024))
         )
     except ValueError as exc:
         raise ConfigError(
@@ -261,6 +262,13 @@ def load_config(
         ) from exc
     if max_file_bytes <= 0:
         raise ConfigError("SNORE_MAX_FILE_BYTES must be a positive integer (bytes)")
+
+    try:
+        max_upload_files = int(os.environ.get("SNORE_MAX_UPLOAD_FILES", "10000"))
+    except ValueError as exc:
+        raise ConfigError("SNORE_MAX_UPLOAD_FILES must be a positive integer") from exc
+    if max_upload_files <= 0:
+        raise ConfigError("SNORE_MAX_UPLOAD_FILES must be a positive integer")
 
     try:
         max_jobs_per_user = int(os.environ.get("SNORE_MAX_JOBS_PER_USER", "3"))
@@ -337,6 +345,7 @@ def load_config(
         pre_auth_cookie_ttl_seconds=pre_auth_cookie_ttl_seconds,
         max_upload_bytes=max_upload_bytes,
         max_file_bytes=max_file_bytes,
+        max_upload_files=max_upload_files,
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
     )

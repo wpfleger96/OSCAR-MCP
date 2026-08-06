@@ -14,8 +14,9 @@ from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
-from snore.mcp.schemas import FindWindowsResponse, SessionCoverageEntry, WindowRow
+from snore.mcp.schemas import FindWindowsResponse, WindowRow
 from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._coverage import map_session_coverage
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -101,16 +102,7 @@ async def find_windows(
     # Service uses device_id=0 as a sentinel for "no device resolved" (never emit it).
     resolved_device_id = result.device_id if result.device_id > 0 else None
 
-    coverage = [
-        SessionCoverageEntry(
-            session_id=c.session_id,
-            analysis_status=str(c.analysis_status),
-            algo_versions=c.algo_versions.model_dump(mode="json")
-            if c.algo_versions is not None
-            else None,
-        )
-        for c in result.session_coverage
-    ]
+    coverage = map_session_coverage(result.session_coverage)
 
     windows = [
         WindowRow(

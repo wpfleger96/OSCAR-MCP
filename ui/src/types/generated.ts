@@ -4,6 +4,146 @@
  */
 
 export interface paths {
+    '/api/v1/admin/invites': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Invites
+         * @description Return pending invites (not redeemed, not revoked, not expired).
+         */
+        get: operations['list_invites_api_v1_admin_invites_get']
+        put?: never
+        /**
+         * Create Invite
+         * @description Create an invite link for a new user.
+         *
+         *     Returns 201 with Cache-Control: no-store because the raw token appears in
+         *     the response body and must not be cached by proxies or browsers.  The token
+         *     is embedded in the URL fragment (never the path) so it never enters server
+         *     access logs.  It is shown once — it is not stored.
+         */
+        post: operations['create_invite_api_v1_admin_invites_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/invites/{invite_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /**
+         * Revoke Invite
+         * @description Revoke a pending invite.
+         *
+         *     Returns 409 when the invite is already redeemed, revoked, or expired.
+         */
+        delete: operations['revoke_invite_api_v1_admin_invites__invite_id__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/users': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Users
+         * @description Return all users (including disabled) ordered by id.
+         */
+        get: operations['list_users_api_v1_admin_users_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/users/{user_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        /**
+         * Patch User
+         * @description Update a user's display_name and/or role.
+         *
+         *     Role changes bump the target's session_version to invalidate existing cookies.
+         *     Demoting the last active admin is rejected with 409.
+         */
+        patch: operations['patch_user_api_v1_admin_users__user_id__patch']
+        trace?: never
+    }
+    '/api/v1/admin/users/{user_id}/disable': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Disable User
+         * @description Disable a user account, invalidating all existing sessions.
+         *
+         *     Idempotent when the user is already disabled.  Rejects self-disable with 409.
+         */
+        post: operations['disable_user_api_v1_admin_users__user_id__disable_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/users/{user_id}/enable': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Enable User
+         * @description Re-enable a previously disabled user account.
+         *
+         *     Idempotent when the user is already active.  Note: enabling does not
+         *     restore old sessions — disable bumped session_version, so the user
+         *     must log in again to obtain a fresh cookie.
+         */
+        post: operations['enable_user_api_v1_admin_users__user_id__enable_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/analysis': {
         parameters: {
             query?: never
@@ -50,6 +190,40 @@ export interface paths {
         put?: never
         post?: never
         delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/analysis/jobs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Analysis Jobs */
+        get: operations['list_analysis_jobs_api_v1_analysis_jobs_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/analysis/jobs/{job_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /** Cancel Analysis Job */
+        delete: operations['cancel_analysis_job_api_v1_analysis_jobs__job_id__delete']
         options?: never
         head?: never
         patch?: never
@@ -108,6 +282,9 @@ export interface paths {
          *     Looks up the single active demo user and issues a session cookie.
          *     Returns 404 (generic) when no demo account is configured so callers
          *     cannot distinguish "demo user disabled" from "demo user absent".
+         *
+         *     Only meaningful in multiuser mode — returns 404 in local mode (which has
+         *     no session cookie and no per-role access control).
          */
         post: operations['demo_login_api_v1_auth_demo_login_post']
         delete?: never
@@ -324,6 +501,90 @@ export interface paths {
         options?: never
         head?: never
         patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Me
+         * @description Return the authenticated user's account information.
+         */
+        get: operations['get_me_api_v1_auth_me_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/display-name': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        /**
+         * Update Display Name
+         * @description Update the authenticated user's display name.
+         */
+        patch: operations['update_display_name_api_v1_auth_me_display_name_patch']
+        trace?: never
+    }
+    '/api/v1/auth/me/password': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Change Password
+         * @description Change the authenticated user's password; bumps session_version and re-issues cookie.
+         */
+        post: operations['change_password_api_v1_auth_me_password_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/preferences': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Preferences
+         * @description Return the authenticated user's preferences, filling gaps with defaults.
+         */
+        get: operations['get_preferences_api_v1_auth_me_preferences_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        /**
+         * Update Preferences
+         * @description Merge supplied preferences into stored preferences; return the merged result.
+         */
+        patch: operations['update_preferences_api_v1_auth_me_preferences_patch']
         trace?: never
     }
     '/api/v1/auth/status': {
@@ -1182,6 +1443,43 @@ export interface components {
              */
             start_time: number
         }
+        /** AnalysisJobEnqueued */
+        AnalysisJobEnqueued: {
+            /** Job Id */
+            job_id: string
+            /** Session Count */
+            session_count: number
+        }
+        /** AnalysisJobStatus */
+        AnalysisJobStatus: {
+            /** Created At */
+            created_at: number
+            /** Error Message */
+            error_message: string | null
+            /** Finished At */
+            finished_at: number | null
+            /** Job Id */
+            job_id: string
+            /** Owner User Id */
+            owner_user_id: number | null
+            /** Progress Completed */
+            progress_completed: number
+            /** Progress Total */
+            progress_total: number
+            /** Session Count */
+            session_count: number
+            /** Source */
+            source: string
+            /** Started At */
+            started_at: number | null
+            /** State */
+            state: string
+        }
+        /** AnalysisJobsListResponse */
+        AnalysisJobsListResponse: {
+            /** Jobs */
+            jobs: components['schemas']['AnalysisJobStatus'][]
+        }
         /**
          * AnalysisListItem
          * @description Session with analysis status for listing.
@@ -1411,11 +1709,6 @@ export interface components {
         BatchAnalysisRequest: {
             /** From Date */
             from_date?: string | null
-            /**
-             * Max Sessions
-             * @default 1000
-             */
-            max_sessions: number
             /** Modes */
             modes?: ('aasm' | 'aasm_relaxed' | 'resmed')[]
             /**
@@ -1430,72 +1723,6 @@ export interface components {
             store_results: boolean
             /** To Date */
             to_date?: string | null
-        }
-        /**
-         * BatchAnalysisResult
-         * @description Aggregate result of batch analysis across multiple sessions.
-         */
-        BatchAnalysisResult: {
-            /**
-             * Cancelled
-             * @description Sessions skipped due to cancellation
-             * @default 0
-             */
-            cancelled: number
-            /**
-             * Failed
-             * @description Sessions that failed analysis
-             * @default 0
-             */
-            failed: number
-            /**
-             * Results
-             * @description Per-session results
-             */
-            results?: components['schemas']['BatchSessionResult'][]
-            /**
-             * Successful
-             * @description Sessions analyzed successfully
-             * @default 0
-             */
-            successful: number
-            /**
-             * Total
-             * @description Total sessions processed
-             */
-            total: number
-        }
-        /**
-         * BatchSessionResult
-         * @description Result of analyzing a single session in a batch.
-         */
-        BatchSessionResult: {
-            /**
-             * Cancelled
-             * @description Whether this session was skipped due to cancellation
-             * @default false
-             */
-            cancelled: boolean
-            /**
-             * Error
-             * @description Error message if failed
-             */
-            error?: string | null
-            /**
-             * Session Date
-             * @description Session date
-             */
-            session_date?: string | null
-            /**
-             * Session Id
-             * @description Session database ID
-             */
-            session_id: number
-            /**
-             * Success
-             * @description Whether analysis succeeded
-             */
-            success: boolean
         }
         /** BulkDeletePreviewRequest */
         BulkDeletePreviewRequest: {
@@ -1512,6 +1739,22 @@ export interface components {
             session_ids?: number[] | null
             /** To Date */
             to_date?: string | null
+        }
+        /** CreateInviteRequest */
+        CreateInviteRequest: {
+            /** Email */
+            email: string
+            /**
+             * Role
+             * @default member
+             * @enum {string}
+             */
+            role: 'admin' | 'member'
+            /**
+             * Ttl Days
+             * @default 7
+             */
+            ttl_days: number
         }
         /** CreateProfileRequest */
         CreateProfileRequest: {
@@ -1811,6 +2054,11 @@ export interface components {
             /** Total Therapy Hours */
             total_therapy_hours: number
         }
+        /** DisplayNameRequest */
+        DisplayNameRequest: {
+            /** Display Name */
+            display_name: string | null
+        }
         /**
          * EventComparisonDetail
          * @description Detail of a single unmatched event in a comparison.
@@ -2037,12 +2285,49 @@ export interface components {
              */
             structure_type?: string | null
         }
+        /** InviteCreatedResponse */
+        InviteCreatedResponse: {
+            /** Email */
+            email: string
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string
+            /** Id */
+            id: number
+            /** Invite Url */
+            invite_url: string
+            /** Role */
+            role: string
+        }
         /** InviteInfoResponse */
         InviteInfoResponse: {
             /** Email */
             email: string
             /** Valid */
             valid: boolean
+        }
+        /** InviteItem */
+        InviteItem: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string
+            /** Created By Id */
+            created_by_id: number | null
+            /** Email */
+            email: string
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string
+            /** Id */
+            id: number
+            /** Role */
+            role: string
         }
         /**
          * InviteLookupRequest
@@ -2073,6 +2358,19 @@ export interface components {
             email: string
             /** Password */
             password: string
+        }
+        /** MeResponse */
+        MeResponse: {
+            /** Display Name */
+            display_name: string | null
+            /** Email */
+            email: string
+            /** Has Password */
+            has_password: boolean
+            /** Id */
+            id: number
+            /** Role */
+            role: string
         }
         /** MessageResponse */
         MessageResponse: {
@@ -2154,6 +2452,27 @@ export interface components {
             offset: number
             /** Total */
             total: number
+        }
+        /** PasswordChangeRequest */
+        PasswordChangeRequest: {
+            /** Current Password */
+            current_password?: string | null
+            /** New Password */
+            new_password: string
+        }
+        /**
+         * PatchUserRequest
+         * @description Partial update for a user record.
+         *
+         *     At least one field must be provided.  display_name accepts None to clear
+         *     the stored value.  role must be one of the allowed literals when provided;
+         *     supplying role=null alone is treated the same as an empty body (422).
+         */
+        PatchUserRequest: {
+            /** Display Name */
+            display_name?: string | null
+            /** Role */
+            role?: ('admin' | 'member' | 'demo') | null
         }
         /**
          * PeriodStatistics
@@ -2861,6 +3180,46 @@ export interface components {
             /** Role */
             role: string
         }
+        /** UserItem */
+        UserItem: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string
+            /** Disabled */
+            disabled: boolean
+            /** Display Name */
+            display_name: string | null
+            /** Email */
+            email: string
+            /** Id */
+            id: number
+            /** Role */
+            role: string
+        }
+        /** UserPreferences */
+        UserPreferences: {
+            /**
+             * Date Format
+             * @default iso
+             * @enum {string}
+             */
+            date_format: 'iso' | 'locale' | 'short'
+            /**
+             * Landing Page
+             * @default dashboard
+             * @enum {string}
+             */
+            landing_page: 'dashboard' | 'sessions' | 'stats'
+        }
+        /** UserPreferencesUpdate */
+        UserPreferencesUpdate: {
+            /** Date Format */
+            date_format?: ('iso' | 'locale' | 'short') | null
+            /** Landing Page */
+            landing_page?: ('dashboard' | 'sessions' | 'stats') | null
+        }
         /**
          * VacuumResult
          * @description Result of a database vacuum operation.
@@ -2984,6 +3343,207 @@ export interface components {
 }
 export type $defs = Record<string, never>
 export interface operations {
+    list_invites_api_v1_admin_invites_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['InviteItem'][]
+                }
+            }
+        }
+    }
+    create_invite_api_v1_admin_invites_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['CreateInviteRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['InviteCreatedResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    revoke_invite_api_v1_admin_invites__invite_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                invite_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_users_api_v1_admin_users_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['UserItem'][]
+                }
+            }
+        }
+    }
+    patch_user_api_v1_admin_users__user_id__patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                user_id: number
+            }
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['PatchUserRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    disable_user_api_v1_admin_users__user_id__disable_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                user_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    enable_user_api_v1_admin_users__user_id__enable_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                user_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
     delete_analysis_api_v1_analysis_delete: {
         parameters: {
             query?: never
@@ -3033,12 +3593,12 @@ export interface operations {
         }
         responses: {
             /** @description Successful Response */
-            201: {
+            202: {
                 headers: {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['BatchAnalysisResult']
+                    'application/json': components['schemas']['AnalysisJobEnqueued']
                 }
             }
             /** @description Validation Error */
@@ -3072,6 +3632,55 @@ export interface operations {
                 content: {
                     'application/json': components['schemas']['AnalysisDeletePreview']
                 }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_analysis_jobs_api_v1_analysis_jobs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AnalysisJobsListResponse']
+                }
+            }
+        }
+    }
+    cancel_analysis_job_api_v1_analysis_jobs__job_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                job_id: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
             }
             /** @description Validation Error */
             422: {
@@ -3407,6 +4016,145 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['MessageResponse']
+                }
+            }
+        }
+    }
+    get_me_api_v1_auth_me_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MeResponse']
+                }
+            }
+        }
+    }
+    update_display_name_api_v1_auth_me_display_name_patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['DisplayNameRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    change_password_api_v1_auth_me_password_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['PasswordChangeRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_preferences_api_v1_auth_me_preferences_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['UserPreferences']
+                }
+            }
+        }
+    }
+    update_preferences_api_v1_auth_me_preferences_patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['UserPreferencesUpdate']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['UserPreferences']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
                 }
             }
         }

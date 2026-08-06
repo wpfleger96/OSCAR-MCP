@@ -6,6 +6,25 @@
             <StatCard label="Failed" :value="result.total_failed" />
         </div>
 
+        <div v-if="analysisJobId" class="analysis-queued-note">
+            <Brain class="h-4 w-4" />
+            <span
+                >Analysis running in background —
+                <RouterLink to="/analysis">view progress</RouterLink></span
+            >
+        </div>
+
+        <div
+            v-else-if="analysisQueued === false && result.total_imported > 0"
+            class="analysis-queue-full-note"
+        >
+            <AlertTriangle class="h-4 w-4 flex-shrink-0" />
+            <span
+                >Analysis queue was full — data was imported but not analyzed. Run analysis from the
+                <RouterLink to="/analysis">Analysis page</RouterLink>.</span
+            >
+        </div>
+
         <div v-if="result.warnings && result.warnings.length > 0" class="warnings-box">
             <div class="warnings-header">
                 <AlertTriangle class="h-4 w-4" />
@@ -54,9 +73,13 @@ import { useRouter } from 'vue-router'
 import type { ImportResult } from '@/types'
 import { Button } from '@/components/ui/button'
 import StatCard from '@/components/StatCard.vue'
-import { Check, AlertTriangle } from '@lucide/vue'
+import { Check, AlertTriangle, Brain } from '@lucide/vue'
 
-defineProps<{ result: ImportResult }>()
+defineProps<{
+    result: ImportResult
+    analysisJobId?: string | null
+    analysisQueued?: boolean | null
+}>()
 const emit = defineEmits<{ reset: [] }>()
 
 const router = useRouter()
@@ -182,5 +205,39 @@ const router = useRouter()
     gap: 0.75rem;
     justify-content: flex-end;
     padding-top: 0.5rem;
+}
+
+.analysis-queued-note {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--color-muted-foreground);
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-accent);
+}
+
+.analysis-queued-note a {
+    color: var(--color-primary);
+    text-decoration: underline;
+}
+
+.analysis-queue-full-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    color: color-mix(in srgb, var(--color-warning) 80%, var(--color-foreground));
+}
+
+.analysis-queue-full-note a {
+    color: var(--color-primary);
+    text-decoration: underline;
 }
 </style>

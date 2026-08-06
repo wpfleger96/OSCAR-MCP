@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.resources
 import logging
 import os
+import resource
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from snore.api.analysis_jobs import shutdown as _shutdown_analysis_jobs
+from snore.api.analysis_jobs import start_worker as _start_analysis_worker
 from snore.api.errors import (
     NotFoundError,
     auth_validation_error_handler,
@@ -25,6 +28,7 @@ from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, AuthPathMiddleware, RateLimitMiddleware
 from snore.api.routers import (
+    admin,
     analysis,
     days,
     db,
@@ -41,6 +45,7 @@ from snore.api.routers import (
     waveforms,
 )
 from snore.api.routers import auth as auth_router
+from snore.api.routers import me as me_router
 from snore.database.session import init_database, init_database_from_url
 
 API_V1_PREFIX = "/api/v1"
@@ -55,6 +60,14 @@ except PackageNotFoundError:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Raise the FD soft limit so Starlette's multipart parser can open a
+    # SpooledTemporaryFile per uploaded file without hitting EMFILE.
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    _target = min(_hard, 65_536) if _hard != resource.RLIM_INFINITY else 65_536
+    if _soft < _target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (_target, _hard))
+        logger.info("Raised file-descriptor limit: %d → %d", _soft, _target)
+
     # Load and validate config first — fail fast on misconfiguration.
     from snore.api.config import load_config, set_config  # noqa: PLC0415
 
@@ -111,8 +124,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
 
-    # Start a single lifespan-owned TTL reaper.
+    # Start a single lifespan-owned TTL reaper and the analysis job worker.
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
+    _start_analysis_worker()
     try:
         yield
     finally:
@@ -124,6 +138,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
                 f"after timeout: {still_alive}. Active import writes may be interrupted."
             )
+        _shutdown_analysis_jobs()
         lease.release()
 
 
@@ -223,6 +238,13 @@ def create_app() -> FastAPI:
     app.include_router(
         auth_router.router, prefix=f"{API_V1_PREFIX}/auth", tags=["auth"]
     )
+    # Self-service account management; mounted under /auth/ to inherit rate
+    # limiting and body-cap middleware applied to that path prefix.
+    app.include_router(
+        me_router.router, prefix=f"{API_V1_PREFIX}/auth/me", tags=["auth"]
+    )
+    # Admin management endpoints (users, invites).
+    app.include_router(admin.router, prefix=f"{API_V1_PREFIX}/admin", tags=["admin"])
 
     app.include_router(
         devices.router, prefix=f"{API_V1_PREFIX}/devices", tags=["devices"]

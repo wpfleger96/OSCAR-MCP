@@ -215,6 +215,8 @@ class TestGetNightlySummary:
         assert night.rera_index is None
         assert night.rera_index_reason == "not_available"
         assert night.rdi is None
+        assert night.leak_above_24_pct is None
+        assert night.leak_above_24_pct_reason == "not_available"
 
     async def test_ahi_populated_from_day_row(
         self, async_db_session: AsyncSession, async_test_profile: Any

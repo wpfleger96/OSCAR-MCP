@@ -1,6 +1,6 @@
-"""Integration tests for the get_ca_analysis MCP tool adapter.
+"""Integration tests for the get_ca_analysis MCP tool fetch/compute pair.
 
-Exercises the full stack: get_ca_analysis adapter → BreathService → SQLite.
+Exercises the full stack: fetch_ca_raw + ca_response_from_raw → BreathService → SQLite.
 Each test is self-contained: seed helpers are defined in this file and must not
 be imported from sibling test modules.
 
@@ -155,7 +155,10 @@ class TestGetCaAnalysisSeededEvent:
         Night-level fields (periodic_breathing_pct, mv_rolling_variance) are null
         with 'not_available' reason because no waveform data is seeded.
         """
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
 
         day_date = date(2025, 1, 15)
         device = await _make_device(async_db_session, async_test_profile.id)
@@ -166,9 +169,10 @@ class TestGetCaAnalysisSeededEvent:
         )
         await async_db_session.flush()
 
-        result = await get_ca_analysis(
+        raw, caps = await fetch_ca_raw(
             async_db_session, day_date, async_test_profile.id
         )
+        result = ca_response_from_raw(raw, caps)
 
         assert result.day_status == "ok"
         assert len(result.ca_events) == 1
@@ -208,18 +212,22 @@ class TestGetCaAnalysisNoSessions:
     ) -> None:
         """Device owned but no sessions on the queried date → NOT_RUN response,
         ca_events=[], night-level null+not_available."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
 
         device = await _make_device(async_db_session, async_test_profile.id)
         # No Day/Session seeded for the queried date
         await async_db_session.flush()
 
-        result = await get_ca_analysis(
+        raw, caps = await fetch_ca_raw(
             async_db_session,
             date(2025, 1, 15),
             async_test_profile.id,
             device_id=device.id,
         )
+        result = ca_response_from_raw(raw, caps)
 
         assert result.day_status == "not_run"
         assert result.null_reason == "analysis_not_run"
@@ -241,7 +249,10 @@ class TestGetCaAnalysisNoAnalysisResult:
         CA events are event-anchored (import-time) so they must appear even
         when analysis has not run.  Night-level fields are null+not_available.
         """
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
 
         day_date = date(2025, 1, 20)
         device = await _make_device(async_db_session, async_test_profile.id)
@@ -252,9 +263,10 @@ class TestGetCaAnalysisNoAnalysisResult:
         )
         await async_db_session.flush()
 
-        result = await get_ca_analysis(
+        raw, caps = await fetch_ca_raw(
             async_db_session, day_date, async_test_profile.id
         )
+        result = ca_response_from_raw(raw, caps)
 
         # Day status: no OK analysis → not_run
         assert result.day_status == "not_run"
@@ -280,7 +292,10 @@ class TestGetCaAnalysisDeviceCapabilities:
     ) -> None:
         """Seeded device with session and analysis → device_capabilities is not None
         and reflects the device's identity fields."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
 
         day_date = date(2025, 2, 1)
         device = await _make_device(async_db_session, async_test_profile.id)
@@ -288,9 +303,10 @@ class TestGetCaAnalysisDeviceCapabilities:
         await _make_analysis_result(async_db_session, sess)
         await async_db_session.flush()
 
-        result = await get_ca_analysis(
+        raw, caps = await fetch_ca_raw(
             async_db_session, day_date, async_test_profile.id
         )
+        result = ca_response_from_raw(raw, caps)
 
         assert result.device_capabilities is not None
         # Device fields populated from the seeded Device row
@@ -306,7 +322,10 @@ class TestGetCaAnalysisProfileIsolation:
     ) -> None:
         """Profile B's CA event (distinctive offset 300s) must not appear
         in profile A's query result."""
-        from snore.mcp.tools.ca_analysis import get_ca_analysis  # noqa: PLC0415
+        from snore.mcp.tools.ca_analysis import (  # noqa: PLC0415
+            ca_response_from_raw,
+            fetch_ca_raw,
+        )
 
         day_date = date(2025, 1, 25)
 
@@ -324,9 +343,10 @@ class TestGetCaAnalysisProfileIsolation:
         await async_db_session.flush()
 
         # Query as profile A with profile A's device
-        result = await get_ca_analysis(
+        raw, caps = await fetch_ca_raw(
             async_db_session, day_date, async_test_profile.id, device_id=device_a.id
         )
+        result = ca_response_from_raw(raw, caps)
 
         # Profile B's 300s event must not appear
         assert all(ev.offset_seconds != pytest.approx(300.0) for ev in result.ca_events)

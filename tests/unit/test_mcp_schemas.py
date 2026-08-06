@@ -195,14 +195,17 @@ class TestDeviceCapabilitiesOnSchemas:
         props = schema.get("properties", {})
         assert "device_capabilities" in props
 
-    def test_settings_epoch_has_device_capabilities_field(self) -> None:
-        """SettingsEpoch includes an optional device_capabilities field."""
+    def test_settings_timeline_has_device_capabilities_by_device_field(self) -> None:
+        """SettingsTimelineResponse has top-level device_capabilities_by_device dict."""
 
-        from snore.mcp.schemas import SettingsEpoch  # noqa: PLC0415
+        from snore.mcp.schemas import SettingsTimelineResponse  # noqa: PLC0415
 
-        schema = model_to_schema(SettingsEpoch)
+        schema = model_to_schema(SettingsTimelineResponse)
         props = schema.get("properties", {})
-        assert "device_capabilities" in props
+        assert "device_capabilities_by_device" in props
+        assert "device_capabilities" not in model_to_schema(
+            __import__("snore.mcp.schemas", fromlist=["SettingsEpoch"]).SettingsEpoch
+        ).get("properties", {})
 
     def test_events_response_has_device_capabilities_field(self) -> None:
         """EventsResponse includes an optional device_capabilities field."""

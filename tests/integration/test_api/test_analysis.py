@@ -1,5 +1,23 @@
 from datetime import datetime
 
+import pytest
+
+import snore.api.analysis_jobs as aj_store
+
+# ---------------------------------------------------------------------------
+# Fixture: clean analysis job state between tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def clean_analysis_jobs():
+    """Reset global analysis job state before and after each test."""
+    aj_store._all_jobs.clear()
+    aj_store._queue.clear()
+    yield
+    aj_store._all_jobs.clear()
+    aj_store._queue.clear()
+
 
 class TestAnalysisSessionsRouter:
     def test_list_analysis_sessions_empty(self, api_client):
@@ -86,22 +104,102 @@ class TestBatchAnalysis:
             or "to_date" in response.json()["detail"]
         )
 
-    def test_from_date_only_accepted(self, api_client):
+    def test_from_date_only_not_400(self, api_client):
+        # from_date alone must not cause a 400; 202 (queued) or 422 (no sessions
+        # or invalid mode) are both valid depending on database state.
         response = api_client.post(
             "/api/v1/analysis/batch", json={"from_date": "2025-01-01"}
         )
-        assert response.status_code == 201
+        assert response.status_code != 400
 
-    def test_empty_range_returns_total_zero(self, api_client):
+    def test_from_date_with_sessions_returns_202(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        from snore.database.models import Day
+
+        day = Day(
+            device_id=test_device.id, date=datetime(2025, 1, 10).date(), session_count=1
+        )
+        db_session.add(day)
+        db_session.flush()
+
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2025, 1, 10, 22, 0)
+        )
+        session.day_id = day.id
+        db_session.flush()
+
+        response = api_client.post(
+            "/api/v1/analysis/batch", json={"from_date": "2025-01-01"}
+        )
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert data["session_count"] >= 1
+
+    def test_empty_range_returns_422(self, api_client):
+        # A date range with no sessions returns 422.
         response = api_client.post(
             "/api/v1/analysis/batch",
             json={"from_date": "2099-01-01", "to_date": "2099-01-31"},
         )
-        assert response.status_code == 201
+        assert response.status_code == 422
+        assert "No sessions found" in response.json()["detail"]
+
+    def test_invalid_primary_mode_returns_422(self, api_client):
+        # primary_mode not in modes → 422 at the endpoint before any DB call.
+        response = api_client.post(
+            "/api/v1/analysis/batch",
+            json={
+                "from_date": "2025-01-01",
+                "modes": ["aasm"],
+                "primary_mode": "resmed",
+            },
+        )
+        assert response.status_code == 422
+
+
+class TestAnalysisJobsAPI:
+    def test_list_jobs_returns_empty_initially(self, api_client):
+        response = api_client.get("/api/v1/analysis/jobs")
+        assert response.status_code == 200
         data = response.json()
-        assert data["total"] == 0
-        assert data["successful"] == 0
-        assert data["failed"] == 0
+        assert "jobs" in data
+        assert isinstance(data["jobs"], list)
+        assert data["jobs"] == []
+
+    def test_delete_unknown_job_returns_404(self, api_client):
+        response = api_client.delete("/api/v1/analysis/jobs/does-not-exist")
+        assert response.status_code == 404
+
+    def test_delete_queued_job_returns_204_and_cancels(self, api_client):
+        # Enqueue a job directly via the module so we control its state.
+        job = aj_store.enqueue(
+            profile_id=1,
+            session_ids=[1, 2],
+            source=aj_store.AnalysisJobSource.BATCH,
+            owner_user_id=None,  # Matches local-mode actor (user_id may be None)
+        )
+        assert job is not None
+
+        response = api_client.delete(f"/api/v1/analysis/jobs/{job.job_id}")
+        assert response.status_code == 204
+        assert job.state == aj_store.AnalysisJobState.CANCELLED
+
+    def test_list_jobs_includes_enqueued_job(self, api_client):
+        job = aj_store.enqueue(
+            profile_id=1,
+            session_ids=[10],
+            source=aj_store.AnalysisJobSource.BATCH,
+            owner_user_id=None,
+        )
+        assert job is not None
+
+        response = api_client.get("/api/v1/analysis/jobs")
+        assert response.status_code == 200
+        data = response.json()
+        ids = [j["job_id"] for j in data["jobs"]]
+        assert job.job_id in ids
 
 
 # ---------------------------------------------------------------------------
