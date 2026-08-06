@@ -6,7 +6,6 @@ import json
 import logging
 import shutil
 import tempfile
-import threading
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
@@ -20,16 +19,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from snore.api.deps import ActorDep, get_db
-from snore.api.guards import RequireWritable
+from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
     JobPhase,
+    JobState,
     JobType,
     cancel_job,
     create_job,
+    enqueue_for_execution,
     get_job,
+    list_jobs,
     remove_job,
     reserve_slot,
+)
+from snore.api.schemas import (
+    ImportResultSummary,
+    ImportSourceResultSummary,
+    LinkedAnalysisSummary,
+    PipelineJobsListResponse,
+    PipelineJobStatus,
 )
 from snore.database import models
 from snore.services.import_service import ImportService, safe_relative_path
@@ -264,6 +273,11 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                     job.job_id,
                 )
 
+        job.set_analysis_link(
+            analysis_job_id=analysis_job_id,
+            queue_full=bool(imported_ids) and analysis_job_id is None,
+        )
+
         terminal_extra: dict[str, Any] = {"result": import_result_dict}
         if analysis_job_id is not None:
             terminal_extra["analysis_job_id"] = analysis_job_id
@@ -283,30 +297,6 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         # Ordering: publish terminal (done above), then clean, then release capacity.
         job.cleanup_files()
         job.release_capacity()
-
-
-def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
-    """Attempt to start the worker thread for *job* (start-once guarantee)."""
-    from snore.api.import_jobs import remove_job  # noqa: PLC0415
-
-    if not job.try_start():
-        return
-    try:
-        t = threading.Thread(
-            target=_run_import,
-            args=(job, profile_raw_root),
-            daemon=True,
-            name=f"import-{job.job_id}",
-        )
-        with job._lock:
-            job._worker_thread = t
-        t.start()
-    except Exception:
-        job._finish_cancelled()
-        remove_job(job.job_id)
-        job.cleanup_files()
-        job.release_capacity()
-        raise
 
 
 @router.post(
@@ -466,6 +456,7 @@ async def import_files(
 
         # Transfer ownership to the job; the worker will clean up on completion.
         job.temp_dir = tmp_path
+        job.set_file_count(len(uploads))
         tmp = None  # Job owns the directory now.
         job.convert_to_pending()
         job.target_profile_id = resolved_profile_id
@@ -487,8 +478,8 @@ async def import_files(
 
     profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(job.target_profile_id)
 
-    # Start worker immediately — /progress is observer-only.
-    _start_worker(job, profile_raw_root)
+    # Enqueue for serial execution — /progress is observer-only.
+    enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
 
 
@@ -529,13 +520,139 @@ async def import_from_path(
         raise HTTPException(status_code=429, detail="Too many active imports.") from exc
 
     job.target_profile_id = resolved_profile_id
+    job.set_file_count(len(body.sources))
 
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
     profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(resolved_profile_id)
 
-    _start_worker(job, profile_raw_root)
+    enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
+
+
+def _derive_stage(
+    import_state: JobState,
+    analysis_job_id: str | None,
+    analysis_queued: bool | None,
+    linked: LinkedAnalysisSummary | None,
+) -> str:
+    """Map import + analysis state to a human-readable pipeline stage string.
+
+    ``linked`` is a LinkedAnalysisSummary instance or None (reaped / not yet set).
+    """
+    if import_state == JobState.PENDING_UPLOAD:
+        return "uploading"
+    if import_state == JobState.PENDING:
+        return "queued"
+    if import_state == JobState.RUNNING:
+        return "importing"
+    if import_state == JobState.FAILED:
+        return "failed"
+    if import_state == JobState.CANCELLED:
+        return "cancelled"
+    # SUCCEEDED — determine analysis stage.
+    if analysis_job_id is None and analysis_queued is False:
+        return "analysis_skipped"
+    if analysis_job_id is None:
+        return "done"
+    if linked is None:
+        # Analysis job was reaped after the import job stored the link.
+        return "done"
+    _state_map = {
+        "queued": "analysis_queued",
+        "running": "analyzing",
+        "succeeded": "done",
+        "failed": "analysis_failed",
+        "cancelled": "analysis_cancelled",
+    }
+    return _state_map.get(linked.state, "unknown")
+
+
+def _to_import_result_summary(result_dict: dict[str, Any]) -> ImportResultSummary:
+    """Build an ImportResultSummary from a raw import-result dict, stripping session IDs."""
+    sources = [
+        ImportSourceResultSummary(
+            source=s.get("source", {}),
+            imported=s.get("imported", 0),
+            skipped=s.get("skipped", 0),
+            failed=s.get("failed", 0),
+            warnings=s.get("warnings", []),
+        )
+        for s in result_dict.get("sources", [])
+    ]
+    return ImportResultSummary(
+        total_imported=result_dict.get("total_imported", 0),
+        total_skipped=result_dict.get("total_skipped", 0),
+        total_failed=result_dict.get("total_failed", 0),
+        warnings=result_dict.get("warnings", []),
+        sources=sources,
+    )
+
+
+@router.get("/jobs", response_model=PipelineJobsListResponse)
+def list_pipeline_jobs(actor: RequireAuth) -> PipelineJobsListResponse:
+    """List all pipeline (import) jobs visible to the authenticated actor.
+
+    Ownership rule: jobs with owner_user_id=None are visible to any authenticated
+    user (local-mode parity); jobs with a set owner are visible only to that owner.
+    Foreign jobs return 404 on direct access but are simply absent from this list.
+
+    TTL note: both stores reap terminal jobs after 600s independently — a reaped
+    analysis job degrades the stage to "done"; a reaped import job drops the row
+    while its analysis job may still appear in GET /analysis/jobs.
+    """
+    from snore.api import analysis_jobs as aj_module  # noqa: PLC0415
+
+    result: list[PipelineJobStatus] = []
+    for job in list_jobs(owner_user_id=actor.user_id):
+        analysis_id = job.analysis_job_id
+        linked: LinkedAnalysisSummary | None = None
+        if analysis_id is not None:
+            aj = aj_module.get_job(analysis_id)
+            if aj is not None:
+                # Defensive: analysis job should always inherit the same owner as the
+                # parent import job (both are set from actor.user_id at enqueue time),
+                # but guard explicitly so the invariant is self-documenting.
+                if aj.owner_user_id is not None and aj.owner_user_id != actor.user_id:
+                    aj = None
+            if aj is not None:
+                linked = LinkedAnalysisSummary(
+                    job_id=aj.job_id,
+                    state=aj.state.value,
+                    progress_completed=aj.progress_completed,
+                    progress_total=aj.progress_total,
+                    error_message=aj.error_message,
+                )
+
+        import_state = job.state
+        stage = _derive_stage(import_state, analysis_id, job.analysis_queued, linked)
+
+        import_result_summary: ImportResultSummary | None = None
+        snapshot = job.import_result_snapshot
+        if snapshot is not None:
+            import_result_summary = _to_import_result_summary(snapshot)
+
+        result.append(
+            PipelineJobStatus(
+                job_id=job.job_id,
+                job_type=job.job_type.value,
+                state=import_state.value,
+                stage=stage,
+                file_count=job.file_count,
+                created_at=job.created_at,
+                finished_at=job.finished_at,
+                progress_message=job.latest_progress_message,
+                sessions_imported=job.sessions_imported,
+                import_result=import_result_summary,
+                error_message=job.error_message,
+                analysis_job_id=analysis_id,
+                analysis_queued=job.analysis_queued,
+                linked_analysis=linked,
+            )
+        )
+
+    result.sort(key=lambda j: j.created_at, reverse=True)
+    return PipelineJobsListResponse(jobs=result)
 
 
 @router.delete("/{job_id}", status_code=204)

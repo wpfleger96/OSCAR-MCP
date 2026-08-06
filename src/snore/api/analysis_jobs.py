@@ -238,11 +238,21 @@ def get_job(job_id: str) -> AnalysisJob | None:
 
 
 def list_jobs(owner_user_id: int | None = None) -> list[AnalysisJob]:
+    """Return jobs visible to *owner_user_id*.
+
+    A job with owner_user_id=None is visible to any caller (local-mode parity).
+    A job with a set owner is visible only to that owner.
+    When *owner_user_id* is None the caller receives all jobs.
+    """
     with _lock:
-        jobs = list(_all_jobs.values())
-    if owner_user_id is not None:
-        jobs = [j for j in jobs if j.owner_user_id == owner_user_id]
-    return jobs
+        all_jobs = list(_all_jobs.values())
+    if owner_user_id is None:
+        return all_jobs
+    return [
+        j
+        for j in all_jobs
+        if j.owner_user_id is None or j.owner_user_id == owner_user_id
+    ]
 
 
 def cancel_job(job_id: str) -> bool:

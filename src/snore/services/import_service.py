@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
 from snore.database.txn import run_txn
+from snore.database.write_gate import write_gate
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
 from snore.parsers.unified import UnifiedSession
@@ -170,10 +171,13 @@ class ImportService:
             backup_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
 
         if not dry_run:
-            async with session_scope() as db_session:
-                orphaned = await SessionImporter.cleanup_orphaned_records(db_session)
-                if orphaned > 0:
-                    emit(f"Cleaned up {orphaned} orphaned records from database")
+            async with write_gate():
+                async with session_scope() as db_session:
+                    orphaned = await SessionImporter.cleanup_orphaned_records(
+                        db_session
+                    )
+                    if orphaned > 0:
+                        emit(f"Cleaned up {orphaned} orphaned records from database")
 
         parser_map = {p.parser_id: p for p in parser_registry.list_parsers()}
 
@@ -299,7 +303,8 @@ class ImportService:
                         db=db,
                     )
 
-                ci, cs, cf, chunk_ids = await run_txn(_import_chunk)
+                async with write_gate():
+                    ci, cs, cf, chunk_ids = await run_txn(_import_chunk)
                 imported += ci
                 skipped += cs
                 failed += cf

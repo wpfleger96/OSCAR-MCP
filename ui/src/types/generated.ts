@@ -822,6 +822,34 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/import/jobs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Pipeline Jobs
+         * @description List all pipeline (import) jobs visible to the authenticated actor.
+         *
+         *     Ownership rule: jobs with owner_user_id=None are visible to any authenticated
+         *     user (local-mode parity); jobs with a set owner are visible only to that owner.
+         *     Foreign jobs return 404 on direct access but are simply absent from this list.
+         *
+         *     TTL note: both stores reap terminal jobs after 600s independently — a reaped
+         *     analysis job degrades the stage to "done"; a reaped import job drops the row
+         *     while its analysis job may still appear in GET /analysis/jobs.
+         */
+        get: operations['list_pipeline_jobs_api_v1_import_jobs_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/import/path': {
         parameters: {
             query?: never
@@ -2250,6 +2278,22 @@ export interface components {
             sources: components['schemas']['ImportSource'][]
         }
         /**
+         * ImportResultSummary
+         * @description Trimmed ImportResult excluding imported_session_ids (poll-bandwidth).
+         */
+        ImportResultSummary: {
+            /** Sources */
+            sources: components['schemas']['ImportSourceResultSummary'][]
+            /** Total Failed */
+            total_failed: number
+            /** Total Imported */
+            total_imported: number
+            /** Total Skipped */
+            total_skipped: number
+            /** Warnings */
+            warnings: string[]
+        }
+        /**
          * ImportSource
          * @description Detected data source for import.
          */
@@ -2284,6 +2328,18 @@ export interface components {
              * @description Directory structure type
              */
             structure_type?: string | null
+        }
+        /** ImportSourceResultSummary */
+        ImportSourceResultSummary: {
+            /** Failed */
+            failed: number
+            /** Imported */
+            imported: number
+            /** Skipped */
+            skipped: number
+            source: components['schemas']['ImportSource']
+            /** Warnings */
+            warnings: string[]
         }
         /** InviteCreatedResponse */
         InviteCreatedResponse: {
@@ -2351,6 +2407,19 @@ export interface components {
         JobResponse: {
             /** Job Id */
             job_id: string
+        }
+        /** LinkedAnalysisSummary */
+        LinkedAnalysisSummary: {
+            /** Error Message */
+            error_message: string | null
+            /** Job Id */
+            job_id: string
+            /** Progress Completed */
+            progress_completed: number
+            /** Progress Total */
+            progress_total: number
+            /** State */
+            state: string
         }
         /** LoginRequest */
         LoginRequest: {
@@ -2575,6 +2644,46 @@ export interface components {
              * @description Type: daily, weekly, monthly, yearly
              */
             period_type: string
+        }
+        /**
+         * PipelineJobStatus
+         * @description Stitched view of one import job and its downstream analysis job.
+         *
+         *     created_at and finished_at are time.monotonic() floats — ordering only,
+         *     not wall-clock (same semantics as the analysis jobs endpoint).
+         */
+        PipelineJobStatus: {
+            /** Analysis Job Id */
+            analysis_job_id: string | null
+            /** Analysis Queued */
+            analysis_queued: boolean | null
+            /** Created At */
+            created_at: number
+            /** Error Message */
+            error_message: string | null
+            /** File Count */
+            file_count: number
+            /** Finished At */
+            finished_at: number | null
+            import_result: components['schemas']['ImportResultSummary'] | null
+            /** Job Id */
+            job_id: string
+            /** Job Type */
+            job_type: string
+            linked_analysis: components['schemas']['LinkedAnalysisSummary'] | null
+            /** Progress Message */
+            progress_message: string | null
+            /** Sessions Imported */
+            sessions_imported: number | null
+            /** Stage */
+            stage: string
+            /** State */
+            state: string
+        }
+        /** PipelineJobsListResponse */
+        PipelineJobsListResponse: {
+            /** Jobs */
+            jobs: components['schemas']['PipelineJobStatus'][]
         }
         /** ProfileInfo */
         ProfileInfo: {
@@ -4515,6 +4624,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_pipeline_jobs_api_v1_import_jobs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['PipelineJobsListResponse']
                 }
             }
         }

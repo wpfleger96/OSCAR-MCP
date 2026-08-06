@@ -38,6 +38,8 @@ def _drain_all_jobs() -> None:
     """Remove ALL jobs from the store and reset counters (test isolation)."""
     with ij._lock:
         ij._jobs.clear()
+    with ij._import_condition:
+        ij._import_queue.clear()
     with ij._counts_lock:
         ij._per_user_count.clear()
         ij._global_count = 0
