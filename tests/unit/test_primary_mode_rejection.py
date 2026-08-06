@@ -25,6 +25,8 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 
+import snore.api.analysis_jobs as _aj_store
+
 from snore.analysis.modes import DEFAULT_MODE
 from snore.analysis.service import _compute_leak_valid, _resolve_primary_mode
 from snore.analysis.shared.versioning import (
@@ -78,6 +80,16 @@ class TestResolvePrimaryMode:
 # ---------------------------------------------------------------------------
 # §5–6 — API 422 tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def clean_analysis_jobs():
+    """Reset global analysis job state between tests."""
+    _aj_store._all_jobs.clear()
+    _aj_store._queue.clear()
+    yield
+    _aj_store._all_jobs.clear()
+    _aj_store._queue.clear()
 
 
 class TestAnalysisRouterPrimaryMode:
@@ -153,18 +165,14 @@ class TestAnalysisRouterPrimaryMode:
         item.session_id = session_id
         return item
 
-    def test_batch_enqueues_job_and_returns_202(self):
-        """POST /analysis/batch enqueues a background job and returns 202.
+    def test_batch_invalid_primary_mode_not_in_modes_returns_422(self):
+        """POST /analysis/batch with primary_mode not in modes → 422 at endpoint.
 
-        primary_mode validation is deferred to the worker; the endpoint itself
-        does not validate primary_mode and must not return 422 for any valid
-        request that resolves at least one session.
+        Endpoint-side validation fires before any facade call; primary_mode='resmed'
+        is not a member of modes=['aasm'], so the request is rejected immediately.
         """
         facade = MagicMock()
         facade.profile_id = 1
-        facade.list_sessions_with_status = AsyncMock(
-            return_value=[self._fake_session_item(42)]
-        )
         client = self._make_client(facade)
         resp = client.post(
             "/api/v1/analysis/batch",
@@ -174,18 +182,13 @@ class TestAnalysisRouterPrimaryMode:
                 "primary_mode": "resmed",
             },
         )
-        assert resp.status_code == 202
-        data = resp.json()
-        assert "job_id" in data
-        assert data["session_count"] == 1
+        assert resp.status_code == 422
 
     def test_batch_valid_primary_mode_returns_202(self):
         """POST /analysis/batch with valid primary_mode returns 202."""
         facade = MagicMock()
         facade.profile_id = 1
-        facade.list_sessions_with_status = AsyncMock(
-            return_value=[self._fake_session_item(1), self._fake_session_item(2)]
-        )
+        facade.list_session_ids = AsyncMock(return_value=[1, 2])
         client = self._make_client(facade)
         resp = client.post(
             "/api/v1/analysis/batch",

@@ -246,7 +246,6 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import StatCard from '@/components/StatCard.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { Loader2, AlertTriangle, Play, Trash2, Clock, X } from '@lucide/vue'
@@ -284,6 +283,7 @@ const batchRunning = ref(false)
 
 const analysisJobs = ref<AnalysisJobInfo[]>([])
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let stopped = false
 
 const activeJobs = computed(() =>
     analysisJobs.value.filter((j) => j.state === 'queued' || j.state === 'running'),
@@ -324,9 +324,10 @@ async function fetchPage(newOffset: number): Promise<void> {
 }
 
 function schedulePoll() {
-    if (pollTimer !== null) return
+    if (stopped || pollTimer !== null) return
     pollTimer = setTimeout(async () => {
         pollTimer = null
+        if (stopped) return
         await fetchJobs()
     }, 3000)
 }
@@ -334,6 +335,7 @@ function schedulePoll() {
 async function fetchJobs() {
     try {
         const { jobs } = await getAnalysisJobs()
+        if (stopped) return
         const hadActive = activeJobs.value.length > 0
         analysisJobs.value = jobs
         const hasActive = jobs.some((j) => j.state === 'queued' || j.state === 'running')
@@ -425,6 +427,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+    stopped = true
     if (pollTimer !== null) {
         clearTimeout(pollTimer)
         pollTimer = null

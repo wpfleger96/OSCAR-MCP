@@ -248,14 +248,12 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         analysis_job_id = None
         imported_ids = result.imported_session_ids
         if imported_ids:
-            from snore.api.analysis_jobs import (
-                enqueue as _enqueue_analysis,  # noqa: PLC0415
-            )
+            from snore.api import analysis_jobs  # noqa: PLC0415
 
-            aj = _enqueue_analysis(
+            aj = analysis_jobs.enqueue(
                 profile_id=target_profile_id,
                 session_ids=imported_ids,
-                source="import",
+                source=analysis_jobs.AnalysisJobSource.IMPORT,
                 owner_user_id=job.owner_user_id,
             )
             if aj is not None:
@@ -269,6 +267,10 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         terminal_extra: dict[str, Any] = {"result": import_result_dict}
         if analysis_job_id is not None:
             terminal_extra["analysis_job_id"] = analysis_job_id
+        elif imported_ids:
+            # Queue was full — tell the client so it can distinguish from
+            # "nothing was imported" (where analysis_queued is absent).
+            terminal_extra["analysis_queued"] = False
         terminal_msg = _make_terminal("complete", extra=terminal_extra)
         job._finish(succeeded=True, terminal_msg=terminal_msg)
     except Exception as e:

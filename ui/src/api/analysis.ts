@@ -50,7 +50,6 @@ export const runBatchAnalysis = apiPost<
             to_date: string
             modes?: string[]
             store_results?: boolean
-            max_sessions?: number
         },
     ]
 >('/analysis/batch', (body) => ({ data: body }))

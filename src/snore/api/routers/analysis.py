@@ -1,15 +1,17 @@
 from datetime import datetime, time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from snore.analysis.types import AnalysisResult
-from snore.api import analysis_jobs as _analysis_jobs_store
+from snore.api import analysis_jobs
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
 from snore.api.errors import NotFoundError
-from snore.api.guards import RequireWritable
+from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import (
     AnalysisDeleteRequest,
+    AnalysisJobEnqueued,
+    AnalysisJobsListResponse,
     AnalysisRunRequest,
     BatchAnalysisRequest,
     PaginatedResponse,
@@ -111,56 +113,88 @@ async def get_analysis_delete_preview(
     return await facade.get_delete_preview(session_ids, all_versions=all_versions)
 
 
-@router.post("/analysis/batch", status_code=202)
+@router.post("/analysis/batch", status_code=202, response_model=AnalysisJobEnqueued)
 async def run_batch_analysis(
     body: BatchAnalysisRequest,
     facade: AnalysisFacadeDep,
-    request: Request,
-    _actor: RequireWritable,
-) -> dict[str, object]:
+    actor: RequireWritable,
+) -> AnalysisJobEnqueued:
+    from snore.analysis.modes.config import (  # noqa: PLC0415
+        AVAILABLE_CONFIGS,
+        DEFAULT_MODE,
+    )
+
     if body.from_date is None and body.to_date is None:
         raise HTTPException(
             status_code=400,
             detail="At least one of from_date or to_date is required",
         )
 
+    # Validate modes and primary_mode at the endpoint so invalid input fails fast.
+    invalid_modes = [m for m in body.modes if m not in AVAILABLE_CONFIGS]
+    if invalid_modes:
+        raise HTTPException(status_code=422, detail=f"Unknown mode(s): {invalid_modes}")
+    if body.primary_mode is not None and body.primary_mode not in body.modes:
+        raise HTTPException(
+            status_code=422,
+            detail="primary_mode must be a member of modes",
+        )
+    if body.primary_mode is None and DEFAULT_MODE not in body.modes:
+        raise HTTPException(
+            status_code=422,
+            detail="primary_mode must be supplied explicitly when aasm is not in modes",
+        )
+
     from_dt = datetime.combine(body.from_date, time.min) if body.from_date else None
     to_dt = datetime.combine(body.to_date, time.max) if body.to_date else None
 
-    session_infos = await facade.list_sessions_with_status(
-        start=from_dt, end=to_dt, limit=10000, offset=0, sort_by="date-asc"
-    )
-    session_ids = [s.session_id for s in session_infos]
+    session_ids = await facade.list_session_ids(from_date=from_dt, to_date=to_dt)
 
     if not session_ids:
         raise HTTPException(
             status_code=422, detail="No sessions found for the specified date range"
         )
 
-    owner_user_id = getattr(getattr(request, "state", None), "user_id", None)
-    aj = _analysis_jobs_store.enqueue(
+    aj = analysis_jobs.enqueue(
         profile_id=facade.profile_id,
         session_ids=session_ids,
-        source="batch",
-        owner_user_id=owner_user_id,
+        source=analysis_jobs.AnalysisJobSource.BATCH,
+        owner_user_id=actor.user_id,
+        modes=list(body.modes),
+        primary_mode=body.primary_mode,
+        store_results=body.store_results,
     )
     if aj is None:
         raise HTTPException(
             status_code=429, detail="Analysis queue is full; try again later"
         )
 
-    return {"job_id": aj.job_id, "session_count": len(session_ids)}
+    return AnalysisJobEnqueued(job_id=aj.job_id, session_count=len(session_ids))
 
 
-@router.get("/analysis/jobs")
-async def list_analysis_jobs(request: Request) -> dict[str, object]:
-    owner_user_id = getattr(getattr(request, "state", None), "user_id", None)
-    jobs = _analysis_jobs_store.list_jobs(owner_user_id=owner_user_id)
-    return {"jobs": [j.to_dict() for j in jobs]}
+@router.get("/analysis/jobs", response_model=AnalysisJobsListResponse)
+async def list_analysis_jobs(actor: RequireAuth) -> AnalysisJobsListResponse:
+    # Mirror the import cancel ownership rule: jobs with owner_user_id=None are
+    # accessible by any authenticated user (local-mode path-import compatibility).
+    # Jobs with a set owner are visible only to that owner.
+    user_id = actor.user_id
+    all_jobs = analysis_jobs.list_jobs()
+    visible = [
+        j for j in all_jobs if j.owner_user_id is None or j.owner_user_id == user_id
+    ]
+    from snore.api.schemas import AnalysisJobStatus  # noqa: PLC0415
+
+    return AnalysisJobsListResponse(
+        jobs=[AnalysisJobStatus.model_validate(aj.to_dict()) for aj in visible]
+    )
 
 
 @router.delete("/analysis/jobs/{job_id}", status_code=204)
-async def cancel_analysis_job(job_id: str, _actor: RequireWritable) -> None:
-    found = _analysis_jobs_store.cancel_job(job_id)
-    if not found:
+async def cancel_analysis_job(job_id: str, actor: RequireWritable) -> None:
+    job = analysis_jobs.get_job(job_id)
+    if job is None or (
+        job.owner_user_id is not None and job.owner_user_id != actor.user_id
+    ):
+        # 404 instead of 403 — no information leak about other users' job IDs.
         raise HTTPException(status_code=404, detail="Job not found")
+    analysis_jobs.cancel_job(job_id)

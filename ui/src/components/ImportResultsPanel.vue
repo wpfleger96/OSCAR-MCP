@@ -14,6 +14,17 @@
             >
         </div>
 
+        <div
+            v-else-if="analysisQueued === false && result.total_imported > 0"
+            class="analysis-queue-full-note"
+        >
+            <AlertTriangle class="h-4 w-4 flex-shrink-0" />
+            <span
+                >Analysis queue was full — data was imported but not analyzed. Run analysis from the
+                <RouterLink to="/analysis">Analysis page</RouterLink>.</span
+            >
+        </div>
+
         <div v-if="result.warnings && result.warnings.length > 0" class="warnings-box">
             <div class="warnings-header">
                 <AlertTriangle class="h-4 w-4" />
@@ -64,7 +75,11 @@ import { Button } from '@/components/ui/button'
 import StatCard from '@/components/StatCard.vue'
 import { Check, AlertTriangle, Brain } from '@lucide/vue'
 
-defineProps<{ result: ImportResult; analysisJobId?: string | null }>()
+defineProps<{
+    result: ImportResult
+    analysisJobId?: string | null
+    analysisQueued?: boolean | null
+}>()
 const emit = defineEmits<{ reset: [] }>()
 
 const router = useRouter()
@@ -205,6 +220,23 @@ const router = useRouter()
 }
 
 .analysis-queued-note a {
+    color: var(--color-primary);
+    text-decoration: underline;
+}
+
+.analysis-queue-full-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    color: color-mix(in srgb, var(--color-warning) 80%, var(--color-foreground));
+}
+
+.analysis-queue-full-note a {
     color: var(--color-primary);
     text-decoration: underline;
 }

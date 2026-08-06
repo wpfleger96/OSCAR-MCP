@@ -34,6 +34,9 @@ __all__ = [
     "RxComparisonResponse",
     "RxSettingChange",
     "RxChangesResponse",
+    "AnalysisJobStatus",
+    "AnalysisJobsListResponse",
+    "AnalysisJobEnqueued",
 ]
 
 
@@ -116,7 +119,6 @@ class BatchAnalysisRequest(BaseModel):
         ),
     )
     store_results: bool = True
-    max_sessions: int = Field(default=1000, le=10000, ge=1)
 
 
 class ValidationRequest(BaseModel):
@@ -137,3 +139,12 @@ class AnalysisJobStatus(BaseModel):
     started_at: float | None
     finished_at: float | None
     owner_user_id: int | None
+
+
+class AnalysisJobsListResponse(BaseModel):
+    jobs: list[AnalysisJobStatus]
+
+
+class AnalysisJobEnqueued(BaseModel):
+    job_id: str
+    session_count: int

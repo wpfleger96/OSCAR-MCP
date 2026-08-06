@@ -15,7 +15,7 @@ import time
 import uuid
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,11 @@ class AnalysisJobState(Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class AnalysisJobSource(StrEnum):
+    IMPORT = "import"
+    BATCH = "batch"
 
 
 TERMINAL_STATES = frozenset(
@@ -45,8 +50,11 @@ class AnalysisJob:
     job_id: str
     profile_id: int
     session_ids: list[int]
-    source: str  # "import" | "batch"
+    source: AnalysisJobSource
     owner_user_id: int | None = None
+    modes: list[str] | None = None
+    primary_mode: str | None = None
+    store_results: bool = True
     created_at: float = field(default_factory=time.monotonic)
 
     _state: AnalysisJobState = field(
@@ -102,11 +110,64 @@ class AnalysisJob:
         with self._lock:
             return self._finished_at
 
+    def try_start(self) -> bool:
+        """Atomically transition QUEUED → RUNNING, or QUEUED → CANCELLED if cancel was set.
+
+        Closes the TOCTOU window between dequeue and RUNNING transition.
+        Returns True if the job is now RUNNING; False if it was cancelled instead.
+        """
+        with self._lock:
+            if self._cancel_flag:
+                self._state = AnalysisJobState.CANCELLED
+                self._finished_at = time.monotonic()
+                return False
+            self._state = AnalysisJobState.RUNNING
+            self._started_at = time.monotonic()
+            return True
+
+    def finish(self, succeeded: bool, error_message: str | None = None) -> None:
+        """Transition to a terminal state. Respects cancel flag.
+
+        If the cancel flag is set, the job always lands in CANCELLED regardless of
+        the ``succeeded`` argument.  Idempotent once already terminal.
+        """
+        with self._lock:
+            if self._state in TERMINAL_STATES:
+                return
+            if self._cancel_flag:
+                self._state = AnalysisJobState.CANCELLED
+            elif succeeded:
+                self._state = AnalysisJobState.SUCCEEDED
+            else:
+                self._state = AnalysisJobState.FAILED
+                self._error_message = error_message
+            self._finished_at = time.monotonic()
+
+    def try_cancel(self) -> bool:
+        """Set the cancel flag; if QUEUED, immediately transition to CANCELLED.
+
+        Returns True if the job was in a non-terminal state.
+        Queue removal must be handled at the module level under _condition.
+        """
+        with self._lock:
+            if self._state in TERMINAL_STATES:
+                return False
+            self._cancel_flag = True
+            if self._state == AnalysisJobState.QUEUED:
+                self._state = AnalysisJobState.CANCELLED
+                self._finished_at = time.monotonic()
+            return True
+
+    def update_progress(self, done: int, total: int | None) -> None:
+        """Update progress counters; safe to call from any thread."""
+        with self._lock:
+            self._progress_completed = done
+            self._progress_total = total or 0
+
     def to_dict(self) -> dict[str, object]:
         with self._lock:
             return {
                 "job_id": self.job_id,
-                "profile_id": self.profile_id,
                 "session_count": len(self.session_ids),
                 "source": self.source,
                 "owner_user_id": self.owner_user_id,
@@ -136,8 +197,11 @@ _stop_event: threading.Event | None = None
 def enqueue(
     profile_id: int,
     session_ids: list[int],
-    source: str,
+    source: AnalysisJobSource,
     owner_user_id: int | None = None,
+    modes: list[str] | None = None,
+    primary_mode: str | None = None,
+    store_results: bool = True,
 ) -> AnalysisJob | None:
     """Create a QUEUED job and append it to the queue.
 
@@ -152,6 +216,9 @@ def enqueue(
             session_ids=list(session_ids),
             source=source,
             owner_user_id=owner_user_id,
+            modes=modes,
+            primary_mode=primary_mode,
+            store_results=store_results,
         )
         _queue.append(job)
         _all_jobs[job.job_id] = job
@@ -187,18 +254,13 @@ def cancel_job(job_id: str) -> bool:
         job = _all_jobs.get(job_id)
         if job is None:
             return False
-        with job._lock:
-            if job._state in TERMINAL_STATES:
-                return False
-            job._cancel_flag = True
-            if job._state == AnalysisJobState.QUEUED:
-                job._state = AnalysisJobState.CANCELLED
-                job._finished_at = time.monotonic()
-                try:
-                    _queue.remove(job)
-                except ValueError:
-                    pass
-    return True
+        result = job.try_cancel()
+        if result:
+            try:
+                _queue.remove(job)
+            except ValueError:
+                pass
+    return result
 
 
 def _reap_terminal() -> None:
@@ -208,8 +270,8 @@ def _reap_terminal() -> None:
             jid
             for jid, job in _all_jobs.items()
             if job.is_terminal
-            and job._finished_at is not None
-            and now - job._finished_at > JOB_TTL_SECONDS
+            and (fa := job.finished_at) is not None
+            and now - fa > JOB_TTL_SECONDS
         ]
         for jid in to_remove:
             _all_jobs.pop(jid, None)
@@ -217,61 +279,68 @@ def _reap_terminal() -> None:
 
 
 async def _run_analysis(job: AnalysisJob) -> None:
-    from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
     from snore.database.session import session_scope  # noqa: PLC0415
     from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
     async with session_scope() as db:
         facade = AnalysisFacade(db, profile_id=job.profile_id)
-
-        def _progress(done: int, total: int | None) -> None:
-            with job._lock:
-                job._progress_completed = done
-                job._progress_total = total or 0
-
         await facade.run_batch_analysis(
             session_ids=job.session_ids,
-            primary_mode=DEFAULT_MODE,
-            progress_callback=_progress,
+            modes=job.modes,
+            primary_mode=job.primary_mode,
+            store_results=job.store_results,
+            progress_callback=job.update_progress,
+            cancel_predicate=lambda: job.cancel_requested,
             max_workers=1,
         )
 
 
 def _execute_job(job: AnalysisJob) -> None:
-    with job._lock:
-        job._state = AnalysisJobState.RUNNING
-        job._started_at = time.monotonic()
+    if not job.try_start():
+        # Cancel arrived before RUNNING transition — job is already CANCELLED.
+        return
     try:
         asyncio.run(_run_analysis(job))
-        with job._lock:
-            job._state = AnalysisJobState.SUCCEEDED
+        # finish() checks the cancel flag: sets CANCELLED if requested, SUCCEEDED otherwise.
+        job.finish(succeeded=True)
     except Exception as exc:
         logger.exception("Analysis job %s failed", job.job_id)
-        with job._lock:
-            job._state = AnalysisJobState.FAILED
-            job._error_message = str(exc)
-    finally:
-        with job._lock:
-            job._finished_at = time.monotonic()
+        job.finish(succeeded=False, error_message=str(exc))
 
 
 def _worker_loop(stop_event: threading.Event, condition: threading.Condition) -> None:
+    last_reap = time.monotonic()
     while not stop_event.is_set():
+        job: AnalysisJob | None = None
         with condition:
-            while not _queue and not stop_event.is_set():
+            if not _queue and not stop_event.is_set():
                 condition.wait(timeout=1.0)
-            if stop_event.is_set():
-                break
-            job = _queue.popleft() if _queue else None
+            if not stop_event.is_set() and _queue:
+                job = _queue.popleft()
+
         if job is None:
+            # Idle timeout — reap at most every 60 s.
+            now = time.monotonic()
+            if now - last_reap >= 60.0:
+                _reap_terminal()
+                last_reap = now
             continue
-        if job.cancel_requested:
-            with job._lock:
-                job._state = AnalysisJobState.CANCELLED
-                job._finished_at = time.monotonic()
-            continue
-        _execute_job(job)
+
+        try:
+            _execute_job(job)
+        except BaseException as exc:
+            logger.exception(
+                "Unexpected error in analysis worker for job %s", job.job_id
+            )
+            if not job.is_terminal:
+                try:
+                    job.finish(succeeded=False, error_message=str(exc))
+                except Exception:
+                    pass
+            # Do NOT re-raise — the worker thread must stay alive.
+
         _reap_terminal()
+        last_reap = time.monotonic()
 
 
 def start_worker() -> tuple[threading.Thread, threading.Event]:
@@ -294,15 +363,13 @@ def start_worker() -> tuple[threading.Thread, threading.Event]:
 
 
 def shutdown(timeout: float = 10.0) -> None:
-    """Signal the worker to stop and cancel any running job."""
+    """Signal the worker to stop; cancel all queued and running jobs."""
     global _worker_thread, _stop_event
     if _stop_event is not None:
         _stop_event.set()
-    # Cancel any running job so _run_analysis can observe it.
-    with _lock:
-        for job in _all_jobs.values():
-            with job._lock:
-                if job._state == AnalysisJobState.RUNNING:
-                    job._cancel_flag = True
+    with _condition:
+        for job in list(_all_jobs.values()):
+            job.try_cancel()
+        _queue.clear()
     if _worker_thread is not None:
         _worker_thread.join(timeout=timeout)

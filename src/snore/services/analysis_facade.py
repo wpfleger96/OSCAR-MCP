@@ -534,6 +534,30 @@ class AnalysisFacade:
             return None
         return AnalysisResult.model_validate(analysis_row.programmatic_result_json)
 
+    async def list_session_ids(
+        self,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+    ) -> list[int]:
+        """Return session IDs for this profile, optionally filtered by date range.
+
+        Cheaper than ``list_sessions_with_status``: selects only the ID column,
+        no ORM object hydration, no artificial row cap.
+        """
+        stmt = (
+            select(models.Session.id)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(self._profile_filter())
+        )
+        if from_date:
+            stmt = stmt.where(models.Day.date >= from_date.date())
+        if to_date:
+            stmt = stmt.where(models.Day.date <= to_date.date())
+        stmt = stmt.order_by(models.Day.date)
+        result = await self.db_session.execute(stmt)
+        return list(result.scalars())
+
     async def run_batch_analysis(
         self,
         from_date: datetime | None = None,
@@ -544,6 +568,7 @@ class AnalysisFacade:
         store_results: bool = True,
         max_workers: int = 4,
         progress_callback: Callable[[int, int | None], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> BatchAnalysisResult:
         """Run analysis on multiple sessions in parallel.
 
@@ -560,6 +585,7 @@ class AnalysisFacade:
             store_results: Whether to store results in the database
             max_workers: Max parallel threads (capped to session count)
             progress_callback: Called with (completed, total) after each session
+            cancel_predicate: Optional callable; returns True when cancellation is requested
 
         Returns:
             BatchAnalysisResult with per-session outcomes and aggregate counts
@@ -605,6 +631,7 @@ class AnalysisFacade:
             store_results=store_results,
             max_workers=max_workers,
             progress_callback=progress_callback,
+            cancel_predicate=cancel_predicate,
         )
 
 
@@ -625,6 +652,7 @@ class BatchAnalysisCoordinator:
 
     def __init__(self) -> None:
         self._cancel_requested = False
+        self._cancel_predicate: Callable[[], bool] | None = None
         self._completed = 0
         self._total = 0
         self.session_dates: dict[int, Any] = {}  # sid → day_date; window-bounded
@@ -632,6 +660,12 @@ class BatchAnalysisCoordinator:
     def cancel(self) -> None:
         """Request cooperative cancellation.  Checked between sessions."""
         self._cancel_requested = True
+
+    def _is_cancelled(self) -> bool:
+        """True if cancellation was requested via cancel() or the predicate fires."""
+        return self._cancel_requested or (
+            self._cancel_predicate is not None and self._cancel_predicate()
+        )
 
     @property
     def progress(self) -> tuple[int, int]:
@@ -649,6 +683,7 @@ class BatchAnalysisCoordinator:
         store_results: bool = True,
         max_workers: int = 4,
         progress_callback: Callable[[int, int | None], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> BatchAnalysisResult:
         """Execute batch analysis and return aggregated results.
 
@@ -683,6 +718,7 @@ class BatchAnalysisCoordinator:
 
         self._total = matched_total
         self._completed = 0
+        self._cancel_predicate = cancel_predicate
         # Do NOT reset _cancel_requested if cancel() was called before submit().
 
         modes_list: list[str] | None = list(modes) if modes is not None else None
@@ -708,7 +744,7 @@ class BatchAnalysisCoordinator:
         async def _run_one(sid: int) -> str:
             """Read → thread-compute → write, all async; semaphore caps concurrency."""
             async with sem:
-                if self._cancel_requested:
+                if self._is_cancelled():
                     return "cancelled"
                 try:
                     t_start = time.monotonic()
@@ -761,7 +797,7 @@ class BatchAnalysisCoordinator:
         async def _fill_window() -> None:
             """Enqueue pairs until max_workers tasks are in flight or stream exhausted."""
             while len(pending) < max_workers:
-                if self._cancel_requested:
+                if self._is_cancelled():
                     break
                 pair = await _next_pair()
                 if pair is None:
@@ -799,7 +835,7 @@ class BatchAnalysisCoordinator:
 
         # Drain any rows remaining in the stream after cancellation.
         # Each unconsumed row is counted as cancelled so `total` stays honest.
-        if self._cancel_requested:
+        if self._is_cancelled():
             while True:
                 pair = await _next_pair()
                 if pair is None:

@@ -115,7 +115,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Start a single lifespan-owned TTL reaper and the analysis job worker.
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
-    analysis_worker, analysis_stop = _start_analysis_worker()
+    _start_analysis_worker()
     try:
         yield
     finally:
@@ -127,8 +127,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
                 f"after timeout: {still_alive}. Active import writes may be interrupted."
             )
-        analysis_stop.set()
-        analysis_worker.join(timeout=10.0)
         _shutdown_analysis_jobs()
         lease.release()
 
