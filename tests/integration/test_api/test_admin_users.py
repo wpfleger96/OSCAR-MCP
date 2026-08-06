@@ -202,6 +202,7 @@ def _set_config_with_public_url(base_url: str = _PUBLIC_BASE_URL) -> None:
             pre_auth_cookie_ttl_seconds=600,
             max_upload_bytes=512 * 1024 * 1024,
             max_file_bytes=256 * 1024 * 1024,
+            max_upload_files=10000,
             max_jobs_per_user=3,
             max_jobs_global=10,
         )
