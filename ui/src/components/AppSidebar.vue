@@ -41,11 +41,6 @@
                 <FileText class="h-4 w-4" />
                 <span>Reports</span>
             </RouterLink>
-            <RouterLink v-if="isLocal" to="/database" class="nav-item">
-                <Database class="h-4 w-4" />
-                <span>Database</span>
-            </RouterLink>
-
             <span class="nav-group-label">Settings</span>
             <RouterLink to="/stats" class="nav-item">
                 <TrendingUp class="h-4 w-4" />
@@ -56,13 +51,13 @@
                 <span>RX History</span>
             </RouterLink>
 
-            <template v-if="!isLocal && role === 'admin'">
+            <template v-if="role === 'admin'">
                 <span class="nav-group-label">Admin</span>
                 <RouterLink to="/database" class="nav-item">
                     <Database class="h-4 w-4" />
                     <span>Database</span>
                 </RouterLink>
-                <RouterLink to="/admin/users" class="nav-item">
+                <RouterLink v-if="!isLocal" to="/admin/users" class="nav-item">
                     <Users class="h-4 w-4" />
                     <span>Users</span>
                 </RouterLink>

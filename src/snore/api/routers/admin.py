@@ -129,6 +129,8 @@ async def list_users(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[UserItem]:
     """Return all users (including disabled) ordered by id."""
+    # Registration is invite-only, so the table is bounded by deliberate admin
+    # action and pagination is deliberately omitted.
     rows = (
         (await db.execute(select(models.User).order_by(models.User.id))).scalars().all()
     )

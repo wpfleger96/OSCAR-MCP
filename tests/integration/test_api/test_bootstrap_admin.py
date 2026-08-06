@@ -48,7 +48,13 @@ def _multiuser_cfg(bootstrap_email: str | None = _BOOTSTRAP_EMAIL) -> AppConfig:
     )
 
 
-async def _seed_user(db_url: str, *, role: str, disabled: bool = False) -> int:
+async def _seed_user(
+    db_url: str,
+    *,
+    role: str,
+    disabled: bool = False,
+    email: str | None = None,
+) -> int:
     """Seed a user row and return its id."""
     from sqlalchemy.ext.asyncio import (  # noqa: PLC0415
         AsyncSession,
@@ -62,8 +68,13 @@ async def _seed_user(db_url: str, *, role: str, disabled: bool = False) -> int:
     )
     async with factory() as session:
         async with session.begin():
+            canonical = (
+                email
+                if email is not None
+                else f"{role}_{uuid.uuid4().hex[:8]}@test.local"
+            )
             user = models.User(
-                canonical_email=f"{role}_{uuid.uuid4().hex[:8]}@test.local",
+                canonical_email=canonical,
                 role=role,
             )
             if disabled:
@@ -223,18 +234,43 @@ class TestStartupEnsureBootstrapAdmin:
 
         assert await _count_invites(db_url, email=_BOOTSTRAP_EMAIL) == 0
 
-    async def test_disabled_admin_does_not_block_invite(self, temp_db):
-        """Disabled admin user is not 'active' → invite should still be created."""
+    async def test_existing_user_at_bootstrap_email_blocks_invite(self, temp_db):
+        """User row at bootstrap email (any role/state) → no invite created.
+
+        The redemption route rejects addresses that already have an account, so
+        minting an invite would create an unredeemable row on every restart after
+        expiry.  The user-exists guard catches this and logs a recovery hint.
+        """
         from snore.api.app import _startup_ensure_bootstrap_admin  # noqa: PLC0415
         from snore.database.session import init_database_from_url  # noqa: PLC0415
 
         db_url = f"sqlite+aiosqlite:///{temp_db}"
         await init_database_from_url(db_url)
-        await _seed_user(db_url, role="admin", disabled=True)
+        # Disabled admin whose email IS the bootstrap email — hits the user-exists guard.
+        await _seed_user(db_url, role="admin", disabled=True, email=_BOOTSTRAP_EMAIL)
         set_config(_multiuser_cfg())
 
         await _startup_ensure_bootstrap_admin()
 
+        assert await _count_invites(db_url, email=_BOOTSTRAP_EMAIL) == 0
+
+    async def test_pending_member_invite_does_not_block(self, temp_db):
+        """Pending MEMBER invite for bootstrap email does not block admin invite creation.
+
+        Two valid invites for the same address may coexist; only a pending ADMIN
+        invite prevents a duplicate.
+        """
+        from snore.api.app import _startup_ensure_bootstrap_admin  # noqa: PLC0415
+        from snore.database.session import init_database_from_url  # noqa: PLC0415
+
+        db_url = f"sqlite+aiosqlite:///{temp_db}"
+        await init_database_from_url(db_url)
+        await _seed_invite(db_url, email=_BOOTSTRAP_EMAIL, role="member")
+        set_config(_multiuser_cfg())
+
+        await _startup_ensure_bootstrap_admin()
+
+        # Both the seeded member invite and the new admin invite must exist.
+        assert await _count_invites(db_url, email=_BOOTSTRAP_EMAIL) == 2
         invite = await _get_invite(db_url, email=_BOOTSTRAP_EMAIL)
         assert invite is not None
-        assert invite.role == "admin"

@@ -277,6 +277,10 @@ to create the invite manually instead, run:
 snore user invite <email> --role admin
 ```
 
+The redemption URL contains the one-time invite token and is written to the
+server log as the delivery channel, so treat your logs as sensitive until the
+invite is redeemed.
+
 ### 9. Shell Completions
 
 ```bash
