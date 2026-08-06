@@ -66,7 +66,9 @@ JOB_TTL_SECONDS: float = 600.0
 
 # Per-user and global admission caps.
 # These are read from the app config at call time so tests can override via env.
-# The module-level defaults are kept as fallbacks when config is not yet loaded.
+# The module-level defaults mirror config.py's env-var defaults (SNORE_MAX_JOBS_PER_USER=3,
+# SNORE_MAX_JOBS_GLOBAL=10) and are used as fallbacks when config is not yet loaded
+# (e.g. unit tests that exercise the job store without a full lifespan setup).
 _DEFAULT_MAX_ACTIVE_PER_USER: int = 3
 _DEFAULT_MAX_ACTIVE_GLOBAL: int = 10
 
@@ -420,6 +422,14 @@ class ImportJob:
             self._state = JobState.RUNNING
             return True
 
+    def _make_cancel_payload(self) -> dict[str, Any]:
+        """Build the cancelled terminal SSE payload. Caller must hold self._lock."""
+        data: dict[str, Any] = {"message": "Cancelled"}
+        if self._import_committed and self._import_result is not None:
+            data["import_committed"] = True
+            data["import_result"] = self._import_result
+        return {"event": "error", "data": data}
+
     def try_cancel(self) -> bool:
         """Request cancellation.
 
@@ -432,11 +442,7 @@ class ImportJob:
             self._cancel_flag = True
             if self._state in (JobState.PENDING_UPLOAD, JobState.PENDING):
                 self._state = JobState.CANCELLED
-                terminal_data: dict[str, Any] = {"message": "Cancelled"}
-                if self._import_committed and self._import_result is not None:
-                    terminal_data["import_committed"] = True
-                    terminal_data["import_result"] = self._import_result
-                terminal_msg = {"event": "error", "data": terminal_data}
+                terminal_msg = self._make_cancel_payload()
                 self._terminal_msg = terminal_msg
                 self._terminal_at = time.monotonic()
                 observers = list(self._observers)
@@ -458,11 +464,7 @@ class ImportJob:
                 return False
             if self._cancel_flag:
                 self._state = JobState.CANCELLED
-                cancel_data: dict[str, Any] = {"message": "Cancelled"}
-                if self._import_committed and self._import_result is not None:
-                    cancel_data["import_committed"] = True
-                    cancel_data["import_result"] = self._import_result
-                terminal_msg = {"event": "error", "data": cancel_data}
+                terminal_msg = self._make_cancel_payload()
             else:
                 self._state = JobState.SUCCEEDED if succeeded else JobState.FAILED
                 # Embed import outcome in every terminal payload after import committed.
@@ -473,25 +475,6 @@ class ImportJob:
                         data["import_result"] = self._import_result
                         terminal_msg = dict(terminal_msg)
                         terminal_msg["data"] = data
-            self._terminal_msg = terminal_msg
-            self._terminal_at = time.monotonic()
-            observers = list(self._observers)
-            self._observers.clear()
-        for ch in observers:
-            ch.put(terminal_msg)
-        return True
-
-    def _finish_cancelled(self) -> bool:
-        """Transition running → CANCELLED. Called by the worker thread."""
-        with self._lock:
-            if self._state in TERMINAL_STATES:
-                return False
-            cancel_data: dict[str, Any] = {"message": "Cancelled"}
-            if self._import_committed and self._import_result is not None:
-                cancel_data["import_committed"] = True
-                cancel_data["import_result"] = self._import_result
-            terminal_msg = {"event": "error", "data": cancel_data}
-            self._state = JobState.CANCELLED
             self._terminal_msg = terminal_msg
             self._terminal_at = time.monotonic()
             observers = list(self._observers)
@@ -855,6 +838,15 @@ def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Ev
     t = threading.Thread(target=_reap_loop, daemon=True, name="import-job-reaper")
     t.start()
     return t, stop_event
+
+
+# Reaper pattern: dedicated background thread (start_reaper) PLUS eager reap-on-read
+# in get_job / list_jobs / reserve_slot / create_job.  The eager-reap-on-read path
+# keeps the job list tidy for HTTP handlers that poll the store on every
+# GET /import/{id}/progress and GET /import/jobs request.
+# analysis_jobs uses a simpler per-iteration reap inside the worker loop — sufficient
+# there because the analysis store is accessed only by the worker thread and a
+# low-frequency list endpoint, not by every HTTP poll.
 
 
 def _reap_terminal() -> None:

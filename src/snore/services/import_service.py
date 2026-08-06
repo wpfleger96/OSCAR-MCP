@@ -114,41 +114,6 @@ class ImportService:
             profile_id:  Resolved profile ID — required.  All devices and sessions
                          created during this import are owned by this profile.
         """
-        return await self._import_sources_async(
-            sources,
-            force=force,
-            batch_size=batch_size,
-            backup=backup,
-            backup_root=backup_root,
-            sort_by=sort_by,
-            limit=limit,
-            date_from=date_from,
-            date_to=date_to,
-            parallel=parallel,
-            dry_run=dry_run,
-            progress_callback=progress_callback,
-            cancel_predicate=cancel_predicate,
-            profile_id=profile_id,
-        )
-
-    async def _import_sources_async(
-        self,
-        sources: list[ImportSource],
-        *,
-        force: bool = False,
-        batch_size: int = 50,
-        backup: bool = True,
-        backup_root: Path | None = None,
-        sort_by: str | None = None,
-        limit: int | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        parallel: bool = True,
-        dry_run: bool = False,
-        progress_callback: Callable[[str], None] | None = None,
-        cancel_predicate: Callable[[], bool] | None = None,
-        profile_id: int,
-    ) -> ImportResult:
 
         def emit(msg: str) -> None:
             if progress_callback:

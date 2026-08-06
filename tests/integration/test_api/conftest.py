@@ -41,7 +41,7 @@ def import_worker():
     ``reset_import_job_store`` autouse fixture handles teardown.
     """
     from snore.api.import_jobs import start_import_worker  # noqa: PLC0415
-    from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+    from snore.api.import_worker import _run_import  # noqa: PLC0415
 
     start_import_worker(_run_import)
 
