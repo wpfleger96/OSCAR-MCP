@@ -542,11 +542,16 @@ class AnalysisFacade:
         self,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
+        missing_only: bool = False,
     ) -> list[int]:
         """Return session IDs for this profile, optionally filtered by date range.
 
         Cheaper than ``list_sessions_with_status``: selects only the ID column,
         no ORM object hydration, no artificial row cap.
+
+        When ``missing_only`` is true, restrict to sessions that have a flow
+        waveform (sessions without flow data cannot be analyzed) but have no
+        existing analysis result.  Composable with date filters.
         """
         stmt = (
             select(models.Session.id)
@@ -558,6 +563,18 @@ class AnalysisFacade:
             stmt = stmt.where(models.Day.date >= from_date.date())
         if to_date:
             stmt = stmt.where(models.Day.date <= to_date.date())
+        if missing_only:
+            stmt = stmt.where(
+                select(models.Waveform.id)
+                .where(models.Waveform.session_id == models.Session.id)
+                .where(models.Waveform.waveform_type == "flow")
+                .exists()
+            )
+            stmt = stmt.where(
+                ~select(models.AnalysisResult.id)
+                .where(models.AnalysisResult.session_id == models.Session.id)
+                .exists()
+            )
         stmt = stmt.order_by(models.Day.date)
         result = await self.db_session.execute(stmt)
         return list(result.scalars())

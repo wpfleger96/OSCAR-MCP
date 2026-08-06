@@ -110,6 +110,10 @@
                                 :style="{ width: data.analysis_coverage_pct + '%' }"
                             />
                         </div>
+                        <p class="coverage-caption">
+                            {{ data.sessions_with_analysis }} of
+                            {{ data.analyzable_session_count }} analyzable sessions
+                        </p>
                     </div>
                 </div>
             </section>
@@ -460,6 +464,12 @@ async function handleReset(): Promise<void> {
     border-radius: 9999px;
     background: var(--color-primary);
     transition: width 0.3s ease;
+}
+
+.coverage-caption {
+    font-size: 0.75rem;
+    color: var(--color-muted-foreground);
+    margin: 0;
 }
 
 .vacuum-card {

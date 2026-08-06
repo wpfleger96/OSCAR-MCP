@@ -121,6 +121,14 @@ AnalysisMode = Literal["aasm", "aasm_relaxed", "resmed"]
 class BatchAnalysisRequest(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
+    missing_only: bool = Field(
+        default=False,
+        description=(
+            "When true, restrict the batch to sessions that have a flow waveform "
+            "but no analysis result yet. Composable with from_date/to_date. "
+            "When true, from_date and to_date are not required."
+        ),
+    )
     modes: list[AnalysisMode] = Field(
         default_factory=lambda: cast(list[AnalysisMode], ["aasm"])
     )

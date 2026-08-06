@@ -124,7 +124,7 @@ async def run_batch_analysis(
         DEFAULT_MODE,
     )
 
-    if body.from_date is None and body.to_date is None:
+    if body.from_date is None and body.to_date is None and not body.missing_only:
         raise HTTPException(
             status_code=400,
             detail="At least one of from_date or to_date is required",
@@ -148,12 +148,17 @@ async def run_batch_analysis(
     from_dt = datetime.combine(body.from_date, time.min) if body.from_date else None
     to_dt = datetime.combine(body.to_date, time.max) if body.to_date else None
 
-    session_ids = await facade.list_session_ids(from_date=from_dt, to_date=to_dt)
+    session_ids = await facade.list_session_ids(
+        from_date=from_dt, to_date=to_dt, missing_only=body.missing_only
+    )
 
     if not session_ids:
-        raise HTTPException(
-            status_code=422, detail="No sessions found for the specified date range"
+        detail = (
+            "No unanalyzed sessions to backfill"
+            if body.missing_only
+            else "No sessions found for the specified date range"
         )
+        raise HTTPException(status_code=422, detail=detail)
 
     aj = analysis_jobs.enqueue(
         profile_id=facade.profile_id,

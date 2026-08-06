@@ -159,11 +159,22 @@ class DatabaseStats(BaseModel):
     pattern_count: int = Field(description="Number of detected patterns")
     sessions_with_waveforms: int = Field(description="Sessions that have waveform data")
     sessions_with_events: int = Field(description="Sessions that have event data")
+    sessions_with_analysis: int = Field(
+        description="Distinct sessions having at least one analysis result"
+    )
+    analyzable_session_count: int = Field(
+        description="Sessions having a flow waveform (prerequisite for analysis)"
+    )
     waveform_coverage_pct: float = Field(
         description="Percentage of sessions with waveforms"
     )
     event_coverage_pct: float = Field(description="Percentage of sessions with events")
-    analysis_coverage_pct: float = Field(description="Percentage of sessions analyzed")
+    analysis_coverage_pct: float = Field(
+        description=(
+            "Percentage of analyzable sessions (those with a flow waveform) that have "
+            "been analyzed: sessions_with_analysis / analyzable_session_count * 100"
+        )
+    )
     first_session: datetime | None = Field(
         default=None, description="Earliest session date"
     )

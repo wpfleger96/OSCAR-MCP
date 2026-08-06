@@ -142,6 +142,15 @@
                 <AlertDialogFooter>
                     <AlertDialogCancel>Cancel</AlertDialogCancel>
                     <Button
+                        variant="outline"
+                        :disabled="batchRunning"
+                        @click="handleAnalyzeMissing"
+                    >
+                        <Loader2 v-if="batchRunning" class="mr-2 h-4 w-4 animate-spin" />
+                        <Play v-else class="mr-2 h-4 w-4" />
+                        Analyze Missing
+                    </Button>
+                    <Button
                         :disabled="!batchFrom || !batchTo || batchRunning"
                         @click="handleBatchRun"
                     >
@@ -319,6 +328,24 @@ async function handleBatchRun(): Promise<void> {
         await runBatchAnalysis({
             from_date: batchFrom.value,
             to_date: batchTo.value,
+            modes: [batchMode.value],
+            store_results: true,
+        })
+        batchDialogOpen.value = false
+        void fetchJobs()
+    } catch (err: unknown) {
+        batchDialogOpen.value = false
+        error.value = err instanceof Error ? err.message : 'Failed to queue batch analysis'
+    } finally {
+        batchRunning.value = false
+    }
+}
+
+async function handleAnalyzeMissing(): Promise<void> {
+    batchRunning.value = true
+    try {
+        await runBatchAnalysis({
+            missing_only: true,
             modes: [batchMode.value],
             store_results: true,
         })
