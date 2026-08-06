@@ -7,8 +7,12 @@ RX-homogeneity checks, and cross-epoch identity checks all live in the service.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
@@ -19,6 +23,7 @@ from snore.mcp.schemas import (
     EpochSpec,
     EpochStats,
 )
+from snore.mcp.tools._helpers import _str_or_none
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -115,7 +120,7 @@ async def compare_epochs(
             algorithm_identity=s.algorithm_identity.model_dump(mode="json")
             if s.algorithm_identity is not None
             else None,
-            null_reason=str(s.null_reason) if s.null_reason is not None else None,
+            null_reason=_str_or_none(s.null_reason),
             primary_mode=s.primary_mode,
             mid_insp_flattening=_map_distribution(s.mid_insp_flattening),
             flatness_index=_map_distribution(s.flatness_index),
@@ -125,7 +130,7 @@ async def compare_epochs(
             tidal_volume_ml=_map_distribution(s.tidal_volume_ml),
             ie_ratio=_map_distribution(s.ie_ratio),
             rera_proxy_count=s.rera_proxy_count,
-            rera_reason=str(s.rera_reason) if s.rera_reason is not None else None,
+            rera_reason=_str_or_none(s.rera_reason),
             rx_settings=s.rx_settings,
         )
         for s in result.epochs
@@ -133,7 +138,7 @@ async def compare_epochs(
 
     return CompareEpochsResponse(
         epochs=epoch_stats,
-        null_reason=str(result.null_reason) if result.null_reason is not None else None,
+        null_reason=_str_or_none(result.null_reason),
         rx_violations=[
             EpochRxViolationRow(
                 epoch_label=v.epoch_label,
@@ -143,3 +148,79 @@ async def compare_epochs(
             for v in result.rx_violations
         ],
     )
+
+
+def register(mcp: FastMCP) -> None:
+    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
+    from snore.mcp.validation import validate_epoch_count  # noqa: PLC0415
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def compare_epochs(
+        ctx: Context,
+        epochs: list[EpochSpec],
+        metrics: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Compare breath-feature distributions across up to 6 therapy settings epochs.
+
+        Use this tool to detect whether a settings change improved or worsened
+        flow-limitation metrics.  Each epoch is a labelled date range; the tool returns
+        descriptive statistics (median, IQR, P95) of leak-valid breaths for each epoch.
+        Only nights with OK analysis results contribute to an epoch's distributions.
+
+        Call ``get_settings_timeline`` first to identify meaningful epoch boundaries,
+        then ``compare_epochs`` to quantify the difference.
+
+        Requires breath-level analysis results (``get_data_overview`` → ``analysis_run``
+        must be true).
+
+        Args:
+            epochs: List of 1–6 epoch specs.  Each spec has:
+                ``label`` — human-readable epoch name (appears in response).
+                ``date_start`` — epoch start in YYYY-MM-DD format (inclusive).
+                ``date_end`` — epoch end in YYYY-MM-DD format (inclusive).
+                ``device_id`` — optional; all epochs must target the same device.
+            metrics: Optional subset of distribution metrics to compute.  Defaults
+                to all four: ``"mid_insp_flattening"``, ``"flatness_index"``,
+                ``"tidal_volume_ml"``, ``"ie_ratio"``.
+
+        Returns:
+            CompareEpochsResponse.  Each entry in ``epochs`` contains distributions
+            and coverage metadata (``nights_with_data``, ``nights_missing_analysis``).
+            ``flow_class_distribution`` keys are strings (``"0"``, ``"1"``, ...) because
+            JSON object keys are always strings.
+            ``rx_settings`` holds representative therapy settings observed for the epoch.
+            ``rx_violations`` lists any therapy-settings changes detected within an
+            epoch's date range; callers should split affected epochs at those dates.
+
+        Refusal semantics (ALL epoch distributions set to null):
+            ``null_reason: "algo_version_mismatch"`` — epochs span sessions analysed
+                with incompatible algorithm versions (cross-version refusal keys differ);
+                re-run analysis with a uniform version before comparing.
+            ``null_reason: "rx_changed_within_epoch"`` — therapy settings changed within
+                at least one epoch; ``rx_violations`` lists the epoch label, changed keys,
+                and change dates so the caller can split the range.
+            Partial degradation: when sessions within an epoch differ in ``primary_mode``,
+                the epoch's ``null_reason`` stays ``null``; only ``rera_proxy_count`` is
+                set to ``null`` with ``rera_reason: "primary_mode_mismatch"``; FL
+                distributions remain populated.
+            Device not owned by the active profile: the service catches this internally
+                and returns a success response with every epoch's
+                ``null_reason: "not_available"``.
+
+        Error conditions:
+            - Epochs list empty or >6 entries → tool error.
+            - Multiple device IDs across epoch specs → tool error.
+            - Multiple devices on the date range and no ``device_id`` → tool error
+              listing device IDs so the caller can re-issue with ``device_id``.
+        """
+        from snore.mcp.tools.epochs import compare_epochs as _impl  # noqa: PLC0415
+
+        validate_epoch_count(len(epochs))
+        return await _scope_and_run(
+            ctx,
+            _impl,
+            tool_name="compare_epochs",
+            epochs=epochs,
+            metrics=metrics,
+        )

@@ -10,7 +10,12 @@ Timestamp contract (A6):
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.schemas import EventContext, EventRow, EventsResponse
@@ -18,6 +23,7 @@ from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
 )
+from snore.mcp.tools._helpers import _str_or_none
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -111,11 +117,9 @@ async def get_events(
                 duration_seconds=ev.duration_seconds,
                 spo2_drop_pct=None,
                 peak_flow_limitation=None,
-                pressure_reason=str(ev.pressure_reason)
-                if ev.pressure_reason is not None
-                else None,
-                leak_reason=str(ev.leak_reason) if ev.leak_reason is not None else None,
-                mv_reason=str(ev.mv_reason) if ev.mv_reason is not None else None,
+                pressure_reason=_str_or_none(ev.pressure_reason),
+                leak_reason=_str_or_none(ev.leak_reason),
+                mv_reason=_str_or_none(ev.mv_reason),
                 context=context,
             )
         )
@@ -161,3 +165,63 @@ async def get_events(
         truncated=truncated,
         device_capabilities=caps,
     )
+
+
+def register(mcp: FastMCP) -> None:
+    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
+    from snore.mcp.validation import (  # noqa: PLC0415
+        parse_date,
+        validate_max_events,
+        validate_min_duration,
+    )
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_events(
+        ctx: Context,
+        date: str,
+        device_id: int | None = None,
+        types: list[str] | None = None,
+        min_duration: float | None = None,
+        include_context: bool = True,
+        max_events: int = 500,
+    ) -> dict[str, Any]:
+        """Return respiratory events for a single session date with inline waveform context.
+
+        Each event includes pressure/leak at the event time and MV in the prior
+        120 s (when waveform data is available), plus minutes since session start.
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            device_id: Optional device ID filter. Required when multiple devices
+                       have data for the same date.
+            types: Optional event type filter, e.g. ["CA", "OA", "H", "RERA"].
+                   Common values: ``OA`` (obstructive apnea), ``CA`` (central
+                   apnea), ``H`` (hypopnea), ``RERA`` (respiratory effort-related
+                   arousal), ``FL`` (flow limitation), ``VS`` (vibratory snore).
+            min_duration: Minimum event duration in seconds (optional).
+            include_context: Attach per-event waveform context block (default true).
+            max_events: Maximum number of events to return after filtering (default 500,
+                        minimum 1). When the result is truncated, ``total_events`` still
+                        reports the full unfiltered count and ``truncated`` is set to true
+                        in the response.
+
+        Returns:
+            EventsResponse with events list, total_events count, and truncated flag.
+        """
+        from snore.mcp.tools.events import get_events as _impl  # noqa: PLC0415
+
+        event_date = parse_date(date, "date")
+        validate_min_duration(min_duration)
+        validate_max_events(max_events)
+        return await _scope_and_run(
+            ctx,
+            _impl,
+            tool_name="get_events",
+            event_date=event_date,
+            device_id=device_id,
+            types=types,
+            min_duration=min_duration,
+            include_context=include_context,
+            max_events=max_events,
+        )

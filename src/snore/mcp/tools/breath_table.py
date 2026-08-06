@@ -9,7 +9,12 @@ Timestamp contract (A6):
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
@@ -23,14 +28,11 @@ from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
 )
+from snore.mcp.tools._helpers import _str_or_none
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
 )
-
-
-def _str_or_none(value: object | None) -> str | None:
-    return str(value) if value is not None else None
 
 
 async def get_breath_table(
@@ -158,7 +160,6 @@ async def get_breath_table(
             trigger_type=_str_or_none(r.trigger_type),
             cycle_type=_str_or_none(r.cycle_type),
             trigger_cycle_confidence=r.trigger_cycle_confidence,
-            trigger_cycle_experimental=True,
             trigger_cycle_applicability=_str_or_none(r.trigger_cycle_applicability),
             trigger_cycle_reason=_str_or_none(r.trigger_cycle_reason),
             leak_valid=r.leak_valid,
@@ -232,3 +233,86 @@ async def get_breath_table(
         bins=bins,
         device_capabilities=caps,
     )
+
+
+def register(mcp: FastMCP) -> None:
+    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
+    from snore.mcp.validation import parse_date  # noqa: PLC0415
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_breath_table(
+        ctx: Context,
+        date: str,
+        offset_start: float,
+        offset_end: float,
+        device_id: int | None = None,
+        session_id: int | None = None,
+        page: int = 1,
+        page_size: int = 500,
+        bin_minutes: float | None = None,
+    ) -> dict[str, Any]:
+        """Paginated breath-level table for a single therapy night.
+
+        Use this tool to inspect individual breath waveform features (flow class,
+        flattening index, timing, tidal volume) within a time window of a therapy session.
+        Call ``get_data_overview`` first to confirm analysis has been run; this tool
+        requires breath-level analysis results.
+
+        Raw windows are capped at 15 minutes (offset_end - offset_start ≤ 900 s).
+        For longer windows set ``bin_minutes`` to aggregate into time bins — the response
+        then populates ``bins`` instead of ``rows``.  ``page_size`` must be between 1 and 2000.
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            offset_start: Window start in seconds from session start (≥ 0).
+            offset_end: Window end in seconds from session start (> offset_start).
+                        Raw window must be ≤ 900 s unless ``bin_minutes`` is set.
+            device_id: Filter to a specific device.  Required when multiple devices
+                       have data for the same date.
+            session_id: Filter to a specific session.  Required when the device had
+                        multiple sessions on the date.  Pass ``device_id`` too when
+                        both are given to validate consistency.
+            page: Page number for raw rows (1-based, default 1).
+            page_size: Rows per page for raw fetch (default 500, must be between 1 and 2000).
+            bin_minutes: When set (≥ 1.0), aggregate breaths into bins of this width
+                         instead of returning raw rows.  Required for windows > 15 min.
+
+        Returns:
+            BreathTableResponse.  ``is_binned`` indicates raw vs binned mode.
+            ``analysis_status`` / ``null_reason`` describe coverage.
+            ``device_capabilities`` describes what the device records.
+
+        Refusal semantics:
+            ``analysis_status`` is one of ``"ok"`` (results present),
+            ``"not_run"`` (no analysis run), or ``"stale"`` (source data
+            changed since analysis ran). When ``"not_run"`` or ``"stale"``,
+            ``null_reason`` explains why (``"analysis_not_run"``,
+            ``"analysis_stale"``). These are successful responses with
+            ``total_breaths=0``, not tool errors.
+
+        Error conditions:
+            - No sessions found for date → tool error; use ``get_data_overview``.
+            - Multiple devices on date and no ``device_id`` → tool error listing device IDs.
+            - Multiple sessions on date and no ``session_id`` → tool error listing session IDs.
+            - Raw window > 15 min without ``bin_minutes`` → tool error; set ``bin_minutes``.
+            - Breath-level tables missing → tool error; run ``snore analysis run``.
+        """
+        from snore.mcp.tools.breath_table import (
+            get_breath_table as _impl,  # noqa: PLC0415
+        )
+
+        therapy_date = parse_date(date, "date")
+        return await _scope_and_run(
+            ctx,
+            _impl,
+            tool_name="get_breath_table",
+            therapy_date=therapy_date,
+            device_id=device_id,
+            session_id=session_id,
+            offset_start=offset_start,
+            offset_end=offset_end,
+            page=page,
+            page_size=page_size,
+            bin_minutes=bin_minutes,
+        )
