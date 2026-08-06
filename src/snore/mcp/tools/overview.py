@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.database import models
 from snore.mcp.schemas import DataOverviewResponse, DeviceInfo
 from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.services.device_service import DeviceService
 
 
@@ -205,8 +206,6 @@ async def get_data_overview(
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
-
     @mcp.tool()
     @tool_error_boundary
     async def get_data_overview(ctx: Context) -> dict[str, Any]:

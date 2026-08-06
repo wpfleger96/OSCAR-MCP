@@ -28,7 +28,8 @@ from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
 )
-from snore.mcp.tools._helpers import _str_or_none
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -157,17 +158,17 @@ async def get_breath_table(
             flow_class=r.flow_class,
             flow_class_confidence=r.flow_class_confidence,
             is_recovery_breath=r.is_recovery_breath,
-            trigger_type=_str_or_none(r.trigger_type),
-            cycle_type=_str_or_none(r.cycle_type),
+            trigger_type=str_or_none(r.trigger_type),
+            cycle_type=str_or_none(r.cycle_type),
             trigger_cycle_confidence=r.trigger_cycle_confidence,
-            trigger_cycle_applicability=_str_or_none(r.trigger_cycle_applicability),
-            trigger_cycle_reason=_str_or_none(r.trigger_cycle_reason),
+            trigger_cycle_applicability=str_or_none(r.trigger_cycle_applicability),
+            trigger_cycle_reason=str_or_none(r.trigger_cycle_reason),
             leak_valid=r.leak_valid,
-            leak_valid_reason=_str_or_none(r.leak_valid_reason),
+            leak_valid_reason=str_or_none(r.leak_valid_reason),
             ramp_active=r.ramp_active,
-            ramp_active_reason=_str_or_none(r.ramp_active_reason),
+            ramp_active_reason=str_or_none(r.ramp_active_reason),
             mask_off=r.mask_off,
-            mask_off_reason=_str_or_none(r.mask_off_reason),
+            mask_off_reason=str_or_none(r.mask_off_reason),
         )
         for r in dto.rows
     ]
@@ -236,7 +237,6 @@ async def get_breath_table(
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
     from snore.mcp.validation import parse_date  # noqa: PLC0415
 
     @mcp.tool()

@@ -19,7 +19,7 @@ Technical documentation for the SNORE system architecture, components, and desig
 │ 17 routers   │  snore cmds  │  10 tools    │
 ├──────────────┴──────────────┴──────────────┤
 │        Service Layer (services/)            │
-│  12 services: business logic between        │
+│  13 services: business logic between        │
 │  CLI/API and database                       │
 ├─────────────────────────────────────────────┤
 │        Analysis Layer (Parser Agnostic)     │

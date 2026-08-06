@@ -453,8 +453,14 @@ class ImportJob:
                 ch.put(terminal_msg)
         return True
 
-    def _finish(self, *, succeeded: bool, terminal_msg: dict[str, Any]) -> bool:
+    def _finish(
+        self, *, succeeded: bool, terminal_msg: dict[str, Any] | None = None
+    ) -> bool:
         """Transition running → succeeded/failed/cancelled. Called by the worker.
+
+        When ``_cancel_flag`` is set the passed ``terminal_msg`` is ignored:
+        ``_make_cancel_payload()`` always produces the cancel terminal event.
+        ``terminal_msg`` is required (non-None) on all non-cancel paths.
 
         NOTE: The caller must call release_capacity() AFTER cleanup_files()
         completes to ensure the slot owns the disk it admitted.
@@ -466,6 +472,10 @@ class ImportJob:
                 self._state = JobState.CANCELLED
                 terminal_msg = self._make_cancel_payload()
             else:
+                if terminal_msg is None:
+                    raise RuntimeError(
+                        "_finish: terminal_msg required on non-cancel paths"
+                    )
                 self._state = JobState.SUCCEEDED if succeeded else JobState.FAILED
                 # Embed import outcome in every terminal payload after import committed.
                 if self._import_committed and self._import_result is not None:

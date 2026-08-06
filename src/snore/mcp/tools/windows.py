@@ -22,7 +22,8 @@ from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import FindWindowsResponse, WindowRow
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
-from snore.mcp.tools._helpers import _str_or_none
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -124,7 +125,7 @@ async def find_windows(
             anchor_event_offset=w.anchor_event_offset,
             analysis_result_id=w.analysis_result_id,
             analysis_status=str(w.analysis_status),
-            analysis_reason=_str_or_none(w.analysis_reason),
+            analysis_reason=str_or_none(w.analysis_reason),
         )
         for w in result.windows
     ]
@@ -148,7 +149,7 @@ async def find_windows(
         algorithm_identity=result.algorithm_identity.model_dump(mode="json")
         if result.algorithm_identity is not None
         else None,
-        null_reason=_str_or_none(result.null_reason),
+        null_reason=str_or_none(result.null_reason),
         primary_mode=result.primary_mode,
         windows=windows,
         device_capabilities=caps,
@@ -156,7 +157,6 @@ async def find_windows(
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
     from snore.mcp.validation import parse_date, validate_window_count  # noqa: PLC0415
 
     @mcp.tool()

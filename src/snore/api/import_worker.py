@@ -66,18 +66,12 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
             job.report_progress("Detecting data sources...")
             if job.cancel_requested:
-                job._finish(
-                    succeeded=False,
-                    terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
-                )
+                job._finish(succeeded=False)
                 return
             sources = service.detect_sources(job.temp_dir)
             job.report_progress(f"Detected {len(sources)} source(s)")
             if job.cancel_requested:
-                job._finish(
-                    succeeded=False,
-                    terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
-                )
+                job._finish(succeeded=False)
                 return
             result = asyncio.run(
                 service.import_sources(

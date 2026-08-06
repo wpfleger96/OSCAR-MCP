@@ -47,7 +47,10 @@ class RenameProfileRequest(BaseModel):
 async def _get_default_profile_id(db: AsyncSession, user_id: int) -> int | None:
     """Return the user's default_profile_id. User always exists per ActorContextFactory."""
     user = await db.get(models.User, user_id)
-    assert user is not None  # noqa: S101 — ActorContextFactory guarantees existence
+    if user is None:
+        raise RuntimeError(
+            f"user {user_id} missing — ActorContextFactory invariant violated"
+        )
     return user.default_profile_id
 
 

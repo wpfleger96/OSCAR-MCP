@@ -545,7 +545,7 @@ class TestGetWaveformClient:
                     new_callable=AsyncMock,
                     return_value=raw,
                 ),
-                patch("snore.mcp.server.RESPONSE_SIZE_LIMIT", new=1),
+                patch("snore.mcp.tools._scaffold.RESPONSE_SIZE_LIMIT", new=1),
             ],
         ) as client:
             with pytest.raises(ToolError):

@@ -576,7 +576,7 @@ class TestGetCaAnalysisClient:
             "snore.services.breath_service.compute_ca_analysis",
             MagicMock(return_value=mock_result),
         )
-        patch_size = patch("snore.mcp.server.RESPONSE_SIZE_LIMIT", new=1)
+        patch_size = patch("snore.mcp.tools._scaffold.RESPONSE_SIZE_LIMIT", new=1)
 
         async with mcp_client_factory(
             mock_db_session, extra_patches=[patch_fetch, patch_compute, patch_size]

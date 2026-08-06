@@ -23,7 +23,8 @@ from snore.mcp.schemas import (
     EpochSpec,
     EpochStats,
 )
-from snore.mcp.tools._helpers import _str_or_none
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -120,7 +121,7 @@ async def compare_epochs(
             algorithm_identity=s.algorithm_identity.model_dump(mode="json")
             if s.algorithm_identity is not None
             else None,
-            null_reason=_str_or_none(s.null_reason),
+            null_reason=str_or_none(s.null_reason),
             primary_mode=s.primary_mode,
             mid_insp_flattening=_map_distribution(s.mid_insp_flattening),
             flatness_index=_map_distribution(s.flatness_index),
@@ -130,7 +131,7 @@ async def compare_epochs(
             tidal_volume_ml=_map_distribution(s.tidal_volume_ml),
             ie_ratio=_map_distribution(s.ie_ratio),
             rera_proxy_count=s.rera_proxy_count,
-            rera_reason=_str_or_none(s.rera_reason),
+            rera_reason=str_or_none(s.rera_reason),
             rx_settings=s.rx_settings,
         )
         for s in result.epochs
@@ -138,7 +139,7 @@ async def compare_epochs(
 
     return CompareEpochsResponse(
         epochs=epoch_stats,
-        null_reason=_str_or_none(result.null_reason),
+        null_reason=str_or_none(result.null_reason),
         rx_violations=[
             EpochRxViolationRow(
                 epoch_label=v.epoch_label,
@@ -151,7 +152,6 @@ async def compare_epochs(
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
     from snore.mcp.validation import validate_epoch_count  # noqa: PLC0415
 
     @mcp.tool()

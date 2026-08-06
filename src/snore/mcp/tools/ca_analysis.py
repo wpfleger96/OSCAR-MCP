@@ -34,7 +34,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.mcp.schemas import CaAnalysisResponse, CaDetailSchema
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
-from snore.mcp.tools._helpers import _str_or_none
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import (
+    _check_response_size,
+    _runtime,
+    tool_error_boundary,
+)
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -121,11 +126,11 @@ def ca_response_from_raw(
             offset_seconds=ev.offset_seconds,
             duration_seconds=ev.duration_seconds,
             preceding_mv_slope_lpm_per_min=ev.preceding_mv_slope,
-            preceding_mv_slope_reason=_str_or_none(ev.preceding_mv_reason),
+            preceding_mv_slope_reason=str_or_none(ev.preceding_mv_reason),
             ps_delivered_cmh2o=ev.ps_delivered_cmh2o,
-            ps_reason=_str_or_none(ev.ps_reason),
+            ps_reason=str_or_none(ev.ps_reason),
             stability_index=ev.stability_index,
-            stability_reason=_str_or_none(ev.stability_reason),
+            stability_reason=str_or_none(ev.stability_reason),
         )
         for ev in result.ca_events
     ]
@@ -138,22 +143,17 @@ def ca_response_from_raw(
         algorithm_identity=result.algorithm_identity.model_dump(mode="json")
         if result.algorithm_identity is not None
         else None,
-        null_reason=_str_or_none(result.null_reason),
+        null_reason=str_or_none(result.null_reason),
         ca_events=ca_events,
         periodic_breathing_pct=result.periodic_breathing_pct,
-        pb_reason=_str_or_none(result.pb_reason),
+        pb_reason=str_or_none(result.pb_reason),
         mv_rolling_variance=result.mv_rolling_variance,
-        mv_variance_reason=_str_or_none(result.mv_variance_reason),
+        mv_variance_reason=str_or_none(result.mv_variance_reason),
         device_capabilities=caps,
     )
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import (  # noqa: PLC0415
-        _check_response_size,
-        _runtime,
-        tool_error_boundary,
-    )
     from snore.mcp.validation import parse_date  # noqa: PLC0415
 
     @mcp.tool()

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.schemas import WaveformChannelSchema, WaveformWindowResponse
+from snore.mcp.tools._scaffold import _check_response_size, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -185,11 +186,7 @@ def render_png_from_raw(raw: RawWaveformWindow) -> bytes:
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import (  # noqa: PLC0415
-        _check_response_size,
-        _fetch_waveform_for_tool,
-        tool_error_boundary,
-    )
+    from snore.mcp.server import _fetch_waveform_for_tool  # noqa: PLC0415
 
     async def get_waveform(
         ctx: Context,
@@ -264,6 +261,8 @@ def register(mcp: FastMCP) -> None:
         "    - Response exceeds 500,000-byte limit → tool error; use ``max_points``\n"
         "      or request fewer channels."
     )
+    # Functional form (not @decorator) because __doc__ is built dynamically above
+    # before decoration; switching to @mcp.tool() would lose the channel vocab.
     mcp.tool()(tool_error_boundary(get_waveform))
 
     async def render_window(

@@ -31,7 +31,8 @@ from snore.mcp.schemas import (
     NightlySummaryResponse,
 )
 from snore.mcp.tools._capabilities import _has_analysis, build_device_capabilities
-from snore.mcp.tools._helpers import _str_or_none
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -225,14 +226,14 @@ async def get_nightly_summary(
 
             # rera_index and rdi mapped straight through from service DTO
             rera_index = bs_night.rera_index
-            rera_index_reason = _str_or_none(bs_night.rera_index_reason)
+            rera_index_reason = str_or_none(bs_night.rera_index_reason)
             rdi = bs_night.rdi
-            rdi_reason = _str_or_none(bs_night.rdi_reason)
+            rdi_reason = str_or_none(bs_night.rdi_reason)
 
             if bs_night.fl_median is not None:
                 fl_median = round(bs_night.fl_median, 4)
             if bs_night.fl_reason is not None:
-                reason_str = _str_or_none(bs_night.fl_reason)
+                reason_str = str_or_none(bs_night.fl_reason)
                 fl_median_reason = reason_str
                 fl_p95_reason = reason_str
                 fl_max_reason = reason_str
@@ -244,10 +245,10 @@ async def get_nightly_summary(
             # Ti and I:E from BreathService
             if bs_night.ti_median_s is not None:
                 ti_median_s = round(bs_night.ti_median_s, 3)
-            ti_median_reason = _str_or_none(bs_night.ti_median_reason)
+            ti_median_reason = str_or_none(bs_night.ti_median_reason)
             if bs_night.ie_ratio_median is not None:
                 ie_ratio = round(bs_night.ie_ratio_median, 3)
-            ie_ratio_reason = _str_or_none(bs_night.ie_ratio_reason)
+            ie_ratio_reason = str_or_none(bs_night.ie_ratio_reason)
         else:
             rera_index_reason = "analysis_not_run"
             rdi_reason = "analysis_not_run"
@@ -340,7 +341,6 @@ async def get_nightly_summary(
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
     from snore.mcp.validation import (  # noqa: PLC0415
         parse_date_range,
         validate_compliance_threshold,

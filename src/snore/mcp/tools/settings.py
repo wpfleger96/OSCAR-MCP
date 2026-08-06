@@ -18,6 +18,7 @@ from snore.mcp.schemas import (
     SettingsTimelineResponse,
 )
 from snore.mcp.tools._capabilities import _has_analysis, build_device_capabilities
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 
 
 async def get_settings_timeline(
@@ -112,7 +113,6 @@ async def get_settings_timeline(
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
     from snore.mcp.validation import parse_date_range  # noqa: PLC0415
 
     @mcp.tool()

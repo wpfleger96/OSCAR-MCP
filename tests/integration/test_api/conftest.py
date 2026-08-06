@@ -98,6 +98,8 @@ def api_client(temp_db, async_db_session, db_session):
     # Do NOT use 'with TestClient(app)' — that runs lifespan (init_database),
     # which we skip since we are overriding get_db entirely; lifespan tests use
     # real_app instead.
+    # See make_test_client()'s docstring for the FastAPI dep-cache rationale
+    # behind the Depends(get_db) declaration in the actor override.
     return make_test_client(async_db_session)
 
 

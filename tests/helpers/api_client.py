@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 from fastapi import Depends, HTTPException
 from fastapi.testclient import TestClient
@@ -13,9 +13,6 @@ from snore.api.app import create_app
 from snore.api.deps import get_actor, get_db
 from snore.auth.actor import ActorContext, AuthMode
 from snore.auth.factory import ActorContextFactory
-
-if TYPE_CHECKING:
-    pass
 
 
 def make_test_client(

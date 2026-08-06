@@ -23,7 +23,8 @@ from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
 )
-from snore.mcp.tools._helpers import _str_or_none
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -117,9 +118,9 @@ async def get_events(
                 duration_seconds=ev.duration_seconds,
                 spo2_drop_pct=None,
                 peak_flow_limitation=None,
-                pressure_reason=_str_or_none(ev.pressure_reason),
-                leak_reason=_str_or_none(ev.leak_reason),
-                mv_reason=_str_or_none(ev.mv_reason),
+                pressure_reason=str_or_none(ev.pressure_reason),
+                leak_reason=str_or_none(ev.leak_reason),
+                mv_reason=str_or_none(ev.mv_reason),
                 context=context,
             )
         )
@@ -168,7 +169,6 @@ async def get_events(
 
 
 def register(mcp: FastMCP) -> None:
-    from snore.mcp.server import _scope_and_run, tool_error_boundary  # noqa: PLC0415
     from snore.mcp.validation import (  # noqa: PLC0415
         parse_date,
         validate_max_events,
