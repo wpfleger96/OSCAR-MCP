@@ -141,30 +141,36 @@ class BreathSegmenter:
             >>> crossings = segmenter.detect_zero_crossings(flow)
             >>> print(f"Found {len(crossings)} zero crossings")
         """
-        crossings = []
+        # Classify each sample: +1 (above hysteresis), -1 (below -hysteresis), 0 (dead band).
+        classified = np.zeros(len(flow_data), dtype=np.int8)
+        classified[flow_data > self.hysteresis] = 1
+        classified[flow_data < -self.hysteresis] = -1
 
-        # State machine for hysteresis
-        # States: "positive" (flow > hysteresis), "negative" (flow < -hysteresis)
-        current_state = None
+        nonzero_indices = np.flatnonzero(classified)
+        if len(nonzero_indices) == 0:
+            logger.debug("Detected 0 zero crossings")
+            return []
+
+        nonzero_values = classified[nonzero_indices]
+
+        # Candidates are the first classified sample plus each sign-change point.
+        # These are exactly the state-transition events the scalar loop encounters,
+        # reducing ~720K samples to ~1-2K candidates for the accept/reject pass.
+        transition_mask = np.concatenate([[True], np.diff(nonzero_values) != 0])
+        candidate_indices = nonzero_indices[transition_mask].tolist()
+        candidate_values = nonzero_values[transition_mask].tolist()
+
+        crossings: list[tuple[int, str]] = []
         last_crossing_idx = -1
 
-        for i, value in enumerate(flow_data):
-            if value > self.hysteresis:
-                new_state = "positive"
-            elif value < -self.hysteresis:
-                new_state = "negative"
-            else:
-                continue
-
-            if current_state is None:
-                crossings.append((i, new_state))
-                last_crossing_idx = i
-            elif new_state != current_state:
-                if i - last_crossing_idx > 5:
-                    crossings.append((i, new_state))
-                    last_crossing_idx = i
-
-            current_state = new_state
+        for idx, val in zip(candidate_indices, candidate_values, strict=True):
+            direction = "positive" if val > 0 else "negative"
+            if not crossings:
+                crossings.append((idx, direction))
+                last_crossing_idx = idx
+            elif idx - last_crossing_idx > 5:
+                crossings.append((idx, direction))
+                last_crossing_idx = idx
 
         logger.debug(f"Detected {len(crossings)} zero crossings")
         return crossings

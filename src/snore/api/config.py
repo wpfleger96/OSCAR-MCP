@@ -52,6 +52,11 @@ Environment variables
 
 ``SNORE_MAX_JOBS_GLOBAL``
     Maximum active jobs across all users.  Default: 10.
+
+``SNORE_ANALYSIS_MAX_WORKERS``
+    Maximum concurrent sessions processed within a single import-triggered
+    analysis job.  Writes are serialized by the write gate; this controls the
+    read/compute concurrency.  Default: 4.
 """
 
 from __future__ import annotations
@@ -123,6 +128,7 @@ class AppConfig:
     max_upload_files: int  # Per-upload file count ceiling; default 10 000.
     max_jobs_per_user: int  # Per-user active-job cap; default 3.
     max_jobs_global: int  # Global active-job cap; default 10.
+    analysis_max_workers: int  # Per-analysis-job session concurrency; default 4.
 
     @property
     def is_multiuser(self) -> bool:
@@ -244,6 +250,7 @@ def load_config(
     max_upload_files = _parse_positive_int("SNORE_MAX_UPLOAD_FILES", 10000)
     max_jobs_per_user = _parse_positive_int("SNORE_MAX_JOBS_PER_USER", 3)
     max_jobs_global = _parse_positive_int("SNORE_MAX_JOBS_GLOBAL", 10)
+    analysis_max_workers = _parse_positive_int("SNORE_ANALYSIS_MAX_WORKERS", 4)
 
     public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:
@@ -309,6 +316,7 @@ def load_config(
         max_upload_files=max_upload_files,
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
+        analysis_max_workers=analysis_max_workers,
     )
 
 

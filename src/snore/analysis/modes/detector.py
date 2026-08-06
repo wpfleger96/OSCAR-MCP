@@ -747,39 +747,19 @@ class EventDetector:
 
         near_zero_mask = np.abs(flow_signal) < zero_threshold
 
+        padded = np.empty(len(near_zero_mask) + 2, dtype=np.int8)
+        padded[0] = 0
+        padded[1:-1] = near_zero_mask
+        padded[-1] = 0
+        delta = np.diff(padded)
+        starts = np.flatnonzero(delta == 1)  # index of first in-run sample
+        ends = np.flatnonzero(delta == -1)  # one past last in-run sample
+
         events = []
-        in_event = False
-        event_start = 0
-
-        for i, is_near_zero in enumerate(near_zero_mask):
-            if is_near_zero and not in_event:
-                in_event = True
-                event_start = i
-            elif not is_near_zero and in_event:
-                in_event = False
-                event_length = i - event_start
-                if event_length >= min_samples:
-                    start_time = float(timestamps[event_start])
-                    end_time = float(timestamps[i - 1])
-                    events.append(
-                        ApneaEvent(
-                            start_time=start_time,
-                            end_time=end_time,
-                            duration=end_time - start_time,
-                            event_type="CA",
-                            flow_reduction=1.0,
-                            confidence=0.80,
-                            classification_confidence=0.85,  # High confidence: near-zero = CA
-                            baseline_flow=0.0,
-                            detection_method="near_zero_flow",
-                        )
-                    )
-
-        if in_event:
-            event_length = len(near_zero_mask) - event_start
-            if event_length >= min_samples:
-                start_time = float(timestamps[event_start])
-                end_time = float(timestamps[-1])
+        for s, e in zip(starts.tolist(), ends.tolist(), strict=True):
+            if e - s >= min_samples:
+                start_time = float(timestamps[s])
+                end_time = float(timestamps[e - 1])
                 events.append(
                     ApneaEvent(
                         start_time=start_time,

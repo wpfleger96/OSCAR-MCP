@@ -13,11 +13,13 @@ import pytest
 import snore.api.analysis_jobs as jobs
 
 from snore.api.analysis_jobs import (
+    _DEFAULT_ANALYSIS_MAX_WORKERS,
     JOB_TTL_SECONDS,
     MAX_QUEUED,
     AnalysisJob,
     AnalysisJobSource,
     AnalysisJobState,
+    _get_analysis_workers,
     _reap_terminal,
     cancel_job,
     enqueue,
@@ -347,3 +349,52 @@ def test_to_dict_fields_and_no_profile_id():
     assert "created_at" in d
     assert d["started_at"] is None
     assert d["finished_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# 9. _get_analysis_workers reads config and falls back gracefully
+# ---------------------------------------------------------------------------
+
+
+def test_get_analysis_workers_returns_configured_value():
+    from snore.api.config import AppConfig, reset_config, set_config
+    from snore.auth.actor import AuthMode
+
+    cfg = AppConfig(
+        auth_mode=AuthMode.LOCAL,
+        session_secret="",
+        public_base_url="",
+        public_origin=None,
+        bind_host="127.0.0.1",
+        trusted_proxies=frozenset(),
+        dev_origins=frozenset(),
+        cors_origins=["http://localhost:5173"],
+        google_client_id="",
+        google_client_secret="",
+        oauth_attempt_ttl_seconds=600,
+        pre_auth_cookie_ttl_seconds=600,
+        max_upload_bytes=512 * 1024 * 1024,
+        max_file_bytes=256 * 1024 * 1024,
+        max_upload_files=10_000,
+        max_jobs_per_user=3,
+        max_jobs_global=10,
+        analysis_max_workers=6,
+    )
+    set_config(cfg)
+    try:
+        assert _get_analysis_workers() == 6
+    finally:
+        reset_config()
+
+
+def test_get_analysis_workers_falls_back_to_default_when_config_raises(monkeypatch):
+    import snore.api.config as _config_mod
+
+    monkeypatch.setattr(_config_mod, "_config", None)
+    # Patch load_config to raise so get_config() propagates the error.
+    monkeypatch.setattr(
+        _config_mod,
+        "load_config",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("config unavailable")),
+    )
+    assert _get_analysis_workers() == _DEFAULT_ANALYSIS_MAX_WORKERS

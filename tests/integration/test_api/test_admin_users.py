@@ -172,6 +172,7 @@ def _set_config_with_public_url(base_url: str = _PUBLIC_BASE_URL) -> None:
             max_upload_files=10000,
             max_jobs_per_user=3,
             max_jobs_global=10,
+            analysis_max_workers=4,
         )
     )
 
