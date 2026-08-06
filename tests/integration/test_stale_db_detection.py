@@ -17,6 +17,8 @@ import unittest.mock
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from sqlalchemy import select, text
 
 import snore.database.session as sess_mod
@@ -397,3 +399,118 @@ async def test_static_runtime_retries_profile_resolution_until_found(
         "StaticRuntime must update profile_id on retry after a live profile appears "
         f"(expected {new_profile_id}, got {runtime.profile_id})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: _pending_reinit recovery path after failed migration during swap
+# ---------------------------------------------------------------------------
+
+
+async def test_pending_reinit_recovery_after_failed_migration(
+    tmp_path: Path,
+) -> None:
+    """A failed swap reinit leaves _pending_reinit set; the next scope entry retries and recovers.
+
+    Arrange: DB A (marker profile 'pend-a'), DB B (marker 'pend-b').
+    Act:
+      1. Init A; swap B over A.
+      2. Patch _apply_migrations_sync to raise RuntimeError.
+      3. Enter session_scope(): staleness check disposes old engine and attempts
+         reinit, which fails — exception propagates out of session_scope().
+      4. Verify _db_path is None and _pending_reinit is not None.
+      5. Remove patch; enter session_scope() again — recovery reinits successfully,
+         B's profile is visible, and _pending_reinit is cleared.
+    """
+    path_a = tmp_path / "pend_a.db"
+    path_b = tmp_path / "pend_b.db"
+
+    await _build_db_with_profile(path_a, "pend_a@example.com", "pend-a")
+    await _build_db_with_profile(path_b, "pend_b@example.com", "pend-b")
+
+    await init_database(str(path_a))
+    os.replace(path_b, path_a)
+
+    with unittest.mock.patch(
+        "snore.database.session._apply_migrations_sync",
+        side_effect=RuntimeError("simulated migration failure"),
+    ):
+        with pytest.raises(RuntimeError):
+            async with session_scope() as _db:
+                pass  # pragma: no cover
+
+    assert sess_mod._db_path is None, "After failed reinit, _db_path must be None"
+    assert sess_mod._pending_reinit is not None, (
+        "After failed reinit, _pending_reinit must be set so recovery can retry"
+    )
+
+    # Recovery: patch removed; next scope entry reinitializes successfully.
+    async with session_scope() as db:
+        profiles = (await db.execute(select(Profile))).scalars().all()
+    names = {p.name for p in profiles}
+
+    assert "pend-b" in names, "After recovery, B's profile must be visible"
+    assert sess_mod._pending_reinit is None, (
+        "_pending_reinit must be cleared after successful recovery"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: get_raw_session staleness coverage via FastAPI dependency
+# ---------------------------------------------------------------------------
+
+
+async def test_get_raw_session_detects_staleness_after_swap(tmp_path: Path) -> None:
+    """get_raw_session drives the FastAPI dependency which triggers staleness detection."""
+    from snore.api.deps import get_raw_session
+
+    path_a = tmp_path / "deps_a.db"
+    path_b = tmp_path / "deps_b.db"
+
+    await _build_db_with_profile(path_a, "deps_a@example.com", "deps-a")
+    await _build_db_with_profile(path_b, "deps_b@example.com", "deps-b")
+
+    await init_database(str(path_a))
+    engine_before = sess_mod._engine
+    os.replace(path_b, path_a)
+
+    agen = get_raw_session()
+    session = await anext(agen)
+    try:
+        profiles = (await session.execute(select(Profile))).scalars().all()
+    finally:
+        await agen.aclose()
+
+    names = {p.name for p in profiles}
+    assert "deps-b" in names, (
+        "get_raw_session must serve B's data after staleness detection"
+    )
+    assert sess_mod._engine is not engine_before, (
+        "Engine must be replaced after staleness detection via get_raw_session"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: non-file targets skip staleness detection (backend-agnosticism)
+# ---------------------------------------------------------------------------
+
+
+async def test_memory_db_skips_staleness_detection(tmp_path: Path) -> None:
+    """Detection is file-backed-SQLite-only so the storage layer stays dialect-agnostic.
+
+    A future PostgreSQL target takes the same no-op path via _db_path is None.
+    """
+    await init_database(":memory:")
+
+    assert sess_mod._db_identity is None, (
+        "In-memory DB must not set _db_identity (no file inode to track)"
+    )
+    engine_before = sess_mod._engine
+
+    async with session_scope() as db:
+        await db.execute(text("SELECT 1"))
+
+    assert sess_mod._engine is engine_before, (
+        "Engine must not change for in-memory DB (no inode to detect)"
+    )
+
+    await cleanup_database()

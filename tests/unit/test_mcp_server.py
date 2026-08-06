@@ -676,13 +676,27 @@ class TestStaticRuntime:
         rt = StaticRuntime(base_scope_provider=MagicMock(), profile_id=42)
         assert rt.profile_id == 42
 
-    def test_scope_provider_returns_callable(self) -> None:
+    def test_scope_provider_is_identity_stable(self) -> None:
         from unittest.mock import MagicMock
 
-        from snore.mcp.server import StaticRuntime
-
         rt = StaticRuntime(base_scope_provider=MagicMock(), profile_id=1)
-        assert callable(rt.scope_provider)
+        assert rt.scope_provider is rt.scope_provider
+
+    async def test_scope_provider_delegates_to_base(self) -> None:
+        from contextlib import asynccontextmanager
+
+        sentinel = object()
+        entered: list[bool] = []
+
+        @asynccontextmanager
+        async def fake_base():
+            entered.append(True)
+            yield sentinel
+
+        rt = StaticRuntime(base_scope_provider=fake_base, profile_id=1)
+        async with rt.scope_provider() as value:
+            assert value is sentinel
+        assert entered, "fake_base must have been entered"
 
     def test_satisfies_snore_runtime_protocol(self) -> None:
         """StaticRuntime structurally satisfies SNORERuntime for _runtime(ctx) usage."""

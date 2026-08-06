@@ -88,6 +88,11 @@ _db_path: str | None = None
 #   _do_cleanup — it must survive cleanup so the reinit can be retried.  When
 #   _pending_reinit is not None and _db_path is None, check_db_staleness retries
 #   the reinit instead of silently returning with a broken/None engine.
+#   Because _pending_reinit survives cleanup_database, a request slipping in
+#   after lifespan teardown (with a failed swap-reinit pending) would
+#   re-initialize the swap target instead of raising "not initialized" —
+#   acceptable in the current server lifecycle where connection acceptance stops
+#   before teardown.
 _db_identity: tuple[int, int] | None = None
 _sync_url: str | None = None
 _async_url: str | None = None
@@ -539,6 +544,24 @@ async def check_db_staleness() -> None:
     - Module globals are captured into locals before the first ``await`` so a
       concurrent ``cleanup_database()`` cannot race between the mismatch check
       and the reinit call to produce a ``None`` dereference.
+
+    Write-loss at swap time:
+    Sessions already open when a swap occurs keep their connection to the OLD
+    unlinked inode — reads succeed against the old data and any writes they
+    commit land on the unlinked inode and are lost when its last file descriptor
+    closes.  Detection happens at scope/session open only.
+
+    Backend-agnostic contract:
+    Detection applies ONLY to file-backed SQLite targets; for ``:memory:`` and
+    non-SQLite backends (e.g. a future PostgreSQL target, where ``_db_path`` is
+    ``None``) the function is a no-op costing one ``is None`` comparison — the
+    storage layer stays dialect-agnostic.
+
+    WAL/SHM note:
+    After a swap, stale ``-wal``/``-shm`` files from the old inode may remain
+    beside the new file; SQLite validates the WAL header salt on open and
+    silently ignores an incompatible WAL, so this is safe — noted here so
+    operators do not chase it.
     """
     global _pending_reinit
 
@@ -561,8 +584,17 @@ async def check_db_staleness() -> None:
 
     try:
         st = os.stat(db_path)
-    except OSError:
+    except FileNotFoundError:
         # File momentarily absent mid-swap — recheck on the next call.
+        return
+    except OSError as exc:
+        logger.warning(
+            "Unexpected error stat-ing database path %s; staleness detection "
+            "skipped this call: %s",
+            db_path,
+            exc,
+            exc_info=True,
+        )
         return
 
     if (st.st_dev, st.st_ino) == _db_identity:
@@ -604,6 +636,12 @@ async def session_scope() -> AsyncGenerator[AsyncSession]:
 
         async with session_scope() as session:
             session.add(obj)
+
+    Calls ``check_db_staleness()`` before opening the session and may
+    transparently rebuild the engine if the database file was replaced on disk
+    since the last initialization.  Sessions already open when a swap occurs
+    keep their connection to the OLD unlinked inode; any writes they commit are
+    lost when the inode's last file descriptor closes.
 
     Commits on success; rolls back on any exception.
 
@@ -700,6 +738,8 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
                 _sync_url = None
                 _async_url = None
                 # _engine_generation deliberately survives — see module-level comment.
+                # _pending_reinit also deliberately survives cleanup — the
+                # swap-recovery path in check_db_staleness depends on it.
     finally:
         # Terminal state transition: always exit cleanup-in-flight,
         # whether we completed normally, raised, or were cancelled.
@@ -715,7 +755,8 @@ async def cleanup_database() -> None:
     task continues to completion so state is always left clean.
 
     After this coroutine returns, ``_engine``, ``_AsyncSessionFactory``,
-    ``_db_path``, ``_init_task``, and ``_cleanup_task`` are all ``None``.
+    ``_db_path``, ``_db_identity``, ``_sync_url``, ``_async_url``,
+    ``_init_task``, and ``_cleanup_task`` are all ``None``.
     Subsequent ``init_database()`` calls create a fresh engine.
 
     This function should be called during test teardown or application shutdown.

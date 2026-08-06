@@ -120,12 +120,17 @@ class StaticRuntime:
       - All tools read ``runtime.profile_id`` *inside* an already-open scope
         (i.e. after ``async with runtime.scope_provider() as db``), so
         ``_profile_id`` is always fully updated before it is consumed.
+
+    Designed for the stdio transport where tool calls are effectively serial;
+    the unsynchronized ``_profile_id`` mutation relies on that assumption —
+    multiuser HTTP uses ``ActorRuntime`` with per-request context instead.
     """
 
     def __init__(self, base_scope_provider: _ScopeProvider, profile_id: int) -> None:
         self._base_scope_provider = base_scope_provider
         self._profile_id = profile_id
         self._known_generation: int = get_engine_generation()
+        self._scope_provider: _ScopeProvider = self._scoped_provider
 
     @asynccontextmanager
     async def _scoped_provider(self) -> AsyncGenerator[AsyncSession]:
@@ -150,7 +155,7 @@ class StaticRuntime:
 
     @property
     def scope_provider(self) -> _ScopeProvider:
-        return self._scoped_provider
+        return self._scope_provider
 
     @property
     def profile_id(self) -> int:

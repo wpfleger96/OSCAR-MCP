@@ -25,7 +25,9 @@ async def get_raw_session() -> AsyncGenerator[AsyncSession]:
     resolution (when the session is created), not per transaction.  Handlers
     that run multiple explicit transactions with network I/O between them may
     observe a DB-file swap between transactions; the swap will be detected and
-    the engine rebuilt at the start of the next request.
+    the engine rebuilt at the start of the next request.  Sessions already open
+    when a swap occurs keep their connection to the OLD unlinked inode; any
+    writes they commit are lost when the inode's last file descriptor closes.
     """
     await check_db_staleness()
     session = get_session()
