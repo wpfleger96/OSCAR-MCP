@@ -259,10 +259,6 @@ class Profile(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_profile_user_name"),
         CheckConstraint("length(name) > 0", name="chk_profile_name"),
-        CheckConstraint(
-            "deleting_at IS NULL OR deleting_at IS NOT NULL",
-            name="chk_profile_deleting",
-        ),
     )
 
     def __repr__(self) -> str:
