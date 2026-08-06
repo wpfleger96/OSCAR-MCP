@@ -1596,6 +1596,7 @@ class TestP2CsrfFailsClosedOnNoneOrigin:
             max_upload_files=10_000,
             max_jobs_per_user=3,
             max_jobs_global=10,
+            analysis_max_workers=4,
         )
         set_config(broken_cfg)
 

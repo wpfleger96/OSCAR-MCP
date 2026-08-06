@@ -1,8 +1,11 @@
 """In-memory FIFO analysis job queue.
 
-A single persistent worker thread pulls one job at a time (SQLite
-single-writer constraint).  Jobs are retained for JOB_TTL_SECONDS
-after completion for status queries, then reaped.
+A single persistent worker thread pulls one job at a time; the queue
+itself remains strictly sequential.  Within each job, sessions run with
+configurable concurrency (``SNORE_ANALYSIS_MAX_WORKERS``, default 4):
+the write gate serializes SQLite writes while the read/compute phases
+overlap safely.  Jobs are retained for JOB_TTL_SECONDS after completion
+for status queries, then reaped.
 """
 
 from __future__ import annotations
@@ -22,6 +25,20 @@ from snore.api.import_jobs import JOB_TTL_SECONDS
 logger = logging.getLogger(__name__)
 
 MAX_QUEUED: int = 10
+
+# Per-analysis-job session concurrency.  Mirrors the config default so tests
+# that skip full lifespan setup get a sensible fallback without loading config.
+_DEFAULT_ANALYSIS_MAX_WORKERS: int = 4
+
+
+def _get_analysis_workers() -> int:
+    """Return analysis_max_workers from config, falling back to the module default."""
+    try:
+        from snore.api.config import get_config  # noqa: PLC0415
+
+        return get_config().analysis_max_workers
+    except Exception:
+        return _DEFAULT_ANALYSIS_MAX_WORKERS
 
 
 class AnalysisJobState(Enum):
@@ -310,7 +327,7 @@ async def _run_analysis(job: AnalysisJob) -> None:
             store_results=job.store_results,
             progress_callback=job.update_progress,
             cancel_predicate=lambda: job.cancel_requested,
-            max_workers=1,
+            max_workers=_get_analysis_workers(),
         )
 
 
