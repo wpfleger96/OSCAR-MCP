@@ -18,7 +18,10 @@ interface GoogleInviteResponse {
     authorization_url: string
 }
 
-export const getAuthStatus = apiGet<AuthStatusResponse>('/auth/status')
+export const getAuthStatus = apiGet<AuthStatusResponse, [signal?: AbortSignal]>(
+    '/auth/status',
+    (signal) => ({ signal }),
+)
 
 export const loginUser = apiPost<MessageResponse, [body: LoginRequest]>('/auth/login', (body) => ({
     data: body,

@@ -12,7 +12,10 @@ This is ONLY safe for named, demonstrably idempotent units.  The current allowli
 
 Analysis storage is NOT retried: ``analysis_results`` supports multiple versions
 with no natural uniqueness, so a replay cannot distinguish "retry" from "new version".
-Analysis storage relies on ``busy_timeout=5000`` and returns 503 on residual contention.
+Analysis storage is serialized against import chunks via
+``snore.database.write_gate.write_gate`` (a cross-thread ``threading.Lock``), which
+ensures the two background workers never hold the SQLite write lock concurrently.
+``busy_timeout=5000`` remains the last-resort protection for HTTP request-path writes.
 
 A generic scope-helper retry is deliberately rejected: ``session_scope()`` yields to
 an arbitrary caller body it cannot replay; retrying a failed session risks invalid

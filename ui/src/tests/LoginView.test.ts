@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
 
@@ -44,6 +45,7 @@ describe('LoginView', () => {
             authMode: { value: null } as never,
             role: { value: null } as never,
             canWrite: { value: true } as never,
+            demoAvailable: { value: true } as never,
             profileKey: { value: 0 } as never,
         })
     })
@@ -107,6 +109,17 @@ describe('LoginView', () => {
         })
         const demoBtn = wrapper.find('.demo-btn')
         expect(demoBtn.attributes('disabled')).toBeUndefined()
+    })
+
+    it('test_hides_demo_button_when_demo_unavailable', () => {
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            demoAvailable: ref(false) as never,
+        })
+        const wrapper = mount(LoginView, {
+            global: { plugins: [makeRouter()] },
+        })
+        expect(wrapper.find('.demo-btn').exists()).toBe(false)
     })
 
     it('test_demo_button_click_calls_demoLogin_and_navigates_to_dashboard', async () => {

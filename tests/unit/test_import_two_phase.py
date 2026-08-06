@@ -42,10 +42,12 @@ def clean_job_store():
     job_store._jobs.clear()
     job_store._per_user_count.clear()
     job_store._global_count = 0
+    job_store._import_queue.clear()
     yield
     job_store._jobs.clear()
     job_store._per_user_count.clear()
     job_store._global_count = 0
+    job_store._import_queue.clear()
 
 
 # ---------------------------------------------------------------------------

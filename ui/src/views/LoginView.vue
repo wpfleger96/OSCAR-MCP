@@ -62,11 +62,13 @@
                 Sign in with Google
             </a>
 
-            <p v-if="demoError" role="alert" class="login-error">{{ demoError }}</p>
-            <button class="demo-btn" :disabled="demoLoading" @click="handleDemoLogin">
-                <Loader2 v-if="demoLoading" class="h-4 w-4 animate-spin mr-2" />
-                {{ demoLoading ? 'Signing in…' : 'Sign in as Demo' }}
-            </button>
+            <template v-if="demoAvailable">
+                <p v-if="demoError" role="alert" class="login-error">{{ demoError }}</p>
+                <button class="demo-btn" :disabled="demoLoading" @click="handleDemoLogin">
+                    <Loader2 v-if="demoLoading" class="h-4 w-4 animate-spin mr-2" />
+                    {{ demoLoading ? 'Signing in…' : 'Sign in as Demo' }}
+                </button>
+            </template>
         </div>
     </div>
 </template>
@@ -80,7 +82,7 @@ import { useAuth } from '@/composables/useAuth'
 import { resolveLandingPath } from '@/router'
 
 const router = useRouter()
-const { login, demoLogin } = useAuth()
+const { login, demoLogin, demoAvailable } = useAuth()
 
 const email = ref('')
 const password = ref('')

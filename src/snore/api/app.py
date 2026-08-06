@@ -25,6 +25,7 @@ from snore.api.errors import (
     server_error_handler,
 )
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
+from snore.api.import_jobs import start_import_worker as _start_import_worker
 from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, AuthPathMiddleware, RateLimitMiddleware
 from snore.api.routers import (
@@ -121,12 +122,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Purge expired/consumed oauth_attempts at startup.
     await _startup_purge_expired_oauth_attempts()
 
+    # Auto-create demo user and import bundled fixture data if not present.
+    if cfg.is_multiuser:
+        await _startup_ensure_demo_data(app)
+
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
 
-    # Start a single lifespan-owned TTL reaper and the analysis job worker.
+    # Start a single lifespan-owned TTL reaper, the analysis job worker, and the
+    # import job worker (serialises execution to avoid SQLite write-lock contention).
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
     _start_analysis_worker()
+    from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+
+    _start_import_worker(_run_import)
     try:
         yield
     finally:
@@ -156,6 +165,60 @@ async def _startup_purge_expired_oauth_attempts() -> None:
             logger.info("Purged %d expired/consumed oauth_attempts rows", purged)
     except Exception as exc:
         logger.warning("oauth_attempts purge failed: %s", exc)
+
+
+async def _startup_ensure_demo_data(app: FastAPI) -> None:
+    """Auto-create demo user and import bundled fixture data if not present.
+
+    Idempotent: exits immediately when demo data already exists.  Failures are
+    logged as warnings and never prevent startup.
+
+    The two separate session_scope() windows are deliberate: no write lock is held
+    during EDF parsing (which can take tens of seconds).  Concurrent multi-worker
+    first boot can double-import benignly — ensure_user_and_profile's cascade-delete
+    makes re-entry idempotent.
+    """
+    import time as _time  # noqa: PLC0415
+
+    from snore.database.session import session_scope  # noqa: PLC0415
+    from snore.services.demo_service import DemoService  # noqa: PLC0415
+
+    try:
+        async with session_scope() as db:
+            if await DemoService(db).demo_data_exists():
+                logger.debug("Demo data already exists — skipping fixture import")
+                app.state.demo_available = True
+                return
+
+        fixtures_dir = Path(str(importlib.resources.files("snore.demo"))) / "fixtures"
+        if not fixtures_dir.is_dir() or not any(
+            d for d in fixtures_dir.iterdir() if d.is_dir()
+        ):
+            logger.info(
+                "No demo fixtures found at %s — demo login will be unavailable",
+                fixtures_dir,
+            )
+            return
+
+        logger.info("Initializing demo account from bundled fixtures…")
+        t0 = _time.monotonic()
+        async with session_scope() as db:
+            counts = await DemoService(db).import_from_fixtures(fixtures_dir)
+        elapsed = _time.monotonic() - t0
+        logger.info(
+            "Demo data ready in %.1fs — %d sessions imported, %d skipped, %d failed",
+            elapsed,
+            counts.get("sessions", 0),
+            counts.get("skipped", 0),
+            counts.get("failed", 0),
+        )
+        if counts.get("sessions", 0) > 0:
+            app.state.demo_available = True
+    except Exception:
+        logger.warning(
+            "Demo startup initialization failed — demo login will be unavailable",
+            exc_info=True,
+        )
 
 
 # Stale-temp retention: any snore-upload-* dir older than this is orphaned.
@@ -326,7 +389,17 @@ def _resolve_spa_dist() -> Path | None:
 def _mount_spa(app: FastAPI) -> None:
     dist = _resolve_spa_dist()
     if dist is None:
+        logger.info("No ui/dist found — SPA not mounted")
         return
+
+    import datetime as _dt
+
+    mtime = (dist / "index.html").stat().st_mtime
+    built = _dt.datetime.fromtimestamp(mtime, tz=_dt.UTC).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+    logger.info("Serving SPA from %s (built %s)", dist, built)
+
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="spa-assets")
 
     @app.middleware("http")

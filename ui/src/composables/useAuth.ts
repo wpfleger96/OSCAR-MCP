@@ -23,13 +23,14 @@ export function useAuth() {
     const canWrite = computed(
         () => isLocal.value || (status.value?.user?.role !== 'demo' && isAuthenticated.value),
     )
+    const demoAvailable = computed(() => status.value?.demo_available ?? false)
 
     async function fetchStatus(): Promise<void> {
         const now = Date.now()
         if (status.value !== null && now - _lastFetched < REVALIDATE_MS) return
         if (_fetchPromise !== null) return _fetchPromise
         const gen = _generation
-        _fetchPromise = getAuthStatus()
+        _fetchPromise = getAuthStatus(AbortSignal.timeout(10_000))
             .then((s) => {
                 if (_generation === gen) {
                     // Only write if this generation is still the active one.
@@ -101,6 +102,7 @@ export function useAuth() {
         authMode,
         role,
         canWrite,
+        demoAvailable,
         profileKey,
         fetchStatus,
         refreshStatus,

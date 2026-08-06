@@ -67,6 +67,38 @@ _engine: AsyncEngine | None = None
 _AsyncSessionFactory: async_sessionmaker[AsyncSession] | None = None
 _db_path: str | None = None
 
+# Staleness-detection globals — set/cleared alongside the engine globals above.
+#
+# _db_identity: (st_dev, st_ino) of the DB file recorded at engine-init time.
+#   A changed identity means the file was atomically replaced on disk (e.g. by
+#   SNORE's import pipeline, which does an atomic rename(2) to a new inode).
+#   None disables detection (in-memory DB, OSError during stat, or not inited).
+#
+# _sync_url / _async_url: cached at init so check_db_staleness can reinitialize
+#   the engine without re-resolving URLs from the path alone.
+#
+# _engine_generation: monotonically increments on every successful _do_init call.
+#   NEVER reset by cleanup_database or initialization failure.  External callers
+#   snapshot this value to detect that the engine was rebuilt (e.g. after a
+#   swap-triggered reinit in check_db_staleness).
+#
+# _pending_reinit: (sync_url, async_url, db_path) of a swap-triggered reinit
+#   that has not yet completed.  Written in check_db_staleness before teardown
+#   starts; cleared inside _do_init's success publish block.  NOT cleared by
+#   _do_cleanup — it must survive cleanup so the reinit can be retried.  When
+#   _pending_reinit is not None and _db_path is None, check_db_staleness retries
+#   the reinit instead of silently returning with a broken/None engine.
+#   Because _pending_reinit survives cleanup_database, a request slipping in
+#   after lifespan teardown (with a failed swap-reinit pending) would
+#   re-initialize the swap target instead of raising "not initialized" —
+#   acceptable in the current server lifecycle where connection acceptance stops
+#   before teardown.
+_db_identity: tuple[int, int] | None = None
+_sync_url: str | None = None
+_async_url: str | None = None
+_engine_generation: int = 0
+_pending_reinit: tuple[str, str, str] | None = None
+
 # Shared state machine: three linearized states under one stable lock.
 #
 #   initialized:       _engine is not None
@@ -193,7 +225,15 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
     ``CancelledError`` is caught as ``BaseException`` so a cancelled driver
     tears down cleanly and lets the next caller retry rather than hanging.
     """
-    global _engine, _AsyncSessionFactory, _db_path
+    global \
+        _engine, \
+        _AsyncSessionFactory, \
+        _db_path, \
+        _db_identity, \
+        _sync_url, \
+        _async_url, \
+        _engine_generation, \
+        _pending_reinit
 
     engine: AsyncEngine | None = None
     try:
@@ -231,6 +271,25 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
             expire_on_commit=False,
             class_=AsyncSession,
         )
+
+        # Record the file identity (dev, inode) for atomic-swap detection.
+        # Statting after migrations is safe — the pool is lazy, so if the file
+        # was replaced mid-init, both this stat and the first connection observe
+        # the new file consistently.
+        if db_path and db_path != ":memory:":
+            try:
+                st = os.stat(db_path)
+                _db_identity = (st.st_dev, st.st_ino)
+            except OSError:
+                # File absent between directory creation and stat (e.g. racing
+                # test teardown).  Swap detection is disabled until next init.
+                _db_identity = None
+        else:
+            _db_identity = None
+        _sync_url = sync_url
+        _async_url = async_url
+        _pending_reinit = None  # Reinit completed successfully.
+        _engine_generation += 1
     except BaseException:
         # Atomic teardown on any failure including CancelledError.
         # Use synchronous disposal only — awaiting inside an except-BaseException
@@ -244,6 +303,10 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
         _engine = None
         _AsyncSessionFactory = None
         _db_path = None
+        _db_identity = None
+        _sync_url = None
+        _async_url = None
+        # _engine_generation deliberately survives — see module-level comment.
         raise
 
 
@@ -434,6 +497,137 @@ def get_session() -> AsyncSession:
     return _AsyncSessionFactory()
 
 
+async def _reinit_after_swap(sync_url: str, async_url: str, db_path: str) -> None:
+    """Tear down the stale engine and reinitialize from the given URLs.
+
+    Called by ``check_db_staleness`` via ``asyncio.shield`` when an atomic
+    DB-file swap is detected.  Using shield ensures this coroutine runs to
+    completion even if the triggering request is cancelled mid-swap.
+
+    On success, ``_do_init``'s publish block clears ``_pending_reinit``.
+    On failure or post-teardown cancellation, ``_pending_reinit`` is NOT
+    cleared by ``_do_cleanup``, so subsequent calls to ``check_db_staleness``
+    find it set and retry the reinit via the recovery path at the top of that
+    function.
+    """
+    await cleanup_database()
+    await _init_with_once_task(sync_url, async_url, db_path)
+
+
+async def check_db_staleness() -> None:
+    """Detect an atomic DB-file swap and transparently reinitialize the engine.
+
+    SNORE's import pipeline atomically replaces the SQLite file with a
+    ``rename(2)`` to a new inode.  The singleton async engine would otherwise
+    keep serving the old unlinked inode forever.  This function compares the
+    engine's recorded ``(st_dev, st_ino)`` against the live filesystem on every
+    session open and triggers a transparent reinit when they differ.
+
+    Hot path: one ``os.stat`` call, no lock.  On mismatch (cold path), the
+    function sets ``_pending_reinit`` to record the intended reinit URLs before
+    any await, then calls ``asyncio.shield(_reinit_after_swap(...))`` so the
+    teardown and rebuild run to completion even if the calling request is
+    cancelled.  On success ``_do_init`` clears ``_pending_reinit``; on failure
+    or post-teardown cancellation it remains set.
+
+    Recovery path: if ``_pending_reinit`` is set and ``_db_path`` is None, a
+    previous swap-reinit was interrupted after teardown.  The recorded URLs are
+    used to retry the reinit immediately via ``asyncio.shield``, so the engine
+    is always restored regardless of which request first detects the failure.
+
+    Concurrency safety:
+    - Concurrent detections are harmless — both converge on the same
+      once-cleanup-task and once-init-task so the engine is replaced exactly
+      once regardless of how many callers detect the mismatch simultaneously.
+    - No deadlock is possible: ``_init_lock`` is never held across an ``await``
+      and ``session_scope`` never runs under it.
+    - Module globals are captured into locals before the first ``await`` so a
+      concurrent ``cleanup_database()`` cannot race between the mismatch check
+      and the reinit call to produce a ``None`` dereference.
+
+    Write-loss at swap time:
+    Sessions already open when a swap occurs keep their connection to the OLD
+    unlinked inode — reads succeed against the old data and any writes they
+    commit land on the unlinked inode and are lost when its last file descriptor
+    closes.  Detection happens at scope/session open only.
+
+    Backend-agnostic contract:
+    Detection applies ONLY to file-backed SQLite targets; for ``:memory:`` and
+    non-SQLite backends (e.g. a future PostgreSQL target, where ``_db_path`` is
+    ``None``) the function is a no-op costing one ``is None`` comparison — the
+    storage layer stays dialect-agnostic.
+
+    WAL/SHM note:
+    After a swap, stale ``-wal``/``-shm`` files from the old inode may remain
+    beside the new file; SQLite validates the WAL header salt on open and
+    silently ignores an incompatible WAL, so this is safe — noted here so
+    operators do not chase it.
+    """
+    global _pending_reinit
+
+    # Recovery path: a previous swap-reinit was cancelled or failed after
+    # teardown — _db_path is None but _pending_reinit carries the URLs needed
+    # to complete the rebuild.  asyncio.shield ensures the reinit runs to
+    # completion even if this caller is also cancelled.
+    if _pending_reinit is not None and _db_path is None:
+        pending = _pending_reinit
+        await asyncio.shield(_reinit_after_swap(*pending))
+        return
+
+    # Fast exits: not a real on-disk file, or identity not recorded.
+    if _db_path is None or _db_path == ":memory:" or _db_identity is None:
+        return
+
+    # Capture _db_path into a local so the stat and all subsequent reads use
+    # the same value — a concurrent cleanup_database() cannot null it mid-function.
+    db_path = _db_path
+
+    try:
+        st = os.stat(db_path)
+    except FileNotFoundError:
+        # File momentarily absent mid-swap — recheck on the next call.
+        return
+    except OSError as exc:
+        logger.warning(
+            "Unexpected error stat-ing database path %s; staleness detection "
+            "skipped this call: %s",
+            db_path,
+            exc,
+            exc_info=True,
+        )
+        return
+
+    if (st.st_dev, st.st_ino) == _db_identity:
+        return  # Hot path: identity unchanged.
+
+    # Cold path: inode mismatch detected.  Capture remaining globals into locals
+    # before the first await so a concurrent cleanup_database() cannot race
+    # between the mismatch check and the reinit call.
+    captured_sync_url = _sync_url
+    captured_async_url = _async_url
+    captured_identity = _db_identity
+
+    if captured_sync_url is None or captured_async_url is None:
+        # A concurrent cleanup cleared the URLs between our stat and here.
+        # The engine is already being torn down; nothing left to do.
+        return
+
+    logger.warning(
+        "Database file replaced on disk (inode %s -> %s) at path %s; "
+        "disposing stale engine and reconnecting.",
+        captured_identity,
+        (st.st_dev, st.st_ino),
+        db_path,
+    )
+    # Record the pending reinit BEFORE the first await so cancellation or a
+    # failed reinit leaves _pending_reinit set — enabling the recovery path
+    # above to retry on the next call.  _do_init clears it on success.
+    _pending_reinit = (captured_sync_url, captured_async_url, db_path)
+    await asyncio.shield(
+        _reinit_after_swap(captured_sync_url, captured_async_url, db_path)
+    )
+
+
 @asynccontextmanager
 async def session_scope() -> AsyncGenerator[AsyncSession]:
     """Provide a transactional scope for async database operations.
@@ -443,11 +637,18 @@ async def session_scope() -> AsyncGenerator[AsyncSession]:
         async with session_scope() as session:
             session.add(obj)
 
+    Calls ``check_db_staleness()`` before opening the session and may
+    transparently rebuild the engine if the database file was replaced on disk
+    since the last initialization.  Sessions already open when a swap occurs
+    keep their connection to the OLD unlinked inode; any writes they commit are
+    lost when the inode's last file descriptor closes.
+
     Commits on success; rolls back on any exception.
 
     Yields:
         An async database session.
     """
+    await check_db_staleness()
     session = get_session()
     try:
         async with session.begin():
@@ -473,6 +674,18 @@ def get_db_path() -> str:
     return _db_path
 
 
+def get_engine_generation() -> int:
+    """Return the current engine generation counter.
+
+    Increments on every successful ``_do_init`` and is never reset by
+    ``cleanup_database`` or initialization failure.  Callers can snapshot this
+    value before an operation and compare it afterwards to detect that the engine
+    was rebuilt — for example after a swap-triggered reinit in
+    ``check_db_staleness``.
+    """
+    return _engine_generation
+
+
 async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
     """Owned teardown coroutine — runs as the shared ``_cleanup_task``.
 
@@ -489,7 +702,14 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
       (normal, exception, or cancellation) — state machine exits cleanup-in-flight
       with no stuck-barrier.
     """
-    global _engine, _AsyncSessionFactory, _db_path, _cleanup_task
+    global \
+        _engine, \
+        _AsyncSessionFactory, \
+        _db_path, \
+        _cleanup_task, \
+        _db_identity, \
+        _sync_url, \
+        _async_url
 
     lock = _get_init_lock()
 
@@ -514,6 +734,12 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
                 _engine = None
                 _AsyncSessionFactory = None
                 _db_path = None
+                _db_identity = None
+                _sync_url = None
+                _async_url = None
+                # _engine_generation deliberately survives — see module-level comment.
+                # _pending_reinit also deliberately survives cleanup — the
+                # swap-recovery path in check_db_staleness depends on it.
     finally:
         # Terminal state transition: always exit cleanup-in-flight,
         # whether we completed normally, raised, or were cancelled.
@@ -529,7 +755,8 @@ async def cleanup_database() -> None:
     task continues to completion so state is always left clean.
 
     After this coroutine returns, ``_engine``, ``_AsyncSessionFactory``,
-    ``_db_path``, ``_init_task``, and ``_cleanup_task`` are all ``None``.
+    ``_db_path``, ``_db_identity``, ``_sync_url``, ``_async_url``,
+    ``_init_task``, and ``_cleanup_task`` are all ``None``.
     Subsequent ``init_database()`` calls create a fresh engine.
 
     This function should be called during test teardown or application shutdown.

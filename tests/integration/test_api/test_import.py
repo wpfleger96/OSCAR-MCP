@@ -6,6 +6,9 @@ import pytest
 
 from fastapi import HTTPException, Request
 
+import snore.api.analysis_jobs as aj_store
+import snore.api.import_jobs as job_store
+
 from snore.api.routers.import_data import _require_localhost
 from snore.services.schemas import ImportResult, ImportSource
 
@@ -70,7 +73,7 @@ class TestImportUpload:
     def test_upload_writes_files_to_temp_dir(self, api_client, monkeypatch):
         """Upload creates temp files that can be retrieved via the job store.
 
-        _start_worker is patched to a no-op so the background worker never runs
+        enqueue_for_execution is patched to a no-op so the background worker never runs
         and its finally-cleanup_files() cannot race the file-existence assertions.
         These tests validate upload path layout and content, not worker execution.
         """
@@ -78,7 +81,9 @@ class TestImportUpload:
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         response = api_client.post(
             "/api/v1/import",
@@ -114,14 +119,16 @@ class TestImportUpload:
     def test_upload_path_traversal_sanitized(self, api_client, monkeypatch):
         """Path traversal components are stripped from uploaded filenames.
 
-        _start_worker is patched to a no-op so the background worker never runs
+        enqueue_for_execution is patched to a no-op so the background worker never runs
         and its finally-cleanup_files() cannot race the temp-dir rglob assertions.
         """
         import snore.api.routers.import_data as import_mod  # noqa: PLC0415
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         response = api_client.post(
             "/api/v1/import",
@@ -188,7 +195,7 @@ class TestImportProgress:
         response = api_client.get("/api/v1/import/nonexistent/progress")
         assert response.status_code == 404
 
-    def test_progress_stream_emits_events(self, api_client):
+    def test_progress_stream_emits_events(self, api_client, import_worker):
         """SSE stream emits progress events and a complete event."""
         fake_result = ImportResult(
             total_imported=1,
@@ -242,7 +249,7 @@ class TestImportProgress:
 class TestUploadBackupEnabled:
     """Upload job must call import_sources with backup=True (WS2 fix)."""
 
-    def test_upload_job_calls_import_with_backup_true(self, api_client):
+    def test_upload_job_calls_import_with_backup_true(self, api_client, import_worker):
         """_run_import for UPLOAD type must pass backup=True to import_sources."""
         fake_result = ImportResult(
             total_imported=1,
@@ -464,7 +471,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         # Create a second profile via the profiles API.
         resp = api_client.post("/api/v1/profiles/", json={"name": "Second Profile"})
@@ -494,7 +503,9 @@ class TestImportTargetProfile:
         """Upload with a profile_id that does not belong to this user returns 403."""
         import snore.api.routers.import_data as import_mod
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         response = api_client.post(
             "/api/v1/import",
@@ -513,7 +524,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         job = None
         try:
@@ -541,7 +554,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         # Create a second profile via the profiles API.
         resp = localhost_api_client.post(
@@ -573,7 +588,9 @@ class TestImportTargetProfile:
         """Path import with a profile_id not owned by this user returns 403."""
         import snore.api.routers.import_data as import_mod
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
         response = localhost_api_client.post(
@@ -595,7 +612,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         resp = localhost_api_client.post(
             "/api/v1/profiles/", json={"name": "Wire Contract Profile"}
@@ -621,3 +640,159 @@ class TestImportTargetProfile:
                 remove_job(job.job_id)
                 job.cleanup_files()
                 job.release_capacity()
+
+
+class TestPipelineJobsListAPI:
+    """Integration tests for GET /api/v1/import/jobs."""
+
+    @pytest.fixture(autouse=True)
+    def clean_stores(self):
+        """Reset both job stores before and after each test."""
+        job_store._jobs.clear()
+        job_store._per_user_count.clear()
+        job_store._global_count = 0
+        job_store._import_queue.clear()
+        aj_store._all_jobs.clear()
+        aj_store._queue.clear()
+        yield
+        job_store._jobs.clear()
+        job_store._per_user_count.clear()
+        job_store._global_count = 0
+        job_store._import_queue.clear()
+        aj_store._all_jobs.clear()
+        aj_store._queue.clear()
+
+    def test_empty_list_initially(self, api_client):
+        response = api_client.get("/api/v1/import/jobs")
+        assert response.status_code == 200
+        data = response.json()
+        assert "jobs" in data
+        assert data["jobs"] == []
+
+    def test_completed_job_appears_with_correct_shape(self, api_client):
+        """A completed job appears in the list with the expected response fields."""
+        from snore.api.import_jobs import JobType, create_job, remove_job
+
+        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job.set_file_count(2)
+        try:
+            job.try_start()
+            job._finish(
+                succeeded=True,
+                terminal_msg={"event": "complete", "data": {}},
+            )
+
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            jobs = response.json()["jobs"]
+            assert len(jobs) == 1
+
+            j = jobs[0]
+            assert j["job_id"] == job.job_id
+            assert j["job_type"] == "path"
+            assert j["state"] == "succeeded"
+            assert j["stage"] == "done"
+            assert j["file_count"] == 2
+            assert j["created_at"] > 0
+            assert j["finished_at"] is not None
+            assert "import_result" in j
+            assert "linked_analysis" in j
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_stitched_analysis_summary_present(self, api_client):
+        """When an analysis job is linked, linked_analysis is populated."""
+        from snore.api.import_jobs import JobType, create_job, remove_job
+
+        # Create the import job.
+        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        try:
+            job.try_start()
+
+            # Enqueue an analysis job and link it.
+            aj = aj_store.enqueue(
+                profile_id=1,
+                session_ids=[1, 2],
+                source=aj_store.AnalysisJobSource.IMPORT,
+                owner_user_id=None,
+            )
+            assert aj is not None
+            job.set_analysis_link(analysis_job_id=aj.job_id, queue_full=False)
+            job._finish(
+                succeeded=True,
+                terminal_msg={
+                    "event": "complete",
+                    "data": {"analysis_job_id": aj.job_id},
+                },
+            )
+
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            jobs = response.json()["jobs"]
+            assert len(jobs) == 1
+
+            j = jobs[0]
+            assert j["analysis_job_id"] == aj.job_id
+            assert j["analysis_queued"] is True
+            assert j["linked_analysis"] is not None
+            assert j["linked_analysis"]["job_id"] == aj.job_id
+            assert j["linked_analysis"]["state"] == "queued"
+            assert j["stage"] == "analysis_queued"
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_ownership_isolation_foreign_job_absent(self, api_client):
+        """A job owned by another user_id does not appear in the list."""
+        from snore.api.import_jobs import JobType, create_job, remove_job
+
+        # api_client actor gets user_id=1; create a job owned by user 9999.
+        job = create_job(JobType.PATH, owner_user_id=9999, sources=[])
+        try:
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            job_ids = [j["job_id"] for j in response.json()["jobs"]]
+            assert job.job_id not in job_ids
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_no_imported_session_ids_in_import_result(self, api_client):
+        """import_result in the response must never contain imported_session_ids."""
+        from snore.api.import_jobs import JobPhase, JobType, create_job, remove_job
+
+        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        try:
+            job.try_start()
+            job.phase_complete(
+                JobPhase.IMPORT,
+                {
+                    "total_imported": 1,
+                    "total_skipped": 0,
+                    "total_failed": 0,
+                    "warnings": [],
+                    "imported_session_ids": [42],
+                    "sources": [],
+                },
+            )
+            job._finish(
+                succeeded=True,
+                terminal_msg={"event": "complete", "data": {}},
+            )
+
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            jobs = response.json()["jobs"]
+            assert len(jobs) == 1
+
+            import_result = jobs[0]["import_result"]
+            assert import_result is not None
+            assert "imported_session_ids" not in import_result
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
