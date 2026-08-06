@@ -17,9 +17,10 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 
+from snore.api.import_jobs import JOB_TTL_SECONDS
+
 logger = logging.getLogger(__name__)
 
-JOB_TTL_SECONDS: float = 600.0
 MAX_QUEUED: int = 10
 
 
@@ -271,6 +272,14 @@ def cancel_job(job_id: str) -> bool:
             except ValueError:
                 pass
     return result
+
+
+# Reaper pattern: reaped inline inside the worker loop — after each job completes
+# and on idle timeouts.  The analysis store is accessed only by the worker thread
+# and a low-frequency list endpoint, so the eager-reap-on-read approach used by
+# import_jobs (which also runs a dedicated background reaper thread) is unnecessary
+# here.  import_jobs needs eager reap because HTTP handlers poll it on every
+# GET /import/{id}/progress and GET /import/jobs request.
 
 
 def _reap_terminal() -> None:

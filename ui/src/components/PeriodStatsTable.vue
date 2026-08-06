@@ -69,8 +69,7 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import type { PeriodStatistics } from '@/types'
-import { ahiClass } from '@/utils/format'
-import { formatDateMonthDay } from '@/utils/formatting'
+import { ahiClass, formatDateMonthDay } from '@/utils/formatting'
 
 defineProps<{
     periods: PeriodStatistics[]

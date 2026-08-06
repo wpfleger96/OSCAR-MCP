@@ -22,7 +22,6 @@ from snore.api.deps import ActorDep, get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
-    JobPhase,
     JobState,
     JobType,
     cancel_job,
@@ -40,6 +39,7 @@ from snore.api.schemas import (
     PipelineJobsListResponse,
     PipelineJobStatus,
 )
+from snore.auth.actor import ActorContext
 from snore.database import models
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
@@ -131,7 +131,12 @@ class JobResponse(BaseModel):
 
 
 def _get_upload_limits() -> tuple[int, int, int]:
-    """Return (max_upload_bytes, max_upload_files, max_file_bytes) from config with safe fallbacks."""
+    """Return (max_upload_bytes, max_upload_files, max_file_bytes) from config.
+
+    Falls back to the config.py env-var defaults (SNORE_MAX_UPLOAD_BYTES=2 GiB,
+    SNORE_MAX_UPLOAD_FILES=10 000, SNORE_MAX_FILE_BYTES=256 MiB) when config is
+    not yet initialised — e.g. unit tests that exercise routes without a lifespan.
+    """
     try:
         from snore.api.config import get_config  # noqa: PLC0415
 
@@ -157,146 +162,42 @@ def _require_localhost(request: Request) -> None:
         )
 
 
+async def _resolve_profile_id(
+    db: AsyncSession,
+    actor: ActorContext,
+    requested_id: int | None,
+) -> int:
+    """Return the resolved profile ID, validating ownership when *requested_id* is given.
+
+    Raises HTTP 403 when the requested profile does not belong to the actor or
+    is being deleted.  Falls back to the actor's active profile when *requested_id*
+    is None.
+    """
+    if requested_id is not None:
+        owned = (
+            (
+                await db.execute(
+                    select(models.Profile).where(
+                        models.Profile.id == requested_id,
+                        models.Profile.user_id == actor.user_id,
+                        models.Profile.deleting_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Profile not owned by user")
+        return requested_id
+    return actor.profile_id
+
+
 @local_only_router.post("/detect", response_model=list[ImportSource])
 def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
     _require_localhost(request)
     service = ImportService()
     return service.detect_sources(Path(body.path))
-
-
-def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
-    """Worker function — runs in a background thread. Must be started exactly once.
-
-    Ordering contract:
-        1. Do the import work.
-        2. Call phase_complete(IMPORT) — non-terminal milestone for observers.
-        3. Run analysis phase (session IDs from import result).
-        4. Publish terminal state (always carries import_committed + import_result
-           when data was committed, even on analysis failure or cancellation).
-        5. Clean parser spool + job temp.
-        6. Release capacity (slot owns the disk it admitted).
-    """
-    import asyncio  # noqa: PLC0415
-
-    def _make_terminal(
-        event: str,
-        *,
-        message: str | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build a terminal payload, injecting import_committed + import_result
-        when the import phase already committed."""
-        data: dict[str, Any] = {}
-        if message is not None:
-            data["message"] = message
-        if extra:
-            data.update(extra)
-        with job._lock:
-            committed = job._import_committed
-            import_result = job._import_result
-        if committed:
-            data["import_committed"] = True
-            data["import_result"] = import_result
-        return {"event": event, "data": data}
-
-    try:
-        service = ImportService()
-        # Consume the snapshotted target_profile_id so DB writes land in the
-        # correct profile even if the default profile changes between job creation
-        # and worker execution.
-        target_profile_id = job.target_profile_id
-        if target_profile_id is None:
-            raise ValueError("Import job has no target profile — cannot proceed")
-        if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
-            job.report_progress("Detecting data sources...")
-            if job.cancel_requested:
-                job._finish_cancelled()
-                return
-            sources = service.detect_sources(job.temp_dir)
-            job.report_progress(f"Detected {len(sources)} source(s)")
-            if job.cancel_requested:
-                job._finish_cancelled()
-                return
-            result = asyncio.run(
-                service.import_sources(
-                    sources,
-                    backup=True,
-                    backup_root=profile_raw_root,
-                    profile_id=target_profile_id,
-                    progress_callback=lambda msg: job.report_progress(msg),
-                    cancel_predicate=lambda: job.cancel_requested,
-                )
-            )
-        elif job.job_type == JobType.PATH and job.sources is not None:
-            result = asyncio.run(
-                service.import_sources(
-                    job.sources,
-                    backup=True,
-                    backup_root=profile_raw_root,
-                    profile_id=target_profile_id,
-                    progress_callback=lambda msg: job.report_progress(msg),
-                    cancel_predicate=lambda: job.cancel_requested,
-                )
-            )
-        else:
-            raise ValueError("Invalid job configuration")
-
-        # --- Phase 1 complete: import committed ---
-        import_result_dict = result.model_dump()
-        job.phase_complete(JobPhase.IMPORT, import_result_dict)
-
-        if job.cancel_requested:
-            job._finish(
-                succeeded=False,
-                terminal_msg=_make_terminal("error", message="Cancelled"),
-            )
-            return
-
-        # Enqueue background analysis for imported sessions, then immediately
-        # emit terminal "complete" so the user can upload more files.
-        analysis_job_id = None
-        imported_ids = result.imported_session_ids
-        if imported_ids:
-            from snore.api import analysis_jobs  # noqa: PLC0415
-
-            aj = analysis_jobs.enqueue(
-                profile_id=target_profile_id,
-                session_ids=imported_ids,
-                source=analysis_jobs.AnalysisJobSource.IMPORT,
-                owner_user_id=job.owner_user_id,
-            )
-            if aj is not None:
-                analysis_job_id = aj.job_id
-            else:
-                logger.warning(
-                    "Analysis queue full; skipping auto-analysis for import job %s",
-                    job.job_id,
-                )
-
-        job.set_analysis_link(
-            analysis_job_id=analysis_job_id,
-            queue_full=bool(imported_ids) and analysis_job_id is None,
-        )
-
-        terminal_extra: dict[str, Any] = {"result": import_result_dict}
-        if analysis_job_id is not None:
-            terminal_extra["analysis_job_id"] = analysis_job_id
-        elif imported_ids:
-            # Queue was full — tell the client so it can distinguish from
-            # "nothing was imported" (where analysis_queued is absent).
-            terminal_extra["analysis_queued"] = False
-        terminal_msg = _make_terminal("complete", extra=terminal_extra)
-        job._finish(succeeded=True, terminal_msg=terminal_msg)
-    except Exception as e:
-        logger.exception("Import job %s failed", job.job_id)
-        job._finish(
-            succeeded=False,
-            terminal_msg=_make_terminal("error", message=str(e)),
-        )
-    finally:
-        # Ordering: publish terminal (done above), then clean, then release capacity.
-        job.cleanup_files()
-        job.release_capacity()
 
 
 @router.post(
@@ -434,25 +335,9 @@ async def import_files(
                 await upload.close()
 
         # Resolve target profile: validate ownership if caller specified one.
-        if _requested_profile_id is not None:
-            owned = (
-                (
-                    await db.execute(
-                        select(models.Profile).where(
-                            models.Profile.id == _requested_profile_id,
-                            models.Profile.user_id == actor.user_id,
-                            models.Profile.deleting_at.is_(None),
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            if owned is None:
-                raise HTTPException(status_code=403, detail="Profile not owned by user")
-            resolved_profile_id = _requested_profile_id
-        else:
-            resolved_profile_id = actor.profile_id
+        resolved_profile_id = await _resolve_profile_id(
+            db, actor, _requested_profile_id
+        )
 
         # Transfer ownership to the job; the worker will clean up on completion.
         job.temp_dir = tmp_path
@@ -492,25 +377,7 @@ async def import_from_path(
 ) -> JobResponse:
     _require_localhost(request)
 
-    if body.profile_id is not None:
-        owned = (
-            (
-                await db.execute(
-                    select(models.Profile).where(
-                        models.Profile.id == body.profile_id,
-                        models.Profile.user_id == actor.user_id,
-                        models.Profile.deleting_at.is_(None),
-                    )
-                )
-            )
-            .scalars()
-            .first()
-        )
-        if owned is None:
-            raise HTTPException(status_code=403, detail="Profile not owned by user")
-        resolved_profile_id = body.profile_id
-    else:
-        resolved_profile_id = actor.profile_id
+    resolved_profile_id = await _resolve_profile_id(db, actor, body.profile_id)
 
     try:
         job = create_job(

@@ -259,8 +259,7 @@ import {
     getBulkDeletePreview,
 } from '@/api/sessions'
 import { getDevices } from '@/api/devices'
-import { ahiClass } from '@/utils/format'
-import { formatDateTime, formatIso, parseLocalDate } from '@/utils/formatting'
+import { ahiClass, formatDateTime, formatIso, parseLocalDate } from '@/utils/formatting'
 import type { SessionListItem, DeletePreview, DeviceInfo } from '@/types'
 import { useAuth } from '@/composables/useAuth'
 

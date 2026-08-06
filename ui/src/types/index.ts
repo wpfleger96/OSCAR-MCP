@@ -10,12 +10,7 @@ export type AuthStatusResponse = Schemas['AuthStatusResponse']
 export type UserInfo = Schemas['UserInfo']
 export type ProfileInfo = Schemas['ProfileInfo']
 
-// ProfileResponse augmented with fields added in Phase 3 backend rework.
-// Fallback to undefined until the generated types are regenerated.
-export type ProfileResponse = Schemas['ProfileResponse'] & {
-    is_default?: boolean
-    created_at?: string | null
-}
+export type ProfileResponse = Schemas['ProfileResponse']
 
 // Pagination — generic over the concrete instantiations FastAPI generates
 // (PaginatedResponse_SessionListItem_ etc.), so the envelope shape cannot drift.

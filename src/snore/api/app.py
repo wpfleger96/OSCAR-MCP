@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # import job worker (serialises execution to avoid SQLite write-lock contention).
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
     _start_analysis_worker()
-    from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+    from snore.api.import_worker import _run_import  # noqa: PLC0415
 
     _start_import_worker(_run_import)
     try:

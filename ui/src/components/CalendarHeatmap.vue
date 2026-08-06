@@ -43,6 +43,9 @@ defineEmits<{
 
 const monthsBack = computed(() => props.monthsBack ?? 6)
 
+// Deliberately distinct from the global ahiClass() in utils/formatting.ts: this
+// version uses a 4-level scale (adds cell--moderate) and returns component-scoped
+// CSS class names (cell--*) rather than the global severity tokens.
 function ahiClass(ahi: number | null): string {
     if (ahi == null) return 'cell--empty'
     if (ahi < 5) return 'cell--good'

@@ -144,29 +144,6 @@ function detailClass(stage: string): string {
 </script>
 
 <style scoped>
-.jobs-banner {
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 1rem;
-    background: var(--color-card);
-    margin-bottom: 1rem;
-}
-
-.jobs-banner-title {
-    font-size: 0.875rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-muted-foreground);
-    margin: 0 0 0.75rem;
-}
-
-.jobs-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-}
-
 .job-row {
     display: flex;
     align-items: flex-start;
@@ -178,25 +155,7 @@ function detailClass(stage: string): string {
 }
 
 .job-icon {
-    flex-shrink: 0;
-    width: 1.25rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     padding-top: 0.1rem;
-}
-
-.job-state-icon {
-    font-size: 0.85rem;
-    font-weight: 700;
-}
-
-.job-state-success {
-    color: var(--color-success);
-}
-
-.job-state-failed {
-    color: var(--color-destructive);
 }
 
 .job-state-warning {
@@ -218,26 +177,9 @@ function detailClass(stage: string): string {
     flex-wrap: wrap;
 }
 
-.job-label {
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-}
-
 .job-stage {
     font-size: 0.8rem;
     color: var(--color-muted-foreground);
-}
-
-.job-progress {
-    font-size: 0.8rem;
-    color: var(--color-muted-foreground);
-}
-
-.job-error {
-    color: var(--color-destructive);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 .job-result-summary {

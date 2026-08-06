@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.auth.actor import ActorContext, AuthMode, Role
+from snore.auth.emails import normalize_email
 from snore.database import models
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,7 @@ class ActorContextFactory:
 
         # Look up by canonical_email (lowercased, as stored).
         stmt = select(models.User).where(
-            models.User.canonical_email == user_ref.lower().strip()
+            models.User.canonical_email == normalize_email(user_ref)
         )
         user = (await self._db.execute(stmt)).scalars().first()
         if user is None:

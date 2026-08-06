@@ -1,0 +1,128 @@
+"""Tool scaffold: shared helpers imported by every MCP tool module.
+
+Lives here (not in server.py) so tool modules can import these at module level
+without creating an import cycle.  The cycle would be:
+  server.py → (registers) tool modules → tool modules → server.py
+
+By moving the shared pieces here, tool modules depend on _scaffold (no cycle),
+and server.py imports from _scaffold for its own use and to re-export for
+callers that import them from server.py.
+
+``SNORERuntime`` is referenced only under TYPE_CHECKING so no runtime import
+from server.py occurs.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+
+from collections.abc import Awaitable, Callable
+from functools import wraps
+from typing import TYPE_CHECKING, Any, cast
+
+from fastmcp import Context
+from fastmcp.exceptions import ToolError
+from pydantic import ValidationError as PydanticValidationError
+
+from snore.mcp.errors import ValidationError
+
+if TYPE_CHECKING:
+    from snore.mcp.server import SNORERuntime
+
+logger = logging.getLogger(__name__)
+
+RESPONSE_SIZE_LIMIT = 500_000  # bytes; tools return narrow-your-query guidance
+
+# Pydantic v2 wraps validator-raised ValueErrors with this prefix in the "msg" field.
+# Stripping it produces cleaner user-visible messages. If a future pydantic upgrade
+# changes this prefix, the strip becomes a no-op and messages will include the prefix
+# again — that breakage should be caught by TestToolErrorBoundary.test_pydantic_value_error_prefix_stripped.
+_PYDANTIC_VALUE_ERROR_PREFIX = "Value error, "
+
+
+def tool_error_boundary(
+    func: Callable[..., Awaitable[Any]],
+) -> Callable[..., Awaitable[Any]]:
+    """Convert common tool failures into ToolError so FastMCP sets isError=true."""
+
+    @wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await func(*args, **kwargs)
+        except ToolError:
+            raise
+        except PydanticValidationError as exc:
+            parts: list[str] = []
+            for err in exc.errors():
+                msg = err["msg"].removeprefix(_PYDANTIC_VALUE_ERROR_PREFIX)
+                loc = err.get("loc", ())
+                if loc:
+                    parts.append(f"{'.'.join(str(p) for p in loc)}: {msg}")
+                else:
+                    parts.append(msg)
+            raise ToolError("; ".join(parts)) from exc
+        except (ValidationError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            if status is not None:
+                raise ToolError(f"HTTP {status} from upstream service") from exc
+            logger.exception("Unexpected error in tool call")
+            raise ToolError("An unexpected error occurred.") from exc
+
+    return wrapper
+
+
+def _check_response_size(result: Any, tool_name: str) -> None:
+    """Raise ToolError if the serialized result exceeds RESPONSE_SIZE_LIMIT.
+
+    Cost note: this re-serializes the already-model_dumped payload purely to
+    measure its byte length — O(response size) work on every successful call,
+    bounded by the page/window/epoch caps and the size limit itself.
+    """
+    try:
+        size = len(json.dumps(result, default=str).encode("utf-8"))
+    except Exception:
+        logger.warning(
+            "_check_response_size: measurement failed for %s; skipping size gate",
+            tool_name,
+        )
+        return
+    if size > RESPONSE_SIZE_LIMIT:
+        raise ToolError(
+            f"Response from {tool_name} exceeds the {RESPONSE_SIZE_LIMIT:,}-byte limit. "
+            "Narrow your query: use a shorter date range, smaller page_size, or add "
+            "device/type filters."
+        )
+
+
+def _runtime(ctx: Context) -> SNORERuntime:
+    """Extract the SNORERuntime from the FastMCP context.
+
+    fastmcp types ``ctx.lifespan_context`` as ``dict[str, Any]``; cast narrows
+    it to the actual yielded type without changing runtime behaviour.
+    """
+    return cast("SNORERuntime", ctx.lifespan_context)
+
+
+async def _scope_and_run(
+    ctx: Context,
+    impl: Callable[..., Awaitable[Any]],
+    *,
+    tool_name: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Open a DB scope, call impl, model_dump the result, and size-check it.
+
+    Shared scaffold for the 7 standard-pattern tools (all except the waveform pair
+    and get_ca_analysis, which have non-standard return paths).  Each tool module's
+    ``register`` closure calls this with the resolved date/validation kwargs.
+    """
+    runtime = _runtime(ctx)
+    async with runtime.scope_provider() as db:
+        result = await impl(db, profile_id=runtime.profile_id, **kwargs)
+    payload: dict[str, Any] = result.model_dump(mode="json")
+    _check_response_size(payload, tool_name)
+    return payload

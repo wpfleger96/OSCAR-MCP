@@ -283,8 +283,10 @@ class TestCheckResponseSize:
 
         from unittest.mock import patch
 
-        with patch("snore.mcp.server.json.dumps", side_effect=RuntimeError("boom")):
-            with caplog.at_level(logging.WARNING, logger="snore.mcp.server"):
+        with patch(
+            "snore.mcp.tools._scaffold.json.dumps", side_effect=RuntimeError("boom")
+        ):
+            with caplog.at_level(logging.WARNING, logger="snore.mcp.tools._scaffold"):
                 _check_response_size({"key": "value"}, "my_tool")  # must not raise
 
         assert any("measurement failed" in r.message for r in caplog.records)

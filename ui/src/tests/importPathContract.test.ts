@@ -45,6 +45,7 @@ vi.mock('@/utils/formatting', () => ({ formatBytes: (n: number) => `${n}B` }))
 import api from '@/api/client'
 import { useAuth } from '@/composables/useAuth'
 import { getImportJobs, cancelImport } from '@/api/importJobs'
+import { makeAuthMock as baseMakeAuthMock } from './helpers/mockUseAuth'
 
 // Minimal job factory for polling/cancel tests — only stage is load-bearing for poll logic.
 function jobWith(stage: string): PipelineJobStatus {
@@ -67,25 +68,11 @@ function jobWith(stage: string): PipelineJobStatus {
 }
 
 function makeAuthMock() {
-    return {
+    return baseMakeAuthMock({
         isAuthenticated: ref(true) as never,
-        isLocal: ref(false) as never,
-        fetchStatus: vi.fn().mockResolvedValue(undefined),
-        refreshStatus: vi.fn().mockResolvedValue(undefined),
         user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
-        profiles: ref([]) as never,
         activeProfileId: ref(1) as never,
-        authMode: ref('multiuser') as never,
-        profileKey: ref(0) as never,
-        role: ref(null) as never,
-        canWrite: ref(true) as never,
-        demoAvailable: ref(false) as never,
-        login: vi.fn(),
-        demoLogin: vi.fn(),
-        logout: vi.fn(),
-        clearAuth: vi.fn(),
-        setActiveProfile: vi.fn(),
-    }
+    })
 }
 
 async function mountImportView() {
@@ -102,28 +89,17 @@ describe('wire contract: importFromPath sends profile_id in HTTP body', () => {
     beforeEach(() => {
         vi.resetAllMocks()
         vi.mocked(api.post).mockResolvedValue({ data: { job_id: 'job-1' } })
-        vi.mocked(useAuth).mockReturnValue({
-            isAuthenticated: ref(true) as never,
-            isLocal: ref(false) as never,
-            fetchStatus: vi.fn().mockResolvedValue(undefined),
-            refreshStatus: vi.fn().mockResolvedValue(undefined),
-            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
-            profiles: ref([
-                { id: 1, name: 'Primary' },
-                { id: 2, name: 'Work' },
-            ]) as never,
-            activeProfileId: ref(1) as never,
-            authMode: ref('multiuser') as never,
-            profileKey: ref(0) as never,
-            role: ref(null) as never,
-            canWrite: ref(true) as never,
-            demoAvailable: ref(false) as never,
-            login: vi.fn(),
-            demoLogin: vi.fn(),
-            logout: vi.fn(),
-            clearAuth: vi.fn(),
-            setActiveProfile: vi.fn(),
-        })
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+                profiles: ref([
+                    { id: 1, name: 'Primary' },
+                    { id: 2, name: 'Work' },
+                ]) as never,
+                activeProfileId: ref(1) as never,
+            }) as never,
+        )
     })
 
     it('test_handlePathImport_sends_profile_id_not_target_profile_id', async () => {
@@ -203,7 +179,7 @@ describe('wire contract: importFromPath sends profile_id in HTTP body', () => {
 describe('import jobs polling behavior', () => {
     beforeEach(() => {
         vi.resetAllMocks()
-        vi.mocked(useAuth).mockReturnValue(makeAuthMock())
+        vi.mocked(useAuth).mockReturnValue(makeAuthMock() as never)
     })
 
     it('test_poll_stops_when_all_jobs_terminal', async () => {
@@ -248,7 +224,7 @@ describe('import jobs polling behavior', () => {
 describe('import job cancel handling', () => {
     beforeEach(() => {
         vi.resetAllMocks()
-        vi.mocked(useAuth).mockReturnValue(makeAuthMock())
+        vi.mocked(useAuth).mockReturnValue(makeAuthMock() as never)
     })
 
     it('test_cancel_wiring_calls_cancelImport_with_job_id_and_refetches', async () => {

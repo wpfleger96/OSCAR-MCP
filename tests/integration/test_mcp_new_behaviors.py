@@ -14,9 +14,7 @@ Covers:
 
 from __future__ import annotations
 
-import uuid
-
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -26,101 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.database.models import (
     AnalysisResult,
     Breath,
-    Day,
-    Device,
     Event,
-    Profile,
     Session,
-    User,
 )
-
-# ---------------------------------------------------------------------------
-# Seed helpers (self-contained — do not import from sibling test modules)
-# ---------------------------------------------------------------------------
-
-
-async def _make_profile(db: AsyncSession) -> Any:
-    user = User(
-        canonical_email=f"nb_{uuid.uuid4().hex[:8]}@example.com",
-        role="member",
-    )
-    db.add(user)
-    await db.flush()
-    profile = Profile(user_id=user.id, name="NB Profile")
-    db.add(profile)
-    await db.flush()
-    return profile
-
-
-async def _make_device(
-    db: AsyncSession,
-    profile_id: int,
-    manufacturer: str = "NBMfr",
-    model: str = "NBModel",
-    serial_number: str | None = None,
-) -> Device:
-    device = Device(
-        profile_id=profile_id,
-        manufacturer=manufacturer,
-        model=model,
-        serial_number=serial_number or f"SN_{uuid.uuid4().hex[:8]}",
-    )
-    db.add(device)
-    await db.flush()
-    return device
-
-
-async def _make_day_session(
-    db: AsyncSession,
-    device: Device,
-    day_date: date,
-    duration_hours: float = 8.0,
-    **day_kwargs: Any,
-) -> tuple[Day, Session]:
-    day = Day(
-        device_id=device.id,
-        date=day_date,
-        total_therapy_hours=duration_hours,
-        **day_kwargs,
-    )
-    db.add(day)
-    await db.flush()
-
-    start_dt = datetime(day_date.year, day_date.month, day_date.day, 22, 0, 0)
-    sess = Session(
-        device_id=device.id,
-        day_id=day.id,
-        device_session_id=f"nb_{day_date.isoformat()}_{uuid.uuid4().hex[:6]}",
-        start_time=start_dt,
-        end_time=start_dt + timedelta(hours=duration_hours),
-        duration_seconds=duration_hours * 3600,
-        enabled=True,
-    )
-    db.add(sess)
-    await db.flush()
-    return day, sess
-
-
-async def _make_analysis_result(db: AsyncSession, session: Session) -> AnalysisResult:
-    from snore.analysis.shared.versioning import (
-        AlgorithmIdentity,
-        AlgoVersions,
-        AnalysisRunMetadata,
-    )
-
-    algo_versions = AlgoVersions(
-        identity=AlgorithmIdentity.current(),
-        run=AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"]),
-    )
-    ar = AnalysisResult(
-        session_id=session.id,
-        timestamp_start=session.start_time,
-        timestamp_end=session.end_time,
-        engine_versions_json=algo_versions.model_dump(),
-    )
-    db.add(ar)
-    await db.flush()
-    return ar
+from tests.integration.conftest import (
+    _make_analysis_result,
+    _make_day_session,
+    _make_device,
+    _make_profile,
+)
 
 
 async def _make_breath(

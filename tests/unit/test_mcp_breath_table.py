@@ -536,7 +536,7 @@ class TestGetBreathTableRoundtrip:
                     new_callable=AsyncMock,
                     return_value=mock_page,
                 ),
-                patch("snore.mcp.server.RESPONSE_SIZE_LIMIT", new=1),
+                patch("snore.mcp.tools._scaffold.RESPONSE_SIZE_LIMIT", new=1),
             ],
         ) as client:
             with pytest.raises(ToolError, match="Narrow your query"):

@@ -32,6 +32,7 @@ from snore.api.config import load_config, set_config
 from snore.api.deps import get_actor, get_db
 from snore.auth.actor import ActorContext, AuthMode
 from snore.auth.factory import ActorContextFactory
+from tests.helpers.api_client import make_test_client
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -49,20 +50,7 @@ def _multiuser_config(
 
 
 def _make_client(async_db_session: AsyncSession) -> TestClient:
-    app = create_app()
-
-    async def _override_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    async def _override_actor(
-        db: Annotated[AsyncSession, Depends(get_db)],
-    ) -> ActorContext:
-        return await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
-
-    app.dependency_overrides[get_db] = _override_db
-    app.dependency_overrides[get_actor] = _override_actor
-    return TestClient(app, raise_server_exceptions=True)
+    return make_test_client(async_db_session)
 
 
 # ---------------------------------------------------------------------------
@@ -1577,7 +1565,7 @@ class TestP2PasswordValidatorInvariant:
 
 
 class TestP2CsrfFailsClosedOnNoneOrigin:
-    """CsrfMiddleware must return 403 (not pass) when public_origin is None."""
+    """AuthPathMiddleware must return 403 (not pass) when public_origin is None."""
 
     def test_csrf_fails_closed_with_no_public_origin(self, monkeypatch):
         """If AppConfig.public_origin is somehow None in multiuser, CSRF fails closed.
@@ -1906,7 +1894,7 @@ class TestP3DevOriginStrictValidation:
 class TestP3AuthBodyCeiling413:
     """The 16 KiB auth-body ceiling must return 413 regardless of encoding.
 
-    The pre-read buffer in CsrfMiddleware.dispatch consumes the full ASGI
+    The pre-read buffer in AuthPathMiddleware.dispatch consumes the full ASGI
     stream before call_next, making Content-Length presence, accuracy, and
     chunked encoding irrelevant.  Tests use httpx.AsyncClient + ASGITransport
     for chunked/generator bodies that TestClient cannot model.
@@ -2122,7 +2110,7 @@ class TestP3AuthBodyCeiling413:
 
         from snore.api.middleware import (  # noqa: PLC0415
             _AUTH_BODY_LIMIT,
-            CsrfMiddleware,
+            AuthPathMiddleware,
         )
 
         # Two frames that cross the limit; any further receive call is a drain bug.
@@ -2167,7 +2155,7 @@ class TestP3AuthBodyCeiling413:
         async def _noop_app(scope, receive, send):
             pass
 
-        csrf_mw = CsrfMiddleware(app=_noop_app)
+        csrf_mw = AuthPathMiddleware(app=_noop_app)
         call_next_invoked = [False]
 
         async def fake_call_next(req: Request) -> StarletteResponse:
@@ -2192,7 +2180,7 @@ class TestP3AuthBodyCeiling413:
         """
         from starlette.requests import Request  # noqa: PLC0415
 
-        from snore.api.middleware import CsrfMiddleware  # noqa: PLC0415
+        from snore.api.middleware import AuthPathMiddleware  # noqa: PLC0415
 
         frames_iter = iter(
             [
@@ -2230,7 +2218,7 @@ class TestP3AuthBodyCeiling413:
         async def _noop_app2(scope, receive, send):
             pass
 
-        csrf_mw = CsrfMiddleware(app=_noop_app2)
+        csrf_mw = AuthPathMiddleware(app=_noop_app2)
         call_next_invoked = [False]
 
         async def fake_call_next(req: Request) -> StarletteResponse:
@@ -2259,7 +2247,7 @@ class TestP3AuthBodyCeiling413:
         from starlette.requests import Request  # noqa: PLC0415
         from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
 
-        from snore.api.middleware import CsrfMiddleware  # noqa: PLC0415
+        from snore.api.middleware import AuthPathMiddleware  # noqa: PLC0415
 
         body_bytes = b'{"email":"test@example.com","password":"pw"}'
         sentinel_msg = {"type": "http.disconnect", "body": b"SENTINEL"}
@@ -2319,7 +2307,7 @@ class TestP3AuthBodyCeiling413:
         async def _noop_app3(scope, receive, send):
             pass
 
-        csrf_mw = CsrfMiddleware(app=_noop_app3)
+        csrf_mw = AuthPathMiddleware(app=_noop_app3)
 
         received_in_handler: list[dict] = []
 

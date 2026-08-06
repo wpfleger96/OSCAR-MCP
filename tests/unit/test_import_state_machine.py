@@ -63,36 +63,6 @@ def _complete_job(job: ImportJob) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fixture: clean job store between tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def clean_job_store():
-    """Reset the job store before and after each test.
-
-    Clears both the jobs dict AND the admission counters so successive
-    create_job() calls within the same xdist worker don't overflow caps.
-    Also stops any import worker thread started by the test.
-    """
-    # Stop any worker left over from a previous test BEFORE nulling globals.
-    # Nulling without stopping first lets a still-running thread become a zombie
-    # that consumes from the shared queue in the next test.
-    job_store.stop_import_worker()
-    job_store._jobs.clear()
-    job_store._per_user_count.clear()
-    job_store._global_count = 0
-    job_store._import_queue.clear()
-    yield
-    # Stop any worker started by this test (5 s to survive slow CI).
-    job_store.stop_import_worker(timeout=5.0)
-    job_store._jobs.clear()
-    job_store._per_user_count.clear()
-    job_store._global_count = 0
-    job_store._import_queue.clear()
-
-
-# ---------------------------------------------------------------------------
 # ObserverChannel unit tests
 # ---------------------------------------------------------------------------
 
@@ -623,7 +593,7 @@ class TestWorkerTerminalState:
 
     The cancel/finish race tests below exercise the exact lock-held transitions
     that _run_import makes.  Tests that need to verify the state machine in
-    isolation call _finish/_finish_cancelled directly (the same methods the real
+    isolation call _finish directly (the same method the real
     worker calls); route-level worker behavior is covered in TestRouteWorkerBehavior.
     """
 
@@ -632,8 +602,12 @@ class TestWorkerTerminalState:
         job = _make_upload_job(tmp_path)
         job.try_start()
 
-        # Simulate the worker noticing cancellation and calling _finish_cancelled().
-        job._finish_cancelled()
+        # Simulate the worker noticing cancellation: flag is set, then _finish is called.
+        job._cancel_flag = True
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
 
         assert job.state == JobState.CANCELLED
         assert job._terminal_msg is not None
@@ -641,13 +615,16 @@ class TestWorkerTerminalState:
         assert "Cancelled" in job._terminal_msg["data"]["message"]
 
     def test_cancel_wins_race_before_finish(self, tmp_path):
-        """If the worker calls _finish_cancelled before _finish, state is CANCELLED."""
+        """If the worker cancels before _finish, state is CANCELLED."""
         job = _make_upload_job(tmp_path)
         job.try_start()
 
-        # Simulate: worker sees the cancel flag and calls _finish_cancelled (wins the race).
+        # Simulate: worker sees the cancel flag and calls _finish (wins the race).
         job._cancel_flag = True
-        job._finish_cancelled()
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
         assert job.state == JobState.CANCELLED
 
         # Worker's normal completion path fires afterward — must be a no-op.
@@ -677,13 +654,16 @@ class TestWorkerTerminalState:
         assert job.state == JobState.SUCCEEDED  # Unchanged.
 
     def test_early_upload_cancel_terminates_as_cancelled(self, tmp_path):
-        """An early-upload-check cancel calls _finish_cancelled, not just return."""
+        """An early-upload-check cancel in _run_import produces CANCELLED."""
         job = _make_upload_job(tmp_path)
         job.try_start()
         # Simulate the early check in _run_import:
-        # if job.cancel_requested: job._finish_cancelled(); return
+        # if job.cancel_requested: job._finish(succeeded=False, ...); return
         job._cancel_flag = True
-        job._finish_cancelled()
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
 
         assert job.state == JobState.CANCELLED
         assert job.is_terminal
@@ -694,7 +674,11 @@ class TestWorkerTerminalState:
         job.try_start()
         ch = job.attach_observer()
 
-        job._finish_cancelled()
+        job._cancel_flag = True
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
 
         msg = ch.get(timeout=0.5)
         assert msg is not None
@@ -707,7 +691,11 @@ class TestWorkerTerminalState:
         job.try_start()
         assert not job.is_terminal
 
-        job._finish_cancelled()
+        job._cancel_flag = True
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
         assert job.is_terminal
         assert job.state == JobState.CANCELLED
 
@@ -785,7 +773,7 @@ class TestRouteWorkerBehavior:
         """A job that runs _run_import to completion ends SUCCEEDED."""
         from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
-        from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
         from snore.services.schemas import ImportResult  # noqa: PLC0415
 
         d = tmp_path / "complete_job"
@@ -820,7 +808,7 @@ class TestRouteWorkerBehavior:
         """Cancelling a job before import_sources returns CANCELLED (not SUCCEEDED/FAILED)."""
         from unittest.mock import patch  # noqa: PLC0415
 
-        from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         d = tmp_path / "cancel_job"
         d.mkdir()
@@ -859,7 +847,7 @@ class TestRouteWorkerBehavior:
         """The /progress SSE channel is open while the job is running."""
         from unittest.mock import patch  # noqa: PLC0415
 
-        from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         d = tmp_path / "sse_job"
         d.mkdir()
@@ -905,7 +893,7 @@ class TestRouteWorkerBehavior:
         from unittest.mock import patch  # noqa: PLC0415
 
         from snore.api.import_jobs import cancel_job  # noqa: PLC0415
-        from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         d = tmp_path / "route_cancel_job"
         d.mkdir()
@@ -1107,7 +1095,7 @@ class TestRouteHTTPBoundary:
 
         from fastapi.testclient import TestClient  # noqa: PLC0415
 
-        from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         app = self._make_app()
         gate = threading.Event()
@@ -1165,7 +1153,7 @@ class TestRouteHTTPBoundary:
 
         from fastapi.testclient import TestClient  # noqa: PLC0415
 
-        from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         app = self._make_app()
         gate = threading.Event()

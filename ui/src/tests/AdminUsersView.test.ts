@@ -4,6 +4,11 @@ import { ref } from 'vue'
 
 vi.mock('@/composables/useAuth')
 vi.mock('@/composables/useDateFormat')
+
+import {
+    makeAuthMock as baseMakeAuthMock,
+    makeDateFormatMock as baseDateFormatMock,
+} from './helpers/mockUseAuth'
 vi.mock('@/api/admin')
 
 // Stub table UI — pass slot content through so functional elements are accessible.
@@ -69,39 +74,22 @@ const OTHER_USER = {
 // ---------------------------------------------------------------------------
 
 function makeAuthMock(userId = 1) {
-    vi.mocked(useAuth).mockReturnValue({
-        user: ref({
-            id: userId,
-            email: 'test@example.com',
-            display_name: null,
-            role: 'admin',
+    vi.mocked(useAuth).mockReturnValue(
+        baseMakeAuthMock({
+            user: ref({
+                id: userId,
+                email: 'test@example.com',
+                display_name: null,
+                role: 'admin',
+            }) as never,
+            role: ref('admin') as never,
+            isAuthenticated: ref(true) as never,
         }) as never,
-        role: ref('admin') as never,
-        isAuthenticated: ref(true) as never,
-        isLocal: ref(false) as never,
-        profiles: ref([]) as never,
-        activeProfileId: ref(null) as never,
-        authMode: ref('multiuser') as never,
-        canWrite: ref(true) as never,
-        demoAvailable: ref(false) as never,
-        profileKey: ref(0) as never,
-        fetchStatus: vi.fn().mockResolvedValue(undefined),
-        refreshStatus: vi.fn().mockResolvedValue(undefined),
-        login: vi.fn(),
-        demoLogin: vi.fn(),
-        logout: vi.fn(),
-        clearAuth: vi.fn(),
-        setActiveProfile: vi.fn(),
-    })
+    )
 }
 
 function makeDateFormatMock() {
-    vi.mocked(useDateFormat).mockReturnValue({
-        formatDate: (d: string | Date) => String(d),
-        loadDateFormat: vi.fn().mockResolvedValue(undefined),
-        setDateFormat: vi.fn(),
-        dateFormat: ref('iso') as never,
-    })
+    vi.mocked(useDateFormat).mockReturnValue(baseDateFormatMock() as never)
 }
 
 // ---------------------------------------------------------------------------

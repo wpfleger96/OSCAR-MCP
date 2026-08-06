@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.config import AppConfig
 from snore.api.routers.auth._common import SessionTicket
+from snore.auth.emails import normalize_email
 from snore.auth.factory import ActorContextFactory
 from snore.auth.invite import invite_valid_clauses
 from snore.database import models
@@ -124,7 +125,7 @@ async def resolve_login(
         return ticket
 
     email_raw = str(claims.get("email", ""))
-    email_canonical = email_raw.lower().strip()
+    email_canonical = normalize_email(email_raw)
     if not email_canonical:
         raise TxFailure()
     user = (
@@ -161,7 +162,7 @@ async def resolve_signup(
     """
     sub = str(claims["sub"])
     email_raw = str(claims.get("email", ""))
-    email_canonical = email_raw.lower().strip()
+    email_canonical = normalize_email(email_raw)
 
     # Path a: identity already linked → login (leave invite unconsumed).
     ticket = await linked_user_ticket(db, cfg, sub)

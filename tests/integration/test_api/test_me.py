@@ -18,38 +18,22 @@ from __future__ import annotations
 import http.cookies
 import uuid
 
-from collections.abc import AsyncGenerator
-from typing import Annotated
-
 import httpx
 import pytest
 
-from fastapi import Depends
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from snore.api.app import create_app
 from snore.api.config import load_config, set_config
-from snore.api.deps import get_actor, get_db
 from snore.auth.actor import ActorContext, AuthMode, Role
 from snore.auth.lockout import get_lockout_store
 from snore.auth.passwords import hash_password, verify_password
 from snore.auth.session_cookie import encode_session
 from snore.database import models
-
-# ---------------------------------------------------------------------------
-# Multiuser env helper (mirrors test_auth.py)
-# ---------------------------------------------------------------------------
-
-_SESSION_SECRET = "test-secret-at-least-32-chars-long-abcdef"
-
-
-def _multiuser_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
-    monkeypatch.setenv("SNORE_SESSION_SECRET", _SESSION_SECRET)
-    monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "http://127.0.0.1:8000")
-
+from tests.helpers.api_client import make_test_client
+from tests.integration.test_api.conftest import _multiuser_env  # noqa: PLC0415
 
 # ---------------------------------------------------------------------------
 # Seeding / client helpers
@@ -88,36 +72,16 @@ def _seed_user(
 
 
 def _make_client(
-    async_db_session: AsyncSession,
-    user_id: int,
-    profile_id: int,
-    role: str,
+    async_db_session: AsyncSession, user_id: int, profile_id: int, role: str
 ) -> TestClient:
-    """Build a TestClient with get_db+get_actor overridden for a specific user.
-
-    The actor override uses Depends(get_db) so FastAPI's dependency cache
-    resolves both the actor and the route's db parameter to the same session
-    and calls begin() exactly once per request.
-    """
-    app = create_app()
-
-    async def _override_get_db() -> AsyncGenerator[AsyncSession]:
-        async with async_db_session.begin():
-            yield async_db_session
-
-    async def _override_get_actor(
-        db: Annotated[AsyncSession, Depends(get_db)],
-    ) -> ActorContext:
-        return ActorContext(
-            user_id=user_id,
-            profile_id=profile_id,
-            role=Role(role),
-            mode=AuthMode.LOCAL,
-        )
-
-    app.dependency_overrides[get_db] = _override_get_db
-    app.dependency_overrides[get_actor] = _override_get_actor
-    return TestClient(app, raise_server_exceptions=True)
+    """Build a TestClient wired to a fixed ActorContext for a specific user."""
+    actor = ActorContext(
+        user_id=user_id,
+        profile_id=profile_id,
+        role=Role(role),
+        mode=AuthMode.LOCAL,
+    )
+    return make_test_client(async_db_session, actor=actor)
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +123,8 @@ class TestGetMe:
         )
         set_config(cfg)
 
-        app = create_app()
-
-        async def _override_get_db():
-            async with async_db_session.begin():
-                yield async_db_session
-
-        app.dependency_overrides[get_db] = _override_get_db
-        # Intentionally do NOT override get_actor: no cookie → actor=None → 401.
-        client = TestClient(app, raise_server_exceptions=True)
+        # No actor override: AuthMiddleware runs and finds no session cookie → 401.
+        client = make_test_client(async_db_session, no_actor_override=True)
 
         resp = client.get("/api/v1/auth/me")
 

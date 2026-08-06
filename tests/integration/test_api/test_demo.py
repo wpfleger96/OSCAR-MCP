@@ -19,9 +19,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.api.app import create_app
-from snore.api.deps import get_db
 from snore.database import models
+from tests.helpers.api_client import make_test_client
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,14 +44,7 @@ def _make_multiuser_client_no_actor(
     from snore.api.config import reset_config  # noqa: PLC0415
 
     reset_config()
-    app = create_app()
-
-    async def override_get_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-    return TestClient(app, raise_server_exceptions=True)
+    return make_test_client(async_db_session, no_actor_override=True)
 
 
 def _make_local_client(
@@ -65,14 +57,7 @@ def _make_local_client(
     from snore.api.config import reset_config  # noqa: PLC0415
 
     reset_config()
-    app = create_app()
-
-    async def override_get_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-    return TestClient(app, raise_server_exceptions=True)
+    return make_test_client(async_db_session, no_actor_override=True)
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +727,11 @@ class TestAuthStatusDemoAvailable:
         )
         monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "http://127.0.0.1:8000")
 
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from snore.api.app import create_app  # noqa: PLC0415
         from snore.api.config import reset_config  # noqa: PLC0415
+        from snore.api.deps import get_db  # noqa: PLC0415
 
         reset_config()
         app = create_app()

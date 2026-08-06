@@ -8,67 +8,15 @@ and graceful degradation when analysis results are absent.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.database.models import Day, Device, Event, Session
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-async def _make_device(
-    db: AsyncSession, profile_id: int, manufacturer: str = "TestMfr"
-) -> Device:
-    import uuid
-
-    device = Device(
-        profile_id=profile_id,
-        manufacturer=manufacturer,
-        model="TestModel",
-        serial_number=f"SN_{uuid.uuid4().hex[:8]}",
-    )
-    db.add(device)
-    await db.flush()
-    return device
-
-
-async def _make_day_session(
-    db: AsyncSession,
-    device: Device,
-    day_date: date,
-    duration_hours: float = 8.0,
-    **day_kwargs: Any,
-) -> tuple[Day, Session]:
-    """Create a Day + enabled Session pair."""
-    day = Day(
-        device_id=device.id,
-        date=day_date,
-        total_therapy_hours=duration_hours,
-        **day_kwargs,
-    )
-    db.add(day)
-    await db.flush()
-
-    sess = Session(
-        device_id=device.id,
-        day_id=day.id,
-        device_session_id=f"test_{day_date.isoformat()}",
-        start_time=datetime.combine(day_date, datetime.min.time()).replace(hour=22),
-        end_time=datetime.combine(day_date, datetime.min.time()).replace(hour=22)
-        + timedelta(hours=duration_hours),
-        duration_seconds=duration_hours * 3600,
-        enabled=True,
-    )
-    db.add(sess)
-    await db.flush()
-    return day, sess
-
+from snore.database.models import Event
+from tests.integration.conftest import _make_day_session, _make_device
 
 # ---------------------------------------------------------------------------
 # get_data_overview

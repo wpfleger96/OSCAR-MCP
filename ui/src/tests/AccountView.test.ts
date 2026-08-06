@@ -4,6 +4,11 @@ import { ref } from 'vue'
 
 vi.mock('@/composables/useAuth')
 vi.mock('@/composables/useDateFormat')
+
+import {
+    makeAuthMock as baseMakeAuthMock,
+    makeDateFormatMock as baseDateFormatMock,
+} from './helpers/mockUseAuth'
 vi.mock('@/api/me')
 
 import AccountView from '@/views/AccountView.vue'
@@ -30,34 +35,16 @@ const ME_WITHOUT_PASSWORD = {
 const PREFS = { landing_page: 'dashboard' as const, date_format: 'iso' as const }
 
 function makeAuthMock(role = 'member') {
-    vi.mocked(useAuth).mockReturnValue({
-        role: ref(role) as never,
-        fetchStatus: vi.fn().mockResolvedValue(undefined),
-        refreshStatus: vi.fn().mockResolvedValue(undefined),
-        user: ref(null) as never,
-        isAuthenticated: ref(true) as never,
-        isLocal: ref(false) as never,
-        profiles: ref([]) as never,
-        activeProfileId: ref(null) as never,
-        authMode: ref('multiuser') as never,
-        canWrite: ref(true) as never,
-        demoAvailable: ref(false) as never,
-        profileKey: ref(0) as never,
-        login: vi.fn(),
-        demoLogin: vi.fn(),
-        logout: vi.fn(),
-        clearAuth: vi.fn(),
-        setActiveProfile: vi.fn(),
-    })
+    vi.mocked(useAuth).mockReturnValue(
+        baseMakeAuthMock({
+            role: ref(role) as never,
+            isAuthenticated: ref(true) as never,
+        }) as never,
+    )
 }
 
 function makeDateFormatMock() {
-    vi.mocked(useDateFormat).mockReturnValue({
-        formatDate: (d: string | Date) => String(d),
-        loadDateFormat: vi.fn().mockResolvedValue(undefined),
-        setDateFormat: vi.fn(),
-        dateFormat: ref('iso') as never,
-    })
+    vi.mocked(useDateFormat).mockReturnValue(baseDateFormatMock() as never)
 }
 
 describe('AccountView — password form', () => {

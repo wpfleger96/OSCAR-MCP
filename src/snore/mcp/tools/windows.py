@@ -10,13 +10,20 @@ Timestamp contract (A6):
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import FindWindowsResponse, WindowRow
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -118,9 +125,7 @@ async def find_windows(
             anchor_event_offset=w.anchor_event_offset,
             analysis_result_id=w.analysis_result_id,
             analysis_status=str(w.analysis_status),
-            analysis_reason=str(w.analysis_reason)
-            if w.analysis_reason is not None
-            else None,
+            analysis_reason=str_or_none(w.analysis_reason),
         )
         for w in result.windows
     ]
@@ -144,8 +149,113 @@ async def find_windows(
         algorithm_identity=result.algorithm_identity.model_dump(mode="json")
         if result.algorithm_identity is not None
         else None,
-        null_reason=str(result.null_reason) if result.null_reason is not None else None,
+        null_reason=str_or_none(result.null_reason),
         primary_mode=result.primary_mode,
         windows=windows,
         device_capabilities=caps,
     )
+
+
+def register(mcp: FastMCP) -> None:
+    from snore.mcp.validation import parse_date, validate_window_count  # noqa: PLC0415
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def find_windows(
+        ctx: Context,
+        date: str,
+        criterion: str,
+        n: int = 5,
+        device_id: int | None = None,
+        include_unknown_leak: bool = False,
+        flattening_threshold: float | None = None,
+        min_window_breaths: int = 3,
+        context_breaths_before: int = 3,
+        context_breaths_after: int = 3,
+        context_seconds: float = 120.0,
+        min_fl_run_length: int = 2,
+        fl_class_threshold: int = 4,
+    ) -> dict[str, Any]:
+        """Find the N worst breath windows matching a flow-limitation criterion for a night.
+
+        Use this tool to locate specific regions in a therapy session worth reviewing in
+        detail (e.g. in ``get_breath_table`` or ``render_window``).  Each window
+        is a contiguous breath sequence ranked by severity; windows with >50% overlap
+        (relative to the shorter) are deduped, keeping the worst.  Results are ordered
+        worst-first.
+
+        Requires breath-level analysis results (``get_data_overview`` → ``analysis_run``
+        must be true).
+
+        Args:
+            date: Session date in YYYY-MM-DD format.
+            criterion: Window selection criterion.  One of:
+                ``"worst_flattening_leak_valid"`` — worst mean mid-inspiratory flattening
+                    among leak-valid breaths; use to find FL hotspots.
+                ``"ca_centered"`` — context window around each CA event; works even when
+                    the day mixes algorithm versions.
+                ``"fl_run_ending_in_recovery"`` — FL runs immediately followed by a
+                    recovery breath; requires uniform primary_mode across sessions.
+            n: Number of windows to return (1–50, default 5).
+            device_id: Filter to a specific device.  Required when multiple devices
+                       have data for the same date.
+            include_unknown_leak: Include breaths where leak validity is unknown
+                (default false).  Only relevant for ``worst_flattening_leak_valid``.
+            flattening_threshold: Minimum mid-inspiratory flattening score for a breath
+                to anchor a window.  Service default when omitted.
+            min_window_breaths: Minimum breaths per window (default 3).
+            context_breaths_before: Context breaths before the anchor (default 3).
+            context_breaths_after: Context breaths after the anchor (default 3).
+            context_seconds: Context window duration in seconds (default 120.0).
+                Only relevant for ``ca_centered``.
+            min_fl_run_length: Minimum FL-class run length (default 2).
+                Only relevant for ``fl_run_ending_in_recovery``.
+            fl_class_threshold: Minimum flow class to count as FL (default 4).
+                Only relevant for ``fl_run_ending_in_recovery``.
+
+        Returns:
+            FindWindowsResponse.  ``windows`` is ordered worst-first.
+            ``device_id`` is ``null`` when no sessions were found on the date
+            (the service-internal sentinel ``0`` is never emitted).
+            ``session_coverage`` lists per-session analysis status.
+            ``device_capabilities`` describes what the device records.
+            ``primary_mode`` is populated for all criteria; ``null`` when
+            sessions on the date mix primary modes.
+
+        Refusal semantics (successful responses with empty ``windows`` list):
+            ``null_reason: "algo_version_mismatch"`` — the day has sessions analysed
+                with different algorithm versions; FL-ranked criteria
+                (``worst_flattening_leak_valid``, ``fl_run_ending_in_recovery``)
+                refuse comparison.  ``ca_centered`` is unaffected — it still works.
+            ``null_reason: "primary_mode_mismatch"`` — sessions differ in primary mode;
+                only ``fl_run_ending_in_recovery`` refuses; other criteria are unaffected.
+            ``null_reason: "analysis_not_run"`` — no analysis results for this date.
+
+        Error conditions:
+            - Unknown ``criterion`` value → tool error listing valid criteria.
+            - ``n`` outside 1–50 → tool error.
+            - Multiple devices on date and no ``device_id`` → tool error listing device IDs.
+            - Options irrelevant to the chosen criterion passed with non-default values
+              → tool error; omit those options or use their defaults.
+        """
+        from snore.mcp.tools.windows import find_windows as _impl  # noqa: PLC0415
+
+        therapy_date = parse_date(date, "date")
+        validate_window_count(n)
+        return await _scope_and_run(
+            ctx,
+            _impl,
+            tool_name="find_windows",
+            therapy_date=therapy_date,
+            criterion=criterion,
+            n=n,
+            device_id=device_id,
+            include_unknown_leak=include_unknown_leak,
+            flattening_threshold=flattening_threshold,
+            min_window_breaths=min_window_breaths,
+            context_breaths_before=context_breaths_before,
+            context_breaths_after=context_breaths_after,
+            context_seconds=context_seconds,
+            min_fl_run_length=min_fl_run_length,
+            fl_class_threshold=fl_class_threshold,
+        )
