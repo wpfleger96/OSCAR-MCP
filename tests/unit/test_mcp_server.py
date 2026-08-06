@@ -149,6 +149,91 @@ class TestToolErrorBoundary:
             await _bad()
         assert "secret response body text" not in str(exc_info.value)
 
+    async def test_pydantic_multi_error_joined_with_semicolon(self) -> None:
+        """Multiple pydantic field errors are joined with '; ' in the ToolError message."""
+        from datetime import date
+
+        from fastmcp.exceptions import ToolError
+        from pydantic import ValidationError as PydanticValidationError
+
+        from snore.services.breath_service import WaveformWindowRequest
+
+        try:
+            WaveformWindowRequest(
+                therapy_date=date(2024, 1, 1),
+                offset_start=-1.0,  # fails ge=0.0
+                offset_end=60.0,
+                max_points=2000,  # fails le=1000
+            )
+        except PydanticValidationError as pydantic_exc:
+            captured = pydantic_exc
+
+        @tool_error_boundary
+        async def _raise() -> str:
+            raise captured
+
+        with pytest.raises(ToolError) as exc_info:
+            await _raise()
+
+        assert "; " in str(exc_info.value)
+
+    async def test_pydantic_value_error_prefix_stripped(self) -> None:
+        """The 'Value error, ' prefix on model_validator errors is stripped from the message."""
+        from datetime import date
+
+        from fastmcp.exceptions import ToolError
+        from pydantic import ValidationError as PydanticValidationError
+
+        from snore.services.breath_service import WaveformWindowRequest
+
+        try:
+            WaveformWindowRequest(
+                therapy_date=date(2024, 1, 1),
+                offset_start=100.0,
+                offset_end=50.0,  # fails model_validator: offset_end must be > offset_start
+            )
+        except PydanticValidationError as pydantic_exc:
+            captured = pydantic_exc
+
+        @tool_error_boundary
+        async def _raise() -> str:
+            raise captured
+
+        with pytest.raises(ToolError) as exc_info:
+            await _raise()
+
+        msg = str(exc_info.value)
+        assert "Value error, " not in msg
+        assert "offset_end" in msg
+
+    async def test_pydantic_list_index_loc_formatted_with_dot_join(self) -> None:
+        """List-indexed validation errors include the dot-joined loc (e.g. 'channels.1: ...')."""
+        from datetime import date
+
+        from fastmcp.exceptions import ToolError
+        from pydantic import ValidationError as PydanticValidationError
+
+        from snore.services.breath_service import WaveformWindowRequest
+
+        try:
+            WaveformWindowRequest(
+                therapy_date=date(2024, 1, 1),
+                offset_start=0.0,
+                offset_end=60.0,
+                channels=["flow", "not_a_valid_channel"],  # type: ignore[list-item]  # index 1 is invalid enum value
+            )
+        except PydanticValidationError as pydantic_exc:
+            captured = pydantic_exc
+
+        @tool_error_boundary
+        async def _raise() -> str:
+            raise captured
+
+        with pytest.raises(ToolError) as exc_info:
+            await _raise()
+
+        assert "channels.1" in str(exc_info.value)
+
 
 class TestCheckResponseSize:
     def test_small_response_passes(self) -> None:
@@ -238,15 +323,29 @@ class TestBuildInstructions:
 class TestValidatePageArgs:
     """validate_page_args rejects out-of-range pagination values."""
 
-    def test_valid_args_return_capped_page_size(self) -> None:
+    def test_valid_args_return_page_size(self) -> None:
         from snore.mcp.validation import validate_page_args
 
         assert validate_page_args(1, 30) == 30
 
-    def test_page_size_is_capped_at_90(self) -> None:
+    def test_page_size_90_is_valid(self) -> None:
         from snore.mcp.validation import validate_page_args
 
-        assert validate_page_args(1, 200) == 90
+        assert validate_page_args(1, 90) == 90
+
+    def test_page_size_91_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
+            validate_page_args(1, 91)
+
+    def test_page_size_200_raises(self) -> None:
+        from snore.mcp.errors import ValidationError
+        from snore.mcp.validation import validate_page_args
+
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
+            validate_page_args(1, 200)
 
     def test_page_zero_raises(self) -> None:
         from snore.mcp.errors import ValidationError
@@ -266,14 +365,14 @@ class TestValidatePageArgs:
         from snore.mcp.errors import ValidationError
         from snore.mcp.validation import validate_page_args
 
-        with pytest.raises(ValidationError, match="page_size must be >= 1"):
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
             validate_page_args(1, 0)
 
     def test_page_size_negative_raises(self) -> None:
         from snore.mcp.errors import ValidationError
         from snore.mcp.validation import validate_page_args
 
-        with pytest.raises(ValidationError, match="page_size must be >= 1"):
+        with pytest.raises(ValidationError, match="page_size must be between 1 and 90"):
             validate_page_args(1, -10)
 
 

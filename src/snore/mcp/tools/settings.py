@@ -93,10 +93,14 @@ async def get_settings_timeline(
                 settings=settings,
                 changed_keys=changed_keys if prev else [],
                 device_id=dev_id,
-                device_capabilities=caps_cache.get(dev_id)
-                if dev_id is not None
-                else None,
             )
         )
 
-    return SettingsTimelineResponse(epochs=epochs, total_epochs=len(epochs))
+    caps_by_device: dict[str, DeviceCapabilities] = {
+        str(dev_id): caps for dev_id, caps in caps_cache.items() if caps is not None
+    }
+    return SettingsTimelineResponse(
+        epochs=epochs,
+        total_epochs=len(epochs),
+        device_capabilities_by_device=caps_by_device,
+    )

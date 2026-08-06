@@ -83,7 +83,6 @@ class SettingsEpoch(BaseModel):
     settings: dict[str, str | None]
     changed_keys: list[str] = []
     device_id: int | None = None
-    device_capabilities: DeviceCapabilities | None = None
 
 
 class SettingsTimelineResponse(BaseModel):
@@ -93,6 +92,7 @@ class SettingsTimelineResponse(BaseModel):
 
     epochs: list[SettingsEpoch]
     total_epochs: int
+    device_capabilities_by_device: dict[str, DeviceCapabilities] = {}
 
 
 class NightlyRow(BaseModel):
@@ -125,6 +125,7 @@ class NightlyRow(BaseModel):
     leak_median_lpm: float | None = None
     leak_95th_lpm: float | None = None
     leak_above_24_pct: float | None = None
+    leak_above_24_pct_reason: str | None = None
 
     # Resp physiology
     rr_mean_bpm: float | None = None
@@ -201,7 +202,6 @@ class EventRow(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: int | None = None  # internal DB id; not provided by BreathService seam
     session_id: int  # session that produced this event (per-event anchor)
     session_start_wall_clock: (
         str  # offset-free ISO 8601 device wall-clock for this event's session
