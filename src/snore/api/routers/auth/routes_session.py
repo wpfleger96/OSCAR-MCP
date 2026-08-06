@@ -30,11 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
 from snore.api.config import get_config
+from snore.api.constants import NO_STORE
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth
 from snore.api.routers.auth._common import (
     EMAIL_MAX_LEN,
-    NO_STORE,
     PASSWORD_MAX_CHARS,
     SessionTicket,
     apply_session_cookie,
@@ -42,6 +42,7 @@ from snore.api.routers.auth._common import (
 )
 from snore.api.schemas import MessageResponse
 from snore.auth.actor import ActorContext
+from snore.auth.emails import normalize_email
 from snore.auth.factory import ActorContextFactory
 from snore.auth.lockout import get_lockout_store
 from snore.auth.passwords import (
@@ -94,7 +95,7 @@ async def login(
     """Authenticate with email + password; set session cookie on success."""
     cfg = get_config()
     lockout = get_lockout_store()
-    canonical = body.email.lower().strip()
+    canonical = normalize_email(body.email)
     ip = get_client_ip(request)
 
     # Validate password byte length before any DB work or KDF.

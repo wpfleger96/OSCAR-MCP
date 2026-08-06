@@ -45,9 +45,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
 from snore.api.config import AppConfig, get_config
+from snore.api.constants import NO_STORE
 from snore.api.deps import get_db, get_raw_session
 from snore.api.routers.auth._common import (
-    NO_STORE,
     TOKEN_MAX_LEN,
     issue_session_redirect,
     opportunistic_purge_oauth_attempts,
@@ -57,6 +57,7 @@ from snore.api.routers.auth._google_resolution import (
     resolve_login,
     resolve_signup,
 )
+from snore.auth.emails import normalize_email
 from snore.auth.google_oauth import OAuthError, fetch_google_id_token_claims
 from snore.auth.invite import invite_valid_clauses
 from snore.auth.invite_tokens import hash_invite_token
@@ -330,7 +331,7 @@ async def google_callback(
 
     # Local: a signup must be completed by the invited Google account.
     if kind == "signup":
-        google_email_canonical = str(claims.get("email", "")).lower().strip()
+        google_email_canonical = normalize_email(str(claims.get("email", "")))
         if google_email_canonical != attempt_expected_email:
             return _oauth_failure_response()
 
@@ -439,7 +440,7 @@ async def google_invite_initiate(
         request,
         kind="signup",
         invite_id=invite.id,
-        expected_canonical_email=invite.email.lower().strip(),
+        expected_canonical_email=normalize_email(invite.email),
         login_hint=invite.email,
     )
     response = JSONResponse(

@@ -23,9 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
 from snore.api.config import get_config
+from snore.api.constants import NO_STORE
 from snore.api.deps import get_db
 from snore.api.routers.auth._common import (
-    NO_STORE,
     PASSWORD_MAX_CHARS,
     TOKEN_MAX_LEN,
     SessionTicket,
@@ -33,6 +33,7 @@ from snore.api.routers.auth._common import (
     opportunistic_purge_oauth_attempts,
 )
 from snore.api.schemas import MessageResponse
+from snore.auth.emails import normalize_email
 from snore.auth.invite import (
     InviteRedemptionError,
     invite_valid_clauses,
@@ -197,7 +198,7 @@ async def redeem_invite_route(
             (
                 await txn_db.execute(
                     select(models.User).where(
-                        models.User.canonical_email == invite_email.lower().strip()
+                        models.User.canonical_email == normalize_email(invite_email)
                     )
                 )
             )
@@ -208,7 +209,7 @@ async def redeem_invite_route(
             raise InviteRedemptionError("Account already exists for this email")
 
         user = models.User(
-            canonical_email=invite_email.lower().strip(),
+            canonical_email=normalize_email(invite_email),
             password_hash=pw_hash,
             role=invite_role,
             session_version=0,

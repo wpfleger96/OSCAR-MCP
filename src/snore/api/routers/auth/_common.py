@@ -15,8 +15,6 @@ from snore.api.config import AppConfig
 from snore.auth.session_cookie import set_session_cookie
 from snore.database import models
 
-NO_STORE = {"Cache-Control": "no-store"}
-
 
 class SessionTicket(NamedTuple):
     """Everything needed to issue a session cookie for a resolved login."""
