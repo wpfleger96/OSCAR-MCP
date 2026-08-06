@@ -2,6 +2,64 @@
     <div class="analysis-mgmt">
         <h1 class="page-title">Analysis Management</h1>
 
+        <!-- Active analysis jobs banner -->
+        <div v-if="activeJobs.length > 0 || recentlyFinishedJobs.length > 0" class="jobs-banner">
+            <h2 class="jobs-banner-title">Analysis Jobs</h2>
+            <div class="jobs-list">
+                <div
+                    v-for="job in [...activeJobs, ...recentlyFinishedJobs]"
+                    :key="job.job_id"
+                    class="job-row"
+                >
+                    <div class="job-icon">
+                        <Loader2
+                            v-if="job.state === 'running'"
+                            class="h-4 w-4 animate-spin text-muted-foreground"
+                        />
+                        <Clock
+                            v-else-if="job.state === 'queued'"
+                            class="h-4 w-4 text-muted-foreground"
+                        />
+                        <span
+                            v-else-if="job.state === 'succeeded'"
+                            class="job-state-icon job-state-success"
+                            >&#x2713;</span
+                        >
+                        <span
+                            v-else-if="job.state === 'failed'"
+                            class="job-state-icon job-state-failed"
+                            >&#x2717;</span
+                        >
+                        <span v-else-if="job.state === 'cancelled'" class="job-state-icon"
+                            >&#x2014;</span
+                        >
+                    </div>
+                    <div class="job-info">
+                        <span class="job-label">{{ jobLabel(job) }}</span>
+                        <span
+                            v-if="job.state === 'running' && job.progress_total > 0"
+                            class="job-progress"
+                        >
+                            {{ job.progress_completed }}/{{ job.progress_total }} sessions
+                        </span>
+                        <span v-else-if="job.state === 'queued'" class="job-progress">Queued</span>
+                        <span v-else-if="job.state === 'failed'" class="job-progress job-error">{{
+                            job.error_message
+                        }}</span>
+                    </div>
+                    <Button
+                        v-if="job.state === 'queued' || job.state === 'running'"
+                        variant="ghost"
+                        size="icon"
+                        title="Cancel job"
+                        @click="handleCancelJob(job.job_id)"
+                    >
+                        <X class="h-4 w-4" />
+                    </Button>
+                </div>
+            </div>
+        </div>
+
         <!-- Filter bar -->
         <div class="filter-bar">
             <input v-model="fromDate" type="date" class="date-input" />
@@ -87,17 +145,6 @@
             <AlertTriangle class="inline h-4 w-4" /> {{ error }}
         </div>
 
-        <!-- Batch result -->
-        <div v-if="batchResult" class="section-card batch-result">
-            <h2>Batch Analysis Result</h2>
-            <div class="batch-stats">
-                <StatCard label="Total" :value="batchResult.total" :decimals="0" />
-                <StatCard label="Successful" :value="batchResult.successful" :decimals="0" />
-                <StatCard label="Cancelled" :value="batchResult.cancelled ?? 0" :decimals="0" />
-                <StatCard label="Failed" :value="batchResult.failed" :decimals="0" />
-            </div>
-        </div>
-
         <!-- Batch dialog -->
         <AlertDialog :open="batchDialogOpen" @update:open="batchDialogOpen = $event">
             <AlertDialogContent class="max-w-[450px]">
@@ -177,7 +224,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import {
     Table,
     TableBody,
@@ -199,18 +246,20 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import StatCard from '@/components/StatCard.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
-import { Loader2, AlertTriangle, Play, Trash2 } from '@lucide/vue'
+import { Loader2, AlertTriangle, Play, Trash2, Clock, X } from '@lucide/vue'
 import {
     getAnalysisSessions,
     runBatchAnalysis,
     deleteAnalysis,
     getAnalysisDeletePreview,
+    getAnalysisJobs,
+    cancelAnalysisJob,
+    type AnalysisJobInfo,
 } from '@/api/analysis'
 import { formatDateShort } from '@/utils/formatting'
-import type { AnalysisListItem, BatchAnalysisResult, AnalysisDeletePreview } from '@/types'
+import type { AnalysisListItem, AnalysisDeletePreview } from '@/types'
 import { useAuth } from '@/composables/useAuth'
 
 const { canWrite } = useAuth()
@@ -231,7 +280,19 @@ const batchFrom = ref('')
 const batchTo = ref('')
 const batchMode = ref('aasm')
 const batchRunning = ref(false)
-const batchResult = ref<BatchAnalysisResult | null>(null)
+
+const analysisJobs = ref<AnalysisJobInfo[]>([])
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let stopped = false
+
+const activeJobs = computed(() =>
+    analysisJobs.value.filter((j) => j.state === 'queued' || j.state === 'running'),
+)
+const recentlyFinishedJobs = computed(() =>
+    analysisJobs.value.filter(
+        (j) => j.state === 'succeeded' || j.state === 'failed' || j.state === 'cancelled',
+    ),
+)
 
 const deleteDialogVisible = ref(false)
 const deletePreviewLoading = ref(false)
@@ -262,6 +323,47 @@ async function fetchPage(newOffset: number): Promise<void> {
     }
 }
 
+function schedulePoll() {
+    if (stopped || pollTimer !== null) return
+    pollTimer = setTimeout(async () => {
+        pollTimer = null
+        if (stopped) return
+        await fetchJobs()
+    }, 3000)
+}
+
+async function fetchJobs() {
+    try {
+        const { jobs } = await getAnalysisJobs()
+        if (stopped) return
+        const hadActive = activeJobs.value.length > 0
+        analysisJobs.value = jobs
+        const hasActive = jobs.some((j) => j.state === 'queued' || j.state === 'running')
+        if (hasActive) {
+            schedulePoll()
+        } else if (hadActive) {
+            void fetchPage(0)
+        }
+    } catch {
+        // Ignore poll errors silently
+    }
+}
+
+async function handleCancelJob(jobId: string) {
+    try {
+        await cancelAnalysisJob(jobId)
+        await fetchJobs()
+    } catch (err: unknown) {
+        error.value = err instanceof Error ? err.message : 'Failed to cancel job'
+    }
+}
+
+function jobLabel(job: AnalysisJobInfo): string {
+    if (job.source === 'import') return `Post-import: ${job.session_count} session(s)`
+    if (job.source === 'batch') return `Batch: ${job.session_count} session(s)`
+    return `${job.session_count} session(s)`
+}
+
 async function handleBatchRun(): Promise<void> {
     if (batchFrom.value && batchTo.value && batchFrom.value > batchTo.value) {
         error.value = 'From date must be before To date'
@@ -270,17 +372,17 @@ async function handleBatchRun(): Promise<void> {
     }
     batchRunning.value = true
     try {
-        batchResult.value = await runBatchAnalysis({
+        await runBatchAnalysis({
             from_date: batchFrom.value,
             to_date: batchTo.value,
             modes: [batchMode.value],
             store_results: true,
         })
         batchDialogOpen.value = false
-        void fetchPage(0)
+        void fetchJobs()
     } catch (err: unknown) {
         batchDialogOpen.value = false
-        error.value = err instanceof Error ? err.message : 'Batch analysis failed'
+        error.value = err instanceof Error ? err.message : 'Failed to queue batch analysis'
     } finally {
         batchRunning.value = false
     }
@@ -319,7 +421,18 @@ async function executeDelete(): Promise<void> {
 
 watch([fromDate, toDate, analyzedOnly], () => void fetchPage(0))
 
-onMounted(() => void fetchPage(0))
+onMounted(() => {
+    void fetchJobs()
+    void fetchPage(0)
+})
+
+onUnmounted(() => {
+    stopped = true
+    if (pollTimer !== null) {
+        clearTimeout(pollTimer)
+        pollTimer = null
+    }
+})
 </script>
 
 <style scoped>
@@ -327,13 +440,82 @@ onMounted(() => void fetchPage(0))
     max-width: 1200px;
 }
 
-.batch-result {
-    margin-top: 1rem;
+.jobs-banner {
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1rem;
+    background: var(--color-card);
+    margin-bottom: 1rem;
 }
 
-.batch-stats {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
+.jobs-banner-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-muted-foreground);
+    margin: 0 0 0.75rem;
+}
+
+.jobs-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.job-row {
+    display: flex;
+    align-items: center;
     gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-background, transparent);
+}
+
+.job-icon {
+    flex-shrink: 0;
+    width: 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.job-state-icon {
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.job-state-success {
+    color: var(--color-success);
+}
+
+.job-state-failed {
+    color: var(--color-destructive);
+}
+
+.job-info {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.job-label {
+    font-size: 0.875rem;
+    color: var(--color-foreground);
+}
+
+.job-progress {
+    font-size: 0.8rem;
+    color: var(--color-muted-foreground);
+}
+
+.job-error {
+    color: var(--color-destructive);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 </style>

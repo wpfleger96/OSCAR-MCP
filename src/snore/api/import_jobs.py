@@ -98,11 +98,10 @@ class JobPhase(StrEnum):
     """Non-terminal phases within a RUNNING job.
 
     Delivered via phase_complete() as a live milestone to attached observers.
-    NOT a terminal state — the job stays RUNNING through both phases.
+    NOT a terminal state — the job stays RUNNING through the import phase.
     """
 
     IMPORT = "import"
-    ANALYSIS = "analysis"
 
 
 # ---------------------------------------------------------------------------
