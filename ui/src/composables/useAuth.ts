@@ -23,6 +23,7 @@ export function useAuth() {
     const canWrite = computed(
         () => isLocal.value || (status.value?.user?.role !== 'demo' && isAuthenticated.value),
     )
+    const demoAvailable = computed(() => status.value?.demo_available ?? false)
 
     async function fetchStatus(): Promise<void> {
         const now = Date.now()
@@ -101,6 +102,7 @@ export function useAuth() {
         authMode,
         role,
         canWrite,
+        demoAvailable,
         profileKey,
         fetchStatus,
         refreshStatus,

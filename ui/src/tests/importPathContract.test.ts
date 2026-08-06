@@ -47,6 +47,7 @@ describe('wire contract: importFromPath sends profile_id in HTTP body', () => {
             profileKey: ref(0) as never,
             role: ref(null) as never,
             canWrite: ref(true) as never,
+            demoAvailable: ref(false) as never,
             login: vi.fn(),
             demoLogin: vi.fn(),
             logout: vi.fn(),

@@ -83,6 +83,7 @@ function makeAuthMock(userId = 1) {
         activeProfileId: ref(null) as never,
         authMode: ref('multiuser') as never,
         canWrite: ref(true) as never,
+        demoAvailable: ref(false) as never,
         profileKey: ref(0) as never,
         fetchStatus: vi.fn().mockResolvedValue(undefined),
         refreshStatus: vi.fn().mockResolvedValue(undefined),
