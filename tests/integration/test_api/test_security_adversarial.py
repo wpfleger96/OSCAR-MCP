@@ -32,6 +32,7 @@ from snore.api.config import load_config, set_config
 from snore.api.deps import get_actor, get_db
 from snore.auth.actor import ActorContext, AuthMode
 from snore.auth.factory import ActorContextFactory
+from tests.helpers.api_client import make_test_client
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -49,20 +50,7 @@ def _multiuser_config(
 
 
 def _make_client(async_db_session: AsyncSession) -> TestClient:
-    app = create_app()
-
-    async def _override_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    async def _override_actor(
-        db: Annotated[AsyncSession, Depends(get_db)],
-    ) -> ActorContext:
-        return await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
-
-    app.dependency_overrides[get_db] = _override_db
-    app.dependency_overrides[get_actor] = _override_actor
-    return TestClient(app, raise_server_exceptions=True)
+    return make_test_client(async_db_session)
 
 
 # ---------------------------------------------------------------------------

@@ -1,11 +1,21 @@
 import pytest
 
-from starlette.types import ASGIApp, Receive, Scope, Send
-
 import snore.api.import_jobs as _import_job_store
 
-from snore.api.app import create_app
-from snore.api.deps import get_actor, get_db
+from tests.helpers.api_client import make_test_client
+
+# ---------------------------------------------------------------------------
+# Shared multiuser test helpers — imported by test_auth.py and test_me.py
+# ---------------------------------------------------------------------------
+
+_SESSION_SECRET = "test-secret-at-least-32-chars-long-abcdef"
+
+
+def _multiuser_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set the env vars required for a minimal multiuser config."""
+    monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
+    monkeypatch.setenv("SNORE_SESSION_SECRET", _SESSION_SECRET)
+    monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "http://127.0.0.1:8000")
 
 
 @pytest.fixture(autouse=True)
@@ -82,94 +92,16 @@ def db_session(temp_db, async_db_session):
 def api_client(temp_db, async_db_session, db_session):
     """TestClient with get_db and get_actor overridden for test isolation.
 
-    - ``get_db`` wraps the shared ``async_db_session`` in ``begin()`` so route
-      handlers see the same commit/rollback semantics as production.
-    - ``get_actor`` is overridden to provision a local admin actor from the same
-      session, bypassing ``AuthMiddleware`` (which tries to open a second DB
-      connection that isn't initialised in the test).  It declares
-      ``Depends(get_db)`` — **not** ``Depends(override_get_db)`` directly — so
-      that FastAPI's per-request dep cache resolves both usages to the same
-      ``override_get_db`` node and calls ``begin()`` exactly once.
-
     Seeds are injected via the AUTOCOMMIT ``db_session`` so they are
     immediately visible inside the override session.
     """
-    from typing import Annotated  # noqa: PLC0415
-
-    from fastapi import Depends  # noqa: PLC0415
-    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
-
-    from snore.auth.actor import ActorContext, AuthMode  # noqa: PLC0415
-    from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
-
-    app = create_app()
-
-    async def override_get_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    # Declare Depends(get_db), not Depends(override_get_db):
-    # FastAPI resolves get_db through the override table, so both
-    # service_dep's get_db and this Depends(get_db) hit the same cache
-    # node — begin() is called only once per request.
-    async def override_get_actor(
-        db: Annotated[AsyncSession, Depends(get_db)],
-    ) -> ActorContext:
-        factory = ActorContextFactory(db)
-        return await factory.make_local(mode=AuthMode.LOCAL)
-
-    app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_actor] = override_get_actor
-    # Do NOT use 'with TestClient(app)' — that runs lifespan (init_database) which we
-    # skip since we are overriding get_db entirely; lifespan tests use real_app instead.
-    from fastapi.testclient import TestClient  # noqa: PLC0415
-
-    client = TestClient(app, raise_server_exceptions=True)
-    yield client
-    app.dependency_overrides.clear()
+    # Do NOT use 'with TestClient(app)' — that runs lifespan (init_database),
+    # which we skip since we are overriding get_db entirely; lifespan tests use
+    # real_app instead.
+    return make_test_client(async_db_session)
 
 
 @pytest.fixture
 def localhost_api_client(temp_db, async_db_session, db_session):
     """TestClient that appears to connect from 127.0.0.1 (for localhost-only endpoints)."""
-    from typing import Annotated  # noqa: PLC0415
-
-    from fastapi import Depends  # noqa: PLC0415
-    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
-
-    from snore.auth.actor import (
-        ActorContext,  # noqa: PLC0415
-        AuthMode,  # noqa: PLC0415
-    )
-    from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
-
-    app = create_app()
-
-    async def override_get_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    async def override_get_actor(
-        db: Annotated[AsyncSession, Depends(get_db)],
-    ) -> ActorContext:
-        factory = ActorContextFactory(db)
-        return await factory.make_local(mode=AuthMode.LOCAL)
-
-    app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_actor] = override_get_actor
-
-    class LocalhostMiddleware:
-        def __init__(self, app: ASGIApp) -> None:
-            self.app = app
-
-        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-            if scope["type"] == "http":
-                scope["client"] = ("127.0.0.1", 12345)
-            await self.app(scope, receive, send)
-
-    wrapped = LocalhostMiddleware(app)
-    from fastapi.testclient import TestClient  # noqa: PLC0415
-
-    client = TestClient(wrapped, raise_server_exceptions=True)
-    yield client
-    app.dependency_overrides.clear()
+    return make_test_client(async_db_session, localhost=True)

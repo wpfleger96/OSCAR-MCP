@@ -17,18 +17,15 @@ import hashlib
 import uuid
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
 
-from fastapi import Depends, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from snore.api.app import create_app
 from snore.api.config import AppConfig, parse_origin, set_config
-from snore.api.deps import get_actor, get_db
 from snore.auth.actor import ActorContext, AuthMode, Role
 from snore.database import models
+from tests.helpers.api_client import make_test_client
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -51,43 +48,13 @@ def _make_client(
 ) -> TestClient:
     """Return a TestClient wired to *async_db_session*.
 
-    - Default (actor=None, unauthenticated=False): auto-provision local admin.
+    - Default: auto-provision local admin.
     - actor=<ActorContext>: return that actor for every request.
     - unauthenticated=True: raise 401, simulating an absent session cookie.
     """
-    from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
-
-    app = create_app()
-
-    async def override_get_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    if unauthenticated:
-
-        async def override_get_actor(
-            db: Annotated[AsyncSession, Depends(get_db)],
-        ) -> ActorContext:
-            raise HTTPException(status_code=401, detail="Authentication required")
-
-    elif actor is not None:
-        _actor = actor
-
-        async def override_get_actor(
-            db: Annotated[AsyncSession, Depends(get_db)],
-        ) -> ActorContext:
-            return _actor
-
-    else:
-
-        async def override_get_actor(
-            db: Annotated[AsyncSession, Depends(get_db)],
-        ) -> ActorContext:
-            return await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
-
-    app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_actor] = override_get_actor
-    return TestClient(app, raise_server_exceptions=True)
+    return make_test_client(
+        async_db_session, actor=actor, unauthenticated=unauthenticated
+    )
 
 
 # ---------------------------------------------------------------------------
