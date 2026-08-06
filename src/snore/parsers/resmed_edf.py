@@ -1192,6 +1192,29 @@ class ResmedEDFParser(DeviceParser):
 
         return group_session_files(datalog_dir)
 
+    def parse_night_session(
+        self,
+        night_date: str,
+        segments: dict[str, dict[str, Path]],
+        device_info: DeviceInfo,
+        base_path: Path,
+        str_settings_cache: dict[date, dict[str, float]] | None = None,
+        str_summaries_cache: dict[date, dict[str, float]] | None = None,
+    ) -> UnifiedSession | None:
+        """Lower-level public entry point for callers that pre-supply ``device_info``
+        and pre-grouped segment files (used by demo fixture import).
+
+        Delegates to ``_parse_night_session``.
+        """
+        return self._parse_night_session(
+            night_date=night_date,
+            segments=segments,
+            device_info=device_info,
+            base_path=base_path,
+            str_settings_cache=str_settings_cache,
+            str_summaries_cache=str_summaries_cache,
+        )
+
     def _parse_night_session(
         self,
         night_date: str,

@@ -256,6 +256,7 @@ class AuthStatusResponse(BaseModel):
     user: UserInfo | None = None
     profiles: list[ProfileInfo] = []
     active_profile_id: int | None = None
+    demo_available: bool = False
 
 
 class InviteInfoResponse(BaseModel):
@@ -442,8 +443,23 @@ async def auth_status(
 ) -> JSONResponse:
     """Return authentication state and profile list for the current session."""
     from snore.api.config import get_config  # noqa: PLC0415
+    from snore.services.demo_service import DemoService  # noqa: PLC0415
 
     cfg = get_config()
+
+    demo_available = False
+    if cfg.is_multiuser:
+        # Cache True permanently in process: a True result never reverts within a
+        # process (a stale True after a DB-file swap only degrades to a harmless 404
+        # on demo-login). We never cache False so a demo user created later by the
+        # scrub-demo CLI is picked up without restart.
+        if getattr(request.app.state, "demo_available", False):
+            demo_available = True
+        else:
+            demo_available = await DemoService(db).demo_user_exists()
+            if demo_available:
+                request.app.state.demo_available = True
+
     actor: ActorContext | None = getattr(request.state, "actor", None)
 
     if actor is None:
@@ -451,6 +467,7 @@ async def auth_status(
             content=AuthStatusResponse(
                 authenticated=False,
                 auth_mode=cfg.auth_mode.value,
+                demo_available=demo_available,
             ).model_dump(),
             headers=_NO_STORE,
         )
@@ -461,6 +478,7 @@ async def auth_status(
             content=AuthStatusResponse(
                 authenticated=False,
                 auth_mode=cfg.auth_mode.value,
+                demo_available=demo_available,
             ).model_dump(),
             headers=_NO_STORE,
         )
@@ -492,6 +510,7 @@ async def auth_status(
             ),
             profiles=[ProfileInfo(id=p.id, name=p.name) for p in profiles_rows],
             active_profile_id=actor.profile_id,
+            demo_available=demo_available,
         ).model_dump(),
         headers=_NO_STORE,
     )
