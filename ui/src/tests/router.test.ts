@@ -8,27 +8,16 @@ vi.mock('@/composables/useAuth')
 // Import the production guard — guard logic comes from the real module, not a copy.
 import { authGuard } from '@/router'
 import { useAuth } from '@/composables/useAuth'
+import { makeAuthMock as baseMakeAuthMock } from './helpers/mockUseAuth'
 
 function makeAuthMock(authed: boolean, local: boolean) {
-    vi.mocked(useAuth).mockReturnValue({
-        isAuthenticated: ref(authed) as never,
-        isLocal: ref(local) as never,
-        fetchStatus: vi.fn().mockResolvedValue(undefined),
-        refreshStatus: vi.fn().mockResolvedValue(undefined),
-        user: ref(null) as never,
-        profiles: ref([]) as never,
-        activeProfileId: ref(null) as never,
-        authMode: ref(local ? 'local' : 'multiuser') as never,
-        role: ref(null) as never,
-        canWrite: ref(true) as never,
-        demoAvailable: ref(false) as never,
-        profileKey: ref(0) as never,
-        login: vi.fn(),
-        demoLogin: vi.fn(),
-        logout: vi.fn(),
-        clearAuth: vi.fn(),
-        setActiveProfile: vi.fn(),
-    })
+    vi.mocked(useAuth).mockReturnValue(
+        baseMakeAuthMock({
+            isAuthenticated: ref(authed) as never,
+            isLocal: ref(local) as never,
+            authMode: ref(local ? 'local' : 'multiuser') as never,
+        }) as never,
+    )
 }
 
 function makeRoute(
@@ -133,25 +122,9 @@ describe('workflow: redemption refreshes status', () => {
     it('test_redemption_clears_cache_and_reaches_dashboard', async () => {
         // refreshStatus is the key: it clears stale cached unauthenticated status
         const refreshStatusMock = vi.fn().mockResolvedValue(undefined)
-        vi.mocked(useAuth).mockReturnValue({
-            isAuthenticated: ref(false) as never,
-            isLocal: ref(false) as never,
-            fetchStatus: vi.fn().mockResolvedValue(undefined),
-            refreshStatus: refreshStatusMock,
-            user: ref(null) as never,
-            profiles: ref([]) as never,
-            activeProfileId: ref(null) as never,
-            authMode: ref('multiuser') as never,
-            profileKey: ref(0) as never,
-            role: ref(null) as never,
-            canWrite: ref(true) as never,
-            demoAvailable: ref(false) as never,
-            login: vi.fn(),
-            demoLogin: vi.fn(),
-            logout: vi.fn(),
-            clearAuth: vi.fn(),
-            setActiveProfile: vi.fn(),
-        })
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({ refreshStatus: refreshStatusMock }) as never,
+        )
 
         vi.mocked(authApi.lookupInvite).mockResolvedValueOnce({ valid: true, email: 'u@x.com' })
         vi.mocked(authApi.redeemInvite).mockResolvedValueOnce({ message: 'ok' })
@@ -241,28 +214,17 @@ describe('workflow: import passes selectedProfileId to importFiles', () => {
         // selectedProfileId (2) differs from the active session profile (1).
         // importFiles must be called with profileId=2 so the backend targets the right profile.
         // Falsifiability: if profileId is omitted from the importFiles call this assertion fails.
-        vi.mocked(useAuth).mockReturnValue({
-            isAuthenticated: ref(true) as never,
-            isLocal: ref(false) as never,
-            fetchStatus: vi.fn().mockResolvedValue(undefined),
-            refreshStatus: vi.fn().mockResolvedValue(undefined),
-            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
-            profiles: ref([
-                { id: 1, name: 'Primary' },
-                { id: 2, name: 'Work' },
-            ]) as never,
-            activeProfileId: ref(1) as never,
-            authMode: ref('multiuser') as never,
-            profileKey: ref(0) as never,
-            role: ref(null) as never,
-            canWrite: ref(true) as never,
-            demoAvailable: ref(false) as never,
-            login: vi.fn(),
-            demoLogin: vi.fn(),
-            logout: vi.fn(),
-            clearAuth: vi.fn(),
-            setActiveProfile: vi.fn(),
-        })
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+                profiles: ref([
+                    { id: 1, name: 'Primary' },
+                    { id: 2, name: 'Work' },
+                ]) as never,
+                activeProfileId: ref(1) as never,
+            }) as never,
+        )
 
         vi.mocked(importApi.importFiles).mockResolvedValueOnce({ job_id: 'job-1' })
 
@@ -293,28 +255,18 @@ describe('workflow: import does not call setActiveProfile during submit', () => 
         // After the pass-2 fix, setActiveProfile is no longer called from handleImport.
         // The profileKey remount that would unmount the view during upload is eliminated.
         const setActiveProfileMock = vi.fn()
-        vi.mocked(useAuth).mockReturnValue({
-            isAuthenticated: ref(true) as never,
-            isLocal: ref(false) as never,
-            fetchStatus: vi.fn().mockResolvedValue(undefined),
-            refreshStatus: vi.fn().mockResolvedValue(undefined),
-            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
-            profiles: ref([
-                { id: 1, name: 'Primary' },
-                { id: 2, name: 'Work' },
-            ]) as never,
-            activeProfileId: ref(1) as never,
-            authMode: ref('multiuser') as never,
-            profileKey: ref(0) as never,
-            role: ref(null) as never,
-            canWrite: ref(true) as never,
-            demoAvailable: ref(false) as never,
-            login: vi.fn(),
-            demoLogin: vi.fn(),
-            logout: vi.fn(),
-            clearAuth: vi.fn(),
-            setActiveProfile: setActiveProfileMock,
-        })
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+                profiles: ref([
+                    { id: 1, name: 'Primary' },
+                    { id: 2, name: 'Work' },
+                ]) as never,
+                activeProfileId: ref(1) as never,
+                setActiveProfile: setActiveProfileMock,
+            }) as never,
+        )
 
         vi.mocked(importApi.importFiles).mockResolvedValueOnce({ job_id: 'job-1' })
 
@@ -396,25 +348,15 @@ describe('workflow: profile default calls PATCH endpoint', () => {
 describe('workflow: profile CRUD refreshes shared auth store', () => {
     it('test_create_profile_calls_refreshStatus_to_update_shared_store', async () => {
         const refreshStatusMock = vi.fn().mockResolvedValue(undefined)
-        vi.mocked(useAuth).mockReturnValue({
-            isAuthenticated: ref(true) as never,
-            isLocal: ref(false) as never,
-            fetchStatus: vi.fn().mockResolvedValue(undefined),
-            refreshStatus: refreshStatusMock,
-            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
-            profiles: ref([{ id: 1, name: 'Primary' }]) as never,
-            activeProfileId: ref(1) as never,
-            authMode: ref('multiuser') as never,
-            profileKey: ref(0) as never,
-            role: ref(null) as never,
-            canWrite: ref(true) as never,
-            demoAvailable: ref(false) as never,
-            login: vi.fn(),
-            demoLogin: vi.fn(),
-            logout: vi.fn(),
-            clearAuth: vi.fn(),
-            setActiveProfile: vi.fn(),
-        })
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+                profiles: ref([{ id: 1, name: 'Primary' }]) as never,
+                activeProfileId: ref(1) as never,
+                refreshStatus: refreshStatusMock,
+            }) as never,
+        )
 
         vi.mocked(profilesApi.listProfiles).mockResolvedValueOnce([
             {
@@ -461,25 +403,15 @@ describe('workflow: profile mutation success not shadowed by refresh failure', (
         // A committed rename must not be reported as a failure just because the
         // subsequent GET /auth/status throws. refreshStatus() is fire-and-forget.
         const refreshStatusMock = vi.fn().mockRejectedValue(new Error('Network'))
-        vi.mocked(useAuth).mockReturnValue({
-            isAuthenticated: ref(true) as never,
-            isLocal: ref(false) as never,
-            fetchStatus: vi.fn().mockResolvedValue(undefined),
-            refreshStatus: refreshStatusMock,
-            user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
-            profiles: ref([{ id: 1, name: 'Primary' }]) as never,
-            activeProfileId: ref(1) as never,
-            authMode: ref('multiuser') as never,
-            profileKey: ref(0) as never,
-            role: ref(null) as never,
-            canWrite: ref(true) as never,
-            demoAvailable: ref(false) as never,
-            login: vi.fn(),
-            demoLogin: vi.fn(),
-            logout: vi.fn(),
-            clearAuth: vi.fn(),
-            setActiveProfile: vi.fn(),
-        })
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                user: ref({ id: 1, email: 'u@x.com', display_name: 'U', role: 'user' }) as never,
+                profiles: ref([{ id: 1, name: 'Primary' }]) as never,
+                activeProfileId: ref(1) as never,
+                refreshStatus: refreshStatusMock,
+            }) as never,
+        )
 
         vi.mocked(profilesApi.listProfiles).mockResolvedValueOnce([
             {
