@@ -46,8 +46,9 @@ export const runBatchAnalysis = apiPost<
     { job_id: string; session_count: number },
     [
         body: {
-            from_date: string
-            to_date: string
+            from_date?: string
+            to_date?: string
+            missing_only?: boolean
             modes?: string[]
             store_results?: boolean
         },

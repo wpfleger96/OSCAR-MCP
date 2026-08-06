@@ -140,6 +140,36 @@ class DatabaseService:
                 )
             )
         ).scalar() or 0
+        # Distinct sessions that have at least one analysis result (re-analysis of the
+        # same session produces multiple rows; COUNT(DISTINCT) prevents over-counting).
+        sessions_with_analysis = (
+            await self.db_session.execute(
+                select(func.count(func.distinct(models.AnalysisResult.session_id)))
+                .select_from(models.AnalysisResult)
+                .join(
+                    models.Session,
+                    models.AnalysisResult.session_id == models.Session.id,
+                )
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(self._profile_filter())
+            )
+        ).scalar() or 0
+        # Sessions that have a flow waveform — the only sessions analysis can run on.
+        # Uses Session.has_waveform_data=True only flags *any* waveform type, so we
+        # join Waveform directly and filter on waveform_type == "flow".
+        analyzable_session_count = (
+            await self.db_session.execute(
+                select(func.count())
+                .select_from(models.Session)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .join(
+                    models.Waveform,
+                    (models.Waveform.session_id == models.Session.id)
+                    & (models.Waveform.waveform_type == "flow"),
+                )
+                .where(self._profile_filter())
+            )
+        ).scalar() or 0
 
         first_session_raw = (
             await self.db_session.execute(
@@ -183,8 +213,13 @@ class DatabaseService:
         event_coverage_pct = (
             (sessions_with_events / session_count * 100) if session_count > 0 else 0
         )
+        # Coverage = analyzed / analyzable (sessions with a flow waveform), not
+        # total analysis rows / total sessions.  This stays in [0, 100] after
+        # re-analysis and correctly excludes summary-only imports from the denominator.
         analysis_coverage_pct = (
-            (analysis_count / session_count * 100) if session_count > 0 else 0
+            (sessions_with_analysis / analyzable_session_count * 100)
+            if analyzable_session_count > 0
+            else 0
         )
 
         return DatabaseStats(
@@ -200,6 +235,8 @@ class DatabaseService:
             pattern_count=pattern_count,
             sessions_with_waveforms=sessions_with_waveforms,
             sessions_with_events=sessions_with_events,
+            sessions_with_analysis=sessions_with_analysis,
+            analyzable_session_count=analyzable_session_count,
             waveform_coverage_pct=waveform_coverage_pct,
             event_coverage_pct=event_coverage_pct,
             analysis_coverage_pct=analysis_coverage_pct,

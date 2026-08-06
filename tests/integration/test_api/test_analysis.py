@@ -158,6 +158,158 @@ class TestBatchAnalysis:
         )
         assert response.status_code == 422
 
+    def test_missing_only_no_dates_returns_202_for_unanalyzed_flow_sessions(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        from snore.database.models import AnalysisResult, Day, Waveform
+
+        # session_a: has flow waveform, no analysis → should be included
+        day_a = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 3, 1).date(),
+            session_count=1,
+        )
+        db_session.add(day_a)
+        db_session.flush()
+        session_a = test_session_factory(
+            test_device.id, start_time=datetime(2025, 3, 1, 22, 0)
+        )
+        session_a.day_id = day_a.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_a.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+
+        # session_b: no flow waveform, no analysis → should be excluded
+        day_b = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 3, 2).date(),
+            session_count=1,
+        )
+        db_session.add(day_b)
+        db_session.flush()
+        session_b = test_session_factory(
+            test_device.id, start_time=datetime(2025, 3, 2, 22, 0)
+        )
+        session_b.day_id = day_b.id
+        db_session.flush()
+
+        # session_c: has flow waveform and an analysis result → should be excluded
+        day_c = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 3, 3).date(),
+            session_count=1,
+        )
+        db_session.add(day_c)
+        db_session.flush()
+        session_c = test_session_factory(
+            test_device.id, start_time=datetime(2025, 3, 3, 22, 0)
+        )
+        session_c.day_id = day_c.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_c.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+        db_session.add(
+            AnalysisResult(
+                session_id=session_c.id,
+                timestamp_start=datetime(2025, 3, 3, 22, 0),
+                timestamp_end=datetime(2025, 3, 4, 6, 0),
+                programmatic_result_json={},
+            )
+        )
+        db_session.flush()
+
+        response = api_client.post(
+            "/api/v1/analysis/batch", json={"missing_only": True}
+        )
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert data["session_count"] == 1
+
+    def test_no_dates_and_no_missing_only_returns_400(self, api_client):
+        response = api_client.post(
+            "/api/v1/analysis/batch", json={"missing_only": False}
+        )
+        assert response.status_code == 400
+        assert (
+            "from_date" in response.json()["detail"]
+            or "to_date" in response.json()["detail"]
+        )
+
+    def test_missing_only_with_date_range_filters_compose(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        from snore.database.models import Day, Waveform
+
+        # session_in_range: flow waveform, no analysis, within date range → included
+        day_in = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 4, 10).date(),
+            session_count=1,
+        )
+        db_session.add(day_in)
+        db_session.flush()
+        session_in = test_session_factory(
+            test_device.id, start_time=datetime(2025, 4, 10, 22, 0)
+        )
+        session_in.day_id = day_in.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_in.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+
+        # session_out_of_range: flow waveform, no analysis, outside date range → excluded
+        day_out = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 5, 1).date(),
+            session_count=1,
+        )
+        db_session.add(day_out)
+        db_session.flush()
+        session_out = test_session_factory(
+            test_device.id, start_time=datetime(2025, 5, 1, 22, 0)
+        )
+        session_out.day_id = day_out.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_out.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+        db_session.flush()
+
+        response = api_client.post(
+            "/api/v1/analysis/batch",
+            json={
+                "missing_only": True,
+                "from_date": "2025-04-01",
+                "to_date": "2025-04-30",
+            },
+        )
+        assert response.status_code == 202
+        data = response.json()
+        assert data["session_count"] == 1
+
 
 class TestAnalysisJobsAPI:
     def test_list_jobs_returns_empty_initially(self, api_client):

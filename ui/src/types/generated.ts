@@ -1710,6 +1710,12 @@ export interface components {
         BatchAnalysisRequest: {
             /** From Date */
             from_date?: string | null
+            /**
+             * Missing Only
+             * @description When true, analyze every analyzable session that has no analysis result yet (ignores date range)
+             * @default false
+             */
+            missing_only?: boolean | null
             /** Modes */
             modes?: ('aasm' | 'aasm_relaxed' | 'resmed')[]
             /**
@@ -1771,9 +1777,14 @@ export interface components {
             analysis_count: number
             /**
              * Analysis Coverage Pct
-             * @description Percentage of sessions analyzed
+             * @description Percentage of analyzable sessions that have been analyzed
              */
             analysis_coverage_pct: number
+            /**
+             * Analyzable Session Count
+             * @description Sessions having a flow waveform (the only ones that can be analyzed)
+             */
+            analyzable_session_count: number
             /**
              * Day Count
              * @description Number of days
@@ -1819,6 +1830,11 @@ export interface components {
              * @description Number of sessions
              */
             session_count: number
+            /**
+             * Sessions With Analysis
+             * @description Distinct sessions having at least one analysis result
+             */
+            sessions_with_analysis: number
             /**
              * Sessions With Events
              * @description Sessions that have event data
