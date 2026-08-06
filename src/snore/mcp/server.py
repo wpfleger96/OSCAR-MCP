@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.types import Image
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.session import (
@@ -310,6 +311,13 @@ def make_server(
 # ---------------------------------------------------------------------------
 
 
+# Pydantic v2 wraps validator-raised ValueErrors with this prefix in the "msg" field.
+# Stripping it produces cleaner user-visible messages. If a future pydantic upgrade
+# changes this prefix, the strip becomes a no-op and messages will include the prefix
+# again — that breakage should be caught by TestToolErrorBoundary.test_pydantic_value_error_prefix_stripped.
+_PYDANTIC_VALUE_ERROR_PREFIX = "Value error, "
+
+
 def tool_error_boundary(
     func: Callable[..., Awaitable[Any]],
 ) -> Callable[..., Awaitable[Any]]:
@@ -321,6 +329,16 @@ def tool_error_boundary(
             return await func(*args, **kwargs)
         except ToolError:
             raise
+        except PydanticValidationError as exc:
+            parts: list[str] = []
+            for err in exc.errors():
+                msg = err["msg"].removeprefix(_PYDANTIC_VALUE_ERROR_PREFIX)
+                loc = err.get("loc", ())
+                if loc:
+                    parts.append(f"{'.'.join(str(p) for p in loc)}: {msg}")
+                else:
+                    parts.append(msg)
+            raise ToolError("; ".join(parts)) from exc
         except (ValidationError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
         except Exception as exc:
@@ -545,6 +563,10 @@ def _register_tools(mcp: FastMCP) -> None:
 
         Returns:
             SettingsTimelineResponse with epochs list and total_epochs count.
+            Also includes ``device_capabilities_by_device``, a map keyed by
+            device_id (a timeline can span multiple devices, so capabilities are
+            per-device rather than the single ``device_capabilities`` field
+            used by single-device tools).
         """
         from snore.mcp.tools.settings import get_settings_timeline as _impl
 
@@ -591,7 +613,7 @@ def _register_tools(mcp: FastMCP) -> None:
             end: End date in YYYY-MM-DD format.
             device_id: Optional device ID filter.
             page: Page number (1-based). Default 1.
-            page_size: Nights per page (max 90). Default 30.
+            page_size: Nights per page (must be between 1 and 90). Default 30.
             compliance_threshold_hours: Hours to count as compliant (default 4.0).
 
         Returns:
@@ -708,7 +730,7 @@ def _register_tools(mcp: FastMCP) -> None:
 
         Raw windows are capped at 15 minutes (offset_end - offset_start ≤ 900 s).
         For longer windows set ``bin_minutes`` to aggregate into time bins — the response
-        then populates ``bins`` instead of ``rows``.  ``page_size`` is capped at 2000.
+        then populates ``bins`` instead of ``rows``.  ``page_size`` must be between 1 and 2000.
 
         Args:
             date: Session date in YYYY-MM-DD format.
@@ -721,7 +743,7 @@ def _register_tools(mcp: FastMCP) -> None:
                         multiple sessions on the date.  Pass ``device_id`` too when
                         both are given to validate consistency.
             page: Page number for raw rows (1-based, default 1).
-            page_size: Rows per page for raw fetch (default 500, max 2000).
+            page_size: Rows per page for raw fetch (default 500, must be between 1 and 2000).
             bin_minutes: When set (≥ 1.0), aggregate breaths into bins of this width
                          instead of returning raw rows.  Required for windows > 15 min.
 
@@ -830,6 +852,8 @@ def _register_tools(mcp: FastMCP) -> None:
             (the service-internal sentinel ``0`` is never emitted).
             ``session_coverage`` lists per-session analysis status.
             ``device_capabilities`` describes what the device records.
+            ``primary_mode`` is populated for all criteria; ``null`` when
+            sessions on the date mix primary modes.
 
         Refusal semantics (successful responses with empty ``windows`` list):
             ``null_reason: "algo_version_mismatch"`` — the day has sessions analysed
@@ -1089,7 +1113,10 @@ def _register_tools(mcp: FastMCP) -> None:
         rather than causing an error.
 
         A date with no sessions returns a valid single-panel PNG with a "No waveform
-        data" label rather than a tool error.
+        data" label rather than a tool error — but only when ``device_id`` is provided
+        (owned device, empty date) or when a single device is auto-resolved.  When no
+        device can be resolved (no sessions in range and no ``device_id`` supplied)
+        the tool raises an error instead.
 
         Args:
             date: Session date in YYYY-MM-DD format.
