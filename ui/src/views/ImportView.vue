@@ -84,14 +84,6 @@
                 </div>
             </template>
 
-            <!-- processing: spinner with live status -->
-            <template v-else-if="uploadPhase === 'processing'">
-                <div class="processing-row">
-                    <Loader2 class="h-6 w-6 animate-spin text-muted-foreground" />
-                    <span class="processing-text">{{ processingMessage }}</span>
-                </div>
-            </template>
-
             <!-- error: message + retry actions -->
             <template v-else-if="uploadPhase === 'error'">
                 <p class="error-text">{{ importError }}</p>
@@ -100,16 +92,10 @@
                     <Button @click="handleImport">Try again</Button>
                 </div>
             </template>
-
-            <!-- done: results panel -->
-            <ImportResultsPanel
-                v-else-if="uploadPhase === 'done' && importResult"
-                :result="importResult"
-                :analysis-job-id="analysisJobId"
-                :analysis-queued="analysisQueued"
-                @reset="resetUpload"
-            />
         </div>
+
+        <!-- Active / recent import jobs -->
+        <ImportJobsPanel :jobs="importJobs" @cancel="handleCancelImportJob" />
 
         <!-- Server path section — local mode on localhost only; the route is not
              registered in multiuser mode and the server enforces 403 otherwise -->
@@ -176,10 +162,6 @@
                             </div>
                         </label>
                     </div>
-                    <div v-if="pathPhase === 'importing'" class="processing-row">
-                        <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
-                        <span class="processing-text">{{ processingMessage }}</span>
-                    </div>
                     <p v-if="pathImportError" class="error-text">{{ pathImportError }}</p>
                     <div class="card-actions">
                         <Button variant="outline" @click="resetPath">Change path</Button>
@@ -195,29 +177,20 @@
                         </Button>
                     </div>
                 </template>
-
-                <!-- done: results panel -->
-                <ImportResultsPanel
-                    v-else-if="pathPhase === 'done' && pathImportResult"
-                    :result="pathImportResult"
-                    :analysis-job-id="pathAnalysisJobId"
-                    :analysis-queued="pathAnalysisQueued"
-                    @reset="resetPath"
-                />
             </div>
         </details>
     </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { AxiosProgressEvent } from 'axios'
-import type { ImportSource, ImportResult } from '@/types'
+import type { ImportSource, PipelineJobStatus } from '@/types'
 import { detectSources, importFiles, importFromPath, type FileEntry } from '@/api/import'
-import { connectImportProgress } from '@/api/sse'
+import { getImportJobs, cancelImport, ACTIVE_PIPELINE_STAGES } from '@/api/importJobs'
 import { formatBytes } from '@/utils/formatting'
 import { Button } from '@/components/ui/button'
-import ImportResultsPanel from '@/components/ImportResultsPanel.vue'
+import ImportJobsPanel from '@/components/ImportJobsPanel.vue'
 import { Upload, Folder, Loader2, CheckCircle2, AlertTriangle } from '@lucide/vue'
 import { useAuth } from '@/composables/useAuth'
 
@@ -236,7 +209,7 @@ const selectedProfileId = ref<number | null>(activeProfileId.value)
 // Upload flow state
 // ---------------------------------------------------------------------------
 
-type UploadPhase = 'idle' | 'selected' | 'uploading' | 'processing' | 'error' | 'done'
+type UploadPhase = 'idle' | 'selected' | 'uploading' | 'error'
 
 const uploadPhase = ref<UploadPhase>('idle')
 const fileEntries = ref<FileEntry[]>([])
@@ -246,10 +219,6 @@ const uploadProgress = ref(0)
 const uploadLoaded = ref(0)
 const uploadTotal = ref(0)
 const importError = ref<string | null>(null)
-const importResult = ref<ImportResult | null>(null)
-const analysisJobId = ref<string | null>(null)
-const analysisQueued = ref<boolean | null>(null)
-const processingMessage = ref('Processing files...')
 const isDragging = ref(false)
 const dropError = ref<string | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -354,34 +323,13 @@ async function handleImport() {
             uploadLoaded.value = event.loaded
             uploadTotal.value = event.total
             uploadProgress.value = Math.round((event.loaded / event.total) * 100)
-            if (event.loaded >= event.total) uploadPhase.value = 'processing'
         }
     }
 
     try {
-        const { job_id } = await importFiles(
-            fileEntries.value,
-            onProgress,
-            selectedProfileId.value ?? undefined,
-        )
-        uploadPhase.value = 'processing'
-        processingMessage.value = 'Starting import...'
-
-        connectImportProgress(job_id, {
-            onProgress: (data) => {
-                processingMessage.value = data.message
-            },
-            onComplete: (data) => {
-                importResult.value = data.result as ImportResult
-                analysisJobId.value = data.analysis_job_id ?? null
-                analysisQueued.value = data.analysis_queued ?? null
-                uploadPhase.value = 'done'
-            },
-            onError: (data) => {
-                importError.value = data.message
-                uploadPhase.value = 'error'
-            },
-        })
+        await importFiles(fileEntries.value, onProgress, selectedProfileId.value ?? undefined)
+        resetUpload()
+        void fetchImportJobs()
     } catch (e: unknown) {
         importError.value = e instanceof Error ? e.message : 'Import failed'
         uploadPhase.value = 'error'
@@ -397,9 +345,6 @@ function resetUpload() {
     uploadLoaded.value = 0
     uploadTotal.value = 0
     importError.value = null
-    importResult.value = null
-    analysisJobId.value = null
-    analysisQueued.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
@@ -407,7 +352,7 @@ function resetUpload() {
 // Server-path flow state
 // ---------------------------------------------------------------------------
 
-type PathPhase = 'idle' | 'detecting' | 'detected' | 'importing' | 'error' | 'done'
+type PathPhase = 'idle' | 'detecting' | 'detected' | 'importing' | 'error'
 
 const pathPhase = ref<PathPhase>('idle')
 const sourcePath = ref('')
@@ -416,9 +361,6 @@ const selectedSources = ref<Set<number>>(new Set())
 const noSourcesDetected = ref(false)
 const detectError = ref<string | null>(null)
 const pathImportError = ref<string | null>(null)
-const pathImportResult = ref<ImportResult | null>(null)
-const pathAnalysisJobId = ref<string | null>(null)
-const pathAnalysisQueued = ref<boolean | null>(null)
 
 function toggleSource(i: number) {
     const next = new Set(selectedSources.value)
@@ -454,29 +396,11 @@ async function handlePathImport() {
     if (selected.length === 0) return
     pathPhase.value = 'importing'
     pathImportError.value = null
-    processingMessage.value = 'Starting import...'
 
     try {
-        const { job_id } = await importFromPath(
-            { sources: selected },
-            selectedProfileId.value ?? undefined,
-        )
-
-        connectImportProgress(job_id, {
-            onProgress: (data) => {
-                processingMessage.value = data.message
-            },
-            onComplete: (data) => {
-                pathImportResult.value = data.result as ImportResult
-                pathAnalysisJobId.value = data.analysis_job_id ?? null
-                pathAnalysisQueued.value = data.analysis_queued ?? null
-                pathPhase.value = 'done'
-            },
-            onError: (data) => {
-                pathImportError.value = data.message
-                pathPhase.value = 'error'
-            },
-        })
+        await importFromPath({ sources: selected }, selectedProfileId.value ?? undefined)
+        resetPath()
+        void fetchImportJobs()
     } catch (e: unknown) {
         pathImportError.value = e instanceof Error ? e.message : 'Import failed'
         pathPhase.value = 'error'
@@ -491,10 +415,57 @@ function resetPath() {
     noSourcesDetected.value = false
     detectError.value = null
     pathImportError.value = null
-    pathImportResult.value = null
-    pathAnalysisJobId.value = null
-    pathAnalysisQueued.value = null
 }
+
+// ---------------------------------------------------------------------------
+// Import jobs polling
+// ---------------------------------------------------------------------------
+
+const importJobs = ref<PipelineJobStatus[]>([])
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let pollStopped = false
+
+async function fetchImportJobs() {
+    try {
+        const { jobs } = await getImportJobs()
+        importJobs.value = jobs
+        if (jobs.some((j) => ACTIVE_PIPELINE_STAGES.has(j.stage))) {
+            schedulePoll()
+        }
+    } catch {
+        if (importJobs.value.some((j) => ACTIVE_PIPELINE_STAGES.has(j.stage))) {
+            schedulePoll()
+        }
+    }
+}
+
+function schedulePoll() {
+    if (pollStopped || pollTimer !== null) return
+    pollTimer = setTimeout(async () => {
+        pollTimer = null
+        if (pollStopped) return
+        await fetchImportJobs()
+    }, 3000)
+}
+
+async function handleCancelImportJob(jobId: string) {
+    try {
+        await cancelImport(jobId)
+    } catch {
+        /* job may already be terminal or reaped */
+    } finally {
+        void fetchImportJobs()
+    }
+}
+
+onMounted(() => {
+    void fetchImportJobs()
+})
+
+onUnmounted(() => {
+    pollStopped = true
+    if (pollTimer) clearTimeout(pollTimer)
+})
 </script>
 
 <style scoped>
@@ -674,20 +645,6 @@ function resetPath() {
     border-radius: 9999px;
     background: var(--color-primary);
     transition: width 0.2s;
-}
-
-/* ---- Processing ---- */
-
-.processing-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem 0;
-}
-
-.processing-text {
-    font-size: 0.875rem;
-    color: var(--color-muted-foreground);
 }
 
 /* ---- Error ---- */

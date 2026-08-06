@@ -91,7 +91,10 @@ vi.mock('@/api/import', () => ({
     detectSources: vi.fn(),
     importFromPath: vi.fn(),
 }))
-vi.mock('@/api/sse', () => ({ connectImportProgress: vi.fn(), cancelImport: vi.fn() }))
+vi.mock('@/api/importJobs', () => ({
+    getImportJobs: vi.fn().mockResolvedValue({ jobs: [] }),
+    cancelImport: vi.fn(),
+}))
 vi.mock('@/composables/useDarkMode', () => ({
     useDarkMode: () => ({ isDark: ref(false), toggleDark: vi.fn() }),
 }))

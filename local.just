@@ -25,6 +25,13 @@ _dev-auth-seed:
 docker-build:
     docker build -t snore .
 
+# Regenerate ui/src/types/generated.ts from the FastAPI OpenAPI spec.
+# Local auth mode: building the app requires no session secret, and all
+# routers/schemas are mounted regardless of mode.
+ui-generate-types:
+    SNORE_AUTH_MODE=local uv run python scripts/export_openapi.py ui/openapi.json
+    cd ui && pnpm run generate:types
+
 # Full-stack multiuser smoke test: build the UI, start from a fresh throwaway DB,
 # seed an admin invite, and serve everything at http://127.0.0.1:8000.
 # Open the printed invite URL to walk the signup → login → import journey.

@@ -488,10 +488,14 @@ class AnalysisFacade:
         processing_time_ms = int((time.monotonic() - t_start) * 1000)
 
         if store_results:
-            # Write phase: short INSERT-only scope.
-            async with session_scope() as write_db:
-                write_svc = AnalysisService(write_db, profile_id=self.profile_id)
-                await write_svc.store_result(computation, processing_time_ms)
+            # Write phase: short INSERT-only scope — gated so import chunks
+            # and analysis stores never hold the SQLite write lock concurrently.
+            from snore.database.write_gate import write_gate  # noqa: PLC0415
+
+            async with write_gate():
+                async with session_scope() as write_db:
+                    write_svc = AnalysisService(write_db, profile_id=self.profile_id)
+                    await write_svc.store_result(computation, processing_time_ms)
 
         return computation.summary
 
@@ -767,13 +771,18 @@ class BatchAnalysisCoordinator:
 
                     # --- Write phase: persist result on the event loop ---
                     if store_results and computation is not None:
-                        async with session_scope() as write_session:
-                            write_svc = AnalysisService(
-                                write_session, profile_id=profile_id
-                            )
-                            await write_svc.store_result(
-                                computation, processing_time_ms
-                            )
+                        from snore.database.write_gate import (
+                            write_gate,  # noqa: PLC0415
+                        )
+
+                        async with write_gate():
+                            async with session_scope() as write_session:
+                                write_svc = AnalysisService(
+                                    write_session, profile_id=profile_id
+                                )
+                                await write_svc.store_result(
+                                    computation, processing_time_ms
+                                )
 
                     return "success"
                 except Exception as e:

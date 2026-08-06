@@ -174,18 +174,13 @@ async def run_batch_analysis(
 
 @router.get("/analysis/jobs", response_model=AnalysisJobsListResponse)
 async def list_analysis_jobs(actor: RequireAuth) -> AnalysisJobsListResponse:
-    # Mirror the import cancel ownership rule: jobs with owner_user_id=None are
-    # accessible by any authenticated user (local-mode path-import compatibility).
-    # Jobs with a set owner are visible only to that owner.
-    user_id = actor.user_id
-    all_jobs = analysis_jobs.list_jobs()
-    visible = [
-        j for j in all_jobs if j.owner_user_id is None or j.owner_user_id == user_id
-    ]
     from snore.api.schemas import AnalysisJobStatus  # noqa: PLC0415
 
     return AnalysisJobsListResponse(
-        jobs=[AnalysisJobStatus.model_validate(aj.to_dict()) for aj in visible]
+        jobs=[
+            AnalysisJobStatus.model_validate(aj.to_dict())
+            for aj in analysis_jobs.list_jobs(owner_user_id=actor.user_id)
+        ]
     )
 
 

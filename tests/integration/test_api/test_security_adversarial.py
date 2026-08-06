@@ -405,8 +405,8 @@ class TestImportant1UploadChunkedCopy:
         monkeypatch.setattr(
             import_mod, "_get_upload_limits", lambda: (512 * 1024 * 1024, 500, 10)
         )
-        # Patch _start_worker to a no-op so cleanup doesn't race.
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        # Patch enqueue_for_execution to a no-op so the worker never runs.
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
         # Record global count before the upload.
         count_before = jobs_mod._global_count
@@ -829,7 +829,7 @@ class TestP2UploadLifecycle:
             "_get_upload_limits",
             lambda: (512 * 1024 * 1024, 500, 256 * 1024 * 1024),
         )
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
         # Redirect snore-upload-* dirs to test-private tmp_path (xdist-safe).
         created_dirs: list[Path] = []
@@ -887,7 +887,7 @@ class TestP2UploadLifecycle:
         monkeypatch.setattr(
             import_mod, "_get_upload_limits", lambda: (512 * 1024 * 1024, 500, 10)
         )
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
         count_before = jobs_mod._global_count
 
@@ -948,7 +948,7 @@ class TestP2UploadLifecycle:
             # Return without error so the copy "succeeds" after unblocking.
 
         monkeypatch.setattr(import_mod, "_copy_chunked", blocking_copy)
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
         count_before = jobs_mod._global_count
         tmpdir_before = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))

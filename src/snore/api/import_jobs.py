@@ -1,11 +1,15 @@
 """In-memory job store for streaming import progress via SSE.
 
+Uploads stage concurrently; execution is serialised through a single persistent
+worker thread (single SQLite writer — mirrors the analysis queue).
+
 State machine
 -------------
 ::
 
     reserve()             → PENDING_UPLOAD (admission slot taken *before* body is read)
     convert_to_job()      → PENDING       (reservation becomes a real job after parsing)
+    enqueue_for_execution → PENDING job appended to FIFO; worker picks it up next
     GET /{id}/progress    → attaches an SSE observer; never starts or restarts the worker
     DELETE /{id}          → cancelled (idempotent after any terminal state)
     worker finishes       → succeeded | failed
@@ -29,23 +33,27 @@ retained for SSE observation independently of capacity.
 
 Guarantees
 ----------
-- Start-once: the worker starts exactly once at convert_to_job/POST; /progress GETs
-  are observer-only.
+- Serial execution: jobs run one at a time through a single persistent worker thread,
+  preventing SQLite write-lock contention between concurrent imports.
+- Start-once: the worker transitions a job PENDING → RUNNING exactly once.
 - Fan-out: each observer has its own capacity-one/coalescing channel backed by the
   latest-progress snapshot.  Terminal delivery is never dropped.
 - Late observers: connecting after terminal state immediately receive the terminal event.
 - Reaper: removes terminal jobs only; active jobs are never reaped regardless of age.
-- Shutdown: ``shutdown()`` cancels all non-terminal jobs and awaits worker threads.
+- Shutdown: ``shutdown()`` cancels all non-terminal jobs, drains the FIFO, and awaits
+  the worker thread.
 """
 
 from __future__ import annotations
 
+import collections
 import logging
 import shutil
 import threading
 import time
 import uuid
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -176,6 +184,9 @@ class ImportJob:
     # PATH jobs: sources list.
     sources: list[Any] | None = None
 
+    # File count — protected by _lock (written by the request handler before the worker starts).
+    _file_count: int = field(default=0, init=False, repr=False)
+
     # State machine fields — protected by _lock.
     _state: JobState = field(default=JobState.PENDING_UPLOAD, init=False, repr=False)
     _terminal_msg: dict[str, Any] | None = field(default=None, init=False, repr=False)
@@ -201,6 +212,11 @@ class ImportJob:
     # stalled observers always learn that data landed (plan §A1, pass-4 IMPORTANT-1).
     _import_committed: bool = field(default=False, init=False, repr=False)
     _import_result: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    # Analysis linkage — set by the worker thread via set_analysis_link() after
+    # the enqueue attempt and BEFORE _finish().  The list endpoint stitches from
+    # these fields; the SSE terminal payload carries the same info independently.
+    _analysis_job_id: str | None = field(default=None, init=False, repr=False)
+    _analysis_queued: bool | None = field(default=None, init=False, repr=False)
 
     @property
     def state(self) -> JobState:
@@ -223,6 +239,102 @@ class ImportJob:
         """True after the import phase has committed to the database."""
         with self._lock:
             return self._import_committed
+
+    @property
+    def finished_at(self) -> float | None:
+        """Monotonic timestamp when the job reached a terminal state, or None."""
+        with self._lock:
+            return self._terminal_at
+
+    @property
+    def analysis_job_id(self) -> str | None:
+        """ID of the downstream analysis job, or None if not yet set."""
+        with self._lock:
+            return self._analysis_job_id
+
+    @property
+    def analysis_queued(self) -> bool | None:
+        """True when analysis was enqueued; False when the queue was full; None when unknown."""
+        with self._lock:
+            return self._analysis_queued
+
+    @property
+    def file_count(self) -> int:
+        """Number of files submitted with this job."""
+        with self._lock:
+            return self._file_count
+
+    def set_file_count(self, n: int) -> None:
+        """Record the number of files submitted with this job."""
+        with self._lock:
+            self._file_count = n
+
+    @property
+    def latest_progress_message(self) -> str | None:
+        """The most recent progress message text, or None."""
+        with self._lock:
+            if self._latest_progress is None:
+                return None
+            data = self._latest_progress.get("data")
+            if not isinstance(data, dict):
+                return None
+            return data.get("message")
+
+    @property
+    def error_message(self) -> str | None:
+        """The error message from the terminal payload, only for FAILED or CANCELLED jobs."""
+        with self._lock:
+            if self._state not in (JobState.FAILED, JobState.CANCELLED):
+                return None
+            if self._terminal_msg is None:
+                return None
+            data = self._terminal_msg.get("data")
+            if not isinstance(data, dict):
+                return None
+            return data.get("message")
+
+    @property
+    def sessions_imported(self) -> int | None:
+        """Total sessions committed to the DB, or None if import has not committed."""
+        with self._lock:
+            if not self._import_committed or self._import_result is None:
+                return None
+            return self._import_result.get("total_imported")
+
+    @property
+    def import_result_snapshot(self) -> dict[str, Any] | None:
+        """Shallow copy of the import result dict, or None if not yet committed.
+
+        Returns a SHALLOW copy — top-level dict copied, nested lists/dicts shared;
+        callers must treat it as read-only (deliberate perf choice).
+        """
+        with self._lock:
+            if not self._import_committed or self._import_result is None:
+                return None
+            return dict(self._import_result)
+
+    def set_analysis_link(
+        self,
+        *,
+        analysis_job_id: str | None,
+        queue_full: bool,
+    ) -> None:
+        """Record the outcome of the analysis enqueue attempt.
+
+        ``queue_full`` is True when the enqueue attempt was rejected because the
+        analysis queue was full (not when the queued job later failed).
+
+        Called by the worker thread after the enqueue attempt and BEFORE _finish() —
+        the list endpoint stitches from these fields; the SSE terminal payload carries
+        the same info independently.
+        """
+        with self._lock:
+            self._analysis_job_id = analysis_job_id
+            if analysis_job_id is not None:
+                self._analysis_queued = True
+            elif queue_full:
+                self._analysis_queued = False
+            # else leave _analysis_queued as None (no sessions imported, no attempt)
 
     def convert_to_pending(self) -> bool:
         """Transition PENDING_UPLOAD → PENDING (files received, body parsed).
@@ -509,6 +621,25 @@ def get_job(job_id: str) -> ImportJob | None:
         return _jobs.get(job_id)
 
 
+def list_jobs(owner_user_id: int | None = None) -> list[ImportJob]:
+    """Return jobs visible to *owner_user_id*, reaping expired terminal jobs first.
+
+    A job with owner_user_id=None is visible to any caller (local-mode parity).
+    A job with a set owner is visible only to that owner.
+    When *owner_user_id* is None the caller receives all jobs.
+    """
+    _reap_terminal()
+    with _lock:
+        jobs_snapshot = list(_jobs.values())
+    if owner_user_id is None:
+        return jobs_snapshot
+    return [
+        job
+        for job in jobs_snapshot
+        if job.owner_user_id is None or job.owner_user_id == owner_user_id
+    ]
+
+
 def remove_job(job_id: str) -> None:
     with _lock:
         _jobs.pop(job_id, None)
@@ -523,23 +654,191 @@ def cancel_job(job_id: str) -> bool:
 
 
 def shutdown(timeout: float = 10.0) -> list[str]:
-    """Cancel all non-terminal jobs and wait for worker threads to exit."""
-    with _lock:
-        active = [j for j in _jobs.values() if not j.is_terminal]
-    for job in active:
+    """Cancel all non-terminal jobs and wait for the worker thread to exit.
+
+    Queued PENDING jobs are drained from the FIFO, cancelled, and have their
+    staged files cleaned and capacity released here (run_callback never ran
+    for them).  The currently RUNNING job (if any) is cancelled cooperatively
+    and its cleanup is handled by the run_callback's finally block.
+    """
+    global _import_worker_thread, _import_stop_event
+
+    # Signal the worker to stop after finishing the current job (if any).
+    if _import_stop_event is not None:
+        _import_stop_event.set()
+
+    # Drain the execution queue atomically so the worker cannot pick up more jobs.
+    drained: list[tuple[ImportJob, Path | None]] = []
+    with _import_condition:
+        drained = list(_import_queue)
+        _import_queue.clear()
+        _import_condition.notify_all()
+
+    # Cancel and clean up each drained PENDING job.  run_callback never ran
+    # for these, so we are responsible for cleanup_files + release_capacity.
+    for job, _ in drained:
         job.try_cancel()
+        job.cleanup_files()
+        job.release_capacity()
+
+    # Cancel any job that is still non-terminal (e.g. currently RUNNING or a
+    # PENDING_UPLOAD job whose upload handler is still writing).  try_cancel()
+    # is idempotent so calling it again on an already-cancelled drained job is safe.
+    with _lock:
+        remaining = [j for j in _jobs.values() if not j.is_terminal]
+    for job in remaining:
+        job.try_cancel()
+
+    # Wait for the single worker thread to exit.
     still_alive: list[str] = []
-    for job in active:
-        job.wait_for_worker(timeout=timeout)
-        t = job._worker_thread
-        if t is not None and t.is_alive():
-            logger.warning(
-                "Worker thread for job %s still alive after %.1fs shutdown timeout",
-                job.job_id,
-                timeout,
-            )
-            still_alive.append(job.job_id)
+    if _import_worker_thread is not None:
+        _import_worker_thread.join(timeout=timeout)
+        if _import_worker_thread.is_alive():
+            with _lock:
+                for job in _jobs.values():
+                    if not job.is_terminal:
+                        logger.warning(
+                            "Worker thread for job %s still alive after %.1fs shutdown timeout",
+                            job.job_id,
+                            timeout,
+                        )
+                        still_alive.append(job.job_id)
     return still_alive
+
+
+# ---------------------------------------------------------------------------
+# Import execution queue (single persistent worker, FIFO serial execution)
+# ---------------------------------------------------------------------------
+
+_import_queue: collections.deque[tuple[ImportJob, Path | None]] = collections.deque()
+_import_condition: threading.Condition = threading.Condition()
+
+_import_worker_thread: threading.Thread | None = None
+_import_stop_event: threading.Event | None = None
+
+
+def enqueue_for_execution(job: ImportJob, profile_raw_root: Path | None) -> None:
+    """Append *job* to the execution FIFO.
+
+    Must be called after the job has reached PENDING state (after
+    ``convert_to_pending()`` for UPLOAD jobs, or after ``create_job()`` for
+    PATH jobs).  The persistent worker thread picks jobs up in FIFO order.
+    """
+    with _import_condition:
+        _import_queue.append((job, profile_raw_root))
+        _import_condition.notify_all()
+    logger.debug("Queued import job %s for execution", job.job_id)
+
+
+def _import_worker_loop(
+    stop_event: threading.Event,
+    run_callback: Callable[[ImportJob, Path | None], None],
+) -> None:
+    while not stop_event.is_set():
+        # Exit if this thread has been replaced by a newer worker.  This
+        # guarantees a deposed worker terminates ≤1 wait cycle after replacement
+        # rather than running indefinitely on the shared queue.
+        if _import_worker_thread is not threading.current_thread():
+            return
+        item: tuple[ImportJob, Path | None] | None = None
+        with _import_condition:
+            if not _import_queue and not stop_event.is_set():
+                _import_condition.wait(timeout=1.0)
+            # Re-check after the wait: we may have been replaced while sleeping.
+            if _import_worker_thread is not threading.current_thread():
+                return
+            if not stop_event.is_set() and _import_queue:
+                item = _import_queue.popleft()
+
+        if item is None:
+            continue
+
+        job, profile_raw_root = item
+
+        if not job.try_start():
+            # Job was cancelled while it was queued (state is now CANCELLED).
+            # run_callback never ran, so we are responsible for cleanup.
+            job.cleanup_files()
+            job.release_capacity()
+            continue
+
+        try:
+            run_callback(job, profile_raw_root)
+        except BaseException:
+            logger.exception(
+                "Unexpected exception in import worker for job %s", job.job_id
+            )
+            # run_callback's finally block (cleanup_files + release_capacity) has
+            # already run.  Ensure a terminal state is recorded so observers don't
+            # hang on a never-closing SSE stream.
+            if not job.is_terminal:
+                try:
+                    job._finish(
+                        succeeded=False,
+                        terminal_msg={
+                            "event": "error",
+                            "data": {"message": "Worker error"},
+                        },
+                    )
+                except Exception:
+                    pass
+            # Do NOT re-raise — the worker thread must stay alive.
+
+
+def stop_import_worker(timeout: float = 5.0) -> None:
+    """Stop the active import worker thread and wait for it to exit.
+
+    Safe to call when no worker is running.  Used by ``shutdown()`` and test
+    fixtures that need to tear down a running worker cleanly.  Notifies
+    ``_import_condition`` so the worker wakes immediately rather than waiting
+    out its 1.0 s poll interval.
+    """
+    global _import_worker_thread, _import_stop_event
+    event = _import_stop_event
+    thread = _import_worker_thread
+    if event is not None:
+        event.set()
+    with _import_condition:
+        _import_condition.notify_all()
+    if thread is not None:
+        thread.join(timeout=timeout)
+    _import_worker_thread = None
+    _import_stop_event = None
+
+
+def start_import_worker(
+    run_callback: Callable[[ImportJob, Path | None], None],
+) -> tuple[threading.Thread, threading.Event]:
+    """Start the single persistent import-job worker thread.
+
+    Returns ``(thread, stop_event)`` so the caller can shut it down.
+    Jobs enqueued before the worker starts are not lost — they sit in the
+    deque and are processed as soon as the worker begins its loop.
+
+    If a previous worker thread is still alive it is stopped gracefully
+    (best-effort, 2 s join) before the new one is started.  The deposed-worker
+    check inside ``_import_worker_loop`` is the hard guarantee — a stale thread
+    that outlives the join exits as soon as it next wakes.
+    """
+    global _import_worker_thread, _import_stop_event
+    # Gracefully retire any existing worker before starting a replacement.
+    if _import_worker_thread is not None and _import_worker_thread.is_alive():
+        if _import_stop_event is not None:
+            _import_stop_event.set()
+        with _import_condition:
+            _import_condition.notify_all()
+        _import_worker_thread.join(timeout=2.0)
+    stop_event = threading.Event()
+    _import_stop_event = stop_event
+    t = threading.Thread(
+        target=_import_worker_loop,
+        args=(stop_event, run_callback),
+        daemon=True,
+        name="import-job-worker",
+    )
+    _import_worker_thread = t
+    t.start()
+    return t, stop_event
 
 
 def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Event]:
