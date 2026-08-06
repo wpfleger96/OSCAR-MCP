@@ -41,6 +41,7 @@ function makeAuthMock(role = 'member') {
         activeProfileId: ref(null) as never,
         authMode: ref('multiuser') as never,
         canWrite: ref(true) as never,
+        demoAvailable: ref(false) as never,
         profileKey: ref(0) as never,
         login: vi.fn(),
         demoLogin: vi.fn(),

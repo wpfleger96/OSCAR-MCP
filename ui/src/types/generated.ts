@@ -1727,6 +1727,11 @@ export interface components {
             /** Authenticated */
             authenticated: boolean
             /**
+             * Demo Available
+             * @default false
+             */
+            demo_available: boolean
+            /**
              * Profiles
              * @default []
              */

@@ -11,6 +11,7 @@ const mockStatus = {
     user: { id: 1, email: 'alice@example.com', display_name: 'Alice', role: 'user' },
     profiles: [{ id: 10, name: 'Primary' }],
     active_profile_id: 10,
+    demo_available: false,
 }
 
 describe('useAuth', () => {

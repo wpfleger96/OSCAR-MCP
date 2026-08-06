@@ -243,9 +243,6 @@ def scrub_demo(db: str | None, source_profile_id: int, yes: bool) -> None:
     asyncio.run(_run())
 
 
-_DEMO_EMAIL = "demo@snore.local"
-
-
 async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
     """Async implementation of the scrub-demo command.
 
@@ -254,18 +251,16 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
     data co-exist before the cascade-delete of existing demo devices completes):
 
     Step 1 — verify source profile exists.
-    Step 2 — find-or-create demo user (role='demo', password_hash=NULL).
-    Step 3 — find-or-create demo profile; on re-run delete old device chain + reset
-              PII fields (username, height_cm, settings) on the profile row itself.
-    Step 4 — compute whole-day date offset (most recent source day → today-7).
-    Step 5 — copy device/day/session chain with PII scrubs and date shift:
+    Step 2 — find-or-create demo user and profile (via DemoService).
+    Step 3 — compute whole-day date offset (most recent source day → today-7).
+    Step 4 — copy device/day/session chain with PII scrubs and date shift:
               - waveforms copied via INSERT...SELECT at the SQL layer so blobs never
                 enter Python memory;
               - events, statistics, settings, analysis_results fetched in one batch
                 per device (WHERE session_id IN (...)) to avoid per-session round-trips;
               - detected_patterns and breaths batched per analysis result batch.
-    Step 6 — post-scrub integrity checks (ClickException, not bare assert).
-    Step 7 — print summary.
+    Step 5 — post-scrub integrity checks (ClickException, not bare assert).
+    Step 6 — print summary.
 
     To revoke a demo session: bump ``users.session_version`` for the demo user;
     all outstanding session cookies will be invalidated on the next request.
@@ -287,11 +282,11 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
         Profile,
         Setting,
         Statistics,
-        User,
     )
     from snore.database.models import (
         Session as DbSession,
     )
+    from snore.services.demo_service import DemoService  # noqa: PLC0415
 
     db: AsyncSession = session
 
@@ -300,72 +295,18 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
     if source_profile is None:
         raise click.ClickException(f"Source profile {source_profile_id} not found")
 
-    # ---- 2. Find-or-create demo user ----
-    # Each query uses a unique variable name so mypy can track the return type.
-    user_q = select(User).where(User.canonical_email == _DEMO_EMAIL)
-    demo_user: User | None = (await db.execute(user_q)).scalars().first()
-
-    if demo_user is None:
-        demo_user = User(
-            canonical_email=_DEMO_EMAIL,
-            display_name="Demo",
-            role="demo",
-            password_hash=None,
-            session_version=0,
+    # ---- 2. Find-or-create demo user + profile ----
+    demo_user, demo_profile, created = await DemoService(db).ensure_user_and_profile()
+    if created:
+        console.print(
+            f"Created demo user (id={demo_user.id}), profile id={demo_profile.id}"
         )
-        db.add(demo_user)
-        await db.flush()
-        console.print(f"Created demo user (id={demo_user.id})")
     else:
-        console.print(f"Using existing demo user (id={demo_user.id})")
-
-    assert demo_user is not None  # narrowing for mypy
-
-    # ---- 3. Find-or-create demo profile ----
-    profile_q = select(Profile).where(
-        Profile.user_id == demo_user.id,
-        Profile.name == "Demo",
-    )
-    demo_profile: Profile | None = (await db.execute(profile_q)).scalars().first()
-
-    if demo_profile is None:
-        demo_profile = Profile(
-            user_id=demo_user.id,
-            name="Demo",
-            username=None,
-            first_name=None,
-            last_name=None,
-            date_of_birth=None,
-            height_cm=None,
-            settings={},
+        console.print(
+            f"Using existing demo user (id={demo_user.id}), profile id={demo_profile.id}"
         )
-        db.add(demo_profile)
-        await db.flush()
-        demo_user.default_profile_id = demo_profile.id
-        await db.flush()
-        console.print(f"Created demo profile (id={demo_profile.id})")
-    else:
-        console.print(f"Replacing existing demo profile data (id={demo_profile.id})")
-        # Re-run path: reset PII fields on the profile row itself (new devices will
-        # be recreated below; these column values persist on the existing row).
-        demo_profile.username = None
-        demo_profile.height_cm = None
-        demo_profile.settings = {}
-        # Delete existing device chain — cascade handles sessions/events/etc.
-        cleanup_dev_q = select(Device).where(Device.profile_id == demo_profile.id)
-        existing_devices = (await db.execute(cleanup_dev_q)).scalars().all()
-        for dev in existing_devices:
-            await db.delete(dev)
-        await db.flush()
 
-    assert demo_profile is not None  # narrowing for mypy
-
-    # Ensure demo_user.default_profile_id points to the demo profile.
-    if demo_user.default_profile_id != demo_profile.id:
-        demo_user.default_profile_id = demo_profile.id
-        await db.flush()
-
-    # ---- 4. Compute date shift ----
+    # ---- 3. Compute date shift ----
     # Find the most recent date across all source days.
     max_date_q = (
         select(Day.date)
@@ -397,7 +338,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
             return None
         return dt + day_offset
 
-    # ---- 5. Copy device/day/session chain ----
+    # ---- 4. Copy device/day/session chain ----
     source_dev_q = select(Device).where(Device.profile_id == source_profile_id)
     source_devices = (await db.execute(source_dev_q)).scalars().all()
 
@@ -704,7 +645,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
 
     await db.flush()
 
-    # ---- 6. Post-scrub integrity checks ----
+    # ---- 5. Post-scrub integrity checks ----
     # Using explicit ClickException (not bare assert) so checks survive python -O.
 
     # a. No source serial numbers remain in demo devices.
@@ -761,7 +702,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
             f"Integrity check failed: raw backup dir exists for demo profile: {raw_dir}"
         )
 
-    # ---- 7. Summary ----
+    # ---- 6. Summary ----
     print_success("Scrub-demo complete")
     print_subsection("Rows copied")
     for table, count in counts.items():
