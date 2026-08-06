@@ -296,8 +296,15 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
         raise click.ClickException(f"Source profile {source_profile_id} not found")
 
     # ---- 2. Find-or-create demo user + profile ----
-    demo_user, demo_profile = await DemoService.ensure_user_and_profile(db)
-    console.print(f"Demo user id={demo_user.id}, profile id={demo_profile.id}")
+    demo_user, demo_profile, created = await DemoService(db).ensure_user_and_profile()
+    if created:
+        console.print(
+            f"Created demo user (id={demo_user.id}), profile id={demo_profile.id}"
+        )
+    else:
+        console.print(
+            f"Using existing demo user (id={demo_user.id}), profile id={demo_profile.id}"
+        )
 
     # ---- 3. Compute date shift ----
     # Find the most recent date across all source days.
@@ -331,7 +338,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
             return None
         return dt + day_offset
 
-    # ---- 5. Copy device/day/session chain ----
+    # ---- 4. Copy device/day/session chain ----
     source_dev_q = select(Device).where(Device.profile_id == source_profile_id)
     source_devices = (await db.execute(source_dev_q)).scalars().all()
 
@@ -638,7 +645,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
 
     await db.flush()
 
-    # ---- 6. Post-scrub integrity checks ----
+    # ---- 5. Post-scrub integrity checks ----
     # Using explicit ClickException (not bare assert) so checks survive python -O.
 
     # a. No source serial numbers remain in demo devices.
@@ -695,7 +702,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
             f"Integrity check failed: raw backup dir exists for demo profile: {raw_dir}"
         )
 
-    # ---- 7. Summary ----
+    # ---- 6. Summary ----
     print_success("Scrub-demo complete")
     print_subsection("Rows copied")
     for table, count in counts.items():

@@ -449,7 +449,16 @@ async def auth_status(
 
     demo_available = False
     if cfg.is_multiuser:
-        demo_available = await DemoService.demo_user_exists(db)
+        # Cache True permanently in process: a True result never reverts within a
+        # process (a stale True after a DB-file swap only degrades to a harmless 404
+        # on demo-login). We never cache False so a demo user created later by the
+        # scrub-demo CLI is picked up without restart.
+        if getattr(request.app.state, "demo_available", False):
+            demo_available = True
+        else:
+            demo_available = await DemoService(db).demo_user_exists()
+            if demo_available:
+                request.app.state.demo_available = True
 
     actor: ActorContext | None = getattr(request.state, "actor", None)
 

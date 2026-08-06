@@ -2,6 +2,7 @@
 
 Covers:
 - POST /api/v1/auth/demo-login (happy path, no demo user, disabled user, local mode)
+- GET /api/v1/auth/status demo_available field (no demo user, demo user, caching)
 - snore db scrub-demo (data copy, PII scrubs, date rotation, idempotency,
   source data untouched, breath FK remapping)
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -679,3 +681,91 @@ class TestScrubDemo:
         async with async_db_session.begin():
             with pytest.raises(click.ClickException, match="not found"):
                 await _do_scrub_demo(async_db_session, 99999)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/auth/status — demo_available field
+# ---------------------------------------------------------------------------
+
+
+def _seed_demo_user(db_session: Any) -> None:
+    """Seed an active demo user + profile via the AUTOCOMMIT sync session."""
+    demo_user = models.User(
+        canonical_email="demo@snore.local",
+        role="demo",
+        display_name="Demo",
+        password_hash=None,
+        session_version=0,
+    )
+    db_session.add(demo_user)
+    db_session.flush()
+    demo_profile = models.Profile(user_id=demo_user.id, name="Demo")
+    db_session.add(demo_profile)
+    db_session.flush()
+    demo_user.default_profile_id = demo_profile.id
+    db_session.flush()
+
+
+class TestAuthStatusDemoAvailable:
+    def test_auth_status_no_demo_user_returns_demo_available_false(
+        self, temp_db, async_db_session, db_session, monkeypatch
+    ):
+        """GET /auth/status → demo_available: false when no demo user exists."""
+        client = _make_multiuser_client_no_actor(async_db_session, monkeypatch)
+        resp = client.get("/api/v1/auth/status")
+        assert resp.status_code == 200
+        assert resp.json()["demo_available"] is False
+
+    def test_auth_status_with_demo_user_returns_demo_available_true(
+        self, temp_db, async_db_session, db_session, monkeypatch
+    ):
+        """GET /auth/status → demo_available: true when an active demo user exists."""
+        _seed_demo_user(db_session)
+
+        client = _make_multiuser_client_no_actor(async_db_session, monkeypatch)
+        resp = client.get("/api/v1/auth/status")
+        assert resp.status_code == 200
+        assert resp.json()["demo_available"] is True
+
+    def test_auth_status_false_not_cached_returns_true_after_demo_user_seeded(
+        self, temp_db, async_db_session, db_session, monkeypatch
+    ):
+        """False result is not cached; a later request on the same app finds the demo user.
+
+        Verifies the caching contract: True is stored in app.state.demo_available and
+        re-used; False is never stored so a newly created demo user is picked up on
+        the next request without restarting the process.
+        """
+        monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
+        monkeypatch.setenv(
+            "SNORE_SESSION_SECRET", "test-secret-at-least-32-chars-long-abcdef"
+        )
+        monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+
+        from snore.api.config import reset_config  # noqa: PLC0415
+
+        reset_config()
+        app = create_app()
+
+        async def override_get_db():
+            async with async_db_session.begin():
+                yield async_db_session
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app, raise_server_exceptions=True)
+
+        # First request: no demo user → false (nothing written to app.state).
+        resp = client.get("/api/v1/auth/status")
+        assert resp.status_code == 200
+        assert resp.json()["demo_available"] is False
+
+        # Seed demo user via AUTOCOMMIT sync session — visible to the next request.
+        _seed_demo_user(db_session)
+
+        # Second request on the same app instance → true (False was not cached).
+        resp = client.get("/api/v1/auth/status")
+        assert resp.status_code == 200
+        assert resp.json()["demo_available"] is True
+
+        # True result is now cached in app.state so future requests skip the DB query.
+        assert getattr(app.state, "demo_available", False) is True

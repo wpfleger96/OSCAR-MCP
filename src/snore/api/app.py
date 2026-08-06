@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Auto-create demo user and import bundled fixture data if not present.
     if cfg.is_multiuser:
-        await _startup_ensure_demo_data()
+        await _startup_ensure_demo_data(app)
 
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
@@ -162,13 +162,17 @@ async def _startup_purge_expired_oauth_attempts() -> None:
         logger.warning("oauth_attempts purge failed: %s", exc)
 
 
-async def _startup_ensure_demo_data() -> None:
+async def _startup_ensure_demo_data(app: FastAPI) -> None:
     """Auto-create demo user and import bundled fixture data if not present.
 
     Idempotent: exits immediately when demo data already exists.  Failures are
     logged as warnings and never prevent startup.
+
+    The two separate session_scope() windows are deliberate: no write lock is held
+    during EDF parsing (which can take tens of seconds).  Concurrent multi-worker
+    first boot can double-import benignly — ensure_user_and_profile's cascade-delete
+    makes re-entry idempotent.
     """
-    import importlib.resources  # noqa: PLC0415
     import time as _time  # noqa: PLC0415
 
     from snore.database.session import session_scope  # noqa: PLC0415
@@ -176,8 +180,9 @@ async def _startup_ensure_demo_data() -> None:
 
     try:
         async with session_scope() as db:
-            if await DemoService.demo_data_exists(db):
+            if await DemoService(db).demo_data_exists():
                 logger.debug("Demo data already exists — skipping fixture import")
+                app.state.demo_available = True
                 return
 
         fixtures_dir = Path(str(importlib.resources.files("snore.demo"))) / "fixtures"
@@ -193,7 +198,7 @@ async def _startup_ensure_demo_data() -> None:
         logger.info("Initializing demo account from bundled fixtures…")
         t0 = _time.monotonic()
         async with session_scope() as db:
-            counts = await DemoService.import_from_fixtures(db, fixtures_dir)
+            counts = await DemoService(db).import_from_fixtures(fixtures_dir)
         elapsed = _time.monotonic() - t0
         logger.info(
             "Demo data ready in %.1fs — %d sessions imported, %d skipped, %d failed",
@@ -202,10 +207,12 @@ async def _startup_ensure_demo_data() -> None:
             counts.get("skipped", 0),
             counts.get("failed", 0),
         )
-    except Exception as exc:
+        if counts.get("sessions", 0) > 0:
+            app.state.demo_available = True
+    except Exception:
         logger.warning(
-            "Demo startup initialization failed — demo login will be unavailable: %s",
-            exc,
+            "Demo startup initialization failed — demo login will be unavailable",
+            exc_info=True,
         )
 
 
