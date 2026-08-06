@@ -1,6 +1,6 @@
 [project]
 name = "snore"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI tool for analyzing and inspecting CPAP/APAP therapy data"
 requires-python = ">=3.13"
 readme = "README.md"
