@@ -95,6 +95,9 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utc_now, onupdate=utc_now
     )
+    preferences: Mapped[dict[str, Any]] = mapped_column(
+        ValidatedJSONWithDefault, nullable=True, default=dict
+    )
 
     profiles = relationship(
         "Profile",

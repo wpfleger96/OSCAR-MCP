@@ -6,6 +6,12 @@ vi.mock('@/composables/useAuth')
 vi.mock('@/components/ui/button', () => ({
     Button: { template: '<button type="submit"><slot /></button>' },
 }))
+// LoginView pulls resolveLandingPath from the real router module; mock it so
+// tests don't instantiate the app router or hit the preferences endpoint.
+vi.mock('@/router', () => ({
+    resolveLandingPath: vi.fn().mockResolvedValue('/dashboard'),
+    default: {},
+}))
 
 import LoginView from '@/views/LoginView.vue'
 import { useAuth } from '@/composables/useAuth'

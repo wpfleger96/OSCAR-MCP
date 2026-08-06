@@ -103,9 +103,11 @@ import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { listProfiles, createProfile, updateProfile, setDefaultProfile } from '@/api/profiles'
 import { useAuth } from '@/composables/useAuth'
+import { useDateFormat } from '@/composables/useDateFormat'
 import type { ProfileResponse } from '@/types'
 
 const { activeProfileId, canWrite, refreshStatus } = useAuth()
+const { formatDate, loadDateFormat } = useDateFormat()
 
 const profiles = ref<ProfileResponse[]>([])
 const loading = ref(true)
@@ -117,14 +119,6 @@ const editName = ref('')
 
 const newProfileName = ref('')
 const creating = ref(false)
-
-function formatDate(iso: string): string {
-    return new Date(iso).toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-    })
-}
 
 async function loadProfiles() {
     loading.value = true
@@ -138,7 +132,10 @@ async function loadProfiles() {
     }
 }
 
-onMounted(loadProfiles)
+onMounted(() => {
+    loadDateFormat()
+    loadProfiles()
+})
 
 function startEdit(profile: ProfileResponse) {
     editingId.value = profile.id
@@ -298,31 +295,6 @@ async function handleCreate() {
     margin-left: auto;
 }
 
-.action-btn {
-    font-size: 0.8rem;
-    padding: 0.25rem 0.625rem;
-    border-radius: 4px;
-    border: 1px solid var(--color-border);
-    background: var(--color-card);
-    color: var(--color-foreground);
-    cursor: pointer;
-    transition: background 0.1s;
-}
-
-.action-btn:hover {
-    background: var(--color-accent);
-}
-
-.action-btn--ghost {
-    background: transparent;
-    border-color: transparent;
-}
-
-.action-btn--ghost:hover {
-    background: var(--color-accent);
-    border-color: var(--color-border);
-}
-
 .action-error {
     font-size: 0.875rem;
     color: var(--color-destructive);
@@ -335,24 +307,8 @@ async function handleCreate() {
     align-items: center;
 }
 
+/* flex: 1 so the input fills the create-form row */
 .field-input {
     flex: 1;
-    height: 2.25rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-input);
-    background: transparent;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    outline: none;
-    transition: border-color 0.15s;
-}
-
-.field-input:focus {
-    border-color: var(--color-primary);
-}
-
-.field-input:disabled {
-    opacity: 0.6;
 }
 </style>

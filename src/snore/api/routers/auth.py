@@ -49,10 +49,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.api.client_ip import get_client_ip
 from snore.api.deps import get_db, get_raw_session
 from snore.api.guards import RequireAuth
+from snore.api.schemas import MessageResponse
 from snore.auth.actor import ActorContext
 from snore.auth.factory import ActorContextFactory
 from snore.auth.google_oauth import OAuthError, fetch_google_id_token_claims
 from snore.auth.invite import InviteRedemptionError
+from snore.auth.invite_tokens import hash_invite_token
 from snore.auth.lockout import get_invite_lockout_store, get_lockout_store
 from snore.auth.passwords import (
     dummy_verify_async,
@@ -259,10 +261,6 @@ class AuthStatusResponse(BaseModel):
 class InviteInfoResponse(BaseModel):
     email: str
     valid: bool
-
-
-class MessageResponse(BaseModel):
-    message: str
 
 
 class _TxFailure(Exception):
@@ -565,7 +563,7 @@ async def lookup_invite(
     """
     ip = get_client_ip(request)
     lockout = get_invite_lockout_store()
-    token_hash = _hash_invite_token(body.token)
+    token_hash = hash_invite_token(body.token)
 
     # Rate limit per (token_hash, IP): slow down repeated probing of the same
     # token while the RateLimitMiddleware handles cross-token IP enumeration.
@@ -632,7 +630,7 @@ async def redeem_invite_route(
     cfg = get_config()
     ip = get_client_ip(request)
     lockout = get_invite_lockout_store()
-    token_hash = _hash_invite_token(body.token)
+    token_hash = hash_invite_token(body.token)
 
     # Rate limit per (token_hash, IP).
     if lockout.is_locked(token_hash, ip):
@@ -757,11 +755,6 @@ async def redeem_invite_route(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _hash_invite_token(token: str) -> str:
-    """Return the SHA-256 hex digest of the invite token."""
-    return hashlib.sha256(token.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -1009,7 +1002,7 @@ async def google_invite_initiate(
 
     ip = get_client_ip(request)
     lockout = get_invite_lockout_store()
-    token_hash = _hash_invite_token(token)
+    token_hash = hash_invite_token(token)
 
     if lockout.is_locked(token_hash, ip):
         raise HTTPException(status_code=429, detail="Too many requests")
