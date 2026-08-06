@@ -55,6 +55,40 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/analysis/jobs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Analysis Jobs */
+        get: operations['list_analysis_jobs_api_v1_analysis_jobs_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/analysis/jobs/{job_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /** Cancel Analysis Job */
+        delete: operations['cancel_analysis_job_api_v1_analysis_jobs__job_id__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/analysis/sessions': {
         parameters: {
             query?: never
@@ -108,6 +142,9 @@ export interface paths {
          *     Looks up the single active demo user and issues a session cookie.
          *     Returns 404 (generic) when no demo account is configured so callers
          *     cannot distinguish "demo user disabled" from "demo user absent".
+         *
+         *     Only meaningful in multiuser mode — returns 404 in local mode (which has
+         *     no session cookie and no per-role access control).
          */
         post: operations['demo_login_api_v1_auth_demo_login_post']
         delete?: never
@@ -1182,6 +1219,43 @@ export interface components {
              */
             start_time: number
         }
+        /** AnalysisJobEnqueued */
+        AnalysisJobEnqueued: {
+            /** Job Id */
+            job_id: string
+            /** Session Count */
+            session_count: number
+        }
+        /** AnalysisJobStatus */
+        AnalysisJobStatus: {
+            /** Created At */
+            created_at: number
+            /** Error Message */
+            error_message: string | null
+            /** Finished At */
+            finished_at: number | null
+            /** Job Id */
+            job_id: string
+            /** Owner User Id */
+            owner_user_id: number | null
+            /** Progress Completed */
+            progress_completed: number
+            /** Progress Total */
+            progress_total: number
+            /** Session Count */
+            session_count: number
+            /** Source */
+            source: string
+            /** Started At */
+            started_at: number | null
+            /** State */
+            state: string
+        }
+        /** AnalysisJobsListResponse */
+        AnalysisJobsListResponse: {
+            /** Jobs */
+            jobs: components['schemas']['AnalysisJobStatus'][]
+        }
         /**
          * AnalysisListItem
          * @description Session with analysis status for listing.
@@ -1411,11 +1485,6 @@ export interface components {
         BatchAnalysisRequest: {
             /** From Date */
             from_date?: string | null
-            /**
-             * Max Sessions
-             * @default 1000
-             */
-            max_sessions: number
             /** Modes */
             modes?: ('aasm' | 'aasm_relaxed' | 'resmed')[]
             /**
@@ -1430,72 +1499,6 @@ export interface components {
             store_results: boolean
             /** To Date */
             to_date?: string | null
-        }
-        /**
-         * BatchAnalysisResult
-         * @description Aggregate result of batch analysis across multiple sessions.
-         */
-        BatchAnalysisResult: {
-            /**
-             * Cancelled
-             * @description Sessions skipped due to cancellation
-             * @default 0
-             */
-            cancelled: number
-            /**
-             * Failed
-             * @description Sessions that failed analysis
-             * @default 0
-             */
-            failed: number
-            /**
-             * Results
-             * @description Per-session results
-             */
-            results?: components['schemas']['BatchSessionResult'][]
-            /**
-             * Successful
-             * @description Sessions analyzed successfully
-             * @default 0
-             */
-            successful: number
-            /**
-             * Total
-             * @description Total sessions processed
-             */
-            total: number
-        }
-        /**
-         * BatchSessionResult
-         * @description Result of analyzing a single session in a batch.
-         */
-        BatchSessionResult: {
-            /**
-             * Cancelled
-             * @description Whether this session was skipped due to cancellation
-             * @default false
-             */
-            cancelled: boolean
-            /**
-             * Error
-             * @description Error message if failed
-             */
-            error?: string | null
-            /**
-             * Session Date
-             * @description Session date
-             */
-            session_date?: string | null
-            /**
-             * Session Id
-             * @description Session database ID
-             */
-            session_id: number
-            /**
-             * Success
-             * @description Whether analysis succeeded
-             */
-            success: boolean
         }
         /** BulkDeletePreviewRequest */
         BulkDeletePreviewRequest: {
@@ -3033,12 +3036,12 @@ export interface operations {
         }
         responses: {
             /** @description Successful Response */
-            201: {
+            202: {
                 headers: {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['BatchAnalysisResult']
+                    'application/json': components['schemas']['AnalysisJobEnqueued']
                 }
             }
             /** @description Validation Error */
@@ -3072,6 +3075,55 @@ export interface operations {
                 content: {
                     'application/json': components['schemas']['AnalysisDeletePreview']
                 }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_analysis_jobs_api_v1_analysis_jobs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AnalysisJobsListResponse']
+                }
+            }
+        }
+    }
+    cancel_analysis_job_api_v1_analysis_jobs__job_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                job_id: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
             }
             /** @description Validation Error */
             422: {
