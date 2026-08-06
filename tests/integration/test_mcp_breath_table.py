@@ -7,8 +7,6 @@ Covers:
 - Analysis status: not_run and stale_version refusals.
 - Isolation: profile A cannot access profile B's sessions or devices; A's query
   returns only A's breaths.
-
-Seed helpers are self-contained — do not import from sibling test files.
 """
 
 from __future__ import annotations
@@ -26,102 +24,14 @@ from snore.database.models import (
     AnalysisResult,
     Breath,
     Day,
-    Device,
-    Profile,
     Session,
-    User,
 )
-
-# ---------------------------------------------------------------------------
-# Seed helpers (self-contained — do not import across test files)
-# ---------------------------------------------------------------------------
-
-
-async def _make_profile(db: AsyncSession) -> Any:
-    user = User(
-        canonical_email=f"bt_{uuid.uuid4().hex[:8]}@example.com",
-        role="member",
-    )
-    db.add(user)
-    await db.flush()
-    profile = Profile(user_id=user.id, name="BreathTable Profile")
-    db.add(profile)
-    await db.flush()
-    return profile
-
-
-async def _make_device(
-    db: AsyncSession,
-    profile_id: int,
-    manufacturer: str = "BTMfr",
-    model: str = "BTModel",
-    serial_number: str | None = None,
-) -> Device:
-    device = Device(
-        profile_id=profile_id,
-        manufacturer=manufacturer,
-        model=model,
-        serial_number=serial_number or f"SN_{uuid.uuid4().hex[:8]}",
-    )
-    db.add(device)
-    await db.flush()
-    return device
-
-
-async def _make_day_session(
-    db: AsyncSession,
-    device: Device,
-    day_date: date,
-    duration_hours: float = 8.0,
-    start_hour: int = 22,
-    **day_kwargs: Any,
-) -> tuple[Day, Session]:
-    """Create a linked Day + enabled Session pair."""
-    day = Day(
-        device_id=device.id,
-        date=day_date,
-        total_therapy_hours=duration_hours,
-        **day_kwargs,
-    )
-    db.add(day)
-    await db.flush()
-
-    start_dt = datetime(day_date.year, day_date.month, day_date.day, start_hour, 0, 0)
-    sess = Session(
-        device_id=device.id,
-        day_id=day.id,
-        device_session_id=f"bt_{day_date.isoformat()}_{uuid.uuid4().hex[:6]}",
-        start_time=start_dt,
-        end_time=start_dt + timedelta(hours=duration_hours),
-        duration_seconds=duration_hours * 3600,
-        enabled=True,
-    )
-    db.add(sess)
-    await db.flush()
-    return day, sess
-
-
-async def _make_analysis_result(db: AsyncSession, session: Session) -> AnalysisResult:
-    """Create an AnalysisResult matching the current algorithm identity (status=OK)."""
-    from snore.analysis.shared.versioning import (  # noqa: PLC0415
-        AlgorithmIdentity,
-        AlgoVersions,
-        AnalysisRunMetadata,
-    )
-
-    algo_versions = AlgoVersions(
-        identity=AlgorithmIdentity.current(),
-        run=AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"]),
-    )
-    ar = AnalysisResult(
-        session_id=session.id,
-        timestamp_start=session.start_time,
-        timestamp_end=session.end_time,
-        engine_versions_json=algo_versions.model_dump(),
-    )
-    db.add(ar)
-    await db.flush()
-    return ar
+from tests.integration.conftest import (
+    _make_analysis_result,
+    _make_day_session,
+    _make_device,
+    _make_profile,
+)
 
 
 async def _make_stale_analysis_result(

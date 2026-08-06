@@ -24,108 +24,16 @@ from snore.database.models import (
     AnalysisResult,
     Breath,
     Day,
-    Device,
     Event,
-    Profile,
     Session,
     Setting,
-    User,
 )
-
-# ---------------------------------------------------------------------------
-# Shared seed helpers
-# ---------------------------------------------------------------------------
-
-
-async def _make_profile(db: AsyncSession) -> Any:
-    """Create a User + Profile and return the Profile."""
-    user = User(
-        canonical_email=f"iso_{uuid.uuid4().hex[:8]}@example.com",
-        role="member",
-    )
-    db.add(user)
-    await db.flush()
-    profile = Profile(user_id=user.id, name="Isolation Profile")
-    db.add(profile)
-    await db.flush()
-    return profile
-
-
-async def _make_device(
-    db: AsyncSession, profile_id: int, manufacturer: str = "IsoMfr"
-) -> Device:
-    device = Device(
-        profile_id=profile_id,
-        manufacturer=manufacturer,
-        model="IsoModel",
-        serial_number=f"SN_{uuid.uuid4().hex[:8]}",
-    )
-    db.add(device)
-    await db.flush()
-    return device
-
-
-async def _make_day_session(
-    db: AsyncSession,
-    device: Device,
-    day_date: date,
-    duration_hours: float = 8.0,
-    **day_kwargs: Any,
-) -> tuple[Day, Session]:
-    """Create a linked Day + enabled Session pair."""
-    day = Day(
-        device_id=device.id,
-        date=day_date,
-        total_therapy_hours=duration_hours,
-        **day_kwargs,
-    )
-    db.add(day)
-    await db.flush()
-
-    sess = Session(
-        device_id=device.id,
-        day_id=day.id,
-        device_session_id=f"iso_{day_date.isoformat()}_{uuid.uuid4().hex[:6]}",
-        start_time=datetime(day_date.year, day_date.month, day_date.day, 22, 0, 0),
-        end_time=datetime(day_date.year, day_date.month, day_date.day, 22, 0, 0)
-        + timedelta(hours=duration_hours),
-        duration_seconds=duration_hours * 3600,
-        enabled=True,
-    )
-    db.add(sess)
-    await db.flush()
-    return day, sess
-
-
-async def _make_analysis_result(
-    db: AsyncSession,
-    session: Session,
-    primary_mode: str = "aasm",
-) -> AnalysisResult:
-    """Create an AnalysisResult with the current algorithm identity.
-
-    The engine_versions_json is built from AlgorithmIdentity.current() so that
-    BreathService._latest_analysis_for_session returns AnalysisStatus.OK.
-    """
-    from snore.analysis.shared.versioning import (
-        AlgorithmIdentity,
-        AlgoVersions,
-        AnalysisRunMetadata,
-    )
-
-    algo_versions = AlgoVersions(
-        identity=AlgorithmIdentity.current(),
-        run=AnalysisRunMetadata(primary_mode=primary_mode, modes=[primary_mode]),
-    )
-    ar = AnalysisResult(
-        session_id=session.id,
-        timestamp_start=session.start_time,
-        timestamp_end=session.end_time,
-        engine_versions_json=algo_versions.model_dump(),
-    )
-    db.add(ar)
-    await db.flush()
-    return ar
+from tests.integration.conftest import (
+    _make_analysis_result,
+    _make_day_session,
+    _make_device,
+    _make_profile,
+)
 
 
 async def _make_breath(
