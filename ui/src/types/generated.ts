@@ -133,7 +133,9 @@ export interface paths {
          * Enable User
          * @description Re-enable a previously disabled user account.
          *
-         *     Idempotent when the user is already active.
+         *     Idempotent when the user is already active.  Note: enabling does not
+         *     restore old sessions — disable bumped session_version, so the user
+         *     must log in again to obtain a fresh cookie.
          */
         post: operations['enable_user_api_v1_admin_users__user_id__enable_post']
         delete?: never
@@ -2463,7 +2465,8 @@ export interface components {
          * @description Partial update for a user record.
          *
          *     At least one field must be provided.  display_name accepts None to clear
-         *     the stored value.  role must be one of the allowed literals when provided.
+         *     the stored value.  role must be one of the allowed literals when provided;
+         *     supplying role=null alone is treated the same as an empty body (422).
          */
         PatchUserRequest: {
             /** Display Name */
