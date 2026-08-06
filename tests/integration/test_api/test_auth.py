@@ -916,7 +916,7 @@ class TestInviteLifecycle:
         """
         _multiuser_env(monkeypatch)
 
-        from snore.auth.invite import InviteRedemptionError, redeem_invite
+        from snore.auth.invite import InviteRedemptionError
         from snore.database.session import (
             cleanup_database,
             init_database,
@@ -948,12 +948,14 @@ class TestInviteLifecycle:
             await db.flush()
             invite_id = inv.id
 
+        from tests.helpers.invites import redeem_invite_once
+
         # First redemption: must succeed.
-        await redeem_invite(invite_id)
+        await redeem_invite_once(invite_id)
 
         # Second redemption of the same invite_id: must raise.
         with pytest.raises(InviteRedemptionError, match="already been redeemed"):
-            await redeem_invite(invite_id)
+            await redeem_invite_once(invite_id)
 
         # Exactly one redeemed_at timestamp.
         from sqlalchemy import select  # noqa

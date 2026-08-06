@@ -84,9 +84,11 @@ src/snore/
 │   ├── app.py          # FastAPI application factory
 │   ├── deps.py         # Dependency injection (get_db)
 │   ├── errors.py       # Exception handlers
-│   ├── middleware.py    # Auth/rate-limit middleware stubs
+│   ├── middleware.py    # Auth, CSRF/body-cap, and rate-limit middleware
 │   ├── schemas.py      # API request/response schemas
-│   └── routers/        # Route handlers (8 routers)
+│   └── routers/        # Route handlers
+│       ├── auth/       # Auth package: routes_session, routes_invites, routes_google
+│       ├── admin.py, me.py, profiles.py, import_data.py
 │       ├── analysis.py, days.py, devices.py, events.py
 │       ├── rx.py, sessions.py, stats.py, waveforms.py
 ├── bootstrap/          # Installation and updates

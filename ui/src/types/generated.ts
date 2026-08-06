@@ -302,48 +302,16 @@ export interface paths {
         }
         /**
          * Google Callback
-         * @description Handle Google OAuth callback for login-only flows.
+         * @description Handle the Google OAuth callback for both login and signup flows.
          *
-         *     Validates browser binding, exchanges code, looks up the linked identity,
-         *     and sets a session cookie before redirecting to ``/dashboard``.
+         *     Looks up the attempt by ``state`` alone (the column is UNIQUE) and
+         *     dispatches account resolution on the attempt's ``kind``.
          *
          *     Uses two transaction windows so no DB connection is held during Google I/O:
-         *     Window 1 reads and validates the attempt; Window 2 consumes and resolves.
+         *     Window 1 reads and validates the attempt (and, for signups, the invite);
+         *     Window 2 consumes the attempt and resolves the account.
          */
         get: operations['google_callback_api_v1_auth_google_callback_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/google/invite-callback': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Google Invite Callback
-         * @description Handle Google OAuth callback for invite-based signup flows.
-         *
-         *     Validates browser binding, exchanges code, checks email matches invite,
-         *     and resolves the account (link existing | create new), then redirects
-         *     to ``/dashboard``.
-         *
-         *     Uses two transaction windows so no DB connection is held during Google I/O:
-         *     Window 1 reads the attempt and invite (capturing role); Window 2 consumes
-         *     and resolves.
-         *
-         *     Resolution order:
-         *     a. Auth identity (provider=google, sub) already exists → login, leave invite.
-         *     b. User with matching canonical email exists → link identity, consume invite.
-         *     c. Neither → create user + profile + identity, consume invite.
-         */
-        get: operations['google_invite_callback_api_v1_auth_google_invite_callback_get']
         put?: never
         post?: never
         delete?: never
@@ -3897,39 +3865,6 @@ export interface operations {
         }
     }
     google_callback_api_v1_auth_google_callback_get: {
-        parameters: {
-            query?: {
-                state?: string | null
-                code?: string | null
-                error?: string | null
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    google_invite_callback_api_v1_auth_google_invite_callback_get: {
         parameters: {
             query?: {
                 state?: string | null

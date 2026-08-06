@@ -198,6 +198,8 @@ def invite_revoke(email: str, db: str | None) -> None:
             from snore.database.models import Invite  # noqa: PLC0415
 
             canonical = email.strip().lower()
+            # Deliberately NOT invite_valid_clauses: expired-but-pending
+            # invites must remain revocable.
             stmt = select(Invite).where(
                 Invite.email == canonical,
                 Invite.redeemed_at.is_(None),
