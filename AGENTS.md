@@ -119,6 +119,27 @@ src/snore/
 │   └── formats/
 │       ├── edf.py      # Generic EDF/EDF+ reader
 │       └── types.py    # Format type definitions
+├── mcp/                # MCP server (third presentation layer, peer of CLI and api/)
+│   ├── server.py       # make_server, SNORERuntime protocol, _scope_and_run, lifespan
+│   ├── auth.py         # OAuth 2.1 GoogleProvider integration (HTTP transport only)
+│   ├── errors.py       # ValidationError (mapped to ToolError at the boundary)
+│   ├── profiles.py     # Clinical profile loading (shapes instructions text only)
+│   ├── schemas.py      # MCP response Pydantic models (SCHEMA_MODEL_MAP for docs://)
+│   ├── validation.py   # parse_date, parse_date_range, validate_* helpers
+│   └── tools/
+│       ├── _helpers.py         # _str_or_none shared helper
+│       ├── _service_errors.py  # MAPPED_SERVICE_ERRORS, raise_mapped_service_error
+│       ├── _capabilities.py    # build_device_capabilities, get_device_id_for_session
+│       ├── _coverage.py        # map_session_coverage
+│       ├── overview.py         # get_data_overview tool
+│       ├── settings.py         # get_settings_timeline tool
+│       ├── summary.py          # get_nightly_summary tool
+│       ├── events.py           # get_events tool
+│       ├── breath_table.py     # get_breath_table tool
+│       ├── windows.py          # find_windows tool
+│       ├── epochs.py           # compare_epochs tool
+│       ├── ca_analysis.py      # get_ca_analysis tool
+│       └── waveform.py         # get_waveform + render_window tools
 ├── services/           # Business logic layer (between CLI/API and database)
 │   ├── schemas.py      # Service response schemas (Pydantic)
 │   ├── analysis_facade.py   # Analysis orchestration
@@ -409,10 +430,60 @@ gh api -X DELETE repos/<owner>/<repo>/issues/comments/<stale-comment-id>
 14. **Never add unlayered global CSS resets in `App.vue`** (e.g. a bare `* { margin: 0 }`): unlayered styles outrank every Tailwind v4 layered utility and silently break component styling.
 15. **Fresh worktree setup:** run `uv sync` and `just web-install` once per new worktree — the managed pre-commit hook (`.hooks/pre-commit` → `just pre-commit`) auto-fixes and re-stages lint/format issues including the web legs, and `just check-all` runs the check-mode web variants.
 
+## MCP Development
+
+### Adding or modifying an MCP tool
+
+Each tool lives in `src/snore/mcp/tools/<name>.py` and follows a two-part structure:
+
+1. A module-level async function that accepts an `AsyncSession` and returns a Pydantic model — this is what tests call directly.
+2. A `register(mcp: FastMCP) -> None` function at the bottom of the module that defines the `@mcp.tool()` closure and wires it to the common scaffold.
+
+The common scaffold for the seven standard-pattern tools lives in `_scope_and_run` (server.py): open scope → `await impl(db, profile_id=..., **kwargs)` → `model_dump(mode="json")` → `_check_response_size`. Tools with non-standard return paths (`get_ca_analysis`, `get_waveform`, `render_window`) handle the scope themselves inside their `register` closures.
+
+### Service error mapping seam
+
+`tools/_service_errors.py` maps `BreathService` exceptions to `ValidationError` (which the server's `tool_error_boundary` converts to `ToolError`):
+
+- `DeviceNotOwnedError` → "device_id=X is not available in this session"
+- `DeviceAmbiguityError` → "Multiple devices have sessions on DATE: ... Devices: device_id=X (serial=Y), ..."
+- `MultiSessionAmbiguityError` → "Multiple sessions on DATE for device_id=X: ..."
+- `NoSessionsInRangeError` → "No therapy data found for date/range ..."
+- `OperationalError("no such table")` → "Breath-level data tables are missing ..."
+
+Any tool that calls `BreathService` should use `except MAPPED_SERVICE_ERRORS as exc: raise_mapped_service_error(exc)`. Do not write per-tool except branches for these exceptions.
+
+### `tool_error_boundary` contract
+
+`tool_error_boundary` in `server.py` wraps every registered tool closure. It converts:
+- `ToolError` → passes through unchanged
+- `PydanticValidationError` → `ToolError` with cleaned field-path messages
+- `ValidationError` or `ValueError` → `ToolError(str(exc))`
+- HTTP errors (upstream `response.status_code`) → `ToolError("HTTP N from upstream service")`
+- All other exceptions → logged + `ToolError("An unexpected error occurred.")`
+
+Internal detail never reaches the client. Never raise `ToolError` with raw exception text that might include profile IDs, file paths, or SQL fragments.
+
+### Running MCP tests
+
+```bash
+# Unit tests (in-memory, fast — run while iterating)
+uv run pytest tests/unit/test_mcp_server.py tests/unit/test_mcp_tools_roundtrip.py tests/unit/test_mcp_validation.py
+
+# Per-tool unit tests
+uv run pytest tests/unit/test_mcp_breath_table.py tests/unit/test_mcp_compare_epochs.py tests/unit/test_mcp_find_windows.py
+
+# Integration tests (real SQLite in-memory DB)
+uv run pytest tests/integration/ -k mcp
+```
+
+Integration test seed helpers (`_make_profile`, `_make_device`, `_make_day_session`, `_make_analysis_result`) live in `tests/integration/conftest.py` as plain functions — import them from there, do not copy them into new test files.
+
 ## Key Files by Task
 
 | Task | Files |
 |------|-------|
+| Add MCP tool | `src/snore/mcp/tools/<name>.py` (impl + register); `src/snore/mcp/schemas.py` (response schema); `tests/unit/test_mcp_<name>.py` + `tests/integration/test_mcp_<name>.py` |
 | Add CLI command | `src/snore/cli/groups/` (subcommand group) or `cli/commands/` (standalone); helpers in `cli/decorators.py`, `cli/display/` |
 | Add device parser | `src/snore/parsers/base.py`, `src/snore/parsers/register_all.py`, create new parser file |
 | Modify ResMed STR settings decoding | `src/snore/parsers/resmed_edf.py` (per-mode signal maps, `_parse_str_settings`), `tests/unit/test_resmed_str_converter.py`, `tests/unit/test_resmed_str_backup.py` |

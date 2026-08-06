@@ -13,11 +13,11 @@ Technical documentation for the SNORE system architecture, components, and desig
 │        Vue 3 Frontend (ui/)                │
 │  Dashboard, Session Explorer, Waveforms     │
 │  PrimeVue components + uPlot charts         │
-├─────────────────────────────────────────────┤
-│        FastAPI REST API (api/)              │
-│  12 routers, 36 endpoints, LTTB            │
-│  OpenAPI docs at /docs                      │
-├─────────────────────────────────────────────┤
+├──────────────┬──────────────┬──────────────┤
+│ FastAPI REST │   CLI (cli/) │  MCP Server  │
+│ API (api/)   │  Click cmds  │  (mcp/)      │
+│ 12 routers   │  snore cmds  │  10 tools    │
+├──────────────┴──────────────┴──────────────┤
 │        Service Layer (services/)            │
 │  12 services: business logic between        │
 │  CLI/API and database                       │
@@ -510,6 +510,59 @@ FastAPI Routers (api/routers/)
     ↓
 JSON Response → Vue Frontend (ui/)
 ```
+
+---
+
+## MCP Server
+
+`src/snore/mcp/` implements the third presentation layer — a peer of the CLI and the FastAPI REST API. It exposes SNORE data to LLM clients via the Model Context Protocol.
+
+### Transports
+
+Two transports are supported, selected at startup:
+
+- **stdio** (`snore mcp stdio`): local tool use; no authentication. A `StaticRuntime` resolves the active profile at startup from the first live profile row and watches for database file replacement (inode change → auto-refresh).
+- **streamable-HTTP** (`snore mcp serve`): multi-user, OAuth 2.1 via FastMCP's `GoogleProvider`. Each request carries a per-user `ActorRuntime` that reads `profile_id` from the request context var rather than a startup-time lookup.
+
+Both transports share the same tool and resource registrations; the only difference is which `SNORERuntime` implementation is yielded by the FastMCP lifespan.
+
+### SNORERuntime Protocol Seam
+
+Tools never import a database session factory directly. Instead, `server.py` yields a `SNORERuntime` instance from its FastMCP lifespan context, and every tool accesses `runtime.scope_provider()` and `runtime.profile_id` through this interface:
+
+```
+StaticRuntime     — stdio path; profile_id resolved at startup
+ActorRuntime      — OAuth HTTP path; profile_id from per-request context var
+```
+
+`_scope_and_run(ctx, impl, *, tool_name, **kwargs)` in `server.py` captures the common scaffold shared by seven of the ten tools: open scope → call impl with `(db, profile_id=..., **kwargs)` → `model_dump(mode="json")` → `_check_response_size`.
+
+### Tool Modules
+
+Each tool is defined in `src/snore/mcp/tools/<name>.py` and owns a `register(mcp: FastMCP) -> None` function. `make_server` calls every module's `register` so the tool registration logic is co-located with the tool's DB-fetch and mapping code.
+
+| Module | Tool name | Pattern |
+|--------|-----------|---------|
+| `overview.py` | `get_data_overview` | `_scope_and_run` |
+| `settings.py` | `get_settings_timeline` | `_scope_and_run` |
+| `summary.py` | `get_nightly_summary` | `_scope_and_run` |
+| `events.py` | `get_events` | `_scope_and_run` |
+| `breath_table.py` | `get_breath_table` | `_scope_and_run` |
+| `windows.py` | `find_windows` | `_scope_and_run` |
+| `epochs.py` | `compare_epochs` | `_scope_and_run` |
+| `ca_analysis.py` | `get_ca_analysis` | fetch inside scope, compute outside |
+| `waveform.py` | `get_waveform` | `_fetch_waveform_for_tool` helper |
+| `waveform.py` | `render_window` | `_fetch_waveform_for_tool` helper |
+
+### Tiered Data Model
+
+Tools implement progressive disclosure across three tiers:
+
+| Tier | Tools | Description |
+|------|-------|-------------|
+| 1 (primary) | overview, summary, settings, events, epochs, ca_analysis | Computed metrics — indices, percentiles, aggregates |
+| 2 (secondary) | render_window | PNG charts — visual inspection of waveform windows ≤15 min |
+| 3 (escape hatch) | get_waveform, breath_table | Raw arrays and per-breath rows for deep inspection |
 
 ---
 
