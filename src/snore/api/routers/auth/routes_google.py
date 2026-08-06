@@ -270,11 +270,37 @@ async def _link_identity_ticket(
 async def _resolve_login(
     db: AsyncSession, cfg: AppConfig, claims: dict[str, object]
 ) -> SessionTicket:
-    """Login-kind resolution: linked identity only — never provisions."""
-    ticket = await _linked_user_ticket(db, cfg, str(claims["sub"]))
-    if ticket is None:
+    """Login-kind resolution: linked identity, else verified-email auto-link.
+
+    A user with no Google identity (e.g. created via the password invite
+    flow) is auto-linked when their canonical email matches the Google
+    account's — the same trust link the invite signup path establishes, and
+    safe because ``fetch_google_id_token_claims`` requires
+    ``email_verified is True``.  Never provisions a new account.
+    """
+    sub = str(claims["sub"])
+    ticket = await _linked_user_ticket(db, cfg, sub)
+    if ticket is not None:
+        return ticket
+
+    email_raw = str(claims.get("email", ""))
+    email_canonical = email_raw.lower().strip()
+    if not email_canonical:
         raise _TxFailure()
-    return ticket
+    user = (
+        (
+            await db.execute(
+                select(models.User).where(
+                    models.User.canonical_email == email_canonical
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if user is None:
+        raise _TxFailure()
+    return await _link_identity_ticket(db, cfg, user, sub, email_raw)
 
 
 async def _resolve_signup(

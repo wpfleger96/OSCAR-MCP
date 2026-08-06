@@ -448,8 +448,9 @@ class TestGoogleCallbackUnknownSubject:
     async def test_google_callback_unknown_subject_no_provisioning(
         self, temp_db, monkeypatch
     ):
-        """Valid flow but no auth_identity exists for the Google sub →
-        failure, no user created."""
+        """Valid flow, no auth_identity for the sub, and no user with the
+        Google email (the auto-link fallback finds nothing) → failure, no
+        user created, no identity linked."""
         _multiuser_env(monkeypatch)
         cfg = load_config(
             auth_mode_override="multiuser", bind_host_override="127.0.0.1"
@@ -468,6 +469,15 @@ class TestGoogleCallbackUnknownSubject:
         nonce = uuid.uuid4().hex
 
         async with session_scope() as db:
+            # A user whose email does NOT match the Google claims — proves the
+            # email fallback cannot cross-link to an unrelated account.
+            other = models.User(
+                canonical_email="someone-else@example.com",
+                role="member",
+                session_version=0,
+            )
+            db.add(other)
+            await db.flush()
             attempt = await _make_oauth_attempt(
                 db, nonce=nonce, browser_session_hash=_hash(pre_auth_value)
             )
@@ -494,15 +504,253 @@ class TestGoogleCallbackUnknownSubject:
         )
         assert "snore_session" not in resp.cookies
 
-        # No new user should have been created.
+        # No user created, no identity linked.
         async with session_scope() as db:
             from sqlalchemy import func
             from sqlalchemy import select as sel
 
-            count = (
+            user_count = (
                 await db.execute(sel(func.count()).select_from(models.User))
             ).scalar_one()
-        assert count == 0, f"Expected no users created, found {count}"
+            identity_count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+        assert user_count == 1, f"Expected only the seeded user, found {user_count}"
+        assert identity_count == 0, (
+            f"Expected no identities linked, found {identity_count}"
+        )
+
+        await cleanup_database()
+
+
+# ---------------------------------------------------------------------------
+# Verified-email auto-link on Google login
+# ---------------------------------------------------------------------------
+
+
+class TestGoogleLoginAutoLink:
+    async def _seed_password_user(
+        self, db: AsyncSession, email: str, disabled: bool = False
+    ) -> int:
+        """User with a default profile and no Google identity (invite-redeem shape)."""
+        user = models.User(
+            canonical_email=email,
+            password_hash="argon2-hash-placeholder",
+            role="member",
+            session_version=0,
+            disabled_at=datetime.now(UTC) if disabled else None,
+        )
+        db.add(user)
+        await db.flush()
+        profile = models.Profile(user_id=user.id, name="Default")
+        db.add(profile)
+        await db.flush()
+        user.default_profile_id = profile.id
+        return user.id
+
+    async def _run_login_callback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        sub: str,
+        email: str,
+        state: str,
+        nonce: str,
+        pre_auth_value: str,
+    ) -> httpx.Response:
+        monkeypatch.setattr(
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
+            lambda **kw: _async_return(_fake_claims(sub=sub, email=email, nonce=nonce)),
+        )
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            return await client.get(
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
+                headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_password_user_auto_linked_and_logged_in(self, temp_db, monkeypatch):
+        """A password-invite user with no Google identity signs in with Google:
+        the verified email matches, an identity row is created, session issued."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+        sub = f"google-sub-{uuid.uuid4().hex[:8]}"
+
+        async with session_scope() as db:
+            user_id = await self._seed_password_user(db, "user@example.com")
+            attempt = await _make_oauth_attempt(
+                db, nonce=nonce, browser_session_hash=_hash(pre_auth_value)
+            )
+            state = attempt.state
+
+        resp = await self._run_login_callback(
+            monkeypatch,
+            sub=sub,
+            email="user@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302, f"Expected 302, got {resp.status_code}"
+        assert resp.headers.get("location") == "/dashboard"
+        assert "snore_session" in resp.cookies
+
+        # Exactly one identity row, linked to the seeded user.
+        async with session_scope() as db:
+            from sqlalchemy import select as sel
+
+            identities = (await db.execute(sel(models.AuthIdentity))).scalars().all()
+        assert len(identities) == 1
+        assert identities[0].user_id == user_id
+        assert identities[0].provider == "google"
+        assert identities[0].subject == sub
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_disabled_user_not_auto_linked(self, temp_db, monkeypatch):
+        """Matching email but disabled account → generic 400, no identity row,
+        and the whole window-2 transaction (including the attempt consume)
+        rolls back."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            await self._seed_password_user(db, "user@example.com", disabled=True)
+            attempt = await _make_oauth_attempt(
+                db, nonce=nonce, browser_session_hash=_hash(pre_auth_value)
+            )
+            state = attempt.state
+
+        resp = await self._run_login_callback(
+            monkeypatch,
+            sub="google-sub-disabled",
+            email="user@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 400
+        assert "snore_session" not in resp.cookies
+
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            identity_count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+            refreshed = (
+                (
+                    await db.execute(
+                        sel(models.OauthAttempt).where(
+                            models.OauthAttempt.state == state
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        assert identity_count == 0
+        assert refreshed is not None
+        assert refreshed.consumed_at is None, (
+            "Resolution failure must roll back the attempt consume too"
+        )
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_auto_link_replay_blocked(self, temp_db, monkeypatch):
+        """Replaying the state after a successful auto-link → 400, still
+        exactly one identity row."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            await self._seed_password_user(db, "user@example.com")
+            attempt = await _make_oauth_attempt(
+                db, nonce=nonce, browser_session_hash=_hash(pre_auth_value)
+            )
+            state = attempt.state
+
+        first = await self._run_login_callback(
+            monkeypatch,
+            sub="google-sub-replay",
+            email="user@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+        assert first.status_code == 302
+
+        replay = await self._run_login_callback(
+            monkeypatch,
+            sub="google-sub-replay",
+            email="user@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+        assert replay.status_code == 400
+        assert "snore_session" not in replay.cookies
+
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            identity_count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+        assert identity_count == 1
 
         await cleanup_database()
 
