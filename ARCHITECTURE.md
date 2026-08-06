@@ -320,9 +320,13 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 
 **Application:** `src/snore/api/app.py`
 
-**Routers (12):**
+**Routers:**
 | Router | Prefix | Endpoints |
 |--------|--------|-----------|
+| auth | `/auth` | Login/logout/demo-login/status, active profile, invite lookup/redeem, Google OAuth (login + invite signup, single callback) |
+| me | `/auth/me` | Self-service account: display name, password, preferences |
+| admin | `/admin` | User management, invite lifecycle (admin-only) |
+| profiles | `/profiles` | Profile CRUD |
 | sessions | `/sessions` | List, detail, enable/disable, delete, bulk delete-preview |
 | waveforms | `/waveforms` | List types, get data (LTTB downsampling), compare events |
 | events | `/events` | List, match machine vs programmatic |
@@ -343,7 +347,7 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 - LTTB downsampling: 720k-point waveforms served in <100ms via `max_points` param
 - CORS: Configured for Vue dev server (`localhost:5173`)
 - OpenAPI: Auto-generated docs at `/docs`
-- Auth/rate-limit middleware (`api/middleware.py`): no-op stubs — designed for production swap-in
+- Auth middleware (`api/middleware.py`): `AuthMiddleware` resolves the actor from the signed session cookie on every request (auto-provisions the local actor in local mode); `AuthPathMiddleware` enforces the CSRF Origin/Referer check on unsafe methods, a 16 KiB body cap on `/api/v1/auth/*`, and blanket `Cache-Control: no-store` on auth responses; `RateLimitMiddleware` applies a per-IP 30 req/60 s window to `/api/v1/auth/*` in multiuser mode
 
 ---
 
