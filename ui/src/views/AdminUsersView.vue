@@ -17,6 +17,8 @@
                             <TableHead>Email</TableHead>
                             <TableHead>Display name</TableHead>
                             <TableHead style="width: 110px">Role</TableHead>
+                            <TableHead style="width: 160px">Auth</TableHead>
+                            <TableHead style="width: 120px">Last login</TableHead>
                             <TableHead style="width: 90px">Status</TableHead>
                             <TableHead style="width: 100px">Actions</TableHead>
                         </TableRow>
@@ -75,6 +77,35 @@
                                     </select>
                                 </TableCell>
                                 <TableCell>
+                                    <template v-if="u.has_password || u.auth_providers.length > 0">
+                                        <span
+                                            v-if="u.has_password"
+                                            class="status-badge status-badge--neutral"
+                                            >Password</span
+                                        >
+                                        <span
+                                            v-for="provider in u.auth_providers"
+                                            :key="provider"
+                                            class="status-badge status-badge--neutral"
+                                            >{{
+                                                provider.charAt(0).toUpperCase() + provider.slice(1)
+                                            }}</span
+                                        >
+                                    </template>
+                                    <span
+                                        v-else
+                                        class="status-badge status-badge--neutral"
+                                        title="No login method — user cannot sign in"
+                                        >None</span
+                                    >
+                                </TableCell>
+                                <TableCell>
+                                    <span v-if="u.last_login_at">{{
+                                        formatDate(u.last_login_at)
+                                    }}</span>
+                                    <span v-else class="muted-text">Never</span>
+                                </TableCell>
+                                <TableCell>
                                     <span
                                         v-if="!u.disabled"
                                         class="status-badge status-badge--active"
@@ -104,7 +135,7 @@
                                 </TableCell>
                             </TableRow>
                             <TableRow v-if="userRowErrors[u.id]">
-                                <TableCell :colspan="5" class="error-cell">
+                                <TableCell :colspan="7" class="error-cell">
                                     <p role="alert" class="row-error">{{ userRowErrors[u.id] }}</p>
                                 </TableCell>
                             </TableRow>
@@ -456,7 +487,7 @@ async function executeRevoke(inviteId: number): Promise<void> {
 
 <style scoped>
 .admin-users-view {
-    max-width: 960px;
+    max-width: 1100px;
     margin: 0 auto;
     padding: 1.5rem;
 }
@@ -478,6 +509,21 @@ async function executeRevoke(inviteId: number): Promise<void> {
 .status-badge--disabled {
     color: var(--color-muted-foreground);
     background: var(--color-accent);
+}
+
+.status-badge--neutral {
+    color: var(--color-foreground);
+    background: var(--color-accent);
+    margin-right: 0.25rem;
+}
+
+.status-badge--neutral:last-child {
+    margin-right: 0;
+}
+
+.muted-text {
+    font-size: 0.875rem;
+    color: var(--color-muted-foreground);
 }
 
 /* Inline display-name editing */

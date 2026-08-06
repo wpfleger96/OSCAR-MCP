@@ -266,6 +266,17 @@ uv run snore serve --host 0.0.0.0 --port 8000
 > only), `just dev-auth` for multiuser development, or the full env block
 > above for network deployment.
 
+**First-admin bootstrap (`SNORE_BOOTSTRAP_ADMIN_EMAIL`):** Set this optional
+env var to an email address and, on startup, SNORE will automatically create a
+7-day admin invite for that address if no active admin user exists yet.  The
+redemption URL is printed to `docker logs` (search for "Bootstrap admin invite
+created").  Once redeemed, the variable has no further effect.  If you prefer
+to create the invite manually instead, run:
+
+```bash
+snore user invite <email> --role admin
+```
+
 ### 9. Shell Completions
 
 ```bash

@@ -41,7 +41,7 @@
                 <FileText class="h-4 w-4" />
                 <span>Reports</span>
             </RouterLink>
-            <RouterLink to="/database" class="nav-item">
+            <RouterLink v-if="isLocal" to="/database" class="nav-item">
                 <Database class="h-4 w-4" />
                 <span>Database</span>
             </RouterLink>
@@ -55,6 +55,18 @@
                 <Pill class="h-4 w-4" />
                 <span>RX History</span>
             </RouterLink>
+
+            <template v-if="!isLocal && role === 'admin'">
+                <span class="nav-group-label">Admin</span>
+                <RouterLink to="/database" class="nav-item">
+                    <Database class="h-4 w-4" />
+                    <span>Database</span>
+                </RouterLink>
+                <RouterLink to="/admin/users" class="nav-item">
+                    <Users class="h-4 w-4" />
+                    <span>Users</span>
+                </RouterLink>
+            </template>
         </nav>
         <div class="sidebar-footer">
             <!-- User menu — multiuser mode only -->
@@ -97,13 +109,6 @@
                             <RouterLink to="/account" class="dropdown-link">
                                 <UserCog class="h-4 w-4 mr-2" />
                                 Account
-                            </RouterLink>
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator v-if="role === 'admin'" />
-                        <DropdownMenuItem v-if="role === 'admin'" as-child>
-                            <RouterLink to="/admin/users" class="dropdown-link">
-                                <Users class="h-4 w-4 mr-2" />
-                                Users
                             </RouterLink>
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />

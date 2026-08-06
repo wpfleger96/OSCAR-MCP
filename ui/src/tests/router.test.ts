@@ -67,6 +67,42 @@ describe('authGuard (production)', () => {
         const result = await authGuard(makeRoute('/') as never)
         expect(result).toBe('/dashboard')
     })
+
+    it('test_database_multiuser_member_redirects_to_dashboard', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                role: ref('member') as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/database', { requiresAdmin: true }) as never)
+        expect(result).toBe('/dashboard')
+    })
+
+    it('test_database_multiuser_admin_is_allowed', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                role: ref('admin') as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/database', { requiresAdmin: true }) as never)
+        expect(result).toBeUndefined()
+    })
+
+    it('test_database_local_mode_is_allowed', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(false) as never,
+                isLocal: ref(true) as never,
+                role: ref('admin') as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/database', { requiresAdmin: true }) as never)
+        expect(result).toBeUndefined()
+    })
 })
 
 // ---------------------------------------------------------------------------

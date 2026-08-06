@@ -123,8 +123,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _startup_purge_expired_oauth_attempts()
 
     # Auto-create demo user and import bundled fixture data if not present.
+    # Bootstrap a first admin invite when no active admin exists yet.
     if cfg.is_multiuser:
         await _startup_ensure_demo_data(app)
+        await _startup_ensure_bootstrap_admin()
 
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
@@ -220,6 +222,100 @@ async def _startup_ensure_demo_data(app: FastAPI) -> None:
     except Exception:
         logger.warning(
             "Demo startup initialization failed — demo login will be unavailable",
+            exc_info=True,
+        )
+
+
+async def _startup_ensure_bootstrap_admin() -> None:
+    """Auto-create a bootstrap admin invite when no active admin user exists.
+
+    No-op when ``SNORE_BOOTSTRAP_ADMIN_EMAIL`` is unset.  Idempotent: returns
+    early if an active admin user exists, or a valid pending invite for that
+    address is already present.  Failures are logged as warnings and never
+    prevent startup.
+    """
+    import secrets  # noqa: PLC0415
+
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from snore.api.config import get_config  # noqa: PLC0415
+    from snore.auth.invite import invite_valid_clauses  # noqa: PLC0415
+    from snore.auth.invite_tokens import hash_invite_token  # noqa: PLC0415
+    from snore.database import models  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    cfg = get_config()
+    if cfg.bootstrap_admin_email is None:
+        return
+
+    email = cfg.bootstrap_admin_email
+    try:
+        async with session_scope() as db:
+            now = datetime.now(UTC)
+
+            active_admin = (
+                (
+                    await db.execute(
+                        select(models.User).where(
+                            models.User.role == "admin",
+                            models.User.disabled_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if active_admin is not None:
+                logger.debug(
+                    "Bootstrap admin: active admin user already exists — skipping"
+                )
+                return
+
+            pending = (
+                (
+                    await db.execute(
+                        select(models.Invite).where(
+                            models.Invite.email == email,
+                            *invite_valid_clauses(now),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if pending is not None:
+                logger.info(
+                    "Bootstrap admin invite for %s is already pending"
+                    " — token was logged when it was created",
+                    email,
+                )
+                return
+
+            raw = secrets.token_urlsafe(32)
+            token_hash = hash_invite_token(raw)
+            invite = models.Invite(
+                email=email,
+                token_hash=token_hash,
+                role="admin",
+                created_by=None,
+                expires_at=now + timedelta(days=7),
+            )
+            db.add(invite)
+
+        base = cfg.public_base_url.rstrip("/") if cfg.public_base_url else ""
+        invite_url = f"{base}/invite#{raw}" if base else f"/invite#{raw}"
+        logger.info(
+            "Bootstrap admin invite created for %s — redeem at: %s",
+            email,
+            invite_url,
+        )
+    except Exception:
+        logger.warning(
+            "Bootstrap admin invite creation failed"
+            " — create one manually with: snore user invite %s --role admin",
+            email,
             exc_info=True,
         )
 

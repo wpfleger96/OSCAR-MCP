@@ -81,6 +81,7 @@ class User(Base):
     # Bumped on password-change/disable/role-change; invalidates all cookies.
     session_version: Mapped[int] = mapped_column(Integer, default=0)
     disabled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # FK to profiles — set after the first profile is created.
     default_profile_id: Mapped[int | None] = mapped_column(
         Integer,

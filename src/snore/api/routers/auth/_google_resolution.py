@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
@@ -51,6 +51,7 @@ async def ticket_for(
         )
     except ValueError as exc:
         raise TxFailure() from exc
+    user.last_login_at = datetime.now(UTC)
     return SessionTicket(actor.user_id, actor.profile_id, user.session_version)
 
 
@@ -208,6 +209,7 @@ async def resolve_signup(
     await db.flush()
 
     new_user.default_profile_id = profile.id
+    new_user.last_login_at = datetime.now(UTC)
     db.add(
         models.AuthIdentity(
             user_id=new_user.id,

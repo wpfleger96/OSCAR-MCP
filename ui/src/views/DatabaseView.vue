@@ -130,7 +130,7 @@
                     </div>
                     <Button
                         variant="outline"
-                        :disabled="!canWrite || vacuuming"
+                        :disabled="vacuuming"
                         @click="vacuumDialogOpen = true"
                     >
                         <Loader2 v-if="vacuuming" class="mr-2 h-4 w-4 animate-spin" />
@@ -162,7 +162,7 @@
             </section>
 
             <!-- Danger Zone -->
-            <section class="section">
+            <section v-if="isLocal" class="section">
                 <h2 class="section-heading">Danger Zone</h2>
                 <div class="danger-card">
                     <div class="vacuum-description">
@@ -220,6 +220,7 @@
 
         <!-- Reset confirmation dialog -->
         <DeleteConfirmDialog
+            v-if="isLocal"
             v-model:visible="resetDialogOpen"
             title="Reset Database"
             message="This will permanently delete ALL data from the database. This cannot be undone."
@@ -286,7 +287,7 @@ import { formatDateShort } from '@/utils/formatting'
 import type { VacuumResult, ResetResult } from '@/types'
 
 const { data, loading, error, reload } = useApiLoad(() => getDbStats())
-const { canWrite } = useAuth()
+const { isLocal } = useAuth()
 
 const vacuumDialogOpen = ref(false)
 const vacuuming = ref(false)

@@ -61,6 +61,9 @@ class UserItem(BaseModel):
     role: str
     disabled: bool
     created_at: datetime
+    has_password: bool
+    auth_providers: list[str]
+    last_login_at: datetime | None
 
 
 class PatchUserRequest(BaseModel):
@@ -129,6 +132,24 @@ async def list_users(
     rows = (
         (await db.execute(select(models.User).order_by(models.User.id))).scalars().all()
     )
+
+    # One query for all auth identities — no per-user queries.
+    user_ids = [u.id for u in rows]
+    providers_by_user: dict[int, list[str]] = {}
+    if user_ids:
+        identity_rows = (
+            await db.execute(
+                select(
+                    models.AuthIdentity.user_id,
+                    models.AuthIdentity.provider,
+                ).where(models.AuthIdentity.user_id.in_(user_ids))
+            )
+        ).all()
+        for uid, provider in identity_rows:
+            bucket = providers_by_user.setdefault(uid, [])
+            if provider not in bucket:
+                bucket.append(provider)
+
     return [
         UserItem(
             id=u.id,
@@ -137,6 +158,9 @@ async def list_users(
             role=u.role,
             disabled=u.disabled_at is not None,
             created_at=u.created_at,
+            has_password=u.password_hash is not None,
+            auth_providers=providers_by_user.get(u.id, []),
+            last_login_at=u.last_login_at,
         )
         for u in rows
     ]

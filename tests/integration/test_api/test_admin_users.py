@@ -2,10 +2,12 @@
 
 Coverage
 --------
-TestListUsers   – GET  /api/v1/admin/users
-TestPatchUser   – PATCH /api/v1/admin/users/{id}
-TestDisableEnable – POST /api/v1/admin/users/{id}/disable|enable
-TestInvites     – POST/GET/DELETE /api/v1/admin/invites[/{id}]
+TestListUsers          – GET  /api/v1/admin/users
+TestListUsersAuthStatus – GET /api/v1/admin/users has_password / auth_providers / last_login_at
+TestPasswordLoginStamp  – POST /api/v1/auth/login stamps last_login_at
+TestPatchUser          – PATCH /api/v1/admin/users/{id}
+TestDisableEnable      – POST /api/v1/admin/users/{id}/disable|enable
+TestInvites            – POST/GET/DELETE /api/v1/admin/invites[/{id}]
 
 All routes require admin role.  Tests exercise 401 (unauthenticated),
 403 (member/demo), and the happy-path semantics described in admin.py.
@@ -111,6 +113,40 @@ def _seed_user(
     db_session.add(user)
     db_session.flush()
     return user
+
+
+def _seed_user_with_password(
+    db_session: Session,
+    *,
+    role: str = "member",
+    password_hash: str = "$argon2id$v=19$m=65536,t=3,p=4$placeholder$placeholder",
+) -> models.User:
+    """Seed a user with a non-null password_hash (hash need not be valid for listing tests)."""
+    user = models.User(
+        canonical_email=f"pw_{uuid.uuid4().hex[:8]}@test.local",
+        role=role,
+        password_hash=password_hash,
+    )
+    db_session.add(user)
+    db_session.flush()
+    return user
+
+
+def _seed_auth_identity(
+    db_session: Session,
+    user_id: int,
+    *,
+    provider: str = "google",
+    subject: str | None = None,
+) -> models.AuthIdentity:
+    identity = models.AuthIdentity(
+        user_id=user_id,
+        provider=provider,
+        subject=subject or uuid.uuid4().hex,
+    )
+    db_session.add(identity)
+    db_session.flush()
+    return identity
 
 
 def _seed_invite(
@@ -225,6 +261,150 @@ class TestListUsers:
         client = _make_client(async_db_session, unauthenticated=True)
         resp = client.get("/api/v1/admin/users")
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# TestListUsersAuthStatus
+# ---------------------------------------------------------------------------
+
+
+class TestListUsersAuthStatus:
+    """GET /api/v1/admin/users returns correct has_password, auth_providers, last_login_at."""
+
+    def test_password_user_has_password_true_providers_empty(
+        self, async_db_session, db_session
+    ):
+        admin = _seed_user(db_session, role="admin")
+        pw_user = _seed_user_with_password(db_session)
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.get("/api/v1/admin/users")
+
+        assert resp.status_code == 200
+        by_id = {u["id"]: u for u in resp.json()}
+        item = by_id[pw_user.id]
+        assert item["has_password"] is True
+        assert item["auth_providers"] == []
+        assert item["last_login_at"] is None
+
+    def test_google_user_providers_contains_google(self, async_db_session, db_session):
+        admin = _seed_user(db_session, role="admin")
+        google_user = _seed_user(db_session, role="member")
+        _seed_auth_identity(db_session, google_user.id, provider="google")
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.get("/api/v1/admin/users")
+
+        assert resp.status_code == 200
+        by_id = {u["id"]: u for u in resp.json()}
+        item = by_id[google_user.id]
+        assert item["has_password"] is False
+        assert item["auth_providers"] == ["google"]
+        assert item["last_login_at"] is None
+
+    def test_bare_user_has_password_false_providers_empty_last_login_none(
+        self, async_db_session, db_session
+    ):
+        admin = _seed_user(db_session, role="admin")
+        bare_user = _seed_user(db_session, role="member")
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.get("/api/v1/admin/users")
+
+        assert resp.status_code == 200
+        by_id = {u["id"]: u for u in resp.json()}
+        item = by_id[bare_user.id]
+        assert item["has_password"] is False
+        assert item["auth_providers"] == []
+        assert item["last_login_at"] is None
+
+    def test_last_login_at_returned_when_set(self, async_db_session, db_session):
+        admin = _seed_user(db_session, role="admin")
+        user = _seed_user(db_session, role="member")
+        user.last_login_at = datetime.now(UTC)
+        db_session.flush()
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.get("/api/v1/admin/users")
+
+        assert resp.status_code == 200
+        by_id = {u["id"]: u for u in resp.json()}
+        assert by_id[user.id]["last_login_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# TestPasswordLoginStamp
+# ---------------------------------------------------------------------------
+
+
+class TestPasswordLoginStamp:
+    """POST /api/v1/auth/login stamps last_login_at on the user row."""
+
+    def test_successful_login_stamps_last_login_at(self, async_db_session, db_session):
+        from snore.auth.passwords import hash_password  # noqa: PLC0415
+
+        pw = "TestPass1234!"
+        user = models.User(
+            canonical_email=f"stamp_{uuid.uuid4().hex[:8]}@test.local",
+            role="member",
+            password_hash=hash_password(pw),
+        )
+        db_session.add(user)
+        db_session.flush()
+
+        # ActorContextFactory.make() requires at least one live profile.
+        profile = models.Profile(user_id=user.id, name="Default")
+        db_session.add(profile)
+        db_session.flush()
+        user.default_profile_id = profile.id
+        db_session.flush()
+
+        # No actor override: let the real login route run its auth flow.
+        client = make_test_client(async_db_session, no_actor_override=True)
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": user.canonical_email, "password": pw},
+        )
+        assert resp.status_code == 200, resp.json()
+
+        db_session.expunge_all()
+        updated = db_session.get(models.User, user.id)
+        assert updated.last_login_at is not None
+
+    def test_admin_listing_reflects_last_login_at_after_login(
+        self, async_db_session, db_session
+    ):
+        """last_login_at set by login is visible in the admin user listing."""
+        from snore.auth.passwords import hash_password  # noqa: PLC0415
+
+        pw = "TestPass5678!"
+        admin = _seed_user(db_session, role="admin")
+        login_user = models.User(
+            canonical_email=f"stamp2_{uuid.uuid4().hex[:8]}@test.local",
+            role="member",
+            password_hash=hash_password(pw),
+        )
+        db_session.add(login_user)
+        db_session.flush()
+
+        profile = models.Profile(user_id=login_user.id, name="Default")
+        db_session.add(profile)
+        db_session.flush()
+        login_user.default_profile_id = profile.id
+        db_session.flush()
+
+        login_client = make_test_client(async_db_session, no_actor_override=True)
+        login_resp = login_client.post(
+            "/api/v1/auth/login",
+            json={"email": login_user.canonical_email, "password": pw},
+        )
+        assert login_resp.status_code == 200
+
+        admin_client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = admin_client.get("/api/v1/admin/users")
+        assert resp.status_code == 200
+        by_id = {u["id"]: u for u in resp.json()}
+        assert by_id[login_user.id]["last_login_at"] is not None
 
 
 # ---------------------------------------------------------------------------
