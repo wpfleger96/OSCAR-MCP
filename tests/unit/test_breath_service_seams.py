@@ -1043,6 +1043,14 @@ class TestFetchCaAnalysis:
         therapy_date = date(2025, 6, 21)
         _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
         await _store_analysis_with_breaths(async_db_session, session, profile_id)
+        ca_event = models.Event(
+            session_id=session.id,
+            event_type="CA",
+            start_time=session.start_time + timedelta(minutes=15),
+            duration_seconds=8.0,
+        )
+        async_db_session.add(ca_event)
+        await async_db_session.flush()
 
         svc = BreathService(async_db_session, profile_id=profile_id)
         raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)

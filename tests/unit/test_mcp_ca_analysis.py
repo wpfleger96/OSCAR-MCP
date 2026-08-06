@@ -113,7 +113,6 @@ def _make_minimal_raw(device_id: int = 3) -> Any:
         day_status=DayAnalysisStatus.NOT_RUN,
         algorithm_identity=None,
         null_reason=NullReason.ANALYSIS_NOT_RUN,
-        night_level_refused=False,
     )
 
 

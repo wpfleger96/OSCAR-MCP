@@ -1605,6 +1605,7 @@ class TestP2CsrfFailsClosedOnNoneOrigin:
             pre_auth_cookie_ttl_seconds=600,
             max_upload_bytes=512 * 1024 * 1024,
             max_file_bytes=256 * 1024 * 1024,
+            max_upload_files=10_000,
             max_jobs_per_user=3,
             max_jobs_global=10,
         )
