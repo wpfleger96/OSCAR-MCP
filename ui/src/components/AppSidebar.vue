@@ -1,7 +1,7 @@
 <template>
     <aside class="app-sidebar">
         <div class="sidebar-header">
-            <span class="sidebar-logo">SNORE</span>
+            <RouterLink to="/dashboard" class="sidebar-logo">SNORE</RouterLink>
         </div>
         <nav class="sidebar-nav">
             <span class="nav-group-label">Data</span>
@@ -209,6 +209,7 @@ async function handleLogout() {
     font-weight: 700;
     letter-spacing: 0.05em;
     color: var(--color-primary);
+    text-decoration: none;
 }
 
 .sidebar-nav {
