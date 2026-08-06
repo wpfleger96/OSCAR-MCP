@@ -53,7 +53,11 @@ from snore.api.schemas import MessageResponse
 from snore.auth.actor import ActorContext
 from snore.auth.factory import ActorContextFactory
 from snore.auth.google_oauth import OAuthError, fetch_google_id_token_claims
-from snore.auth.invite import InviteRedemptionError
+from snore.auth.invite import (
+    InviteRedemptionError,
+    invite_valid_clauses,
+    is_invite_valid,
+)
 from snore.auth.invite_tokens import hash_invite_token
 from snore.auth.lockout import get_invite_lockout_store, get_lockout_store
 from snore.auth.passwords import (
@@ -600,12 +604,7 @@ async def lookup_invite(
     )
 
     now = datetime.now(UTC)
-    valid = (
-        invite is not None
-        and invite.redeemed_at is None
-        and invite.revoked_at is None
-        and invite.expires_at > now
-    )
+    valid = is_invite_valid(invite, now)
 
     if not valid:
         lockout.record_failure(token_hash, ip)
@@ -677,12 +676,7 @@ async def redeem_invite_route(
     )
 
     now = datetime.now(UTC)
-    if (
-        invite is None
-        or invite.redeemed_at is not None
-        or invite.revoked_at is not None
-        or invite.expires_at <= now
-    ):
+    if invite is None or not is_invite_valid(invite, now):
         lockout.record_failure(token_hash, ip)
         raise HTTPException(status_code=404, detail="Invite not found or expired")
 
@@ -702,12 +696,7 @@ async def redeem_invite_route(
         # Consume the invite atomically (idempotent via IS NULL guard).
         res = await txn_db.execute(
             update(models.Invite)
-            .where(
-                models.Invite.id == invite_id,
-                models.Invite.redeemed_at.is_(None),
-                models.Invite.revoked_at.is_(None),
-                models.Invite.expires_at > now,
-            )
+            .where(models.Invite.id == invite_id, *invite_valid_clauses(now))
             .values(redeemed_at=now)
         )
         if res.rowcount == 0:  # type: ignore[attr-defined]
@@ -1032,9 +1021,7 @@ async def google_invite_initiate(
             await db.execute(
                 select(models.Invite).where(
                     models.Invite.token_hash == token_hash,
-                    models.Invite.redeemed_at.is_(None),
-                    models.Invite.revoked_at.is_(None),
-                    models.Invite.expires_at > now,
+                    *invite_valid_clauses(now),
                 )
             )
         )
@@ -1185,9 +1172,7 @@ async def google_invite_callback(
                 await db.execute(
                     select(models.Invite).where(
                         models.Invite.id == invite_id,
-                        models.Invite.redeemed_at.is_(None),
-                        models.Invite.revoked_at.is_(None),
-                        models.Invite.expires_at > now_invite,
+                        *invite_valid_clauses(now_invite),
                     )
                 )
             )
@@ -1294,12 +1279,7 @@ async def google_invite_callback(
             # Any failure here rolls back the attempt consume too.
             invite_result = await db.execute(
                 sa_update(models.Invite)
-                .where(
-                    models.Invite.id == invite_id,
-                    models.Invite.redeemed_at.is_(None),
-                    models.Invite.revoked_at.is_(None),
-                    models.Invite.expires_at > now,
-                )
+                .where(models.Invite.id == invite_id, *invite_valid_clauses(now))
                 .values(redeemed_at=now)
             )
             if int(invite_result.rowcount) == 0:  # type: ignore[attr-defined]

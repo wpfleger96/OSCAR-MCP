@@ -552,17 +552,17 @@ class TestRunTxnIdempotency:
         import uuid
 
         from datetime import UTC, datetime, timedelta
-        from unittest.mock import patch
 
         from sqlalchemy import select
 
-        from snore.auth.invite import InviteRedemptionError, redeem_invite
+        from snore.auth.invite import InviteRedemptionError
         from snore.database.models import Invite, User
         from snore.database.session import (
             cleanup_database,
             init_database,
             session_scope,
         )
+        from tests.helpers.invites import redeem_invite_once
 
         db_path = str(temp_db)
         await init_database(db_path)
@@ -586,7 +586,7 @@ class TestRunTxnIdempotency:
             await db.flush()
             invite_id = invite.id
 
-        # Patch run_txn to inject contention on the first attempt inside redeem_invite.
+        # Inject a run_txn that simulates contention on the first attempt.
         attempt_count = 0
 
         async def _patched_run_txn(unit_of_work, *, max_attempts=5):
@@ -616,8 +616,7 @@ class TestRunTxnIdempotency:
                 raise last_exc
             raise RuntimeError("exhausted")
 
-        with patch("snore.auth.invite.run_txn", side_effect=_patched_run_txn):
-            await redeem_invite(invite_id)
+        await redeem_invite_once(invite_id, run_txn=_patched_run_txn)
 
         assert attempt_count == 2, (
             f"Expected 2 attempts (1 rollback + 1 success); got {attempt_count}"
@@ -635,7 +634,7 @@ class TestRunTxnIdempotency:
 
         # Trying to redeem again raises InviteRedemptionError (already consumed).
         with pytest.raises(InviteRedemptionError, match="already been redeemed"):
-            await redeem_invite(invite_id)
+            await redeem_invite_once(invite_id)
 
         await cleanup_database()
 

@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.api.deps import get_db
 from snore.api.guards import RequireAdmin
 from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
+from snore.auth.invite import invite_valid_clauses
 from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
 
@@ -321,15 +322,7 @@ async def list_invites(
     """Return pending invites (not redeemed, not revoked, not expired)."""
     now = datetime.now(UTC)
     rows = (
-        (
-            await db.execute(
-                select(models.Invite).where(
-                    models.Invite.redeemed_at.is_(None),
-                    models.Invite.revoked_at.is_(None),
-                    models.Invite.expires_at > now,
-                )
-            )
-        )
+        (await db.execute(select(models.Invite).where(*invite_valid_clauses(now))))
         .scalars()
         .all()
     )
