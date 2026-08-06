@@ -754,6 +754,128 @@ class TestGoogleLoginAutoLink:
 
         await cleanup_database()
 
+    @pytest.mark.asyncio
+    async def test_admin_user_not_auto_linked(self, temp_db, monkeypatch):
+        """Matching email but role=admin → generic 400, no identity row.
+
+        Mailbox possession alone must not grant admin access; admins link
+        Google deliberately via an invite addressed to their email.
+        """
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            admin = models.User(
+                canonical_email="admin@example.com",
+                password_hash="argon2-hash-placeholder",
+                role="admin",
+                session_version=0,
+            )
+            db.add(admin)
+            await db.flush()
+            profile = models.Profile(user_id=admin.id, name="Default")
+            db.add(profile)
+            await db.flush()
+            admin.default_profile_id = profile.id
+            attempt = await _make_oauth_attempt(
+                db, nonce=nonce, browser_session_hash=_hash(pre_auth_value)
+            )
+            state = attempt.state
+
+        resp = await self._run_login_callback(
+            monkeypatch,
+            sub="google-sub-admin",
+            email="admin@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 400
+        assert "snore_session" not in resp.cookies
+
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            identity_count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+        assert identity_count == 0
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_identity_link_race_returns_generic_400(self, temp_db, monkeypatch):
+        """An IntegrityError from window 2 (two flows racing to link the same
+        Google subject) is translated to the uniform generic 400, not a 500."""
+        from sqlalchemy.exc import IntegrityError
+
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            await self._seed_password_user(db, "user@example.com")
+            attempt = await _make_oauth_attempt(
+                db, nonce=nonce, browser_session_hash=_hash(pre_auth_value)
+            )
+            state = attempt.state
+
+        async def _raise_integrity_error(*args: object, **kwargs: object) -> None:
+            raise IntegrityError(
+                "INSERT INTO auth_identities", None, Exception("UNIQUE constraint")
+            )
+
+        monkeypatch.setattr(
+            "snore.api.routers.auth.routes_google._resolve_login",
+            _raise_integrity_error,
+        )
+
+        resp = await self._run_login_callback(
+            monkeypatch,
+            sub="google-sub-race",
+            email="user@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 400, (
+            f"IntegrityError must map to generic 400, got {resp.status_code}"
+        )
+        assert resp.json() == {"detail": "Authentication failed"}
+        assert "snore_session" not in resp.cookies
+
+        await cleanup_database()
+
 
 # ---------------------------------------------------------------------------
 # Test 7: Email mismatch in invite callback

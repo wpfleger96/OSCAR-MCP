@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, StringConstraints
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
@@ -264,6 +265,11 @@ async def _link_identity_ticket(
             email=email_raw,
         )
     )
+    # Audit trail: linking changes who can access the account without a
+    # password, so operators need a record of when it happened.
+    logger.info(
+        "Linked new Google identity to user id=%s (role=%s)", user.id, user.role
+    )
     return await _ticket_for(db, cfg, user)
 
 
@@ -277,6 +283,10 @@ async def _resolve_login(
     account's — the same trust link the invite signup path establishes, and
     safe because ``fetch_google_id_token_claims`` requires
     ``email_verified is True``.  Never provisions a new account.
+
+    Admin accounts are excluded: control of a matching mailbox alone must
+    not grant admin access.  Admins link Google deliberately via an invite
+    addressed to their own email (signup path b).
     """
     sub = str(claims["sub"])
     ticket = await _linked_user_ticket(db, cfg, sub)
@@ -298,7 +308,7 @@ async def _resolve_login(
         .scalars()
         .first()
     )
-    if user is None:
+    if user is None or user.role == "admin":
         raise _TxFailure()
     return await _link_identity_ticket(db, cfg, user, sub, email_raw)
 
@@ -533,6 +543,12 @@ async def google_callback(
                 ticket = await _resolve_login(db, cfg, claims)
             return issue_session_redirect(cfg, ticket)
     except _TxFailure:
+        return _oauth_failure_response()
+    except IntegrityError:
+        # Two concurrent flows racing to link the same (provider, subject)
+        # identity: the loser's commit violates the unique constraint.  Keep
+        # the uniform generic failure instead of surfacing a 500.
+        logger.warning("Google callback lost an identity-link race; returning 400")
         return _oauth_failure_response()
 
 
