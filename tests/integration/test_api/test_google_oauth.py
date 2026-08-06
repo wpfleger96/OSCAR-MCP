@@ -755,6 +755,60 @@ class TestGoogleLoginAutoLink:
         await cleanup_database()
 
     @pytest.mark.asyncio
+    async def test_auto_link_normalizes_email_case(self, temp_db, monkeypatch):
+        """The auto-link match canonicalizes the Google email (lower + strip),
+        and the identity row stores the raw claim value."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+        raw_claim_email = "  User@Example.COM "
+
+        async with session_scope() as db:
+            user_id = await self._seed_password_user(db, "user@example.com")
+            attempt = await _make_oauth_attempt(
+                db, nonce=nonce, browser_session_hash=_hash(pre_auth_value)
+            )
+            state = attempt.state
+
+        resp = await self._run_login_callback(
+            monkeypatch,
+            sub="google-sub-mixed-case",
+            email=raw_claim_email,
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302, (
+            f"Mixed-case verified email must still match, got {resp.status_code}"
+        )
+        assert "snore_session" in resp.cookies
+
+        async with session_scope() as db:
+            from sqlalchemy import select as sel
+
+            identities = (await db.execute(sel(models.AuthIdentity))).scalars().all()
+        assert len(identities) == 1
+        assert identities[0].user_id == user_id
+        # The stored identity email is the raw claim, not the canonical form.
+        assert identities[0].email == raw_claim_email
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
     async def test_admin_user_not_auto_linked(self, temp_db, monkeypatch):
         """Matching email but role=admin → generic 400, no identity row.
 
@@ -855,7 +909,7 @@ class TestGoogleLoginAutoLink:
             )
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.routes_google._resolve_login",
+            "snore.api.routers.auth.routes_google.resolve_login",
             _raise_integrity_error,
         )
 

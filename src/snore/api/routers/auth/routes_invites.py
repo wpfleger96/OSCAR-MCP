@@ -25,9 +25,9 @@ from snore.api.client_ip import get_client_ip
 from snore.api.config import get_config
 from snore.api.deps import get_db
 from snore.api.routers.auth._common import (
-    _NO_STORE,
-    _PASSWORD_MAX_CHARS,
-    _TOKEN_MAX_LEN,
+    NO_STORE,
+    PASSWORD_MAX_CHARS,
+    TOKEN_MAX_LEN,
     SessionTicket,
     apply_session_cookie,
     opportunistic_purge_oauth_attempts,
@@ -50,14 +50,14 @@ router = APIRouter()
 class InviteLookupRequest(BaseModel):
     """Invite lookup — token in request body, never in the URL path."""
 
-    token: Annotated[str, StringConstraints(max_length=_TOKEN_MAX_LEN)]
+    token: Annotated[str, StringConstraints(max_length=TOKEN_MAX_LEN)]
 
 
 class InviteRedeemRequest(BaseModel):
     """Invite redemption — both token and password in request body."""
 
-    token: Annotated[str, StringConstraints(max_length=_TOKEN_MAX_LEN)]
-    password: Annotated[str, StringConstraints(max_length=_PASSWORD_MAX_CHARS)]
+    token: Annotated[str, StringConstraints(max_length=TOKEN_MAX_LEN)]
+    password: Annotated[str, StringConstraints(max_length=PASSWORD_MAX_CHARS)]
 
 
 class InviteInfoResponse(BaseModel):
@@ -112,7 +112,7 @@ async def lookup_invite(
             email=invite.email if (invite is not None and valid) else "",
             valid=valid,
         ).model_dump(),
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
 
 
@@ -125,7 +125,7 @@ async def redeem_invite_route(
     """Redeem an invite with a password — create user + profile atomically.
 
     Both token and password are in the request body so neither appears in the
-    URL path or access logs.  SNORE_MULTIUSER_PLAN.md:233 (secret hygiene).
+    URL path or access logs (secret hygiene).
 
     State machine:
     1. Validate the password byte length (shared byte-based validator).
@@ -236,7 +236,7 @@ async def redeem_invite_route(
 
     response = JSONResponse(
         content={"message": "Account created"},
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
     apply_session_cookie(
         response,

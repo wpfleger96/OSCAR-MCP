@@ -15,7 +15,7 @@ from snore.api.config import AppConfig
 from snore.auth.session_cookie import set_session_cookie
 from snore.database import models
 
-_NO_STORE = {"Cache-Control": "no-store"}
+NO_STORE = {"Cache-Control": "no-store"}
 
 
 class SessionTicket(NamedTuple):
@@ -59,11 +59,9 @@ def issue_session_redirect(
 # inputs before the byte validator runs.  The auth body ceiling in
 # CsrfMiddleware (_AUTH_BODY_LIMIT) is the first resource boundary; these
 # model limits are the second.
-_EMAIL_MAX_LEN = 254  # RFC 5321 maximum email length
-_PASSWORD_MAX_CHARS = (
-    4096  # Conservative char cap; byte validator refines to 1024 bytes
-)
-_TOKEN_MAX_LEN = 256  # Invite tokens are 43-char URL-safe base64; cap with margin
+EMAIL_MAX_LEN = 254  # RFC 5321 maximum email length
+PASSWORD_MAX_CHARS = 4096  # Conservative char cap; byte validator refines to 1024 bytes
+TOKEN_MAX_LEN = 256  # Invite tokens are 43-char URL-safe base64; cap with margin
 
 
 async def purge_expired_oauth_attempts(db: AsyncSession, now: datetime) -> int:
@@ -109,9 +107,9 @@ async def purge_expired_oauth_attempts(db: AsyncSession, now: datetime) -> int:
 async def opportunistic_purge_oauth_attempts(db: AsyncSession) -> None:
     """Delete expired/consumed oauth_attempts rows opportunistically.
 
-    Called on the login and invite-redeem paths to bound table growth between
-    restarts.  Failures are silently swallowed — this is best-effort cleanup,
-    not a hard requirement.
+    Called from the password-login, invite-redeem, and Google flow-initiation
+    paths to bound table growth between restarts.  Failures are silently
+    swallowed — this is best-effort cleanup, not a hard requirement.
     """
     try:
         await purge_expired_oauth_attempts(db, datetime.now(UTC))

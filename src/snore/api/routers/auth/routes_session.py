@@ -33,9 +33,9 @@ from snore.api.config import get_config
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth
 from snore.api.routers.auth._common import (
-    _EMAIL_MAX_LEN,
-    _NO_STORE,
-    _PASSWORD_MAX_CHARS,
+    EMAIL_MAX_LEN,
+    NO_STORE,
+    PASSWORD_MAX_CHARS,
     SessionTicket,
     apply_session_cookie,
     opportunistic_purge_oauth_attempts,
@@ -56,8 +56,8 @@ router = APIRouter()
 
 
 class LoginRequest(BaseModel):
-    email: Annotated[str, StringConstraints(max_length=_EMAIL_MAX_LEN)]
-    password: Annotated[str, StringConstraints(max_length=_PASSWORD_MAX_CHARS)]
+    email: Annotated[str, StringConstraints(max_length=EMAIL_MAX_LEN)]
+    password: Annotated[str, StringConstraints(max_length=PASSWORD_MAX_CHARS)]
 
 
 class ActiveProfileRequest(BaseModel):
@@ -155,7 +155,7 @@ async def login(
 
     response = JSONResponse(
         content={"message": "Logged in"},
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
     apply_session_cookie(
         response,
@@ -169,7 +169,7 @@ async def login(
 async def logout(request: Request) -> JSONResponse:
     """Clear the session cookie."""
     cfg = get_config()
-    response = JSONResponse(content={"message": "Logged out"}, headers=_NO_STORE)
+    response = JSONResponse(content={"message": "Logged out"}, headers=NO_STORE)
     if cfg.is_multiuser:
         clear_session_cookie(response, secure=cfg.secure_cookie)
     return response
@@ -220,7 +220,7 @@ async def demo_login(
 
     response = JSONResponse(
         content={"message": "Logged in as demo"},
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
     apply_session_cookie(
         response,
@@ -262,7 +262,7 @@ async def auth_status(
                 auth_mode=cfg.auth_mode.value,
                 demo_available=demo_available,
             ).model_dump(),
-            headers=_NO_STORE,
+            headers=NO_STORE,
         )
 
     user = await db.get(models.User, actor.user_id)
@@ -273,7 +273,7 @@ async def auth_status(
                 auth_mode=cfg.auth_mode.value,
                 demo_available=demo_available,
             ).model_dump(),
-            headers=_NO_STORE,
+            headers=NO_STORE,
         )
 
     profiles_rows = (
@@ -305,7 +305,7 @@ async def auth_status(
             active_profile_id=actor.profile_id,
             demo_available=demo_available,
         ).model_dump(),
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
 
 
@@ -342,7 +342,7 @@ async def set_active_profile(
 
     response = JSONResponse(
         content={"message": "Active profile updated"},
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
     apply_session_cookie(
         response,

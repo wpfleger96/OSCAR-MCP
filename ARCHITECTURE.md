@@ -335,6 +335,7 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 | devices | `/devices` | List, detail |
 | days | `/days` | List, detail |
 | rx | `/rx` | History, current, compare |
+| reports | `/reports` | Report generation |
 | import | `/import` | Detect sources, upload+import |
 | export | `/export` | CSV, JSON, raw file download |
 | db | `/db` | Stats, vacuum |
