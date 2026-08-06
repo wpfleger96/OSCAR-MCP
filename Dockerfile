@@ -11,25 +11,31 @@ RUN pnpm install --frozen-lockfile
 COPY ui/ ./
 RUN pnpm run build
 
-# Stage 2: Python runtime
-FROM python:3.13-slim AS runtime
+# Stage 2: compile Python dependencies (full image has gcc for native extensions)
+FROM python:3.13 AS python-builder
 
 WORKDIR /app
 
-# Install uv (pinned; update when bumping uv.lock).
 COPY --from=ghcr.io/astral-sh/uv:0.12.2 /uv /uvx /usr/local/bin/
 
-# Install Python dependencies (without the project itself) for layer caching.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
-# Copy source and install the project (editable; snore binary at /app/.venv/bin/snore).
 # README.md is required by hatchling to build the editable install.
 COPY src/ ./src/
 COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
+
+# Stage 3: slim runtime — copy the pre-built venv, no compiler needed
+FROM python:3.13-slim AS runtime
+
+WORKDIR /app
+
+COPY --from=python-builder /app/.venv ./.venv
+COPY --from=python-builder /app/src ./src/
+COPY --from=python-builder /app/pyproject.toml ./
 
 # Copy the built SPA.  _resolve_spa_dist() in app.py falls back to
 # Path(__file__).parents[3] / "ui" / "dist", which resolves to /app/ui/dist
