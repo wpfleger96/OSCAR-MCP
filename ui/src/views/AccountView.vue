@@ -184,7 +184,7 @@ const { setDateFormat } = useDateFormat()
 
 // ── Account ──────────────────────────────────────────────────────────────────
 
-const { data: me, loading: meLoading, error: meError, reload: reloadMe } = useApiLoad(getMe)
+const { data: me, loading: meLoading, error: meError } = useApiLoad(getMe)
 
 const displayName = ref('')
 const displayNameSaving = ref(false)
@@ -249,13 +249,12 @@ async function savePassword() {
     } finally {
         passwordSaving.value = false
     }
-    // Reload me in its own try so a network failure here does not corrupt success state.
-    if (succeeded) {
-        try {
-            await reloadMe()
-        } catch {
-            // Swallow — me.has_password self-corrects on the next full reload.
-        }
+    // A successful change means a password now exists — update locally instead
+    // of re-fetching, so a network hiccup can't blank the page or the success
+    // banner (useApiLoad surfaces reload failures via meError, which swaps the
+    // whole view into its error state).
+    if (succeeded && me.value) {
+        me.value = { ...me.value, has_password: true }
     }
 }
 
