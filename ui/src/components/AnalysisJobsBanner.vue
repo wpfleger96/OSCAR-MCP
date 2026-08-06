@@ -67,29 +67,6 @@ function jobLabel(job: AnalysisJobInfo): string {
 </script>
 
 <style scoped>
-.jobs-banner {
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 1rem;
-    background: var(--color-card);
-    margin-bottom: 1rem;
-}
-
-.jobs-banner-title {
-    font-size: 0.875rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-muted-foreground);
-    margin: 0 0 0.75rem;
-}
-
-.jobs-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-}
-
 .job-row {
     display: flex;
     align-items: center;
@@ -100,49 +77,11 @@ function jobLabel(job: AnalysisJobInfo): string {
     background: var(--color-background, transparent);
 }
 
-.job-icon {
-    flex-shrink: 0;
-    width: 1.25rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.job-state-icon {
-    font-size: 0.85rem;
-    font-weight: 700;
-}
-
-.job-state-success {
-    color: var(--color-success);
-}
-
-.job-state-failed {
-    color: var(--color-destructive);
-}
-
 .job-info {
     flex: 1;
     display: flex;
     align-items: center;
     gap: 0.75rem;
     min-width: 0;
-}
-
-.job-label {
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-}
-
-.job-progress {
-    font-size: 0.8rem;
-    color: var(--color-muted-foreground);
-}
-
-.job-error {
-    color: var(--color-destructive);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 </style>

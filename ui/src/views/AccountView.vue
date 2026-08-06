@@ -35,14 +35,10 @@
                             placeholder="Optional display name"
                             :disabled="isDemo || displayNameSaving"
                         />
-                        <button
-                            type="submit"
-                            class="save-btn"
-                            :disabled="isDemo || displayNameSaving"
-                        >
+                        <Button type="submit" :disabled="isDemo || displayNameSaving">
                             <Loader2 v-if="displayNameSaving" class="h-4 w-4 animate-spin" />
                             <span v-else>Save</span>
-                        </button>
+                        </Button>
                     </div>
                     <p v-if="displayNameError" role="alert" class="form-error">
                         {{ displayNameError }}
@@ -97,12 +93,12 @@
                     <p v-if="passwordError" role="alert" class="form-error">{{ passwordError }}</p>
                     <p v-if="passwordSuccess" class="form-success">{{ passwordSuccess }}</p>
 
-                    <button type="submit" class="save-btn" :disabled="isDemo || passwordSaving">
+                    <Button type="submit" class="self-start" :disabled="isDemo || passwordSaving">
                         <Loader2 v-if="passwordSaving" class="h-4 w-4 animate-spin" />
                         <span v-else>{{
                             me.has_password ? 'Update password' : 'Set password'
                         }}</span>
-                    </button>
+                    </Button>
                 </form>
             </div>
 
@@ -151,10 +147,10 @@
                     <p v-if="prefSaveError" role="alert" class="form-error">{{ prefSaveError }}</p>
                     <p v-if="prefSuccess" class="form-success">{{ prefSuccess }}</p>
 
-                    <button type="submit" class="save-btn" :disabled="isDemo || prefSaving">
+                    <Button type="submit" class="self-start" :disabled="isDemo || prefSaving">
                         <Loader2 v-if="prefSaving" class="h-4 w-4 animate-spin" />
                         <span v-else>Save preferences</span>
-                    </button>
+                    </Button>
                 </form>
             </div>
         </template>
@@ -164,6 +160,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { Loader2 } from '@lucide/vue'
+import { Button } from '@/components/ui/button'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
@@ -378,33 +375,6 @@ async function savePreferences() {
 /* flex: 1 so the input fills the inline-row */
 .field-input {
     flex: 1;
-}
-
-.save-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.375rem;
-    height: 2.25rem;
-    padding: 0 1rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-border);
-    background: var(--color-primary);
-    color: var(--color-primary-foreground);
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity 0.15s;
-    align-self: flex-start;
-}
-
-.save-btn:hover:not(:disabled) {
-    opacity: 0.9;
-}
-
-.save-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
 }
 
 .form-error {

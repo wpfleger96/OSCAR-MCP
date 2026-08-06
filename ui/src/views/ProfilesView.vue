@@ -43,10 +43,7 @@
                                 <span v-if="profile.id === activeProfileId" class="active-badge">
                                     Active
                                 </span>
-                                <span
-                                    v-if="profile.is_default ?? profile.id === activeProfileId"
-                                    class="default-badge"
-                                >
+                                <span v-if="profile.is_default" class="default-badge">
                                     Default
                                 </span>
                             </div>
@@ -59,10 +56,7 @@
                                     Rename
                                 </button>
                                 <button
-                                    v-if="
-                                        canWrite &&
-                                        !(profile.is_default ?? profile.id === activeProfileId)
-                                    "
+                                    v-if="canWrite && !profile.is_default"
                                     class="action-btn action-btn--ghost"
                                     @click="setDefault(profile.id)"
                                 >

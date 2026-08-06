@@ -9,11 +9,7 @@
                 <label for="import-profile" class="profile-selector-label"
                     >Import into profile</label
                 >
-                <select
-                    id="import-profile"
-                    v-model="selectedProfileId"
-                    class="profile-selector-select"
-                >
+                <select id="import-profile" v-model="selectedProfileId" class="field-select">
                     <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
                 </select>
             </div>
@@ -490,23 +486,6 @@ onUnmounted(() => {
     font-weight: 500;
     color: var(--color-foreground);
     white-space: nowrap;
-}
-
-.profile-selector-select {
-    height: 2.25rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-input);
-    background: transparent;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    outline: none;
-    cursor: pointer;
-    transition: border-color 0.15s;
-}
-
-.profile-selector-select:focus {
-    border-color: var(--color-primary);
 }
 
 /* ---- Hero card ---- */
