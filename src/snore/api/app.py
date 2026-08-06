@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.resources
 import logging
 import os
+import resource
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -55,6 +56,14 @@ except PackageNotFoundError:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Raise the FD soft limit so Starlette's multipart parser can open a
+    # SpooledTemporaryFile per uploaded file without hitting EMFILE.
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    _target = min(_hard, 65_536) if _hard != resource.RLIM_INFINITY else 65_536
+    if _soft < _target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (_target, _hard))
+        logger.info("Raised file-descriptor limit: %d → %d", _soft, _target)
+
     # Load and validate config first — fail fast on misconfiguration.
     from snore.api.config import load_config, set_config  # noqa: PLC0415
 

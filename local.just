@@ -3,7 +3,7 @@
 
 # Start the API in LOCAL auth mode (single-user, no login, identical to pre-multiuser UX).
 dev:
-    SNORE_AUTH_MODE=local uv run uvicorn snore.api.app:create_app --factory --reload --host 127.0.0.1 --port 8000
+    SNORE_AUTH_MODE=local uv run uvicorn snore.api.app:create_app --factory --reload --reload-dir src --host 127.0.0.1 --port 8000
 
 # Start the API in MULTIUSER auth mode with a throwaway secret and a seeded invite.
 # Prints the signup URL to stdout so you can paste it into a browser.
