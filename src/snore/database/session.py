@@ -67,6 +67,25 @@ _engine: AsyncEngine | None = None
 _AsyncSessionFactory: async_sessionmaker[AsyncSession] | None = None
 _db_path: str | None = None
 
+# Staleness-detection globals — set/cleared alongside the engine globals above.
+#
+# _db_identity: (st_dev, st_ino) of the DB file recorded at engine-init time.
+#   A changed identity means the file was atomically replaced on disk (e.g. by
+#   SNORE's import pipeline, which does an atomic rename(2) to a new inode).
+#   None disables detection (in-memory DB, OSError during stat, or not inited).
+#
+# _sync_url / _async_url: cached at init so check_db_staleness can reinitialize
+#   the engine without re-resolving URLs from the path alone.
+#
+# _engine_generation: monotonically increments on every successful _do_init call.
+#   NEVER reset by cleanup_database or initialization failure.  External callers
+#   snapshot this value to detect that the engine was rebuilt (e.g. after a
+#   swap-triggered reinit in check_db_staleness).
+_db_identity: tuple[int, int] | None = None
+_sync_url: str | None = None
+_async_url: str | None = None
+_engine_generation: int = 0
+
 # Shared state machine: three linearized states under one stable lock.
 #
 #   initialized:       _engine is not None
@@ -193,7 +212,14 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
     ``CancelledError`` is caught as ``BaseException`` so a cancelled driver
     tears down cleanly and lets the next caller retry rather than hanging.
     """
-    global _engine, _AsyncSessionFactory, _db_path
+    global \
+        _engine, \
+        _AsyncSessionFactory, \
+        _db_path, \
+        _db_identity, \
+        _sync_url, \
+        _async_url, \
+        _engine_generation
 
     engine: AsyncEngine | None = None
     try:
@@ -231,6 +257,24 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
             expire_on_commit=False,
             class_=AsyncSession,
         )
+
+        # Record the file identity (dev, inode) for atomic-swap detection.
+        # Statting after migrations is safe — the pool is lazy, so if the file
+        # was replaced mid-init, both this stat and the first connection observe
+        # the new file consistently.
+        if db_path and db_path != ":memory:":
+            try:
+                st = os.stat(db_path)
+                _db_identity = (st.st_dev, st.st_ino)
+            except OSError:
+                # File absent between directory creation and stat (e.g. racing
+                # test teardown).  Swap detection is disabled until next init.
+                _db_identity = None
+        else:
+            _db_identity = None
+        _sync_url = sync_url
+        _async_url = async_url
+        _engine_generation += 1
     except BaseException:
         # Atomic teardown on any failure including CancelledError.
         # Use synchronous disposal only — awaiting inside an except-BaseException
@@ -244,6 +288,10 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
         _engine = None
         _AsyncSessionFactory = None
         _db_path = None
+        _db_identity = None
+        _sync_url = None
+        _async_url = None
+        # _engine_generation is intentionally not reset on failure.
         raise
 
 
@@ -434,6 +482,69 @@ def get_session() -> AsyncSession:
     return _AsyncSessionFactory()
 
 
+async def check_db_staleness() -> None:
+    """Detect an atomic DB-file swap and transparently reinitialize the engine.
+
+    SNORE's import pipeline atomically replaces the SQLite file with a
+    ``rename(2)`` to a new inode.  The singleton async engine would otherwise
+    keep serving the old unlinked inode forever.  This function compares the
+    engine's recorded ``(st_dev, st_ino)`` against the live filesystem on every
+    session open and triggers a transparent reinit when they differ.
+
+    Hot path: one ``os.stat`` call, no lock.  On mismatch (cold path), the
+    function disposes the stale engine via ``cleanup_database`` and rebuilds via
+    ``_init_with_once_task`` using the URLs cached at engine-init time.
+
+    Concurrency safety:
+    - Concurrent detections are harmless — both converge on the same
+      once-cleanup-task and once-init-task so the engine is replaced exactly
+      once regardless of how many callers detect the mismatch simultaneously.
+    - No deadlock is possible: ``_init_lock`` is never held across an ``await``
+      and ``session_scope`` never runs under it.
+    - Module globals are captured into locals before the first ``await`` so a
+      concurrent ``cleanup_database()`` cannot race between the mismatch check
+      and the reinit call to produce a ``None`` dereference.
+    """
+    # Fast exits: not a real on-disk file, or identity not recorded.
+    if _db_path is None or _db_path == ":memory:" or _db_identity is None:
+        return
+
+    try:
+        st = os.stat(_db_path)
+    except OSError:
+        # File momentarily absent mid-swap — recheck on the next call.
+        return
+
+    if (st.st_dev, st.st_ino) == _db_identity:
+        return  # Hot path: identity unchanged.
+
+    # Capture module globals into locals before the first await.  A concurrent
+    # cleanup_database() call may clear them at any point after this.
+    captured_sync_url = _sync_url
+    captured_async_url = _async_url
+    captured_db_path = _db_path
+    captured_identity = _db_identity
+
+    if (
+        captured_sync_url is None
+        or captured_async_url is None
+        or captured_db_path is None
+    ):
+        # A concurrent cleanup cleared the URLs between our stat and here.
+        # The engine is already being torn down; nothing left to do.
+        return
+
+    logger.warning(
+        "Database file replaced on disk (inode %s -> %s) at path %s; "
+        "disposing stale engine and reconnecting.",
+        captured_identity,
+        (st.st_dev, st.st_ino),
+        captured_db_path,
+    )
+    await cleanup_database()
+    await _init_with_once_task(captured_sync_url, captured_async_url, captured_db_path)
+
+
 @asynccontextmanager
 async def session_scope() -> AsyncGenerator[AsyncSession]:
     """Provide a transactional scope for async database operations.
@@ -448,6 +559,7 @@ async def session_scope() -> AsyncGenerator[AsyncSession]:
     Yields:
         An async database session.
     """
+    await check_db_staleness()
     session = get_session()
     try:
         async with session.begin():
@@ -473,6 +585,18 @@ def get_db_path() -> str:
     return _db_path
 
 
+def get_engine_generation() -> int:
+    """Return the current engine generation counter.
+
+    Increments on every successful ``_do_init`` and is never reset by
+    ``cleanup_database`` or initialization failure.  Callers can snapshot this
+    value before an operation and compare it afterwards to detect that the engine
+    was rebuilt — for example after a swap-triggered reinit in
+    ``check_db_staleness``.
+    """
+    return _engine_generation
+
+
 async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
     """Owned teardown coroutine — runs as the shared ``_cleanup_task``.
 
@@ -489,7 +613,14 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
       (normal, exception, or cancellation) — state machine exits cleanup-in-flight
       with no stuck-barrier.
     """
-    global _engine, _AsyncSessionFactory, _db_path, _cleanup_task
+    global \
+        _engine, \
+        _AsyncSessionFactory, \
+        _db_path, \
+        _cleanup_task, \
+        _db_identity, \
+        _sync_url, \
+        _async_url
 
     lock = _get_init_lock()
 
@@ -514,6 +645,10 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
                 _engine = None
                 _AsyncSessionFactory = None
                 _db_path = None
+                _db_identity = None
+                _sync_url = None
+                _async_url = None
+                # _engine_generation is intentionally not reset on cleanup.
     finally:
         # Terminal state transition: always exit cleanup-in-flight,
         # whether we completed normally, raised, or were cancelled.

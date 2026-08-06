@@ -6,19 +6,13 @@ from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.auth.actor import ActorContext, AuthMode
-from snore.database.session import get_session
+from snore.database.session import check_db_staleness, get_session, session_scope
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
     """FastAPI dependency that provides a committed/rolled-back AsyncSession."""
-    session = get_session()
-    try:
-        async with session.begin():
-            yield session
-    except Exception:
-        raise
-    finally:
-        await session.close()
+    async with session_scope() as session:
+        yield session
 
 
 async def get_raw_session() -> AsyncGenerator[AsyncSession]:
@@ -27,6 +21,7 @@ async def get_raw_session() -> AsyncGenerator[AsyncSession]:
     Use when a handler needs fine-grained transaction control (e.g., splitting
     a read transaction from network I/O from a write transaction).
     """
+    await check_db_staleness()
     session = get_session()
     try:
         yield session
