@@ -29,7 +29,7 @@ export function useAuth() {
         if (status.value !== null && now - _lastFetched < REVALIDATE_MS) return
         if (_fetchPromise !== null) return _fetchPromise
         const gen = _generation
-        _fetchPromise = getAuthStatus()
+        _fetchPromise = getAuthStatus(AbortSignal.timeout(10_000))
             .then((s) => {
                 if (_generation === gen) {
                     // Only write if this generation is still the active one.
