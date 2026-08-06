@@ -441,6 +441,7 @@ async def import_files(
                             f"{max_file_bytes // (1024**2)} MiB per-file limit"
                         ),
                     ) from None
+                await upload.close()
 
         # Resolve target profile: validate ownership if caller specified one.
         if _requested_profile_id is not None:
