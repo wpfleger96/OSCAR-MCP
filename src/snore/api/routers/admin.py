@@ -17,7 +17,7 @@ admin session authentication and CSRF are the relevant controls here.
 Security controls
 -----------------
 - All routes guarded by RequireAdmin (401 unauthenticated, 403 non-admin).
-- CSRF origin check is handled by the existing CsrfMiddleware covering /api/v1.
+- CSRF origin check is handled by the existing AuthPathMiddleware covering /api/v1.
 - Invite creation response carries Cache-Control: no-store (raw token in body,
   shown once).
 - Last-admin guard prevents demoting the sole active admin.
@@ -37,16 +37,16 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.api.constants import NO_STORE
 from snore.api.deps import get_db
 from snore.api.guards import RequireAdmin
 from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
+from snore.auth.emails import normalize_email
 from snore.auth.invite import invite_valid_clauses
 from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
 
 router = APIRouter()
-
-_NO_STORE = {"Cache-Control": "no-store"}
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ class CreateInviteRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_email(self) -> CreateInviteRequest:
-        normalized = self.email.strip().lower()
+        normalized = normalize_email(self.email)
         if not normalized or "@" not in normalized:
             raise ValueError("Invalid email address")
         return self
@@ -282,7 +282,7 @@ async def create_invite(
 
     cfg = get_config()
 
-    canonical = body.email.strip().lower()
+    canonical = normalize_email(body.email)
     raw = secrets.token_urlsafe(32)
     token_hash = hash_invite_token(raw)
     now = datetime.now(UTC)
@@ -311,7 +311,7 @@ async def create_invite(
         expires_at=expires_at,
     ).model_dump(mode="json")
 
-    return JSONResponse(content=content, status_code=201, headers=_NO_STORE)
+    return JSONResponse(content=content, status_code=201, headers=NO_STORE)
 
 
 @router.get("/invites", response_model=list[InviteItem])

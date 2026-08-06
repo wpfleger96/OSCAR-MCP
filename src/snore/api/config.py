@@ -153,6 +153,19 @@ class AppConfig:
 _config: AppConfig | None = None
 
 
+def _parse_positive_int(env_key: str, default: int, unit_label: str = "") -> int:
+    """Parse an env var as a positive integer; raise ConfigError on failure."""
+    suffix = f" {unit_label}" if unit_label else ""
+    msg = f"{env_key} must be a positive integer{suffix}"
+    try:
+        value = int(os.environ.get(env_key, str(default)))
+    except ValueError as exc:
+        raise ConfigError(msg) from exc
+    if value <= 0:
+        raise ConfigError(msg)
+    return value
+
+
 def load_config(
     *,
     auth_mode_override: str | None = None,
@@ -214,75 +227,23 @@ def load_config(
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
     google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
-    try:
-        oauth_attempt_ttl_seconds = int(
-            os.environ.get("SNORE_OAUTH_ATTEMPT_TTL_SECONDS", "600")
-        )
-    except ValueError as exc:
-        raise ConfigError(
-            "SNORE_OAUTH_ATTEMPT_TTL_SECONDS must be a positive integer (seconds)"
-        ) from exc
-    if oauth_attempt_ttl_seconds <= 0:
-        raise ConfigError(
-            "SNORE_OAUTH_ATTEMPT_TTL_SECONDS must be a positive integer (seconds)"
-        )
-
-    try:
-        pre_auth_cookie_ttl_seconds = int(
-            os.environ.get("SNORE_PRE_AUTH_COOKIE_TTL_SECONDS", "600")
-        )
-    except ValueError as exc:
-        raise ConfigError(
-            "SNORE_PRE_AUTH_COOKIE_TTL_SECONDS must be a positive integer (seconds)"
-        ) from exc
-    if pre_auth_cookie_ttl_seconds <= 0:
-        raise ConfigError(
-            "SNORE_PRE_AUTH_COOKIE_TTL_SECONDS must be a positive integer (seconds)"
-        )
+    oauth_attempt_ttl_seconds = _parse_positive_int(
+        "SNORE_OAUTH_ATTEMPT_TTL_SECONDS", 600, "(seconds)"
+    )
+    pre_auth_cookie_ttl_seconds = _parse_positive_int(
+        "SNORE_PRE_AUTH_COOKIE_TTL_SECONDS", 600, "(seconds)"
+    )
 
     # Resource bounds — read with safe int parsing.
-    try:
-        max_upload_bytes = int(
-            os.environ.get("SNORE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024))
-        )
-    except ValueError as exc:
-        raise ConfigError(
-            "SNORE_MAX_UPLOAD_BYTES must be a positive integer (bytes)"
-        ) from exc
-    if max_upload_bytes <= 0:
-        raise ConfigError("SNORE_MAX_UPLOAD_BYTES must be a positive integer (bytes)")
-
-    try:
-        max_file_bytes = int(
-            os.environ.get("SNORE_MAX_FILE_BYTES", str(256 * 1024 * 1024))
-        )
-    except ValueError as exc:
-        raise ConfigError(
-            "SNORE_MAX_FILE_BYTES must be a positive integer (bytes)"
-        ) from exc
-    if max_file_bytes <= 0:
-        raise ConfigError("SNORE_MAX_FILE_BYTES must be a positive integer (bytes)")
-
-    try:
-        max_upload_files = int(os.environ.get("SNORE_MAX_UPLOAD_FILES", "10000"))
-    except ValueError as exc:
-        raise ConfigError("SNORE_MAX_UPLOAD_FILES must be a positive integer") from exc
-    if max_upload_files <= 0:
-        raise ConfigError("SNORE_MAX_UPLOAD_FILES must be a positive integer")
-
-    try:
-        max_jobs_per_user = int(os.environ.get("SNORE_MAX_JOBS_PER_USER", "3"))
-    except ValueError as exc:
-        raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer") from exc
-    if max_jobs_per_user <= 0:
-        raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer")
-
-    try:
-        max_jobs_global = int(os.environ.get("SNORE_MAX_JOBS_GLOBAL", "10"))
-    except ValueError as exc:
-        raise ConfigError("SNORE_MAX_JOBS_GLOBAL must be a positive integer") from exc
-    if max_jobs_global <= 0:
-        raise ConfigError("SNORE_MAX_JOBS_GLOBAL must be a positive integer")
+    max_upload_bytes = _parse_positive_int(
+        "SNORE_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024, "(bytes)"
+    )
+    max_file_bytes = _parse_positive_int(
+        "SNORE_MAX_FILE_BYTES", 256 * 1024 * 1024, "(bytes)"
+    )
+    max_upload_files = _parse_positive_int("SNORE_MAX_UPLOAD_FILES", 10000)
+    max_jobs_per_user = _parse_positive_int("SNORE_MAX_JOBS_PER_USER", 3)
+    max_jobs_global = _parse_positive_int("SNORE_MAX_JOBS_GLOBAL", 10)
 
     public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:
@@ -398,9 +359,6 @@ def validate_origin_url(url: str, *, require_http_loopback: bool = False) -> Non
                 ) from None
 
 
-_validate_origin_url = validate_origin_url  # backwards-compat alias
-
-
 def _validate_public_base_url(url: str) -> None:
     """Raise ConfigError if ``url`` is not a valid loopback HTTP or HTTPS URL.
 
@@ -409,7 +367,7 @@ def _validate_public_base_url(url: str) -> None:
     canonical origin without ambiguity.
     """
     try:
-        _validate_origin_url(url, require_http_loopback=True)
+        validate_origin_url(url, require_http_loopback=True)
     except ConfigError as exc:
         raise ConfigError(f"SNORE_PUBLIC_BASE_URL {exc}") from exc
 
@@ -422,7 +380,7 @@ def _validate_dev_origin(url: str) -> None:
     schemes (``javascript:``, etc.) or partial URLs from silently collapsing
     into a host-wide origin.
     """
-    _validate_origin_url(url)
+    validate_origin_url(url)
 
 
 def get_config() -> AppConfig:

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import click
 
+from snore.auth.emails import normalize_email
 from snore.cli.decorators import db_option, db_session
 from snore.cli.display import console, print_error, print_success
 
@@ -66,7 +67,7 @@ def user_create(
         async with db_session(db) as session:
             from snore.database.models import Profile, User  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
             u = User(
                 canonical_email=canonical,
                 display_name=display_name or canonical.split("@")[0],
@@ -98,7 +99,7 @@ def user_disable(email: str, db: str | None) -> None:
 
             from snore.database.models import User  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
             u = (
                 (
                     await session.execute(
@@ -159,7 +160,7 @@ def user_invite(
         async with db_session(db) as session:
             from snore.database.models import Invite  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
             inv = Invite(
                 email=canonical,
                 token_hash=token_hash,
@@ -197,7 +198,7 @@ def invite_revoke(email: str, db: str | None) -> None:
 
             from snore.database.models import Invite  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
             # Deliberately NOT invite_valid_clauses: expired-but-pending
             # invites must remain revocable.
             stmt = select(Invite).where(

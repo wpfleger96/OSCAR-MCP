@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth, RequireWritable
+from snore.database import models
 from snore.services.profile_service import ProfileNotFoundError, ProfileService
 
 router = APIRouter()
@@ -43,15 +44,19 @@ class RenameProfileRequest(BaseModel):
     default: bool | None = None
 
 
+async def _get_default_profile_id(db: AsyncSession, user_id: int) -> int | None:
+    """Return the user's default_profile_id. User always exists per ActorContextFactory."""
+    user = await db.get(models.User, user_id)
+    assert user is not None  # noqa: S101 — ActorContextFactory guarantees existence
+    return user.default_profile_id
+
+
 @router.get("/", response_model=list[ProfileResponse])
 async def list_profiles(actor: RequireAuth, db: DbDep) -> list[ProfileResponse]:
     """List all live profiles for the current user."""
-    from snore.database import models as _models  # noqa: PLC0415
-
     svc = ProfileService(db)
     profiles = await svc.list_profiles(actor.user_id)
-    user = await db.get(_models.User, actor.user_id)
-    default_id = user.default_profile_id if user else None
+    default_id = await _get_default_profile_id(db, actor.user_id)
     return [
         ProfileResponse(
             id=p.id,
@@ -68,8 +73,6 @@ async def list_profiles(actor: RequireAuth, db: DbDep) -> list[ProfileResponse]:
 async def create_profile(
     body: CreateProfileRequest, actor: RequireWritable, db: DbDep
 ) -> ProfileResponse:
-    from snore.database import models as _models  # noqa: PLC0415
-
     svc = ProfileService(db)
     try:
         profile = await svc.create_profile(actor.user_id, body.name)
@@ -77,8 +80,7 @@ async def create_profile(
         raise HTTPException(
             status_code=409, detail=f"A profile named '{body.name}' already exists"
         ) from exc
-    user = await db.get(_models.User, actor.user_id)
-    default_id = user.default_profile_id if user else None
+    default_id = await _get_default_profile_id(db, actor.user_id)
     return ProfileResponse(
         id=profile.id,
         name=profile.name,
@@ -92,8 +94,6 @@ async def create_profile(
 async def update_profile(
     profile_id: int, body: RenameProfileRequest, actor: RequireWritable, db: DbDep
 ) -> ProfileResponse:
-    from snore.database import models as _models  # noqa: PLC0415
-
     svc = ProfileService(db)
     try:
         if body.name is not None:
@@ -111,8 +111,7 @@ async def update_profile(
             status_code=409,
             detail=f"A profile named '{body.name}' already exists",
         ) from err
-    user = await db.get(_models.User, actor.user_id)
-    default_id = user.default_profile_id if user else None
+    default_id = await _get_default_profile_id(db, actor.user_id)
     return ProfileResponse(
         id=profile.id,
         name=profile.name,

@@ -304,10 +304,6 @@ class AuthPathMiddleware(BaseHTTPMiddleware):
         return "Origin not allowed"
 
 
-# Backward-compat alias — app.py imports this name; remove once app.py is updated.
-CsrfMiddleware = AuthPathMiddleware
-
-
 # ---------------------------------------------------------------------------
 # RateLimitMiddleware
 # ---------------------------------------------------------------------------

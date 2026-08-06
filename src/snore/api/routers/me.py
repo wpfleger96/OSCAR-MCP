@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
+from snore.api.constants import NO_STORE
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
@@ -49,8 +50,6 @@ from snore.auth.session_cookie import set_session_cookie
 from snore.database import models
 
 router = APIRouter()
-
-_NO_STORE = {"Cache-Control": "no-store"}
 
 _PASSWORD_MAX_CHARS = (
     4096  # conservative char cap; byte validator refines to 1024 bytes
@@ -129,7 +128,7 @@ async def get_me(
             role=user.role,
             has_password=user.password_hash is not None,
         ).model_dump(),
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
 
 
@@ -150,7 +149,7 @@ async def update_display_name(
 
     return JSONResponse(
         content={"message": "Display name updated"},
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
 
 
@@ -207,7 +206,7 @@ async def change_password(
 
     response = JSONResponse(
         content={"message": "Password updated"},
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
     if cfg.is_multiuser:
         set_session_cookie(
@@ -232,7 +231,7 @@ async def get_preferences(
     prefs = UserPreferences(**(user.preferences or {}))
     return JSONResponse(
         content=prefs.model_dump(),
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
 
 
@@ -256,5 +255,5 @@ async def update_preferences(
 
     return JSONResponse(
         content=dumped,
-        headers=_NO_STORE,
+        headers=NO_STORE,
     )
