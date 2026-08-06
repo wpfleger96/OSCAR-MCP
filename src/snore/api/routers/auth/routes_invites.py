@@ -28,6 +28,8 @@ from snore.api.routers.auth._common import (
     _NO_STORE,
     _PASSWORD_MAX_CHARS,
     _TOKEN_MAX_LEN,
+    SessionTicket,
+    apply_session_cookie,
     opportunistic_purge_oauth_attempts,
 )
 from snore.api.schemas import MessageResponse
@@ -39,7 +41,6 @@ from snore.auth.invite import (
 from snore.auth.invite_tokens import hash_invite_token
 from snore.auth.lockout import get_invite_lockout_store
 from snore.auth.passwords import hash_password_async, validate_password_bytes
-from snore.auth.session_cookie import set_session_cookie
 from snore.database import models
 from snore.database.txn import run_txn
 
@@ -237,13 +238,9 @@ async def redeem_invite_route(
         content={"message": "Account created"},
         headers=_NO_STORE,
     )
-    if cfg.is_multiuser:
-        set_session_cookie(
-            response,
-            secret=cfg.session_secret,
-            user_id=result_holder["user_id"],
-            active_profile_id=result_holder["profile_id"],
-            session_version=0,
-            secure=cfg.secure_cookie,
-        )
+    apply_session_cookie(
+        response,
+        cfg,
+        SessionTicket(result_holder["user_id"], result_holder["profile_id"], 0),
+    )
     return response

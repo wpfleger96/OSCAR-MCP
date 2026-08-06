@@ -26,6 +26,7 @@ import hmac
 import logging
 import secrets
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from urllib.parse import urlencode
@@ -43,6 +44,8 @@ from snore.api.deps import get_db, get_raw_session
 from snore.api.routers.auth._common import (
     _NO_STORE,
     _TOKEN_MAX_LEN,
+    SessionTicket,
+    issue_session_redirect,
     opportunistic_purge_oauth_attempts,
 )
 from snore.auth.factory import ActorContextFactory
@@ -50,7 +53,6 @@ from snore.auth.google_oauth import OAuthError, fetch_google_id_token_claims
 from snore.auth.invite import invite_valid_clauses
 from snore.auth.invite_tokens import hash_invite_token
 from snore.auth.lockout import get_invite_lockout_store
-from snore.auth.session_cookie import set_session_cookie
 from snore.database import models
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,15 @@ def _oauth_failure_response() -> JSONResponse:
     )
 
 
-def _google_not_configured_response() -> JSONResponse:
+def _google_gate(cfg: AppConfig) -> JSONResponse | None:
+    """503 unless Google flows are available: multiuser mode + credentials.
+
+    Local mode has no session cookies or per-user accounts, so a Google login
+    would be meaningless; the message stays identical to the unconfigured case
+    to avoid a configuration oracle.
+    """
+    if cfg.is_multiuser and cfg.is_google_configured:
+        return None
     return JSONResponse(
         content={"detail": "Google login not configured"},
         status_code=503,
@@ -100,20 +110,76 @@ def _google_not_configured_response() -> JSONResponse:
     )
 
 
-def _ensure_pre_auth_cookie(
-    request: Request,
-    cfg: AppConfig,
-    response: Response,
-) -> str:
-    """Return the pre-auth cookie value; set a new one on *response* if absent.
+@dataclass(frozen=True)
+class _GoogleFlowStart:
+    auth_url: str
+    pre_auth_value: str
+    new_cookie: bool  # False ⇒ an existing snore_pre_auth cookie was reused
 
-    Reuses an existing cookie without rotating it so concurrent tabs share one
-    hash and parallel flows both stay valid.
+
+async def _begin_google_flow(
+    db: AsyncSession,
+    cfg: AppConfig,
+    request: Request,
+    *,
+    kind: str,
+    redirect_path: str,
+    invite_id: int | None = None,
+    expected_canonical_email: str | None = None,
+    login_hint: str | None = None,
+) -> _GoogleFlowStart:
+    """Create an ``oauth_attempts`` row and build the Google authorization URL.
+
+    Owns everything the two initiation routes share: state/nonce generation,
+    PKCE S256, browser binding, and opportunistic purge.  An existing pre-auth
+    cookie is reused without rotation so concurrent tabs share one hash and
+    parallel flows both stay valid; the caller sets the cookie on its response
+    when ``new_cookie`` is True.
     """
+    state = secrets.token_hex(32)
+    nonce = secrets.token_hex(16)
+    verifier, challenge = _pkce_pair()
+    now = datetime.now(UTC)
+
+    params = {
+        "client_id": cfg.google_client_id,
+        "redirect_uri": cfg.public_base_url.rstrip("/") + redirect_path,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "nonce": nonce,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    if login_hint is not None:
+        params["login_hint"] = login_hint
+
     existing = request.cookies.get(_PRE_AUTH_COOKIE)
-    if existing:
-        return existing
-    value = secrets.token_hex(32)
+    pre_auth_value = existing if existing else secrets.token_hex(32)
+
+    db.add(
+        models.OauthAttempt(
+            state=state,
+            kind=kind,
+            invite_id=invite_id,
+            expected_canonical_email=expected_canonical_email,
+            nonce=nonce,
+            pkce_verifier=verifier,
+            browser_session_hash=hashlib.sha256(pre_auth_value.encode()).hexdigest(),
+            expires_at=now + timedelta(seconds=cfg.oauth_attempt_ttl_seconds),
+        )
+    )
+    await db.flush()
+    await opportunistic_purge_oauth_attempts(db)
+
+    return _GoogleFlowStart(
+        auth_url=_GOOGLE_AUTH_URL + "?" + urlencode(params),
+        pre_auth_value=pre_auth_value,
+        new_cookie=existing is None,
+    )
+
+
+def _set_pre_auth_cookie(response: Response, cfg: AppConfig, value: str) -> None:
     response.set_cookie(
         _PRE_AUTH_COOKIE,
         value,
@@ -123,7 +189,6 @@ def _ensure_pre_auth_cookie(
         httponly=True,
         samesite="lax",
     )
-    return value
 
 
 @router.get("/google/login")
@@ -137,47 +202,19 @@ async def google_login(
     an ``oauth_attempts`` row, then redirects the browser to Google.
     """
     cfg = get_config()
+    if (gate := _google_gate(cfg)) is not None:
+        return gate
 
-    if not cfg.is_google_configured:
-        return _google_not_configured_response()
-
-    state = secrets.token_hex(32)
-    nonce = secrets.token_hex(16)
-    verifier, challenge = _pkce_pair()
-    now = datetime.now(UTC)
-    expires_at = now + timedelta(seconds=cfg.oauth_attempt_ttl_seconds)
-    redirect_uri = cfg.public_base_url.rstrip("/") + "/api/v1/auth/google/callback"
-
-    # Build the redirect response first so we can set the cookie on it.
-    params = {
-        "client_id": cfg.google_client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "state": state,
-        "nonce": nonce,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-    }
-    auth_url = _GOOGLE_AUTH_URL + "?" + urlencode(params)
-    response: RedirectResponse = RedirectResponse(url=auth_url, status_code=302)
-
-    pre_auth_value = _ensure_pre_auth_cookie(request, cfg, response)
-    browser_session_hash = hashlib.sha256(pre_auth_value.encode()).hexdigest()
-
-    db.add(
-        models.OauthAttempt(
-            state=state,
-            kind="login",
-            nonce=nonce,
-            pkce_verifier=verifier,
-            browser_session_hash=browser_session_hash,
-            expires_at=expires_at,
-        )
+    flow = await _begin_google_flow(
+        db,
+        cfg,
+        request,
+        kind="login",
+        redirect_path="/api/v1/auth/google/callback",
     )
-    await db.flush()
-
-    await opportunistic_purge_oauth_attempts(db)
+    response: RedirectResponse = RedirectResponse(url=flow.auth_url, status_code=302)
+    if flow.new_cookie:
+        _set_pre_auth_cookie(response, cfg, flow.pre_auth_value)
     return response
 
 
@@ -198,9 +235,8 @@ async def google_callback(
     Window 1 reads and validates the attempt; Window 2 consumes and resolves.
     """
     cfg = get_config()
-
-    if not cfg.is_google_configured:
-        return _google_not_configured_response()
+    if (gate := _google_gate(cfg)) is not None:
+        return gate
 
     if error or not state or not code:
         return _oauth_failure_response()
@@ -301,16 +337,10 @@ async def google_callback(
                 active_profile_id=user.default_profile_id,
                 mode=cfg.auth_mode,
             )
-            resp: RedirectResponse = RedirectResponse(url="/dashboard", status_code=302)
-            set_session_cookie(
-                resp,
-                secret=cfg.session_secret,
-                user_id=actor.user_id,
-                active_profile_id=actor.profile_id,
-                session_version=user.session_version,
-                secure=cfg.secure_cookie,
+            return issue_session_redirect(
+                cfg,
+                SessionTicket(actor.user_id, actor.profile_id, user.session_version),
             )
-            return resp
     except _TxFailure:
         return _oauth_failure_response()
 
@@ -330,9 +360,8 @@ async def google_invite_initiate(
     Rate-limited per (token_hash, client IP) to slow down token probing.
     """
     cfg = get_config()
-
-    if not cfg.is_google_configured:
-        return _google_not_configured_response()
+    if (gate := _google_gate(cfg)) is not None:
+        return gate
 
     token = body.token.strip()
     if not token:
@@ -371,61 +400,22 @@ async def google_invite_initiate(
             headers=_NO_STORE,
         )
 
-    state = secrets.token_hex(32)
-    nonce = secrets.token_hex(16)
-    verifier, challenge = _pkce_pair()
-    expires_at = now + timedelta(seconds=cfg.oauth_attempt_ttl_seconds)
-    redirect_uri = (
-        cfg.public_base_url.rstrip("/") + "/api/v1/auth/google/invite-callback"
+    flow = await _begin_google_flow(
+        db,
+        cfg,
+        request,
+        kind="signup",
+        redirect_path="/api/v1/auth/google/invite-callback",
+        invite_id=invite.id,
+        expected_canonical_email=invite.email.lower().strip(),
+        login_hint=invite.email,
     )
-
-    params = {
-        "client_id": cfg.google_client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "state": state,
-        "nonce": nonce,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "login_hint": invite.email,
-    }
-    auth_url = _GOOGLE_AUTH_URL + "?" + urlencode(params)
-
-    # Handle pre-auth cookie: reuse existing or generate a new one.
-    existing_cookie = request.cookies.get(_PRE_AUTH_COOKIE)
-    pre_auth_value = existing_cookie if existing_cookie else secrets.token_hex(32)
-    browser_session_hash = hashlib.sha256(pre_auth_value.encode()).hexdigest()
-
-    db.add(
-        models.OauthAttempt(
-            state=state,
-            kind="signup",
-            invite_id=invite.id,
-            expected_canonical_email=invite.email.lower().strip(),
-            nonce=nonce,
-            pkce_verifier=verifier,
-            browser_session_hash=browser_session_hash,
-            expires_at=expires_at,
-        )
-    )
-    await db.flush()
-    await opportunistic_purge_oauth_attempts(db)
-
     response = JSONResponse(
-        content={"authorization_url": auth_url},
+        content={"authorization_url": flow.auth_url},
         headers=_NO_STORE,
     )
-    if not existing_cookie:
-        response.set_cookie(
-            _PRE_AUTH_COOKIE,
-            pre_auth_value,
-            max_age=cfg.pre_auth_cookie_ttl_seconds,
-            path="/",
-            secure=cfg.secure_cookie,
-            httponly=True,
-            samesite="lax",
-        )
+    if flow.new_cookie:
+        _set_pre_auth_cookie(response, cfg, flow.pre_auth_value)
     return response
 
 
@@ -453,9 +443,8 @@ async def google_invite_callback(
     c. Neither → create user + profile + identity, consume invite.
     """
     cfg = get_config()
-
-    if not cfg.is_google_configured:
-        return _google_not_configured_response()
+    if (gate := _google_gate(cfg)) is not None:
+        return gate
 
     if error or not state or not code:
         return _oauth_failure_response()
@@ -588,18 +577,12 @@ async def google_invite_callback(
                     )
                 except ValueError as exc:
                     raise _TxFailure() from exc
-                resp: RedirectResponse = RedirectResponse(
-                    url="/dashboard", status_code=302
+                return issue_session_redirect(
+                    cfg,
+                    SessionTicket(
+                        actor.user_id, actor.profile_id, user.session_version
+                    ),
                 )
-                set_session_cookie(
-                    resp,
-                    secret=cfg.session_secret,
-                    user_id=actor.user_id,
-                    active_profile_id=actor.profile_id,
-                    session_version=user.session_version,
-                    secure=cfg.secure_cookie,
-                )
-                return resp
 
             # Paths B/C: consume invite FIRST — before any account state mutations.
             # Any failure here rolls back the attempt consume too.
@@ -643,16 +626,14 @@ async def google_invite_callback(
                     )
                 except ValueError as exc:
                     raise _TxFailure() from exc
-                resp = RedirectResponse(url="/dashboard", status_code=302)
-                set_session_cookie(
-                    resp,
-                    secret=cfg.session_secret,
-                    user_id=actor.user_id,
-                    active_profile_id=actor.profile_id,
-                    session_version=existing_user.session_version,
-                    secure=cfg.secure_cookie,
+                return issue_session_redirect(
+                    cfg,
+                    SessionTicket(
+                        actor.user_id,
+                        actor.profile_id,
+                        existing_user.session_version,
+                    ),
                 )
-                return resp
 
             # Path c: create new user + profile + identity.
             new_user = models.User(
@@ -677,15 +658,8 @@ async def google_invite_callback(
                 )
             )
 
-            resp = RedirectResponse(url="/dashboard", status_code=302)
-            set_session_cookie(
-                resp,
-                secret=cfg.session_secret,
-                user_id=new_user.id,
-                active_profile_id=profile.id,
-                session_version=0,
-                secure=cfg.secure_cookie,
+            return issue_session_redirect(
+                cfg, SessionTicket(new_user.id, profile.id, 0)
             )
-            return resp
     except _TxFailure:
         return _oauth_failure_response()

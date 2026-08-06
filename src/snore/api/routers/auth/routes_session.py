@@ -36,6 +36,8 @@ from snore.api.routers.auth._common import (
     _EMAIL_MAX_LEN,
     _NO_STORE,
     _PASSWORD_MAX_CHARS,
+    SessionTicket,
+    apply_session_cookie,
     opportunistic_purge_oauth_attempts,
 )
 from snore.api.schemas import MessageResponse
@@ -47,7 +49,7 @@ from snore.auth.passwords import (
     validate_password_bytes,
     verify_password_async,
 )
-from snore.auth.session_cookie import clear_session_cookie, set_session_cookie
+from snore.auth.session_cookie import clear_session_cookie
 from snore.database import models
 
 router = APIRouter()
@@ -155,15 +157,11 @@ async def login(
         content={"message": "Logged in"},
         headers=_NO_STORE,
     )
-    if cfg.is_multiuser:
-        set_session_cookie(
-            response,
-            secret=cfg.session_secret,
-            user_id=actor.user_id,
-            active_profile_id=actor.profile_id,
-            session_version=user_row.session_version,
-            secure=cfg.secure_cookie,
-        )
+    apply_session_cookie(
+        response,
+        cfg,
+        SessionTicket(actor.user_id, actor.profile_id, user_row.session_version),
+    )
     return response
 
 
@@ -224,15 +222,11 @@ async def demo_login(
         content={"message": "Logged in as demo"},
         headers=_NO_STORE,
     )
-    if cfg.is_multiuser:
-        set_session_cookie(
-            response,
-            secret=cfg.session_secret,
-            user_id=actor.user_id,
-            active_profile_id=actor.profile_id,
-            session_version=demo_user.session_version,
-            secure=cfg.secure_cookie,
-        )
+    apply_session_cookie(
+        response,
+        cfg,
+        SessionTicket(actor.user_id, actor.profile_id, demo_user.session_version),
+    )
     return response
 
 
@@ -350,13 +344,9 @@ async def set_active_profile(
         content={"message": "Active profile updated"},
         headers=_NO_STORE,
     )
-    if cfg.is_multiuser:
-        set_session_cookie(
-            response,
-            secret=cfg.session_secret,
-            user_id=actor.user_id,
-            active_profile_id=body.profile_id,
-            session_version=user.session_version,
-            secure=cfg.secure_cookie,
-        )
+    apply_session_cookie(
+        response,
+        cfg,
+        SessionTicket(actor.user_id, body.profile_id, user.session_version),
+    )
     return response
