@@ -40,7 +40,7 @@ async def _fake_static_lifespan(
 ) -> AsyncIterator[StaticRuntime]:
     session = MagicMock()
     yield StaticRuntime(
-        scope_provider=lambda: _noop_scope(session),
+        base_scope_provider=lambda: _noop_scope(session),
         profile_id=1,
     )
 
@@ -673,17 +673,30 @@ class TestStaticRuntime:
 
         from snore.mcp.server import StaticRuntime
 
-        rt = StaticRuntime(scope_provider=MagicMock(), profile_id=42)
+        rt = StaticRuntime(base_scope_provider=MagicMock(), profile_id=42)
         assert rt.profile_id == 42
 
-    def test_scope_provider_returns_stored_callable(self) -> None:
+    def test_scope_provider_is_identity_stable(self) -> None:
         from unittest.mock import MagicMock
 
-        from snore.mcp.server import StaticRuntime
+        rt = StaticRuntime(base_scope_provider=MagicMock(), profile_id=1)
+        assert rt.scope_provider is rt.scope_provider
 
-        provider = MagicMock()
-        rt = StaticRuntime(scope_provider=provider, profile_id=1)
-        assert rt.scope_provider is provider
+    async def test_scope_provider_delegates_to_base(self) -> None:
+        from contextlib import asynccontextmanager
+
+        sentinel = object()
+        entered: list[bool] = []
+
+        @asynccontextmanager
+        async def fake_base():
+            entered.append(True)
+            yield sentinel
+
+        rt = StaticRuntime(base_scope_provider=fake_base, profile_id=1)
+        async with rt.scope_provider() as value:
+            assert value is sentinel
+        assert entered, "fake_base must have been entered"
 
     def test_satisfies_snore_runtime_protocol(self) -> None:
         """StaticRuntime structurally satisfies SNORERuntime for _runtime(ctx) usage."""
@@ -691,7 +704,7 @@ class TestStaticRuntime:
 
         from snore.mcp.server import SNORERuntime, StaticRuntime
 
-        rt: SNORERuntime = StaticRuntime(scope_provider=MagicMock(), profile_id=7)
+        rt: SNORERuntime = StaticRuntime(base_scope_provider=MagicMock(), profile_id=7)
         assert rt.profile_id == 7
 
 

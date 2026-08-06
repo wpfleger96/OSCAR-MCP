@@ -19,8 +19,10 @@ DB-access pattern (M2 / Thufir MINOR):
   and then ``runtime.scope_provider()`` instead of ``session_scope()`` directly.
 
   Two concrete implementations exist:
-    ``StaticRuntime`` — frozen dataclass used by the stdio path; profile_id is
-      looked up at startup from the first live profile row.
+    ``StaticRuntime`` — used by the stdio path; profile_id is looked up at
+      startup from the first live profile row, and refreshed automatically
+      when the underlying SQLite file is replaced (new inode → new engine
+      generation detected inside ``scope_provider``).
     ``ActorRuntime`` — used by the OAuth HTTP path; scope_provider is
       ``actor_scope`` from ``snore.mcp.auth``; profile_id is read from the
       per-request ``ActorContext`` on each property access.
@@ -33,7 +35,6 @@ import logging
 
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
 from functools import wraps
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -51,6 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database.session import (
     cleanup_database,
+    get_engine_generation,
     init_database_from_url,
     session_scope,
 )
@@ -94,17 +96,70 @@ class SNORERuntime(Protocol):
     def profile_id(self) -> int: ...
 
 
-@dataclass(frozen=True)
 class StaticRuntime:
-    """Stdio-path runtime: scope_provider and profile_id fixed at lifespan start.
+    """Generation-aware stdio-path runtime.
 
-    Frozen to prevent accidental mutation across concurrent requests sharing
-    the same lifespan.  ``profile_id`` is resolved from the live profile with
-    the lowest ID at server startup.
+    ``profile_id`` is resolved from the live profile with the lowest ID at
+    server startup and re-resolved automatically whenever the SQLite file
+    underneath the engine is replaced (detected by a change in the value
+    returned by ``get_engine_generation()`` between consecutive requests).
+
+    Retry-until-found: when the new DB contains no live profile at the moment
+    the generation change is detected, ``_known_generation`` is intentionally
+    NOT advanced so every subsequent scope entry re-attempts resolution until
+    a live profile is found.  The cost is one extra ``SELECT … LIMIT 1`` per
+    scope entry while in this transient, pathological state; once a live
+    profile is found the generation is anchored and the overhead reverts to zero.
+
+    Refresh safety — why mutation is safe here:
+      - The refresh query is idempotent: ``SELECT … WHERE deleting_at IS NULL
+        ORDER BY id LIMIT 1`` always returns the same row for a given DB state.
+      - Concurrent tool calls that both detect a generation change will run the
+        same query and write the same value; last-write-wins produces no
+        inconsistency.
+      - All tools read ``runtime.profile_id`` *inside* an already-open scope
+        (i.e. after ``async with runtime.scope_provider() as db``), so
+        ``_profile_id`` is always fully updated before it is consumed.
+
+    Designed for the stdio transport where tool calls are effectively serial;
+    the unsynchronized ``_profile_id`` mutation relies on that assumption —
+    multiuser HTTP uses ``ActorRuntime`` with per-request context instead.
     """
 
-    scope_provider: _ScopeProvider
-    profile_id: int
+    def __init__(self, base_scope_provider: _ScopeProvider, profile_id: int) -> None:
+        self._base_scope_provider = base_scope_provider
+        self._profile_id = profile_id
+        self._known_generation: int = get_engine_generation()
+        self._scope_provider: _ScopeProvider = self._scoped_provider
+
+    @asynccontextmanager
+    async def _scoped_provider(self) -> AsyncGenerator[AsyncSession]:
+        async with self._base_scope_provider() as db:
+            current_gen = get_engine_generation()
+            if current_gen != self._known_generation:
+                new_profile_id = await _resolve_first_profile_id(db)
+                if new_profile_id is not None:
+                    self._profile_id = new_profile_id
+                    self._known_generation = current_gen
+                    logger.info(
+                        "StaticRuntime: refreshed profile_id=%d after database file replacement",
+                        self._profile_id,
+                    )
+                else:
+                    logger.warning(
+                        "StaticRuntime: new DB has no live profile yet; retaining "
+                        "profile_id=%d — will retry on next scope entry",
+                        self._profile_id,
+                    )
+            yield db
+
+    @property
+    def scope_provider(self) -> _ScopeProvider:
+        return self._scope_provider
+
+    @property
+    def profile_id(self) -> int:
+        return self._profile_id
 
 
 class ActorRuntime:
@@ -179,6 +234,37 @@ See docs://capabilities for dataset-specific channel availability.
 
 
 # ---------------------------------------------------------------------------
+# Profile resolution helper
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_first_profile_id(db: AsyncSession) -> int | None:
+    """Return the id of the first live profile, or None when none exists.
+
+    Selects the ``Profile`` row with ``deleting_at IS NULL``, ordered by id
+    ascending, limit 1.  Used at startup (inside ``_lifespan``) and on every
+    engine-generation change detected by ``StaticRuntime._scoped_provider``.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from snore.database import models  # noqa: PLC0415
+
+    row = (
+        (
+            await db.execute(
+                select(models.Profile)
+                .where(models.Profile.deleting_at.is_(None))
+                .order_by(models.Profile.id)
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    return int(row.id) if row is not None else None
+
+
+# ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 
@@ -226,33 +312,19 @@ async def _lifespan(
                 target.location,
             )
         else:
-            from sqlalchemy import select  # noqa: PLC0415
-
-            from snore.database import models  # noqa: PLC0415
-
             # Resolve the active profile — required by BreathService, DeviceService,
             # and RxTracker (all scoped to a profile_id since multiuser Phase 1).
             async with session_scope() as _db:
-                _profile_row = (
-                    (
-                        await _db.execute(
-                            select(models.Profile)
-                            .where(models.Profile.deleting_at.is_(None))
-                            .order_by(models.Profile.id)
-                            .limit(1)
-                        )
-                    )
-                    .scalars()
-                    .first()
-                )
-                if _profile_row is None:
+                profile_id = await _resolve_first_profile_id(_db)
+                if profile_id is None:
                     raise RuntimeError(
                         "No profile found in database — run 'snore db init' first "
                         "or import CPAP data to create a profile."
                     )
-                profile_id = int(_profile_row.id)
 
-            runtime = StaticRuntime(scope_provider=session_scope, profile_id=profile_id)
+            runtime = StaticRuntime(
+                base_scope_provider=session_scope, profile_id=profile_id
+            )
             logger.info(
                 "SNORE MCP server started — db=%r profile=%s profile_id=%d",
                 target.location,

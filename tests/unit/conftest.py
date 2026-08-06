@@ -84,7 +84,7 @@ def mcp_client_factory() -> Any:
             actor_scoped: bool = False,
         ) -> Any:  # noqa: RUF029
             yield StaticRuntime(
-                scope_provider=lambda: _mock_scope(session),
+                base_scope_provider=lambda: _mock_scope(session),
                 profile_id=1,
             )
 
