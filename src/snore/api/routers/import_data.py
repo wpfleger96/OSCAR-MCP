@@ -243,50 +243,35 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
             )
             return
 
-        # --- Phase 2: analysis ---
+        # Enqueue background analysis for imported sessions, then immediately
+        # emit terminal "complete" so the user can upload more files.
+        analysis_job_id = None
         imported_ids = result.imported_session_ids
         if imported_ids:
-            job.report_progress(f"Analyzing {len(imported_ids)} imported session(s)...")
-            try:
-                from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
-                from snore.database.session import session_scope  # noqa: PLC0415
-                from snore.services.analysis_facade import (
-                    AnalysisFacade,  # noqa: PLC0415
-                )
+            from snore.api import analysis_jobs  # noqa: PLC0415
 
-                async def _run_analysis() -> None:
-                    async with session_scope() as db:
-                        facade = AnalysisFacade(db, profile_id=target_profile_id)
-                        await facade.run_batch_analysis(
-                            session_ids=imported_ids,
-                            primary_mode=DEFAULT_MODE,
-                            progress_callback=lambda done, total: job.report_progress(
-                                f"Analyzed {done}/{total or '?'} sessions"
-                            ),
-                            # SQLite tolerates only one concurrent writer; keep sequential.
-                            max_workers=1,
-                        )
-
-                asyncio.run(_run_analysis())
-            except Exception as analysis_exc:
+            aj = analysis_jobs.enqueue(
+                profile_id=target_profile_id,
+                session_ids=imported_ids,
+                source=analysis_jobs.AnalysisJobSource.IMPORT,
+                owner_user_id=job.owner_user_id,
+            )
+            if aj is not None:
+                analysis_job_id = aj.job_id
+            else:
                 logger.warning(
-                    "Import job %s: analysis phase failed: %s",
+                    "Analysis queue full; skipping auto-analysis for import job %s",
                     job.job_id,
-                    analysis_exc,
                 )
-                # Analysis failure does NOT roll back committed import data.
-                # Terminal payload includes import_committed so the client knows
-                # the data landed even though analysis failed.
-                job._finish(
-                    succeeded=False,
-                    terminal_msg=_make_terminal(
-                        "error",
-                        message=f"Analysis failed: {analysis_exc}",
-                    ),
-                )
-                return
 
-        terminal_msg = _make_terminal("complete", extra={"result": import_result_dict})
+        terminal_extra: dict[str, Any] = {"result": import_result_dict}
+        if analysis_job_id is not None:
+            terminal_extra["analysis_job_id"] = analysis_job_id
+        elif imported_ids:
+            # Queue was full — tell the client so it can distinguish from
+            # "nothing was imported" (where analysis_queued is absent).
+            terminal_extra["analysis_queued"] = False
+        terminal_msg = _make_terminal("complete", extra=terminal_extra)
         job._finish(succeeded=True, terminal_msg=terminal_msg)
     except Exception as e:
         logger.exception("Import job %s failed", job.job_id)

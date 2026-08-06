@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from snore.api.analysis_jobs import shutdown as _shutdown_analysis_jobs
+from snore.api.analysis_jobs import start_worker as _start_analysis_worker
 from snore.api.errors import (
     NotFoundError,
     auth_validation_error_handler,
@@ -122,8 +124,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
 
-    # Start a single lifespan-owned TTL reaper.
+    # Start a single lifespan-owned TTL reaper and the analysis job worker.
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
+    _start_analysis_worker()
     try:
         yield
     finally:
@@ -135,6 +138,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
                 f"after timeout: {still_alive}. Active import writes may be interrupted."
             )
+        _shutdown_analysis_jobs()
         lease.release()
 
 

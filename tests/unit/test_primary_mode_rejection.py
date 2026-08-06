@@ -25,6 +25,8 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 
+import snore.api.analysis_jobs as _aj_store
+
 from snore.analysis.modes import DEFAULT_MODE
 from snore.analysis.service import _compute_leak_valid, _resolve_primary_mode
 from snore.analysis.shared.versioning import (
@@ -78,6 +80,16 @@ class TestResolvePrimaryMode:
 # ---------------------------------------------------------------------------
 # §5–6 — API 422 tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def clean_analysis_jobs():
+    """Reset global analysis job state between tests."""
+    _aj_store._all_jobs.clear()
+    _aj_store._queue.clear()
+    yield
+    _aj_store._all_jobs.clear()
+    _aj_store._queue.clear()
 
 
 class TestAnalysisRouterPrimaryMode:
@@ -148,14 +160,19 @@ class TestAnalysisRouterPrimaryMode:
         # 201 or 422 — not a ValueError-triggered 422
         facade.run_analysis.assert_awaited_once()
 
-    def test_batch_invalid_primary_mode_returns_422(self):
-        """POST /analysis/batch with primary_mode not in modes → 422."""
+    def _fake_session_item(self, session_id: int = 42) -> MagicMock:
+        item = MagicMock()
+        item.session_id = session_id
+        return item
+
+    def test_batch_invalid_primary_mode_not_in_modes_returns_422(self):
+        """POST /analysis/batch with primary_mode not in modes → 422 at endpoint.
+
+        Endpoint-side validation fires before any facade call; primary_mode='resmed'
+        is not a member of modes=['aasm'], so the request is rejected immediately.
+        """
         facade = MagicMock()
-        facade.run_batch_analysis = AsyncMock(
-            side_effect=ValueError(
-                "primary_mode 'resmed' must be a member of modes ['aasm']"
-            )
-        )
+        facade.profile_id = 1
         client = self._make_client(facade)
         resp = client.post(
             "/api/v1/analysis/batch",
@@ -167,25 +184,17 @@ class TestAnalysisRouterPrimaryMode:
         )
         assert resp.status_code == 422
 
-    def test_batch_valid_primary_mode_does_not_raise_422(self):
-        """POST /analysis/batch with valid primary_mode does not raise 422."""
-        from snore.services.schemas import BatchAnalysisResult
-
-        fake_result = BatchAnalysisResult(
-            total=0,
-            successful=0,
-            failed=0,
-            cancelled=0,
-            results=[],
-        )
+    def test_batch_valid_primary_mode_returns_202(self):
+        """POST /analysis/batch with valid primary_mode returns 202."""
         facade = MagicMock()
-        facade.run_batch_analysis = AsyncMock(return_value=fake_result)
+        facade.profile_id = 1
+        facade.list_session_ids = AsyncMock(return_value=[1, 2])
         client = self._make_client(facade)
         resp = client.post(
             "/api/v1/analysis/batch",
             json={"from_date": "2025-01-01", "modes": ["aasm"], "primary_mode": "aasm"},
         )
-        assert resp.status_code != 422
+        assert resp.status_code == 202
 
 
 # ---------------------------------------------------------------------------

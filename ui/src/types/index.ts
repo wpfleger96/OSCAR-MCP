@@ -107,10 +107,8 @@ export type ValidationReport = Schemas['ValidationReport']
 export type AggregateMetrics = Schemas['AggregateMetrics']
 export type SessionValidation = Schemas['SessionValidation']
 
-// Batch analysis
-export type BatchAnalysisRequest = Schemas['BatchAnalysisRequest']
-export type BatchAnalysisResult = Schemas['BatchAnalysisResult']
-export type BatchSessionResult = Schemas['BatchSessionResult']
+// Analysis jobs (background queue — not in OpenAPI spec)
+export type { AnalysisJobInfo } from '@/api/analysis'
 
 // Waveform compare
 export type EventComparisonResult = Schemas['EventComparisonResult']
