@@ -574,7 +574,7 @@ class TestGoogleInviteCallbackEmailMismatch:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -652,7 +652,7 @@ class TestGoogleSignupCreatesUser:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -794,7 +794,7 @@ class TestGoogleSignupLinksExistingEmail:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -1170,7 +1170,7 @@ class TestRevokedInviteDuringExchangeCommitsNothing:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -1310,7 +1310,7 @@ class TestExpiredInviteDuringExchangeCommitsNothing:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -1443,7 +1443,7 @@ class TestGoogleInviteCallbackRevokedInvite:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -1534,7 +1534,7 @@ class TestGoogleInviteCallbackExpiredInvite:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -1615,7 +1615,7 @@ class TestGoogleInviteCallbackAdminRole:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -1696,7 +1696,7 @@ class TestGoogleInviteCallbackNullInviteId:
             follow_redirects=False,
         ) as client:
             resp = await client.get(
-                f"/api/v1/auth/google/invite-callback?state={state}&code=testcode",
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
                 headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
             )
 
@@ -1861,5 +1861,40 @@ class TestPostInvitesGoogle:
             )
 
         assert resp.status_code == 400
+
+        await cleanup_database()
+
+
+# ---------------------------------------------------------------------------
+# Merged callback: the legacy invite-callback route is gone
+# ---------------------------------------------------------------------------
+
+
+class TestInviteCallbackRouteRemoved:
+    @pytest.mark.asyncio
+    async def test_invite_callback_returns_404(self, temp_db, monkeypatch):
+        """GET /auth/google/invite-callback → 404: signup flows complete on the
+        single merged /auth/google/callback endpoint."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import cleanup_database, init_database
+
+        await init_database(str(temp_db))
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                "/api/v1/auth/google/invite-callback?state=abc&code=def"
+            )
+
+        assert resp.status_code == 404
 
         await cleanup_database()
