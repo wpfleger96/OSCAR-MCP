@@ -25,6 +25,7 @@ from snore.api.errors import (
     server_error_handler,
 )
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
+from snore.api.import_jobs import start_import_worker as _start_import_worker
 from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, AuthPathMiddleware, RateLimitMiddleware
 from snore.api.routers import (
@@ -124,9 +125,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
 
-    # Start a single lifespan-owned TTL reaper and the analysis job worker.
+    # Start a single lifespan-owned TTL reaper, the analysis job worker, and the
+    # import job worker (serialises execution to avoid SQLite write-lock contention).
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
     _start_analysis_worker()
+    from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+
+    _start_import_worker(_run_import)
     try:
         yield
     finally:

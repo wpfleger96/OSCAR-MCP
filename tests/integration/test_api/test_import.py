@@ -73,7 +73,7 @@ class TestImportUpload:
     def test_upload_writes_files_to_temp_dir(self, api_client, monkeypatch):
         """Upload creates temp files that can be retrieved via the job store.
 
-        _start_worker is patched to a no-op so the background worker never runs
+        enqueue_for_execution is patched to a no-op so the background worker never runs
         and its finally-cleanup_files() cannot race the file-existence assertions.
         These tests validate upload path layout and content, not worker execution.
         """
@@ -81,7 +81,9 @@ class TestImportUpload:
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         response = api_client.post(
             "/api/v1/import",
@@ -117,14 +119,16 @@ class TestImportUpload:
     def test_upload_path_traversal_sanitized(self, api_client, monkeypatch):
         """Path traversal components are stripped from uploaded filenames.
 
-        _start_worker is patched to a no-op so the background worker never runs
+        enqueue_for_execution is patched to a no-op so the background worker never runs
         and its finally-cleanup_files() cannot race the temp-dir rglob assertions.
         """
         import snore.api.routers.import_data as import_mod  # noqa: PLC0415
 
         from snore.api.import_jobs import get_job  # noqa: PLC0415
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         response = api_client.post(
             "/api/v1/import",
@@ -191,7 +195,7 @@ class TestImportProgress:
         response = api_client.get("/api/v1/import/nonexistent/progress")
         assert response.status_code == 404
 
-    def test_progress_stream_emits_events(self, api_client):
+    def test_progress_stream_emits_events(self, api_client, import_worker):
         """SSE stream emits progress events and a complete event."""
         fake_result = ImportResult(
             total_imported=1,
@@ -245,7 +249,7 @@ class TestImportProgress:
 class TestUploadBackupEnabled:
     """Upload job must call import_sources with backup=True (WS2 fix)."""
 
-    def test_upload_job_calls_import_with_backup_true(self, api_client):
+    def test_upload_job_calls_import_with_backup_true(self, api_client, import_worker):
         """_run_import for UPLOAD type must pass backup=True to import_sources."""
         fake_result = ImportResult(
             total_imported=1,
@@ -467,7 +471,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         # Create a second profile via the profiles API.
         resp = api_client.post("/api/v1/profiles/", json={"name": "Second Profile"})
@@ -497,7 +503,9 @@ class TestImportTargetProfile:
         """Upload with a profile_id that does not belong to this user returns 403."""
         import snore.api.routers.import_data as import_mod
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         response = api_client.post(
             "/api/v1/import",
@@ -516,7 +524,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         job = None
         try:
@@ -544,7 +554,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         # Create a second profile via the profiles API.
         resp = localhost_api_client.post(
@@ -576,7 +588,9 @@ class TestImportTargetProfile:
         """Path import with a profile_id not owned by this user returns 403."""
         import snore.api.routers.import_data as import_mod
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
         response = localhost_api_client.post(
@@ -598,7 +612,9 @@ class TestImportTargetProfile:
 
         from snore.api.import_jobs import get_job, remove_job
 
-        monkeypatch.setattr(import_mod, "_start_worker", lambda job, root=None: None)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
 
         resp = localhost_api_client.post(
             "/api/v1/profiles/", json={"name": "Wire Contract Profile"}
@@ -635,12 +651,14 @@ class TestPipelineJobsListAPI:
         job_store._jobs.clear()
         job_store._per_user_count.clear()
         job_store._global_count = 0
+        job_store._import_queue.clear()
         aj_store._all_jobs.clear()
         aj_store._queue.clear()
         yield
         job_store._jobs.clear()
         job_store._per_user_count.clear()
         job_store._global_count = 0
+        job_store._import_queue.clear()
         aj_store._all_jobs.clear()
         aj_store._queue.clear()
 

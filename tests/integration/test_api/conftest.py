@@ -2,8 +2,48 @@ import pytest
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+import snore.api.import_jobs as _import_job_store
+
 from snore.api.app import create_app
 from snore.api.deps import get_actor, get_db
+
+
+@pytest.fixture(autouse=True)
+def reset_import_job_store():
+    """Stop any running import worker and reset all import job globals before/after each test.
+
+    The import worker is module-global.  Any test that starts one (via the
+    ``import_worker`` fixture) or that accidentally triggers a worker-start must
+    have the state cleaned up so subsequent tests start fresh.
+    """
+    # Stop any worker left over from a previous test BEFORE clearing globals.
+    # Nulling without stopping first lets a still-running thread become a zombie.
+    _import_job_store.stop_import_worker()
+    _import_job_store._jobs.clear()
+    _import_job_store._per_user_count.clear()
+    _import_job_store._global_count = 0
+    _import_job_store._import_queue.clear()
+    yield
+    # Teardown after the test (5 s to survive slow CI).
+    _import_job_store.stop_import_worker(timeout=5.0)
+    _import_job_store._jobs.clear()
+    _import_job_store._per_user_count.clear()
+    _import_job_store._global_count = 0
+    _import_job_store._import_queue.clear()
+
+
+@pytest.fixture
+def import_worker():
+    """Start the import worker with the real _run_import callback for this test.
+
+    Use this fixture in tests that exercise the full upload-then-execute flow
+    (SSE progress streaming, backup=True verification, etc.).  The
+    ``reset_import_job_store`` autouse fixture handles teardown.
+    """
+    from snore.api.import_jobs import start_import_worker  # noqa: PLC0415
+    from snore.api.routers.import_data import _run_import  # noqa: PLC0415
+
+    start_import_worker(_run_import)
 
 
 @pytest.fixture

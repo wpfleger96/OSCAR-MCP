@@ -6,7 +6,6 @@ import json
 import logging
 import shutil
 import tempfile
-import threading
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from pathlib import Path
@@ -28,6 +27,7 @@ from snore.api.import_jobs import (
     JobType,
     cancel_job,
     create_job,
+    enqueue_for_execution,
     get_job,
     list_jobs,
     remove_job,
@@ -299,30 +299,6 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         job.release_capacity()
 
 
-def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
-    """Attempt to start the worker thread for *job* (start-once guarantee)."""
-    from snore.api.import_jobs import remove_job  # noqa: PLC0415
-
-    if not job.try_start():
-        return
-    try:
-        t = threading.Thread(
-            target=_run_import,
-            args=(job, profile_raw_root),
-            daemon=True,
-            name=f"import-{job.job_id}",
-        )
-        with job._lock:
-            job._worker_thread = t
-        t.start()
-    except Exception:
-        job._finish_cancelled()
-        remove_job(job.job_id)
-        job.cleanup_files()
-        job.release_capacity()
-        raise
-
-
 @router.post(
     "/",
     response_model=JobResponse,
@@ -502,8 +478,8 @@ async def import_files(
 
     profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(job.target_profile_id)
 
-    # Start worker immediately — /progress is observer-only.
-    _start_worker(job, profile_raw_root)
+    # Enqueue for serial execution — /progress is observer-only.
+    enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
 
 
@@ -550,7 +526,7 @@ async def import_from_path(
 
     profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(resolved_profile_id)
 
-    _start_worker(job, profile_raw_root)
+    enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
 
 
