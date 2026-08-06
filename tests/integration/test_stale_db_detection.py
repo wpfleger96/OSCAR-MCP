@@ -231,3 +231,169 @@ async def test_static_runtime_refreshes_profile_id_after_swap(tmp_path: Path) ->
         f"After swap, StaticRuntime must re-resolve to B's first live profile "
         f"(expected {profile_b_live_id}, got {runtime.profile_id})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: swap while a session is already open
+# ---------------------------------------------------------------------------
+
+
+async def test_swap_with_open_session_keeps_inflight_session_working(
+    tmp_path: Path,
+) -> None:
+    """Swapping the DB file while a session is open does not break inflight sessions.
+
+    Arrange: DB A ("profile-a"), DB B ("profile-b").
+    Act:     init on A, open s1, verify A visible, swap A→B inside s1, open s2
+             (triggers inode detection + engine rebuild), verify s2 sees B, then
+             query s1 again (its file descriptor still holds A's inode), exit s1,
+             verify a fresh session sees B and the engine was replaced.
+    Assert:
+      - s1 sees A's profile before the swap.
+      - s2 (opened after the swap) sees B's profile.
+      - s1's inflight connection still queries successfully after the swap and
+        sees A's data (open fd keeps the old inode alive; dispose() does not
+        close checked-out connections).
+      - After s1 exits, a fresh session_scope sees B and the engine is replaced.
+
+    NOTE: if step 4 errors instead (driver-level fd behaviour differs from
+    POSIX expectations on this platform), the test re-raises with a message
+    flagging this as a product finding rather than silently masking the failure.
+    """
+    path_a = tmp_path / "sw_a.db"
+    path_b = tmp_path / "sw_b.db"
+
+    await _build_db_with_profile(path_a, "swa@example.com", "profile-a")
+    await _build_db_with_profile(path_b, "swb@example.com", "profile-b")
+
+    await init_database(str(path_a))
+    engine_before_swap = sess_mod._engine
+
+    async with session_scope() as s1:
+        # s1 is connected to DB A.
+        names_before = {
+            p.name for p in (await s1.execute(select(Profile))).scalars().all()
+        }
+        assert "profile-a" in names_before, "s1 must see DB A before swap"
+
+        # Atomically replace path_a with DB B.
+        os.replace(path_b, path_a)
+
+        # s2: opening triggers inode check → engine rebuild → new connection to DB B.
+        async with session_scope() as s2:
+            names_s2 = {
+                p.name for p in (await s2.execute(select(Profile))).scalars().all()
+            }
+        assert "profile-b" in names_s2, "s2 must see DB B after swap"
+        assert "profile-a" not in names_s2, "s2 must not see DB A"
+
+        # s1's connection is checked-out and was not closed by dispose().
+        # Its open fd still points to DB A's inode.
+        try:
+            names_after_swap = {
+                p.name for p in (await s1.execute(select(Profile))).scalars().all()
+            }
+            assert "profile-a" in names_after_swap, (
+                "s1's inflight connection must still see DB A after the swap "
+                "(open fd keeps the old inode alive)"
+            )
+        except Exception as exc:
+            raise AssertionError(
+                f"Product finding: s1 query failed after swap "
+                f"(SQLite fd behaviour differs from POSIX expectation): {exc}"
+            ) from exc
+
+    # After both contexts exit, a fresh session uses the rebuilt engine (DB B).
+    async with session_scope() as fresh:
+        names_fresh = {
+            p.name for p in (await fresh.execute(select(Profile))).scalars().all()
+        }
+
+    assert "profile-b" in names_fresh, "Fresh session must see DB B after swap"
+    assert "profile-a" not in names_fresh, "Fresh session must not see DB A"
+    assert sess_mod._engine is not engine_before_swap, (
+        "Engine object must have been replaced by the swap detection"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: StaticRuntime retries profile resolution until a live profile appears
+# ---------------------------------------------------------------------------
+
+
+async def test_static_runtime_retries_profile_resolution_until_found(
+    tmp_path: Path,
+) -> None:
+    """StaticRuntime retries profile resolution on each scope entry after a swap with no live profile.
+
+    Arrange:
+      - DB A: one live profile (id captured).
+      - DB B: only a tombstoned profile (no live profiles).
+    Act:
+      - Re-init pointing at A; construct StaticRuntime with A's profile_id.
+      - Replace A with B (no live profiles in new DB).
+      - Enter scope_provider() once: detects generation change, finds no live
+        profile, retains A's profile_id, and does NOT advance _known_generation.
+      - Insert a live profile into DB B (now at path_a).
+      - Enter scope_provider() again: _known_generation still differs from
+        current_gen, so resolution is retried and finds the new profile.
+    Assert:
+      - After first scope entry: runtime.profile_id == profile_a_id (unchanged).
+      - After second scope entry: runtime.profile_id == newly inserted profile's id.
+    """
+    path_a = tmp_path / "retry_a.db"
+    path_b = tmp_path / "retry_b.db"
+
+    # DB A: one live profile.
+    profile_a_id = await _build_db_with_profile(path_a, "rya@example.com", "retry-a")
+
+    # DB B: only a tombstoned profile — no live profiles.
+    await init_database(str(path_b))
+    async with session_scope() as db:
+        user_b = User(canonical_email="ryb@example.com", role="admin")
+        db.add(user_b)
+        await db.flush()
+        tombstoned = Profile(
+            user_id=user_b.id,
+            name="retry-b-dead",
+            deleting_at=datetime.now(UTC),
+        )
+        db.add(tombstoned)
+        await db.flush()
+    await cleanup_database()
+
+    # Re-init pointing at DB A; bind runtime to A's profile.
+    await init_database(str(path_a))
+    runtime = StaticRuntime(base_scope_provider=session_scope, profile_id=profile_a_id)
+
+    # Swap: path_a now holds DB B's content (no live profiles).
+    os.replace(path_b, path_a)
+
+    # First scope entry: detects generation change, finds nothing, retains profile_id.
+    async with runtime.scope_provider() as _db:
+        pass
+
+    assert runtime.profile_id == profile_a_id, (
+        "After swap to a DB with no live profiles, profile_id must be retained "
+        f"(expected {profile_a_id}, got {runtime.profile_id})"
+    )
+
+    # Insert a live profile into the swapped-in DB (DB B at path_a).
+    new_profile_id: int
+    async with session_scope() as db:
+        user_b_row = (await db.execute(select(User))).scalars().first()
+        assert user_b_row is not None, "DB B must have a user"
+        live_profile = Profile(user_id=user_b_row.id, name="retry-b-live")
+        db.add(live_profile)
+        await db.flush()
+        new_profile_id = live_profile.id
+
+    # Second scope entry: _known_generation still differs (was not advanced
+    # in the first entry), so resolution fires again and now finds the new profile.
+    async with runtime.scope_provider() as _db:
+        pass
+
+    assert runtime.profile_id == new_profile_id, (
+        "StaticRuntime must update profile_id on retry after a live profile appears "
+        f"(expected {new_profile_id}, got {runtime.profile_id})"
+    )

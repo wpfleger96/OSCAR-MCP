@@ -20,6 +20,12 @@ async def get_raw_session() -> AsyncGenerator[AsyncSession]:
 
     Use when a handler needs fine-grained transaction control (e.g., splitting
     a read transaction from network I/O from a write transaction).
+
+    Staleness check: ``check_db_staleness`` is called once at dependency
+    resolution (when the session is created), not per transaction.  Handlers
+    that run multiple explicit transactions with network I/O between them may
+    observe a DB-file swap between transactions; the swap will be detected and
+    the engine rebuilt at the start of the next request.
     """
     await check_db_staleness()
     session = get_session()

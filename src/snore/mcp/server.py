@@ -104,6 +104,13 @@ class StaticRuntime:
     underneath the engine is replaced (detected by a change in the value
     returned by ``get_engine_generation()`` between consecutive requests).
 
+    Retry-until-found: when the new DB contains no live profile at the moment
+    the generation change is detected, ``_known_generation`` is intentionally
+    NOT advanced so every subsequent scope entry re-attempts resolution until
+    a live profile is found.  The cost is one extra ``SELECT … LIMIT 1`` per
+    scope entry while in this transient, pathological state; once a live
+    profile is found the generation is anchored and the overhead reverts to zero.
+
     Refresh safety — why mutation is safe here:
       - The refresh query is idempotent: ``SELECT … WHERE deleting_at IS NULL
         ORDER BY id LIMIT 1`` always returns the same row for a given DB state.
@@ -128,17 +135,17 @@ class StaticRuntime:
                 new_profile_id = await _resolve_first_profile_id(db)
                 if new_profile_id is not None:
                     self._profile_id = new_profile_id
+                    self._known_generation = current_gen
                     logger.info(
                         "StaticRuntime: refreshed profile_id=%d after database file replacement",
                         self._profile_id,
                     )
                 else:
                     logger.warning(
-                        "StaticRuntime: no profile found after database file replacement; "
-                        "retaining profile_id=%d",
+                        "StaticRuntime: new DB has no live profile yet; retaining "
+                        "profile_id=%d — will retry on next scope entry",
                         self._profile_id,
                     )
-                self._known_generation = current_gen
             yield db
 
     @property
