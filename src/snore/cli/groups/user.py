@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import secrets
 
 from datetime import UTC, datetime, timedelta
@@ -152,8 +151,10 @@ def user_invite(
     """
 
     async def _run() -> None:
+        from snore.auth.invite_tokens import hash_invite_token  # noqa: PLC0415
+
         raw_token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        token_hash = hash_invite_token(raw_token)
 
         async with db_session(db) as session:
             from snore.database.models import Invite  # noqa: PLC0415

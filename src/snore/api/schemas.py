@@ -15,7 +15,11 @@ from snore.services.schemas import (
     RxSettingChange,
 )
 
+DISPLAY_NAME_MAX_LEN: int = 150
+
 __all__ = [
+    "DISPLAY_NAME_MAX_LEN",
+    "MessageResponse",
     "AnalysisMode",
     "PaginatedResponse",
     "WaveformDataResponse",
@@ -35,6 +39,10 @@ __all__ = [
     "RxSettingChange",
     "RxChangesResponse",
 ]
+
+
+class MessageResponse(BaseModel):
+    message: str
 
 
 class PaginatedResponse[T](BaseModel):

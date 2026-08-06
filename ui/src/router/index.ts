@@ -1,11 +1,30 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
+import { getPreferences } from '@/api/me'
+import type { components } from '@/types/generated'
+
+type UserPreferences = components['schemas']['UserPreferences']
 
 declare module 'vue-router' {
     interface RouteMeta {
         authFree?: boolean
+        requiresMultiuser?: boolean
+        requiresAdmin?: boolean
     }
+}
+
+// landing_page value → route path.
+const LANDING_PAGE_MAP: Record<UserPreferences['landing_page'], string> = {
+    dashboard: '/dashboard',
+    sessions: '/sessions',
+    stats: '/stats',
+}
+
+/** Resolve the authenticated user's preferred landing path (multiuser only). */
+export async function resolveLandingPath(): Promise<string> {
+    const prefs = await getPreferences(AbortSignal.timeout(5000)).catch(() => null)
+    return LANDING_PAGE_MAP[prefs?.landing_page ?? 'dashboard'] ?? '/dashboard'
 }
 
 function sessionIdProp(route: { params: { id: string | string[] } }) {
@@ -119,12 +138,26 @@ const router = createRouter({
                     : route.params.date,
             }),
         },
+
+        // Multiuser-only routes
+        {
+            path: '/account',
+            name: 'account',
+            component: () => import('@/views/AccountView.vue'),
+            meta: { requiresMultiuser: true },
+        },
+        {
+            path: '/admin/users',
+            name: 'admin-users',
+            component: () => import('@/views/AdminUsersView.vue'),
+            meta: { requiresMultiuser: true, requiresAdmin: true },
+        },
     ],
 })
 
 // Exported for unit testing — the production router uses this directly.
 export async function authGuard(to: RouteLocationNormalized): Promise<string | boolean | void> {
-    const { fetchStatus, isAuthenticated, isLocal } = useAuth()
+    const { fetchStatus, isAuthenticated, isLocal, role } = useAuth()
 
     try {
         await fetchStatus()
@@ -139,8 +172,22 @@ export async function authGuard(to: RouteLocationNormalized): Promise<string | b
         return '/'
     }
 
-    // Authenticated user landing on login page → dashboard.
+    // Authenticated user landing on login page → preference-based landing or dashboard.
     if (authed && to.path === '/') {
+        if (isLocal.value) {
+            // Local mode has no preferences endpoint; skip the fetch.
+            return '/dashboard'
+        }
+        return resolveLandingPath()
+    }
+
+    // Multiuser-only routes are inaccessible in local mode.
+    if (to.meta.requiresMultiuser && isLocal.value) {
+        return '/dashboard'
+    }
+
+    // Admin-only routes require the admin role.
+    if (to.meta.requiresAdmin && role.value !== 'admin') {
         return '/dashboard'
     }
 }
