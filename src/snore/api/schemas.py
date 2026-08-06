@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from snore.services.schemas import (
     DayDetail,
     DayListItem,
+    ImportSource,
     RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
@@ -41,6 +42,11 @@ __all__ = [
     "AnalysisJobStatus",
     "AnalysisJobsListResponse",
     "AnalysisJobEnqueued",
+    "ImportSourceResultSummary",
+    "ImportResultSummary",
+    "LinkedAnalysisSummary",
+    "PipelineJobStatus",
+    "PipelineJobsListResponse",
 ]
 
 
@@ -156,3 +162,56 @@ class AnalysisJobsListResponse(BaseModel):
 class AnalysisJobEnqueued(BaseModel):
     job_id: str
     session_count: int
+
+
+class ImportSourceResultSummary(BaseModel):
+    source: ImportSource
+    imported: int
+    skipped: int
+    failed: int
+    warnings: list[str]
+
+
+class ImportResultSummary(BaseModel):
+    """Trimmed ImportResult excluding imported_session_ids (poll-bandwidth)."""
+
+    total_imported: int
+    total_skipped: int
+    total_failed: int
+    warnings: list[str]
+    sources: list[ImportSourceResultSummary]
+
+
+class LinkedAnalysisSummary(BaseModel):
+    job_id: str
+    state: str
+    progress_completed: int
+    progress_total: int
+    error_message: str | None
+
+
+class PipelineJobStatus(BaseModel):
+    """Stitched view of one import job and its downstream analysis job.
+
+    created_at and finished_at are time.monotonic() floats — ordering only,
+    not wall-clock (same semantics as the analysis jobs endpoint).
+    """
+
+    job_id: str
+    job_type: str
+    state: str
+    stage: str
+    file_count: int
+    created_at: float
+    finished_at: float | None
+    progress_message: str | None
+    sessions_imported: int | None
+    import_result: ImportResultSummary | None
+    error_message: str | None
+    analysis_job_id: str | None
+    analysis_queued: bool | None
+    linked_analysis: LinkedAnalysisSummary | None
+
+
+class PipelineJobsListResponse(BaseModel):
+    jobs: list[PipelineJobStatus]

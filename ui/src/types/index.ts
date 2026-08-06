@@ -78,6 +78,11 @@ export type RERAEvent = Schemas['RERAEvent']
 export type ImportSource = Schemas['ImportSource']
 export type DetectRequest = Schemas['DetectRequest']
 export type ImportPathRequest = Schemas['ImportPathRequest']
+export type PipelineJobStatus = Schemas['PipelineJobStatus']
+export type PipelineJobsListResponse = Schemas['PipelineJobsListResponse']
+export type LinkedAnalysisSummary = Schemas['LinkedAnalysisSummary']
+export type ImportResultSummary = Schemas['ImportResultSummary']
+export type ImportSourceResultSummary = Schemas['ImportSourceResultSummary']
 
 // ImportSourceResult and ImportResult are returned as SSE event data (not HTTP
 // response models), so they are absent from the OpenAPI spec and hand-written here.

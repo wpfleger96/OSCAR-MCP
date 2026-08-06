@@ -90,6 +90,46 @@ def test_enqueue_owner_scoping():
     assert list_jobs(owner_user_id=99) == []
 
 
+def test_list_jobs_none_owner_visible_to_any_caller():
+    """A job with owner_user_id=None is visible to any authenticated caller."""
+    job = enqueue(
+        profile_id=1,
+        session_ids=[1],
+        source=AnalysisJobSource.IMPORT,
+        owner_user_id=None,
+    )
+    assert job is not None
+    assert job in list_jobs(owner_user_id=42)
+    assert job in list_jobs(owner_user_id=99)
+
+
+def test_list_jobs_foreign_owner_not_visible():
+    """A job owned by user A must not appear in user B's list."""
+    job = enqueue(
+        profile_id=1,
+        session_ids=[1],
+        source=AnalysisJobSource.IMPORT,
+        owner_user_id=7,
+    )
+    assert job is not None
+    assert job not in list_jobs(owner_user_id=99)
+
+
+def test_list_jobs_none_parameter_returns_all():
+    """Passing owner_user_id=None to list_jobs returns all jobs."""
+    job_a = enqueue(
+        profile_id=1, session_ids=[1], source=AnalysisJobSource.BATCH, owner_user_id=1
+    )
+    job_b = enqueue(
+        profile_id=1, session_ids=[2], source=AnalysisJobSource.BATCH, owner_user_id=2
+    )
+    assert job_a is not None
+    assert job_b is not None
+    all_jobs = list_jobs(owner_user_id=None)
+    assert job_a in all_jobs
+    assert job_b in all_jobs
+
+
 def test_enqueue_stores_modes_and_primary_mode():
     job = enqueue(
         profile_id=1,

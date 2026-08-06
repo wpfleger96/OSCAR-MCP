@@ -176,6 +176,9 @@ class ImportJob:
     # PATH jobs: sources list.
     sources: list[Any] | None = None
 
+    # File count — protected by _lock (written by the request handler before the worker starts).
+    _file_count: int = field(default=0, init=False, repr=False)
+
     # State machine fields — protected by _lock.
     _state: JobState = field(default=JobState.PENDING_UPLOAD, init=False, repr=False)
     _terminal_msg: dict[str, Any] | None = field(default=None, init=False, repr=False)
@@ -201,6 +204,11 @@ class ImportJob:
     # stalled observers always learn that data landed (plan §A1, pass-4 IMPORTANT-1).
     _import_committed: bool = field(default=False, init=False, repr=False)
     _import_result: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    # Analysis linkage — set by the worker thread via set_analysis_link() after
+    # the enqueue attempt and BEFORE _finish().  The list endpoint stitches from
+    # these fields; the SSE terminal payload carries the same info independently.
+    _analysis_job_id: str | None = field(default=None, init=False, repr=False)
+    _analysis_queued: bool | None = field(default=None, init=False, repr=False)
 
     @property
     def state(self) -> JobState:
@@ -223,6 +231,102 @@ class ImportJob:
         """True after the import phase has committed to the database."""
         with self._lock:
             return self._import_committed
+
+    @property
+    def finished_at(self) -> float | None:
+        """Monotonic timestamp when the job reached a terminal state, or None."""
+        with self._lock:
+            return self._terminal_at
+
+    @property
+    def analysis_job_id(self) -> str | None:
+        """ID of the downstream analysis job, or None if not yet set."""
+        with self._lock:
+            return self._analysis_job_id
+
+    @property
+    def analysis_queued(self) -> bool | None:
+        """True when analysis was enqueued; False when the queue was full; None when unknown."""
+        with self._lock:
+            return self._analysis_queued
+
+    @property
+    def file_count(self) -> int:
+        """Number of files submitted with this job."""
+        with self._lock:
+            return self._file_count
+
+    def set_file_count(self, n: int) -> None:
+        """Record the number of files submitted with this job."""
+        with self._lock:
+            self._file_count = n
+
+    @property
+    def latest_progress_message(self) -> str | None:
+        """The most recent progress message text, or None."""
+        with self._lock:
+            if self._latest_progress is None:
+                return None
+            data = self._latest_progress.get("data")
+            if not isinstance(data, dict):
+                return None
+            return data.get("message")
+
+    @property
+    def error_message(self) -> str | None:
+        """The error message from the terminal payload, only for FAILED or CANCELLED jobs."""
+        with self._lock:
+            if self._state not in (JobState.FAILED, JobState.CANCELLED):
+                return None
+            if self._terminal_msg is None:
+                return None
+            data = self._terminal_msg.get("data")
+            if not isinstance(data, dict):
+                return None
+            return data.get("message")
+
+    @property
+    def sessions_imported(self) -> int | None:
+        """Total sessions committed to the DB, or None if import has not committed."""
+        with self._lock:
+            if not self._import_committed or self._import_result is None:
+                return None
+            return self._import_result.get("total_imported")
+
+    @property
+    def import_result_snapshot(self) -> dict[str, Any] | None:
+        """Shallow copy of the import result dict, or None if not yet committed.
+
+        Returns a SHALLOW copy — top-level dict copied, nested lists/dicts shared;
+        callers must treat it as read-only (deliberate perf choice).
+        """
+        with self._lock:
+            if not self._import_committed or self._import_result is None:
+                return None
+            return dict(self._import_result)
+
+    def set_analysis_link(
+        self,
+        *,
+        analysis_job_id: str | None,
+        queue_full: bool,
+    ) -> None:
+        """Record the outcome of the analysis enqueue attempt.
+
+        ``queue_full`` is True when the enqueue attempt was rejected because the
+        analysis queue was full (not when the queued job later failed).
+
+        Called by the worker thread after the enqueue attempt and BEFORE _finish() —
+        the list endpoint stitches from these fields; the SSE terminal payload carries
+        the same info independently.
+        """
+        with self._lock:
+            self._analysis_job_id = analysis_job_id
+            if analysis_job_id is not None:
+                self._analysis_queued = True
+            elif queue_full:
+                self._analysis_queued = False
+            # else leave _analysis_queued as None (no sessions imported, no attempt)
 
     def convert_to_pending(self) -> bool:
         """Transition PENDING_UPLOAD → PENDING (files received, body parsed).
@@ -507,6 +611,25 @@ def get_job(job_id: str) -> ImportJob | None:
     _reap_terminal()
     with _lock:
         return _jobs.get(job_id)
+
+
+def list_jobs(owner_user_id: int | None = None) -> list[ImportJob]:
+    """Return jobs visible to *owner_user_id*, reaping expired terminal jobs first.
+
+    A job with owner_user_id=None is visible to any caller (local-mode parity).
+    A job with a set owner is visible only to that owner.
+    When *owner_user_id* is None the caller receives all jobs.
+    """
+    _reap_terminal()
+    with _lock:
+        jobs_snapshot = list(_jobs.values())
+    if owner_user_id is None:
+        return jobs_snapshot
+    return [
+        job
+        for job in jobs_snapshot
+        if job.owner_user_id is None or job.owner_user_id == owner_user_id
+    ]
 
 
 def remove_job(job_id: str) -> None:
