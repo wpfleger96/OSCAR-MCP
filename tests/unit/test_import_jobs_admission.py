@@ -34,17 +34,6 @@ MAX_ACTIVE_GLOBAL = ij._DEFAULT_MAX_ACTIVE_GLOBAL
 # ---------------------------------------------------------------------------
 
 
-def _drain_all_jobs() -> None:
-    """Remove ALL jobs from the store and reset counters (test isolation)."""
-    with ij._lock:
-        ij._jobs.clear()
-    with ij._import_condition:
-        ij._import_queue.clear()
-    with ij._counts_lock:
-        ij._per_user_count.clear()
-        ij._global_count = 0
-
-
 def _active_count_for(owner: int | None) -> int:
     with ij._counts_lock:
         return ij._per_user_count.get(owner, 0)
@@ -53,14 +42,6 @@ def _active_count_for(owner: int | None) -> int:
 def _global_count() -> int:
     with ij._counts_lock:
         return ij._global_count
-
-
-@pytest.fixture(autouse=True)
-def isolate_job_store():
-    """Reset the in-memory job store before and after each test."""
-    _drain_all_jobs()
-    yield
-    _drain_all_jobs()
 
 
 # ---------------------------------------------------------------------------
