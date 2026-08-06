@@ -291,7 +291,8 @@ async def get_nightly_summary(
                 epap_median_cmh2o=day.epap_median,
                 leak_median_lpm=day.leak_median,
                 leak_95th_lpm=day.leak_95th,
-                leak_above_24_pct=None,  # requires waveform time-above; Phase 4
+                leak_above_24_pct=None,
+                leak_above_24_pct_reason="not_available",
                 rr_mean_bpm=stats.respiratory_rate_mean if stats else None,
                 tv_mean_ml=(
                     round(stats.tidal_volume_mean * 1000, 1)

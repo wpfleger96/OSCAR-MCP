@@ -436,3 +436,49 @@ class TestFindWindowsRoundtrip:
         assert "SN-ALPHA" in err_text
         assert "device_id=8" in err_text
         assert "SN-BETA" in err_text
+
+    async def test_primary_mode_populated_for_worst_flattening_criterion(
+        self, mcp_client_factory: object, mock_db_session: object
+    ) -> None:
+        """primary_mode is non-null for WORST_FLATTENING_LEAK_VALID when sessions share one mode."""
+        from snore.services.breath_service import (  # noqa: PLC0415
+            DayAnalysisStatus,
+            FindWindowsResult,
+            WindowCriterion,
+        )
+
+        av = _algo_versions()
+        mock_result = FindWindowsResult(
+            query_date=date(2025, 7, 14),
+            device_id=3,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            day_status=DayAnalysisStatus.OK,
+            session_coverage=[],
+            algorithm_identity=av.identity,
+            null_reason=None,
+            primary_mode="aasm",
+            windows=[],
+        )
+
+        mock_fw = AsyncMock(return_value=mock_result)
+        patch_fw = patch(
+            "snore.services.breath_service.BreathService.find_windows",
+            mock_fw,
+        )
+        patch_caps = patch(
+            "snore.mcp.tools.windows.build_device_capabilities",
+            new_callable=AsyncMock,
+            return_value=None,
+        )
+
+        async with mcp_client_factory(
+            mock_db_session, extra_patches=[patch_fw, patch_caps]
+        ) as client:
+            result = await client.call_tool(
+                "find_windows",
+                {"date": "2025-07-14", "criterion": "worst_flattening_leak_valid"},
+            )
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert payload["primary_mode"] == "aasm"

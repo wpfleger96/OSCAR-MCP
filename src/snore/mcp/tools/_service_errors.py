@@ -17,12 +17,14 @@ from snore.services.breath_service import (
     DeviceAmbiguityError,
     DeviceNotOwnedError,
     MultiSessionAmbiguityError,
+    NoSessionsInRangeError,
 )
 
 MAPPED_SERVICE_ERRORS = (
     DeviceNotOwnedError,
     DeviceAmbiguityError,
     MultiSessionAmbiguityError,
+    NoSessionsInRangeError,
     OperationalError,
 )
 
@@ -40,6 +42,17 @@ def raise_mapped_service_error(exc: Exception) -> NoReturn:
             any other OperationalError (sanitized to a generic message).
         The original exception: for any other unexpected type.
     """
+    if isinstance(exc, NoSessionsInRangeError):
+        if exc.date_start == exc.date_end:
+            raise ValidationError(
+                f"No therapy data found for date {exc.date_start}. "
+                "Use get_data_overview to check which dates have imported data."
+            ) from exc
+        raise ValidationError(
+            f"No therapy data found in range {exc.date_start} to {exc.date_end}. "
+            "Use get_data_overview to check which dates have imported data."
+        ) from exc
+
     if isinstance(exc, DeviceNotOwnedError):
         raise ValidationError(
             f"device_id={exc.device_id} is not available in this session"

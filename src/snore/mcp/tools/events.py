@@ -13,13 +13,15 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import EventContext, EventRow, EventsResponse
 from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
 )
-from snore.mcp.tools._service_errors import raise_mapped_service_error
+from snore.mcp.tools._service_errors import (
+    MAPPED_SERVICE_ERRORS,
+    raise_mapped_service_error,
+)
 
 
 async def get_events(
@@ -48,11 +50,7 @@ async def get_events(
         max_events: Maximum events to return (≥1, pre-validated by server wrapper).
             total_events reflects the untruncated count; truncated=True when cut.
     """
-    from snore.services.breath_service import (  # noqa: PLC0415
-        BreathService,
-        DeviceAmbiguityError,
-        DeviceNotOwnedError,
-    )
+    from snore.services.breath_service import BreathService  # noqa: PLC0415
 
     bs = BreathService(db_session, profile_id)
     try:
@@ -62,13 +60,8 @@ async def get_events(
             min_duration=min_duration,
             device_id=device_id,
         )
-    except (DeviceNotOwnedError, DeviceAmbiguityError) as exc:
+    except MAPPED_SERVICE_ERRORS as exc:
         raise_mapped_service_error(exc)
-    except ValueError as exc:
-        raise ValidationError(
-            f"No therapy data found for date {event_date}. "
-            "Use get_data_overview to check which dates have imported data."
-        ) from exc
 
     if not contextual_events:
         caps = (
@@ -109,7 +102,6 @@ async def get_events(
 
         rows.append(
             EventRow(
-                id=None,  # BreathService seam does not expose internal event IDs
                 session_id=ev.session_id,
                 session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
                 event_type=ev.event_type,

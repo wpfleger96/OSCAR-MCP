@@ -529,6 +529,39 @@ class TestGetCaAnalysisClient:
                     {"date": "not-a-date"},
                 )
 
+    async def test_no_sessions_in_range_produces_polished_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
+        """NoSessionsInRangeError from service → ToolError with polished date message.
+
+        The error must say 'No therapy data found for date <date>' and include
+        the get_data_overview hint.  It must NOT expose the raw internal message
+        'No sessions found in range'.
+        """
+        from snore.services.breath_service import (
+            NoSessionsInRangeError,  # noqa: PLC0415
+        )
+
+        exc = NoSessionsInRangeError(
+            date(2026, 1, 15),
+            date(2026, 1, 15),
+        )
+        with patch(
+            "snore.services.breath_service.BreathService.fetch_ca_analysis",
+            AsyncMock(side_effect=exc),
+        ):
+            async with mcp_client_factory(mock_db_session) as client:
+                with pytest.raises(ToolError) as exc_info:
+                    await client.call_tool(
+                        "get_ca_analysis",
+                        {"date": "2026-01-15"},
+                    )
+
+        msg = str(exc_info.value)
+        assert "No therapy data found for date 2026-01-15" in msg
+        assert "get_data_overview" in msg
+        assert "No sessions found in range" not in msg
+
     async def test_size_guard_raises_tool_error(
         self, mock_db_session: Any, mcp_client_factory: Any
     ) -> None:
