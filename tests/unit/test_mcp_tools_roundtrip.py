@@ -299,13 +299,24 @@ class TestGetEventsRoundtrip:
     async def test_missing_date_raises_tool_error(
         self, mock_db_session: Any, mcp_client_factory: Any
     ) -> None:
-        """get_events for a date with no data: ToolError with no-data message."""
+        """get_events for a date with no data: ToolError with no-data message.
+
+        The service raises NoSessionsInRangeError (a ValueError subclass) for
+        missing dates; MAPPED_SERVICE_ERRORS routes it through raise_mapped_service_error,
+        which produces the polished "No therapy data found for date …" message.
+        """
+        from datetime import date as _date  # noqa: PLC0415
+
         from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        from snore.services.breath_service import (  # noqa: PLC0415
+            NoSessionsInRangeError,
+        )
 
         with patch(
             "snore.services.breath_service.BreathService.get_contextual_events",
             new_callable=AsyncMock,
-            side_effect=ValueError("no sessions for date"),
+            side_effect=NoSessionsInRangeError(_date(2024, 1, 1), _date(2024, 1, 1)),
         ):
             async with mcp_client_factory(mock_db_session) as client:
                 with pytest.raises(ToolError, match="No therapy data"):

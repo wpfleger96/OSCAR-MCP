@@ -14,7 +14,7 @@ import math
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1749,7 +1749,8 @@ class BreathService:
 
             # Sort by mid_insp_flattening descending (§6 step 2)
             eligible_indices.sort(
-                key=lambda i: breath_rows[i].mid_insp_flattening or 0.0, reverse=True
+                key=lambda i: cast(float, breath_rows[i].mid_insp_flattening),
+                reverse=True,
             )
 
             session_start = session_starts[sid]

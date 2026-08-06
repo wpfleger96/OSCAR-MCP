@@ -92,6 +92,11 @@ async def get_breath_table(
     except MAPPED_SERVICE_ERRORS as exc:
         raise_mapped_service_error(exc)
     except ValueError as exc:
+        # This branch is load-bearing. NoSessionsInRangeError (device resolution,
+        # "in range X to Y") routes through MAPPED_SERVICE_ERRORS above. But
+        # breath_service.py raises plain ValueError("No sessions found for date X")
+        # for an owned device with an empty day — that lands here and is NOT caught
+        # by MAPPED_SERVICE_ERRORS. Do not remove this fallback.
         msg = str(exc)
         if "No sessions found" in msg:
             raise ValidationError(

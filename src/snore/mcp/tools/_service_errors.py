@@ -48,7 +48,10 @@ def raise_mapped_service_error(exc: Exception) -> NoReturn:
                 f"No therapy data found for date {exc.date_start}. "
                 "Use get_data_overview to check which dates have imported data."
             ) from exc
-        raise ValidationError(str(exc)) from exc
+        raise ValidationError(
+            f"No therapy data found in range {exc.date_start} to {exc.date_end}. "
+            "Use get_data_overview to check which dates have imported data."
+        ) from exc
 
     if isinstance(exc, DeviceNotOwnedError):
         raise ValidationError(

@@ -551,6 +551,112 @@ class TestFindWindows:
         for w in result.windows:
             assert w.worst_mid_insp_flattening is not None
 
+    async def test_single_primary_mode_session_reports_primary_mode(
+        self, async_db_session
+    ):
+        """find_windows populates primary_mode when all sessions share one primary mode.
+
+        A day with a single WORST_FLATTENING_LEAK_VALID session analysed with
+        primary_mode='aasm' must set result.primary_mode == 'aasm'.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 2, 10)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=10
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=3,
+            device_id=dev.id,
+        )
+
+        assert result.day_status == DayAnalysisStatus.OK
+        assert result.primary_mode == "aasm"
+
+    async def test_mixed_primary_modes_yields_none_primary_mode(self, async_db_session):
+        """find_windows returns primary_mode=None when sessions differ in primary mode.
+
+        WORST_FLATTENING_LEAK_VALID does not refuse on primary_mode mismatch
+        (only FL_RUN_ENDING_IN_RECOVERY does), so windows may still be returned,
+        but result.primary_mode must be None.
+        """
+        from snore.analysis.modes.types import ModeResult  # noqa: PLC0415
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.analysis.types import AnalysisComputation  # noqa: PLC0415
+        from snore.analysis.types import (
+            AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 2, 11)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        session_a = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(hours=3),
+            duration_seconds=3 * 3600.0,
+        )
+        session_b = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=4),
+            end_time=start_a + timedelta(hours=7),
+            duration_seconds=3 * 3600.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        # Store analysis for each session with a different primary_mode
+        for sess, pm in [(session_a, "aasm"), (session_b, "aasm_relaxed")]:
+            result_dto = AnalysisResultDTO(
+                session_id=sess.id,
+                session_duration_hours=3.0,
+                total_breaths=10,
+                machine_events=[],
+                mode_results={
+                    pm: ModeResult(
+                        mode_name=pm, apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                    )
+                },
+                timestamp_start=sess.start_time.timestamp(),
+                timestamp_end=(sess.end_time or sess.start_time).timestamp(),
+            )
+            computation = AnalysisComputation(
+                summary=result_dto, breaths=[], primary_mode=pm
+            )
+            await AnalysisService(async_db_session, profile_id=profile_id).store_result(
+                computation, processing_time_ms=10
+            )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=3,
+            device_id=dev.id,
+        )
+
+        # Mixed primary modes → primary_mode=None; no early-return for WORST_FLATTENING
+        assert result.primary_mode is None
+        assert result.day_status != DayAnalysisStatus.NOT_RUN
+
 
 # ---------------------------------------------------------------------------
 # compare_epochs
