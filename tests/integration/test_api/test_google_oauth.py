@@ -1,7 +1,7 @@
 """Integration tests for Google OAuth routes.
 
 All tests that exercise the token-exchange path mock
-``snore.api.routers.auth.fetch_google_id_token_claims`` so no real HTTP
+``snore.api.routers.auth.routes_google.fetch_google_id_token_claims`` so no real HTTP
 calls are made to Google.
 
 DB pattern: ``temp_db + init_database`` so the module-level SQLAlchemy
@@ -260,7 +260,7 @@ class TestGoogleCallbackBrowserBinding:
 
         # Mock returns valid claims so cookie guard is the only thing blocking 302.
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(sub=google_sub, nonce=nonce)),
         )
 
@@ -335,7 +335,7 @@ class TestGoogleCallbackBrowserBinding:
 
         # Mock returns valid claims so hash mismatch is the only thing blocking 302.
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(sub=google_sub, nonce=nonce)),
         )
 
@@ -417,7 +417,7 @@ class TestGoogleCallbackReplay:
 
         # Mock returns valid claims so the SELECT+consume guards are what block 302.
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(sub=google_sub, nonce=nonce)),
         )
 
@@ -474,7 +474,7 @@ class TestGoogleCallbackUnknownSubject:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(sub="unknown-sub", nonce=nonce)),
         )
 
@@ -563,7 +563,7 @@ class TestGoogleInviteCallbackEmailMismatch:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(email=google_email, nonce=nonce)),
         )
 
@@ -639,7 +639,7 @@ class TestGoogleSignupCreatesUser:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(
                 _fake_claims(sub=google_sub, email=invite_email, nonce=nonce)
             ),
@@ -781,7 +781,7 @@ class TestGoogleSignupLinksExistingEmail:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(
                 _fake_claims(sub=google_sub, email=email, nonce=nonce)
             ),
@@ -900,7 +900,7 @@ class TestTwoConcurrentAttempts:
 
         # Attempt 2 (tab 2) should still succeed.
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(
                 _fake_claims(sub=google_sub, nonce=kw.get("expected_nonce", nonce2))
             ),
@@ -981,7 +981,7 @@ class TestGoogleCallbackDisabledUser:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(sub=google_sub, nonce=nonce)),
         )
 
@@ -1159,7 +1159,7 @@ class TestRevokedInviteDuringExchangeCommitsNothing:
             return _fake_claims(sub=google_sub, email=invite_email, nonce=nonce)
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             _mock_exchange_then_revoke,
         )
 
@@ -1299,7 +1299,7 @@ class TestExpiredInviteDuringExchangeCommitsNothing:
             return _fake_claims(sub=google_sub, email=invite_email, nonce=nonce)
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             _mock_exchange_then_expire,
         )
 
@@ -1432,7 +1432,7 @@ class TestGoogleInviteCallbackRevokedInvite:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(email=invite_email, nonce=nonce)),
         )
 
@@ -1523,7 +1523,7 @@ class TestGoogleInviteCallbackExpiredInvite:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(_fake_claims(email=invite_email, nonce=nonce)),
         )
 
@@ -1602,7 +1602,7 @@ class TestGoogleInviteCallbackAdminRole:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(
                 _fake_claims(sub=google_sub, email=invite_email, nonce=nonce)
             ),
@@ -1683,7 +1683,7 @@ class TestGoogleInviteCallbackNullInviteId:
             state = attempt.state
 
         monkeypatch.setattr(
-            "snore.api.routers.auth.fetch_google_id_token_claims",
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
             lambda **kw: _async_return(
                 _fake_claims(email="nobody@example.com", nonce=nonce)
             ),

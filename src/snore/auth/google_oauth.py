@@ -6,7 +6,7 @@ Tests mock this one function; the route logic itself is never touched.
 Usage in tests::
 
     monkeypatch.setattr(
-        "snore.api.routers.auth.fetch_google_id_token_claims",
+        "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
         mock_claims_fn,
     )
 """

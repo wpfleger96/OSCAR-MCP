@@ -156,11 +156,14 @@ async def _startup_purge_expired_oauth_attempts() -> None:
     try:
         from datetime import UTC, datetime  # noqa: PLC0415
 
+        from snore.api.routers.auth._common import (  # noqa: PLC0415
+            purge_expired_oauth_attempts,
+        )
         from snore.database.session import session_scope  # noqa: PLC0415
 
         now = datetime.now(UTC)
         async with session_scope() as db:
-            purged = await auth_router._purge_expired_oauth_attempts(db, now)
+            purged = await purge_expired_oauth_attempts(db, now)
         if purged:
             logger.info("Purged %d expired/consumed oauth_attempts rows", purged)
     except Exception as exc:
