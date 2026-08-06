@@ -93,6 +93,20 @@
                             </RouterLink>
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
+                        <DropdownMenuItem as-child>
+                            <RouterLink to="/account" class="dropdown-link">
+                                <UserCog class="h-4 w-4 mr-2" />
+                                Account
+                            </RouterLink>
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator v-if="role === 'admin'" />
+                        <DropdownMenuItem v-if="role === 'admin'" as-child>
+                            <RouterLink to="/admin/users" class="dropdown-link">
+                                <Users class="h-4 w-4 mr-2" />
+                                Users
+                            </RouterLink>
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem @click="handleLogout" class="text-destructive">
                             <LogOut class="h-4 w-4 mr-2" />
                             Sign out
@@ -132,6 +146,8 @@ import {
     TrendingUp,
     Upload,
     User,
+    UserCog,
+    Users,
 } from '@lucide/vue'
 import {
     DropdownMenu,
@@ -153,6 +169,7 @@ const {
     profiles,
     activeProfileId,
     canWrite,
+    role,
     setActiveProfile,
     logout,
 } = useAuth()

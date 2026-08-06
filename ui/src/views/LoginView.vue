@@ -77,6 +77,7 @@ import { useRouter } from 'vue-router'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/composables/useAuth'
+import { resolveLandingPath } from '@/router'
 
 const router = useRouter()
 const { login, demoLogin } = useAuth()
@@ -93,7 +94,7 @@ async function handleLogin() {
     loading.value = true
     try {
         await login(email.value, password.value)
-        router.push('/dashboard')
+        router.push(await resolveLandingPath())
     } catch (e: unknown) {
         const status = (e as { response?: { status?: number } }).response?.status
         if (status === 401) {
@@ -115,7 +116,7 @@ async function handleDemoLogin() {
     demoLoading.value = true
     try {
         await demoLogin()
-        router.push('/dashboard')
+        router.push(await resolveLandingPath())
     } catch (e: unknown) {
         const status = (e as { response?: { status?: number } }).response?.status
         if (status === 404) {
@@ -173,39 +174,6 @@ async function handleDemoLogin() {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-}
-
-.field-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
-}
-
-.field-label {
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: var(--color-foreground);
-}
-
-.field-input {
-    height: 2.25rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--color-input);
-    background: transparent;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    transition: border-color 0.15s;
-    outline: none;
-}
-
-.field-input:focus {
-    border-color: var(--color-primary);
-}
-
-.field-input:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
 }
 
 .login-error {
