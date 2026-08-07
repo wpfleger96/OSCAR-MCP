@@ -34,6 +34,35 @@ def reset_auth_config():
     reset_config()
 
 
+@pytest.fixture(autouse=True)
+def _disable_background_vacuum(monkeypatch):
+    """Disable background VACUUM in all tests.
+
+    FastAPI runs sync background tasks before the session's dep generator exits
+    (i.e., before ``session_scope()``'s ``finally: await session.close()``).
+    The aiosqlite connection pool therefore keeps a connection to the test's
+    ``temp_db`` file open when ``_vacuum_background`` tries to open a pysqlite
+    connection for VACUUM.
+
+    The vacuum attempt itself is caught and logged as a warning — no test
+    assertion fails because of it — but the transient pysqlite open creates
+    OS-level file-lock contention that intermittently prevents the explicit
+    ``vacuum_db`` endpoint test from running its own VACUUM on the same file
+    under high xdist parallelism (18 workers).
+
+    Making this a no-op removes the contention without affecting any assertion
+    in the test suite.  Production paths exercise the real implementation.
+    """
+    from snore.api.routers import db as _db_router
+    from snore.api.routers import me as _me_router
+    from snore.services import database_service
+
+    noop = lambda db_path: None  # noqa: E731
+    monkeypatch.setattr(database_service, "_vacuum_background", noop)
+    monkeypatch.setattr(_db_router, "_vacuum_background", noop)
+    monkeypatch.setattr(_me_router, "_vacuum_background", noop)
+
+
 def pytest_configure(config):
     """Register custom test markers."""
     config.addinivalue_line(

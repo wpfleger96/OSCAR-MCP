@@ -101,6 +101,7 @@ export interface ImportResult {
 export type DatabaseStatsPublic = Schemas['DatabaseStatsPublic']
 export type VacuumResult = Schemas['VacuumResult']
 export type ResetResult = Schemas['ResetResult']
+export type DeleteDataResult = Schemas['DeleteDataResult']
 
 // Validation
 export type ValidationReport = Schemas['ValidationReport']

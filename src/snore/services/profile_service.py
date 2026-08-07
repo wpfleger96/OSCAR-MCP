@@ -25,6 +25,32 @@ from snore.services.writer_lease import get_writer_lease
 logger = logging.getLogger(__name__)
 
 
+def purge_profile_raw_dir(profile_id: int, raw_root: Path, label: str = "") -> None:
+    """Quarantine-rename then rmtree the raw/<profile_id>/ backup dir (idempotent).
+
+    Follows the two-step pattern used by DeletionSaga: atomic rename to
+    .quarantine/ first so the directory is invisible to new imports, then rmtree.
+    Interruption leaves the dir in .quarantine/ where startup recovery will clean it.
+
+    Args:
+        profile_id: The profile whose raw backup dir to purge.
+        raw_root: Root of the raw backup directory tree.
+        label: Optional label included in the log message (e.g. "delete-data").
+    """
+    src = raw_root / str(profile_id)
+    if not src.exists():
+        return
+    quarantine = raw_root / ".quarantine"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    dst = quarantine / str(profile_id)
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    src.rename(dst)
+    shutil.rmtree(dst, ignore_errors=True)
+    tag = f" ({label})" if label else ""
+    logger.info("Purged raw backup for profile %d%s", profile_id, tag)
+
+
 class ProfileNotFoundError(Exception):
     pass
 

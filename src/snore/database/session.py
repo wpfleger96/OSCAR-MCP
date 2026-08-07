@@ -122,6 +122,14 @@ _cleanup_task: asyncio.Task[None] | None = None  # The in-flight once-cleanup-ta
 _TXN_OPT_KEY = "sqlite_txn_mode"
 _TXN_OPT_IMMEDIATE = "IMMEDIATE"
 
+# Public mapping for callers that need to escalate a session to IMMEDIATE mode
+# by calling ``await session.connection(execution_options=TXN_OPT_IMMEDIATE)``
+# at the start of a handler body before any SQL is issued.  The ``begin``
+# event listener reads this option and issues ``BEGIN IMMEDIATE`` instead of
+# a plain ``BEGIN``, preventing SQLITE_BUSY on the first write in a deferred
+# transaction when another writer has committed since the transaction opened.
+TXN_OPT_IMMEDIATE: dict[str, str] = {_TXN_OPT_KEY: _TXN_OPT_IMMEDIATE}
+
 
 def _get_init_lock() -> asyncio.Lock:
     """Return the module-level asyncio.Lock, creating it on first call.

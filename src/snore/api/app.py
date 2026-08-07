@@ -509,15 +509,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(export.router, prefix=f"{API_V1_PREFIX}/export", tags=["export"])
 
-    # /db router: /db/reset is removed from the web API in multiuser mode.
-    # In multiuser, register a restricted db router that excludes /reset.
+    # /db router: reset is now available in both local and multiuser mode.
+    # Multiuser reset accepts include_accounts=false (data-only) or =true (factory reset).
     app.include_router(db.router, prefix=f"{API_V1_PREFIX}/db", tags=["database"])
-    if not is_multiuser:
-        app.include_router(
-            db.local_only_router,
-            prefix=f"{API_V1_PREFIX}/db",
-            tags=["database"],
-        )
 
     app.include_router(
         validation.router, prefix=f"{API_V1_PREFIX}/validate", tags=["validation"]

@@ -191,8 +191,47 @@
                     </Button>
                 </form>
             </div>
+
+            <!-- Danger zone card — hidden for demo accounts -->
+            <div v-if="!isDemo" class="section-card danger-zone-card">
+                <h2>Danger Zone</h2>
+
+                <div class="danger-zone-row">
+                    <div>
+                        <p class="danger-zone-title">Delete all my data</p>
+                        <p class="danger-zone-subtitle">
+                            Permanently removes all sleep sessions, waveforms, events, and analysis
+                            results across all your profiles. Your account, profile containers, and
+                            preferences are kept — you can re-import data afterward.
+                        </p>
+                    </div>
+                    <Button
+                        variant="destructive"
+                        :disabled="deletingData"
+                        @click="deleteDataDialogOpen = true"
+                    >
+                        <Loader2 v-if="deletingData" class="h-4 w-4 animate-spin" />
+                        <span v-else>Delete all my data</span>
+                    </Button>
+                </div>
+
+                <p v-if="deleteDataSuccess" class="form-success">{{ deleteDataSuccess }}</p>
+                <p v-if="deleteDataError" role="alert" class="form-error">{{ deleteDataError }}</p>
+            </div>
         </template>
     </div>
+
+    <!-- Delete-data confirmation dialog -->
+    <DeleteConfirmDialog
+        v-if="!isDemo"
+        v-model:visible="deleteDataDialogOpen"
+        title="Delete All My Data"
+        message="This will permanently delete all sleep sessions, waveforms, events, and analysis across all your profiles. Your account and preferences are kept. This cannot be undone."
+        :loading="false"
+        :deleting="deletingData"
+        confirm-phrase="delete"
+        @confirm="handleDeleteData"
+    />
 </template>
 
 <script setup lang="ts">
@@ -211,6 +250,7 @@ import {
     unlinkGoogle,
     getPreferences,
     updatePreferences,
+    deleteMyData,
 } from '@/api/me'
 import type { components } from '@/types/generated'
 
@@ -371,6 +411,29 @@ async function savePreferences() {
         prefSaving.value = false
     }
 }
+
+// ── Delete all my data ────────────────────────────────────────────────────────
+
+const deleteDataDialogOpen = ref(false)
+const deletingData = ref(false)
+const deleteDataSuccess = ref<string | null>(null)
+const deleteDataError = ref<string | null>(null)
+
+async function handleDeleteData(): Promise<void> {
+    if (isDemo.value) return
+    deleteDataDialogOpen.value = false
+    deletingData.value = true
+    deleteDataSuccess.value = null
+    deleteDataError.value = null
+    try {
+        const result = await deleteMyData()
+        deleteDataSuccess.value = `Deleted: ${result.devices_deleted} device(s), ${result.import_jobs_deleted} import record(s) across ${result.profiles_processed} profile(s).`
+    } catch (e: unknown) {
+        deleteDataError.value = e instanceof Error ? e.message : 'Failed to delete data'
+    } finally {
+        deletingData.value = false
+    }
+}
 </script>
 
 <style scoped>
@@ -451,5 +514,31 @@ async function savePreferences() {
     font-size: 0.875rem;
     color: var(--color-success);
     margin: 0;
+}
+
+.danger-zone-card {
+    border-color: var(--color-destructive);
+}
+
+.danger-zone-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.danger-zone-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--color-foreground);
+    margin: 0 0 0.25rem;
+}
+
+.danger-zone-subtitle {
+    font-size: 0.8rem;
+    color: var(--color-muted-foreground);
+    margin: 0;
+    max-width: 36ch;
 }
 </style>

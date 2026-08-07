@@ -8,6 +8,7 @@ POST   /api/v1/auth/me/password
 GET    /api/v1/auth/me/preferences
 PATCH  /api/v1/auth/me/preferences
 DELETE /api/v1/auth/me/identities/google
+POST   /api/v1/auth/me/delete-data
 
 All responses carry ``Cache-Control: no-store`` to prevent credential
 caching by proxies or browsers.
@@ -27,16 +28,19 @@ Security controls
 - Preference updates reject unknown fields (extra="forbid") to prevent
   silent key accumulation in the stored JSON blob.
 - All mutating endpoints require ``RequireWritable``, which blocks demo
-  role actors at the guard layer.
+  role actors at the guard layer.  delete-data is covered by
+  ``RequireWritable`` — demo actors are rejected at the guard layer (403)
+  without needing a separate in-handler check.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import delete, exists, select
@@ -55,11 +59,15 @@ from snore.auth.passwords import (
     verify_password_async,
 )
 from snore.auth.session_cookie import clear_session_cookie, set_session_cookie
+from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.database import models
-
-router = APIRouter()
+from snore.database.session import TXN_OPT_IMMEDIATE
+from snore.services.database_service import DatabaseService, _vacuum_background
+from snore.services.schemas import DeleteDataResult
 
 logger = logging.getLogger(__name__)
+
+router = APIRouter()
 
 _PASSWORD_MAX_CHARS = (
     4096  # conservative char cap; byte validator refines to 1024 bytes
@@ -342,5 +350,83 @@ async def update_preferences(
 
     return JSONResponse(
         content=dumped,
+        headers=NO_STORE,
+    )
+
+
+@router.post("/delete-data", response_model=DeleteDataResult)
+async def delete_my_data(
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    """Delete all sleep data owned by the authenticated user.
+
+    Removes all Device rows for every live profile owned by the caller.  The
+    DB-level cascade (Device → Session/Day/Waveform/Event/Statistics/Setting/
+    AnalysisResult/Breath/DetectedPattern) wipes all dependent sleep data.
+    Import job records for this user are also deleted.  Raw backup directories
+    under ``raw/<profile_id>/`` are purged via the quarantine-rename pattern.
+
+    Profile rows, the user account, preferences, auth identities, and invites
+    are NOT affected.  The caller can re-import data after this operation.
+
+    VACUUM runs as a post-response background task so that reclaiming large
+    waveform blobs never blocks the event loop or exceeds proxy timeouts.
+    ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
+
+    NOTE: Concurrent in-flight imports for this user's devices will fail if
+    their device rows are deleted mid-import; this is accepted behavior.
+
+    Demo accounts are blocked by ``RequireWritable`` (403) before reaching
+    this handler — fixture data is never at risk.
+
+    Write-lock note: ``await db.connection(execution_options=TXN_OPT_IMMEDIATE)``
+    is called before any SQL to request ``BEGIN IMMEDIATE``, acquiring the SQLite
+    write lock upfront.  This prevents SQLITE_BUSY on the first write when another
+    writer has committed since the (deferred) session was checked out.  In test
+    environments the session is already in a transaction so the option is a no-op.
+    """
+    from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+    # Acquire the write lock immediately before any reads or writes.
+    await db.connection(execution_options=TXN_OPT_IMMEDIATE)
+
+    target = DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
+    is_sqlite_file = target.dialect == "sqlite" and target.location not in (
+        "",
+        ":memory:",
+    )
+    db_path = target.sqlite_path if is_sqlite_file else ""
+
+    size_before = (
+        os.path.getsize(db_path) / (1024 * 1024)
+        if db_path and os.path.exists(db_path)
+        else 0.0
+    )
+
+    (
+        devices_deleted,
+        import_jobs_deleted,
+        profiles_processed,
+    ) = await DatabaseService.delete_user_data(
+        db, actor.user_id, DEFAULT_RAW_BACKUP_DIR
+    )
+
+    # Schedule VACUUM as a post-response background task.  FastAPI runs sync
+    # background tasks in a thread pool so the event loop is never blocked.
+    if db_path:
+        background_tasks.add_task(_vacuum_background, db_path)
+
+    return JSONResponse(
+        content=DeleteDataResult(
+            status="success",
+            devices_deleted=devices_deleted,
+            import_jobs_deleted=import_jobs_deleted,
+            profiles_processed=profiles_processed,
+            size_before_mb=size_before,
+            size_after_mb=None,
+            vacuum_scheduled=bool(db_path),
+        ).model_dump(),
         headers=NO_STORE,
     )

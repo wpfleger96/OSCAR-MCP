@@ -18,6 +18,8 @@ from __future__ import annotations
 import http.cookies
 import uuid
 
+from datetime import datetime
+
 import httpx
 import pytest
 
@@ -862,3 +864,189 @@ class TestUnlinkGoogle:
             )
 
         await cleanup_database()
+
+
+# ---------------------------------------------------------------------------
+# TestDeleteData
+# ---------------------------------------------------------------------------
+
+
+def _count(db_session: Session, model: type, **filters: object) -> int:
+    """Count rows matching the given filter kwargs."""
+    from sqlalchemy import func  # noqa: PLC0415
+    from sqlalchemy import select as sa_select
+
+    stmt = sa_select(func.count()).select_from(model)
+    for col_name, val in filters.items():
+        stmt = stmt.where(getattr(model, col_name) == val)
+    return db_session.execute(stmt).scalar() or 0
+
+
+def _seed_device_with_session(db_session: Session, profile_id: int) -> models.Device:
+    """Create a Device + one Session under the given profile; return the device."""
+    device = models.Device(
+        profile_id=profile_id,
+        manufacturer="TestMfr",
+        model="TestMdl",
+        serial_number=f"SN_{uuid.uuid4().hex[:6]}",
+    )
+    db_session.add(device)
+    db_session.flush()
+
+    cpap_session = models.Session(
+        device_id=device.id,
+        device_session_id=f"sess_{uuid.uuid4().hex[:8]}",
+        start_time=datetime(2025, 6, 1, 22, 0),
+        end_time=datetime(2025, 6, 2, 6, 0),
+        duration_seconds=8 * 3600,
+    )
+    db_session.add(cpap_session)
+    db_session.flush()
+    return device
+
+
+class TestDeleteData:
+    def test_demo_gets_403(self, async_db_session, db_session):
+        """Demo role is explicitly rejected by the endpoint (403)."""
+        user, profile = _seed_user(db_session, role="demo")
+        client = _make_client(async_db_session, user.id, profile.id, "demo")
+
+        resp = client.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 403
+
+    def test_member_can_delete_their_own_data(self, async_db_session, db_session):
+        """Member with a device and session sees them deleted; profile and account survive."""
+        user, profile = _seed_user(db_session, role="member")
+        _seed_device_with_session(db_session, profile.id)
+        db_session.commit()
+
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+        resp = client.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["devices_deleted"] >= 1
+        assert data["profiles_processed"] == 1
+
+        # Account and profile survive.
+        db_session.expire_all()
+        assert db_session.get(models.User, user.id) is not None
+        assert db_session.get(models.Profile, profile.id) is not None
+
+        # Sleep data is gone.
+        assert _count(db_session, models.Device, profile_id=profile.id) == 0
+
+    def test_delete_data_does_not_affect_other_users(
+        self, async_db_session, db_session
+    ):
+        """Deleting one user's data leaves a second user's devices untouched."""
+        user_a, profile_a = _seed_user(db_session, role="member")
+        user_b, profile_b = _seed_user(db_session, role="member")
+        _seed_device_with_session(db_session, profile_a.id)
+        _seed_device_with_session(db_session, profile_b.id)
+        db_session.commit()
+
+        client_a = _make_client(async_db_session, user_a.id, profile_a.id, "member")
+        resp = client_a.post("/api/v1/auth/me/delete-data")
+        assert resp.status_code == 200
+
+        # user_b's devices must still exist.
+        db_session.expire_all()
+        assert _count(db_session, models.Device, profile_id=profile_b.id) >= 1, (
+            "Other user's devices must not be deleted"
+        )
+
+    def test_delete_data_removes_import_job_records_for_caller(
+        self, async_db_session, db_session
+    ):
+        """Import job records owned by the caller are deleted; others survive."""
+        from datetime import UTC  # noqa: PLC0415
+        from datetime import datetime as dt  # noqa: PLC0415
+
+        user_a, profile_a = _seed_user(db_session, role="member")
+        user_b, profile_b = _seed_user(db_session, role="member")
+
+        now = dt.now(UTC)
+
+        def _job(owner_id: int, profile_id: int) -> models.ImportJobRecord:
+            return models.ImportJobRecord(
+                job_id=uuid.uuid4().hex,
+                job_type="upload",
+                owner_user_id=owner_id,
+                target_profile_id=profile_id,
+                state="succeeded",
+                file_count=1,
+                created_at=now,
+                finished_at=now,
+            )
+
+        db_session.add(_job(user_a.id, profile_a.id))
+        db_session.add(_job(user_b.id, profile_b.id))
+        db_session.commit()
+
+        client_a = _make_client(async_db_session, user_a.id, profile_a.id, "member")
+        resp = client_a.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 200
+        assert resp.json()["import_jobs_deleted"] == 1
+
+        db_session.expire_all()
+        surviving = _count(db_session, models.ImportJobRecord)
+        assert surviving == 1, "User B's import record must survive"
+
+    def test_delete_data_with_multiple_profiles_clears_all(
+        self, async_db_session, db_session
+    ):
+        """A user with two profiles has data deleted from both."""
+        user, profile_a = _seed_user(db_session, role="member")
+        # Second profile for the same user.
+        profile_b = models.Profile(user_id=user.id, name="Profile B")
+        db_session.add(profile_b)
+        db_session.flush()
+        _seed_device_with_session(db_session, profile_a.id)
+        _seed_device_with_session(db_session, profile_b.id)
+        db_session.commit()
+
+        client = _make_client(async_db_session, user.id, profile_a.id, "member")
+        resp = client.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["devices_deleted"] == 2
+        assert data["profiles_processed"] == 2
+
+        db_session.expire_all()
+        assert _count(db_session, models.Device) == 0
+
+    def test_delete_data_purges_raw_dirs(self, async_db_session, db_session, tmp_path):
+        """Raw backup directories for the caller's profiles are purged."""
+        from unittest.mock import patch  # noqa: PLC0415
+
+        user, profile = _seed_user(db_session, role="member")
+
+        raw_root = tmp_path / "raw"
+        profile_dir = raw_root / str(profile.id)
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "data.edf").write_text("fake")
+
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+        with patch("snore.api.routers.me.DEFAULT_RAW_BACKUP_DIR", raw_root):
+            resp = client.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 200
+        assert not profile_dir.exists(), "Profile raw dir must be purged"
+
+    def test_delete_data_empty_account_succeeds(self, async_db_session, db_session):
+        """User with no devices or sessions gets a 200 with zero counts."""
+        user, profile = _seed_user(db_session, role="member")
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["devices_deleted"] == 0
+        assert data["import_jobs_deleted"] == 0
