@@ -53,6 +53,11 @@ RUN groupadd -g 1000 snore && \
 # HOME=/data is load-bearing (see comment above).
 ENV HOME=/data
 
+ARG GIT_SHA=dev
+ARG BUILD_TIME=
+ENV SNORE_GIT_SHA=$GIT_SHA
+ENV SNORE_BUILD_TIME=$BUILD_TIME
+
 # /data persists the database, raw backups, and logs across container restarts.
 # Bind-mount requirement: the host directory must be owned by uid/gid 1000
 # (e.g. `chown 1000:1000 /opt/snore/data`).  Docker-managed volumes are chowned

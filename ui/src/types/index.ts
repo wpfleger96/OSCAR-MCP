@@ -183,3 +183,14 @@ export const EVENT_COLORS: Record<string, string> = {
     RE: 'rgba(34, 197, 94, 0.25)', // green — RERA
     FL: 'rgba(249, 115, 22, 0.2)', // orange — Flow Limitation
 }
+
+// About / build provenance (excluded from OpenAPI schema)
+export interface AboutInfo {
+    version: string
+    git_sha: string
+    build_time: string
+    uptime_seconds: number
+    auth_mode: string
+    python_version: string
+    sqlite_version: string
+}

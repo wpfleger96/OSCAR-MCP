@@ -125,6 +125,11 @@ const router = createRouter({
             meta: { requiresAdmin: true },
         },
         {
+            path: '/about',
+            name: 'about',
+            component: () => import('@/views/AboutView.vue'),
+        },
+        {
             path: '/validation',
             name: 'validation',
             component: () => import('@/views/ValidationView.vue'),

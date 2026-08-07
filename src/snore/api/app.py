@@ -29,6 +29,7 @@ from snore.api.import_jobs import start_import_worker as _start_import_worker
 from snore.api.import_jobs import start_reaper as _start_import_reaper
 from snore.api.middleware import AuthMiddleware, AuthPathMiddleware, RateLimitMiddleware
 from snore.api.routers import (
+    about,
     admin,
     analysis,
     days,
@@ -57,6 +58,10 @@ try:
     __version__ = get_version("snore")
 except PackageNotFoundError:
     __version__ = "dev"
+
+import time
+
+_STARTUP_TIME: float = time.monotonic()
 
 
 @asynccontextmanager
@@ -520,6 +525,8 @@ def create_app() -> FastAPI:
     app.include_router(
         profiles.router, prefix=f"{API_V1_PREFIX}/profiles", tags=["profiles"]
     )
+
+    app.include_router(about.router, prefix=API_V1_PREFIX, tags=["about"])
 
     # Excluded from the OpenAPI schema deliberately — keeps the health probe
     # out of generated API clients and avoids ui/src/types/generated.ts churn.
