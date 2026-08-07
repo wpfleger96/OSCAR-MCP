@@ -8,6 +8,8 @@ Create Date: 2026-08-06 00:00:00.000000
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -23,13 +25,23 @@ def upgrade() -> None:
     ``deleting_at IS NULL OR deleting_at IS NOT NULL`` is a tautology — it
     holds for every row regardless of the column's value and enforces nothing.
     SQLite does not support DROP CONSTRAINT directly; batch mode recreates
-    the table.  The env.py naming convention expanded the baseline migration's
-    ``chk_profile_deleting`` to ``ck_profiles_chk_profile_deleting`` in the
-    DB; calling drop_constraint("chk_profile_deleting") causes Alembic to
-    expand via convention and look up the full name.
+    the table.
+
+    The constraint's stored name varies by how the schema was created:
+    baseline-migration DBs carry the env.py naming-convention expansion
+    (``ck_profiles_chk_profile_deleting``) while pre-migration DBs created
+    via ``Base.metadata.create_all`` carry the bare ``chk_profile_deleting``.
+    Reflect the actual name and drop that; ``op.f()`` marks it final so the
+    naming convention cannot re-expand it.  Skip cleanly when neither form
+    exists (already dropped).
     """
+    inspector = sa.inspect(op.get_bind())
+    names = {c["name"] for c in inspector.get_check_constraints("profiles")}
+    target = next((n for n in names if n and n.endswith("chk_profile_deleting")), None)
+    if target is None:
+        return
     with op.batch_alter_table("profiles", schema=None) as batch_op:
-        batch_op.drop_constraint("chk_profile_deleting", type_="check")
+        batch_op.drop_constraint(op.f(target), type_="check")
 
 
 def downgrade() -> None:
