@@ -44,7 +44,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import {
     AlertDialog,
     AlertDialogCancel,
@@ -73,6 +73,15 @@ const emit = defineEmits<{
 }>()
 
 const typedPhrase = ref('')
+
+// Reset typed phrase whenever the dialog closes (covers Escape and overlay
+// click, not just explicit Cancel, which resets it inline).
+watch(
+    () => props.visible,
+    (visible) => {
+        if (!visible) typedPhrase.value = ''
+    },
+)
 
 const confirmReady = computed(() =>
     props.confirmPhrase ? typedPhrase.value === props.confirmPhrase : true,

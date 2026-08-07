@@ -15,6 +15,22 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         yield session
 
 
+async def get_db_immediate() -> AsyncGenerator[AsyncSession]:
+    """FastAPI dependency providing a BEGIN IMMEDIATE session for bulk writes.
+
+    Acquires the SQLite write lock at transaction open (BEGIN IMMEDIATE) so
+    contending writers queue on busy_timeout rather than failing instantly on a
+    WAL snapshot-upgrade conflict.  Use for endpoints that perform large bulk
+    deletes (e.g. /db/reset, /auth/me/delete-data) to prevent SQLITE_BUSY
+    bypassing the timeout that a deferred-BEGIN transaction would trigger.
+    """
+    async with session_scope(immediate=True) as session:
+        yield session
+
+
+ImmediateDbDep = Annotated[AsyncSession, Depends(get_db_immediate)]
+
+
 async def get_raw_session() -> AsyncGenerator[AsyncSession]:
     """FastAPI dependency yielding an AsyncSession WITHOUT an open transaction.
 

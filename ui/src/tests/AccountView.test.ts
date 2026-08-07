@@ -1,10 +1,20 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { ref } from 'vue'
+import { ref, defineComponent } from 'vue'
 
 vi.mock('@/composables/useAuth')
 vi.mock('@/composables/useDateFormat')
 vi.mock('vue-router')
+
+// Stub DeleteConfirmDialog to avoid portal/jsdom incompatibilities.
+vi.mock('@/components/DeleteConfirmDialog.vue', () => ({
+    default: defineComponent({
+        name: 'DeleteConfirmDialog',
+        props: ['visible', 'title', 'message', 'loading', 'deleting', 'confirmPhrase'],
+        emits: ['update:visible', 'confirm'],
+        template: `<button v-if="visible" class="stub-confirm" @click="$emit('confirm')">Confirm</button>`,
+    }),
+}))
 
 import {
     makeAuthMock as baseMakeAuthMock,
@@ -17,7 +27,7 @@ import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
 import { useRouter } from 'vue-router'
-import { getMe, changePassword, getPreferences, unlinkGoogle } from '@/api/me'
+import { getMe, changePassword, getPreferences, unlinkGoogle, deleteMyData } from '@/api/me'
 
 const ME_WITH_PASSWORD = {
     id: 1,
@@ -310,5 +320,78 @@ describe('AccountView — sign-in methods / Google unlink', () => {
         expect(errorAlert).toBeTruthy()
         expect(mockClearAuth).not.toHaveBeenCalled()
         expect(mockPush).not.toHaveBeenCalled()
+    })
+})
+
+describe('AccountView — danger zone (delete-data)', () => {
+    beforeEach(() => {
+        vi.resetAllMocks()
+        makeAuthMock()
+        makeDateFormatMock()
+        vi.mocked(getMe).mockResolvedValue(ME_WITH_PASSWORD)
+        vi.mocked(getPreferences).mockResolvedValue(PREFS as never)
+    })
+
+    async function mountAndLoad() {
+        const wrapper = mount(AccountView)
+        await flushPromises()
+        return wrapper
+    }
+
+    it('test_danger_zone_visible_for_non_demo', async () => {
+        const wrapper = await mountAndLoad()
+        expect(wrapper.find('.danger-zone-card').exists()).toBe(true)
+    })
+
+    it('test_danger_zone_hidden_for_demo', async () => {
+        makeAuthMock('demo')
+        const wrapper = await mountAndLoad()
+        expect(wrapper.find('.danger-zone-card').exists()).toBe(false)
+    })
+
+    it('test_confirm_calls_deleteMyData_and_shows_success', async () => {
+        vi.mocked(deleteMyData).mockResolvedValueOnce({
+            status: 'success',
+            devices_deleted: 2,
+            import_jobs_deleted: 5,
+            profiles_processed: 1,
+            size_before_mb: 10.0,
+            size_after_mb: null,
+            vacuum_scheduled: true,
+        })
+
+        const wrapper = await mountAndLoad()
+
+        // The stub-confirm button only renders when deleteDataDialogOpen is true.
+        expect(wrapper.find('.stub-confirm').exists()).toBe(false)
+
+        // Open dialog — sets deleteDataDialogOpen = true.
+        await wrapper.find('.danger-zone-card button').trigger('click')
+        await wrapper.vm.$nextTick()
+
+        expect(wrapper.find('.stub-confirm').exists()).toBe(true)
+
+        // Fire confirm — triggers handleDeleteData.
+        await wrapper.find('.stub-confirm').trigger('click')
+        await flushPromises()
+
+        expect(deleteMyData).toHaveBeenCalledTimes(1)
+        expect(wrapper.find('.form-success').text()).toContain('2 device(s)')
+        expect(wrapper.find('.form-success').text()).toContain('5 import record(s)')
+        expect(wrapper.find('.form-success').text()).toContain('1 profile(s)')
+    })
+
+    it('test_deleteMyData_error_shows_inline_error', async () => {
+        vi.mocked(deleteMyData).mockRejectedValueOnce(new Error('Server error'))
+
+        const wrapper = await mountAndLoad()
+
+        await wrapper.find('.danger-zone-card button').trigger('click')
+        await wrapper.vm.$nextTick()
+        await wrapper.find('.stub-confirm').trigger('click')
+        await flushPromises()
+
+        expect(wrapper.find('[role="alert"]').text()).toContain('Server error')
+        expect(wrapper.find('.form-success').exists()).toBe(false)
     })
 })

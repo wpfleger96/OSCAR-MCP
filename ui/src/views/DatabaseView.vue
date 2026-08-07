@@ -162,7 +162,7 @@
             </section>
 
             <!-- Danger Zone — visible to admins in multiuser mode or in local mode -->
-            <section v-if="isLocal || role === 'admin'" class="section">
+            <section v-if="showDangerZone" class="section">
                 <h2 class="section-heading">Danger Zone</h2>
 
                 <!-- Post-full-reset: show the bootstrap invite URL prominently -->
@@ -222,8 +222,13 @@
                     <span class="vacuum-result-label">Last reset:</span>
                     <span class="vacuum-result-value">
                         {{ resetResult.total_rows_deleted.toLocaleString() }} rows deleted,
-                        {{ resetResult.size_before_mb.toFixed(1) }} MB →
-                        {{ resetResult.size_after_mb.toFixed(1) }} MB
+                        {{ resetResult.size_before_mb.toFixed(1) }} MB
+                        <template v-if="resetResult.size_after_mb != null">
+                            → {{ resetResult.size_after_mb.toFixed(1) }} MB
+                        </template>
+                        <template v-else-if="resetResult.vacuum_scheduled">
+                            (vacuum running)
+                        </template>
                     </span>
                 </div>
 
@@ -256,7 +261,7 @@
 
         <!-- Reset confirmation dialog -->
         <DeleteConfirmDialog
-            v-if="isLocal || role === 'admin'"
+            v-if="showDangerZone"
             v-model:visible="resetDialogOpen"
             title="Reset Database"
             :message="resetDialogMessage"
@@ -304,6 +309,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useAuth } from '@/composables/useAuth'
+
 import StatCard from '@/components/StatCard.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { Button } from '@/components/ui/button'
@@ -325,6 +331,8 @@ import type { VacuumResult, ResetResult } from '@/types'
 
 const { data, loading, error, reload } = useApiLoad(() => getDbStats())
 const { isLocal, role } = useAuth()
+
+const showDangerZone = computed(() => isLocal.value || role.value === 'admin')
 
 const vacuumDialogOpen = ref(false)
 const vacuuming = ref(false)
@@ -369,9 +377,18 @@ async function handleReset(): Promise<void> {
         const body = !isLocal.value ? { include_accounts: includeAccounts.value } : undefined
         resetResult.value = await resetDb(body)
         bootstrapInviteUrl.value = resetResult.value.bootstrap_invite_url ?? null
-        await reload()
+        // After a full-accounts reset the calling session is dead — skip reload()
+        // so the axios interceptor's 401 redirect doesn't navigate away and destroy
+        // the one-time bootstrap invite banner before the user can copy the URL.
+        if (!bootstrapInviteUrl.value) {
+            await reload()
+        }
     } catch (err: unknown) {
-        resetError.value = err instanceof Error ? err.message : 'Reset failed'
+        // Post-reset 401 is expected when include_accounts=true: the session is
+        // intentionally dead.  Don't show an error when the invite URL was set.
+        if (!bootstrapInviteUrl.value) {
+            resetError.value = err instanceof Error ? err.message : 'Reset failed'
+        }
     } finally {
         resetting.value = false
     }

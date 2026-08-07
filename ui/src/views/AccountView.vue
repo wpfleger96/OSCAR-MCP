@@ -421,6 +421,7 @@ const deleteDataError = ref<string | null>(null)
 
 async function handleDeleteData(): Promise<void> {
     if (isDemo.value) return
+    deleteDataDialogOpen.value = false
     deletingData.value = true
     deleteDataSuccess.value = null
     deleteDataError.value = null

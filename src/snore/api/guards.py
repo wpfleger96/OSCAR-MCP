@@ -18,7 +18,7 @@ Auth classification for ``/api/v1/*`` routes:
   invite lookup/redeem).  These are intentionally unauthenticated.
 
 - **Local-only routes** (not registered in multiuser): ``/import/detect``,
-  ``/import/path``, ``/db/reset``.
+  ``/import/path``.
 
 ``require_auth``
     Returns the ``ActorContext`` for the request.  Raises 401 if the

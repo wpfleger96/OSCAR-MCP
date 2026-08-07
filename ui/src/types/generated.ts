@@ -491,6 +491,51 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/auth/me/delete-data': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Delete My Data
+         * @description Delete all sleep data owned by the authenticated user.
+         *
+         *     Removes all Device rows for every live profile owned by the caller.  The
+         *     DB-level cascade (Device → Session/Day/Waveform/Event/Statistics/Setting/
+         *     AnalysisResult/Breath/DetectedPattern) wipes all dependent sleep data.
+         *     Import job records for this user are also deleted.  Raw backup directories
+         *     under ``raw/<profile_id>/`` are purged via the quarantine-rename pattern.
+         *
+         *     Profile rows, the user account, preferences, auth identities, and invites
+         *     are NOT affected.  The caller can re-import data after this operation.
+         *
+         *     VACUUM runs as a post-response background task so that reclaiming large
+         *     waveform blobs never blocks the event loop or exceeds proxy timeouts.
+         *     ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
+         *
+         *     NOTE: Concurrent in-flight imports for this user's devices will fail if
+         *     their device rows are deleted mid-import; this is accepted behavior.
+         *
+         *     Demo accounts are blocked by ``RequireWritable`` (403) before reaching
+         *     this handler — fixture data is never at risk.
+         *
+         *     Write-lock note: ``await db.connection(execution_options=TXN_OPT_IMMEDIATE)``
+         *     is called before any SQL to request ``BEGIN IMMEDIATE``, acquiring the SQLite
+         *     write lock upfront.  This prevents SQLITE_BUSY on the first write when another
+         *     writer has committed since the (deferred) session was checked out.  In test
+         *     environments the session is already in a transaction so the option is a no-op.
+         */
+        post: operations['delete_my_data_api_v1_auth_me_delete_data_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/auth/me/display-name': {
         parameters: {
             query?: never
@@ -645,10 +690,30 @@ export interface paths {
         put?: never
         /**
          * Reset Db
-         * @description Delete all rows from all tables (generic) and vacuum if SQLite.
+         * @description Delete database rows and vacuum.
          *
-         *     Generic row reset works for any dialect.  SQLite targets additionally
-         *     receive a VACUUM pass after the commit.
+         *     Two modes selected via the request body:
+         *
+         *     ``include_accounts=false`` (default):
+         *         Delete all sleep data (devices, sessions, waveforms, events, statistics,
+         *         settings, analysis results, breaths, detected patterns, days, import job
+         *         records) and purge every ``raw/<profile_id>/`` backup directory.
+         *         User accounts, auth identities, invites, and profile containers are
+         *         preserved.  Safe for multiuser deployments — users keep their accounts
+         *         and can re-import data afterward.
+         *
+         *     ``include_accounts=true``:
+         *         Full factory reset via ``reset_rows()`` (every row in every table) plus
+         *         raw-dir purge and vacuum.  A fresh bootstrap admin invite is created for
+         *         the calling admin's email and returned in ``bootstrap_invite_url``.  The
+         *         caller's session is immediately dead; they must redeem that URL to regain
+         *         access.
+         *
+         *     The response carries ``Cache-Control: no-store`` so the one-time
+         *     ``bootstrap_invite_url`` is never cached by a proxy or browser.
+         *
+         *     VACUUM runs as a post-response background task.  ``size_after_mb`` is null
+         *     and ``vacuum_scheduled`` is true in the response when VACUUM is queued.
          */
         post: operations['reset_db_api_v1_db_reset_post']
         delete?: never
@@ -1988,6 +2053,48 @@ export interface components {
             total_therapy_hours?: number | null
         }
         /**
+         * DeleteDataResult
+         * @description Result of a per-user delete-all-data operation.
+         */
+        DeleteDataResult: {
+            /**
+             * Devices Deleted
+             * @description Device rows deleted (cascades removed all sleep data)
+             */
+            devices_deleted: number
+            /**
+             * Import Jobs Deleted
+             * @description Import job records deleted for this user
+             */
+            import_jobs_deleted: number
+            /**
+             * Profiles Processed
+             * @description Profiles whose raw backup dirs were purged
+             */
+            profiles_processed: number
+            /**
+             * Size After Mb
+             * @description Database size after vacuum in MB. Null when vacuum_scheduled=true — the vacuum is still running as a post-response background task.
+             */
+            size_after_mb?: number | null
+            /**
+             * Size Before Mb
+             * @description Database size before deletion in MB
+             */
+            size_before_mb: number
+            /**
+             * Status
+             * @description Operation status ('success')
+             */
+            status: string
+            /**
+             * Vacuum Scheduled
+             * @description True when VACUUM has been queued as a post-response background task. size_after_mb will be null in this case.
+             * @default false
+             */
+            vacuum_scheduled: boolean
+        }
+        /**
          * DeletePreview
          * @description Preview of sessions and related data to be deleted.
          */
@@ -2782,6 +2889,14 @@ export interface components {
             /** Name */
             name?: string | null
         }
+        /** ResetRequest */
+        ResetRequest: {
+            /**
+             * Include Accounts
+             * @default false
+             */
+            include_accounts: boolean
+        }
         /**
          * ResetResult
          * @description Result of a database reset (delete all data, preserve schema) operation.
@@ -2789,14 +2904,14 @@ export interface components {
         ResetResult: {
             /**
              * Bootstrap Invite Url
-             * @description Admin invite redemption URL (only present after include_accounts=true reset).
+             * @description Admin invite redemption URL (only present after include_accounts=true reset). The caller's account was deleted; redeem this URL to create a new admin account.
              */
             bootstrap_invite_url?: string | null
             /**
              * Size After Mb
-             * @description Database size after reset + vacuum in MB
+             * @description Database size after vacuum in MB. Null when vacuum_scheduled=true — the vacuum is still running as a post-response background task.
              */
-            size_after_mb: number
+            size_after_mb?: number | null
             /**
              * Size Before Mb
              * @description Database size before reset in MB
@@ -2819,42 +2934,12 @@ export interface components {
              * @description Total rows deleted across all tables
              */
             total_rows_deleted: number
-        }
-        /**
-         * DeleteDataResult
-         * @description Result of a per-user delete-all-data operation.
-         */
-        DeleteDataResult: {
             /**
-             * Status
-             * @description Operation status ('success')
+             * Vacuum Scheduled
+             * @description True when VACUUM has been queued as a post-response background task. size_after_mb will be null in this case.
+             * @default false
              */
-            status: string
-            /**
-             * Devices Deleted
-             * @description Device rows deleted (cascades removed all sleep data)
-             */
-            devices_deleted: number
-            /**
-             * Import Jobs Deleted
-             * @description Import job records deleted for this user
-             */
-            import_jobs_deleted: number
-            /**
-             * Profiles Processed
-             * @description Profiles whose raw backup dirs were purged
-             */
-            profiles_processed: number
-            /**
-             * Size Before Mb
-             * @description Database size before deletion in MB
-             */
-            size_before_mb: number
-            /**
-             * Size After Mb
-             * @description Database size after deletion + vacuum in MB
-             */
-            size_after_mb: number
+            vacuum_scheduled: boolean
         }
         /**
          * RxAllResponse
@@ -4177,6 +4262,26 @@ export interface operations {
             }
         }
     }
+    delete_my_data_api_v1_auth_me_delete_data_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DeleteDataResult']
+                }
+            }
+        }
+    }
     update_display_name_api_v1_auth_me_display_name_patch: {
         parameters: {
             query?: never
@@ -4409,7 +4514,11 @@ export interface operations {
             path?: never
             cookie?: never
         }
-        requestBody?: never
+        requestBody?: {
+            content: {
+                'application/json': components['schemas']['ResetRequest'] | null
+            }
+        }
         responses: {
             /** @description Successful Response */
             200: {
@@ -4418,6 +4527,15 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ResetResult']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
                 }
             }
         }

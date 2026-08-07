@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from snore.api.app import create_app
-from snore.api.deps import get_actor, get_db
+from snore.api.deps import get_actor, get_db, get_db_immediate
 from snore.auth.actor import ActorContext, AuthMode
 from snore.auth.factory import ActorContextFactory
 
@@ -49,6 +50,18 @@ def make_test_client(
             yield async_db_session
 
     app.dependency_overrides[get_db] = _override_db
+
+    # ImmediateDbDep uses get_db_immediate which would open its own
+    # session_scope (requiring a real initialized DB).  Override it to reuse
+    # the test session that get_db already provides.  Declaring Depends(get_db)
+    # here lets FastAPI's per-request dependency cache return the already-
+    # resolved (and already-transacted) session so begin() fires only once.
+    async def _override_db_immediate(
+        db: Annotated[AsyncSession, Depends(get_db)],
+    ) -> AsyncGenerator[AsyncSession]:
+        yield db
+
+    app.dependency_overrides[get_db_immediate] = _override_db_immediate
 
     if not no_actor_override:
         if unauthenticated:

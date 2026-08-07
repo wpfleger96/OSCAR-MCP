@@ -28,21 +28,19 @@ Security controls
 - Preference updates reject unknown fields (extra="forbid") to prevent
   silent key accumulation in the stored JSON blob.
 - All mutating endpoints require ``RequireWritable``, which blocks demo
-  role actors at the guard layer.
-- delete-data explicitly rejects demo role actors (403) in addition to the
-  RequireAuth guard, since demo accounts must never lose their fixture data.
+  role actors at the guard layer.  delete-data is covered by
+  ``RequireWritable`` — demo actors are rejected at the guard layer (403)
+  without needing a separate in-handler check.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import shutil
 
-from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import delete, exists, select
@@ -54,7 +52,6 @@ from snore.api.constants import NO_STORE
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
-from snore.auth.actor import Role
 from snore.auth.lockout import get_lockout_store
 from snore.auth.passwords import (
     hash_password_async,
@@ -64,13 +61,13 @@ from snore.auth.passwords import (
 from snore.auth.session_cookie import clear_session_cookie, set_session_cookie
 from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.database import models
+from snore.database.session import TXN_OPT_IMMEDIATE
+from snore.services.database_service import DatabaseService, _vacuum_background
 from snore.services.schemas import DeleteDataResult
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-logger = logging.getLogger(__name__)
 
 _PASSWORD_MAX_CHARS = (
     4096  # conservative char cap; byte validator refines to 1024 bytes
@@ -359,13 +356,14 @@ async def update_preferences(
 
 @router.post("/delete-data", response_model=DeleteDataResult)
 async def delete_my_data(
-    actor: RequireAuth,
+    actor: RequireWritable,
     db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
 ) -> JSONResponse:
     """Delete all sleep data owned by the authenticated user.
 
-    Removes all Device rows for every profile owned by the caller.  The ORM
-    cascade (Device → Session/Day/Waveform/Event/Statistics/Setting/
+    Removes all Device rows for every live profile owned by the caller.  The
+    DB-level cascade (Device → Session/Day/Waveform/Event/Statistics/Setting/
     AnalysisResult/Breath/DetectedPattern) wipes all dependent sleep data.
     Import job records for this user are also deleted.  Raw backup directories
     under ``raw/<profile_id>/`` are purged via the quarantine-rename pattern.
@@ -373,15 +371,26 @@ async def delete_my_data(
     Profile rows, the user account, preferences, auth identities, and invites
     are NOT affected.  The caller can re-import data after this operation.
 
-    Runs a SQLite VACUUM after deletion to reclaim space freed by waveform blobs.
+    VACUUM runs as a post-response background task so that reclaiming large
+    waveform blobs never blocks the event loop or exceeds proxy timeouts.
+    ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
 
-    Returns 403 for demo role actors — demo fixture data must never be wiped.
+    NOTE: Concurrent in-flight imports for this user's devices will fail if
+    their device rows are deleted mid-import; this is accepted behavior.
+
+    Demo accounts are blocked by ``RequireWritable`` (403) before reaching
+    this handler — fixture data is never at risk.
+
+    Write-lock note: ``await db.connection(execution_options=TXN_OPT_IMMEDIATE)``
+    is called before any SQL to request ``BEGIN IMMEDIATE``, acquiring the SQLite
+    write lock upfront.  This prevents SQLITE_BUSY on the first write when another
+    writer has committed since the (deferred) session was checked out.  In test
+    environments the session is already in a transaction so the option is a no-op.
     """
-    if actor.role == Role.DEMO:
-        raise HTTPException(status_code=403, detail="Demo accounts cannot delete data")
-
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
-    from snore.services.database_service import DatabaseService  # noqa: PLC0415
+
+    # Acquire the write lock immediately before any reads or writes.
+    await db.connection(execution_options=TXN_OPT_IMMEDIATE)
 
     target = DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
     is_sqlite_file = target.dialect == "sqlite" and target.location not in (
@@ -396,78 +405,28 @@ async def delete_my_data(
         else 0.0
     )
 
-    raw_root: Path = DEFAULT_RAW_BACKUP_DIR
-
-    # Collect all profile IDs owned by this user (profiles survive; their data does not).
-    profile_ids = list(
-        (
-            await db.execute(
-                select(models.Profile.id).where(
-                    models.Profile.user_id == actor.user_id,
-                    models.Profile.deleting_at.is_(None),
-                )
-            )
-        ).scalars()
+    (
+        devices_deleted,
+        import_jobs_deleted,
+        profiles_processed,
+    ) = await DatabaseService.delete_user_data(
+        db, actor.user_id, DEFAULT_RAW_BACKUP_DIR
     )
 
-    # Delete all Device rows for those profiles — DB cascade removes all sleep data.
-    # Use RETURNING so the count is derived from a typed ScalarResult, not rowcount.
-    devices_deleted = 0
-    for profile_id in profile_ids:
-        result = await db.execute(
-            delete(models.Device)
-            .where(models.Device.profile_id == profile_id)
-            .returning(models.Device.id)
-        )
-        devices_deleted += len(result.scalars().all())
-
-    # Delete import job records; they carry no FK so must be removed explicitly.
-    import_jobs_result = await db.execute(
-        delete(models.ImportJobRecord)
-        .where(models.ImportJobRecord.owner_user_id == actor.user_id)
-        .returning(models.ImportJobRecord.id)
-    )
-    import_jobs_deleted = len(import_jobs_result.scalars().all())
-
-    await db.commit()
-
-    # Purge raw backup dirs for each profile (idempotent quarantine-rename pattern).
-    for profile_id in profile_ids:
-        _purge_profile_raw_dir(profile_id, raw_root)
-
-    # Vacuum to reclaim space freed by waveform blobs and other large records.
-    if is_sqlite_file:
-        DatabaseService(db, 0).vacuum_sqlite(db_path)
-
-    size_after = (
-        os.path.getsize(db_path) / (1024 * 1024)
-        if db_path and os.path.exists(db_path)
-        else 0.0
-    )
+    # Schedule VACUUM as a post-response background task.  FastAPI runs sync
+    # background tasks in a thread pool so the event loop is never blocked.
+    if db_path:
+        background_tasks.add_task(_vacuum_background, db_path)
 
     return JSONResponse(
         content=DeleteDataResult(
             status="success",
             devices_deleted=devices_deleted,
             import_jobs_deleted=import_jobs_deleted,
-            profiles_processed=len(profile_ids),
+            profiles_processed=profiles_processed,
             size_before_mb=size_before,
-            size_after_mb=size_after,
+            size_after_mb=None,
+            vacuum_scheduled=bool(db_path),
         ).model_dump(),
         headers=NO_STORE,
     )
-
-
-def _purge_profile_raw_dir(profile_id: int, raw_root: Path) -> None:
-    """Quarantine-rename then rmtree raw/<profile_id>/ (idempotent)."""
-    src = raw_root / str(profile_id)
-    if not src.exists():
-        return
-    quarantine = raw_root / ".quarantine"
-    quarantine.mkdir(parents=True, exist_ok=True)
-    dst = quarantine / str(profile_id)
-    if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
-    src.rename(dst)
-    shutil.rmtree(dst, ignore_errors=True)
-    logger.info("Purged raw backup for profile %d (delete-data)", profile_id)

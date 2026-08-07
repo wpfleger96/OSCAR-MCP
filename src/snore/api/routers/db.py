@@ -1,21 +1,26 @@
 import logging
 import os
-import shutil
+import secrets
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.api.deps import get_db, service_dep
+from snore.api.constants import NO_STORE
+from snore.api.deps import ImmediateDbDep, service_dep
 from snore.api.guards import RequireAdmin
+from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
 from snore.database.models import Base
 from snore.database.target import DatabaseTarget
-from snore.services.database_service import DatabaseService
+from snore.services.database_service import DatabaseService, _vacuum_background
+from snore.services.profile_service import purge_profile_raw_dir
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 
 logger = logging.getLogger(__name__)
@@ -54,27 +59,6 @@ def _raw_root() -> Path:
     return DEFAULT_RAW_BACKUP_DIR
 
 
-def _purge_profile_raw_dir(profile_id: int, raw_root: Path) -> None:
-    """Quarantine-rename then rmtree the raw/<profile_id>/ backup dir (idempotent).
-
-    Follows the same two-step pattern as DeletionSaga: atomic rename to
-    .quarantine/ first so the directory is invisible to new imports, then
-    rmtree.  Interruption leaves the dir in .quarantine/ where startup
-    recovery will clean it up.
-    """
-    src = raw_root / str(profile_id)
-    if not src.exists():
-        return
-    quarantine = raw_root / ".quarantine"
-    quarantine.mkdir(parents=True, exist_ok=True)
-    dst = quarantine / str(profile_id)
-    if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
-    src.rename(dst)
-    shutil.rmtree(dst, ignore_errors=True)
-    logger.info("Purged raw backup for profile %d", profile_id)
-
-
 async def _mint_admin_invite(db: AsyncSession, email: str, base_url: str) -> str:
     """Insert a new admin invite row and return its redemption URL.
 
@@ -82,14 +66,6 @@ async def _mint_admin_invite(db: AsyncSession, email: str, base_url: str) -> str
     have been deleted.  At that point there are no users or pending invites,
     so the duplicate-guard queries are elided.
     """
-    import secrets  # noqa: PLC0415
-
-    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
-
-    from sqlalchemy import insert  # noqa: PLC0415
-
-    from snore.auth.invite_tokens import hash_invite_token  # noqa: PLC0415
-
     raw = secrets.token_urlsafe(32)
     token_hash = hash_invite_token(raw)
     now = datetime.now(UTC)
@@ -135,8 +111,6 @@ def vacuum_db(
         or not target.location
         or target.location == ":memory:"
     ):
-        from fastapi import HTTPException  # noqa: PLC0415
-
         raise HTTPException(
             status_code=422,
             detail="VACUUM is only available for SQLite file databases.",
@@ -148,10 +122,11 @@ def vacuum_db(
 async def reset_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: ImmediateDbDep,
     actor: RequireAdmin,
+    background_tasks: BackgroundTasks,
     body: Annotated[ResetRequest | None, Body()] = None,
-) -> ResetResult:
+) -> JSONResponse:
     """Delete database rows and vacuum.
 
     Two modes selected via the request body:
@@ -170,6 +145,12 @@ async def reset_db(
         the calling admin's email and returned in ``bootstrap_invite_url``.  The
         caller's session is immediately dead; they must redeem that URL to regain
         access.
+
+    The response carries ``Cache-Control: no-store`` so the one-time
+    ``bootstrap_invite_url`` is never cached by a proxy or browser.
+
+    VACUUM runs as a post-response background task.  ``size_after_mb`` is null
+    and ``vacuum_scheduled`` is true in the response when VACUUM is queued.
     """
     from snore.api.config import get_config  # noqa: PLC0415
 
@@ -191,9 +172,11 @@ async def reset_db(
     raw_root = _raw_root()
 
     if req.include_accounts:
-        # Full factory reset — record caller's email using Core SQL to avoid
-        # adding the User to the identity map (which would conflict with the
-        # bulk delete that follows and cause a StaleDataError on autoflush).
+        # Full factory reset.
+        #
+        # Fetch caller email BEFORE any deletes — this is a hard precondition.
+        # If the calling user's row can't be found, abort rather than wiping
+        # the database and leaving the system with no admin and no invite.
         row = (
             await db.execute(
                 select(models.User.canonical_email).where(
@@ -203,32 +186,36 @@ async def reset_db(
         ).first()
         caller_email = row[0] if row else None
 
-        # Collect all profile IDs for raw-dir purge (Core SQL, same reason).
+        if not caller_email:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not resolve caller email; reset aborted to prevent data loss.",
+            )
+
+        # Collect all profile IDs for raw-dir purge (Core SQL, avoids ORM
+        # identity-map conflicts with the bulk delete that follows).
         profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
 
         tables_cleared = await service.reset_rows()
         total = sum(tables_cleared.values())
 
-        # After bulk deletes, the ORM identity map may contain stale objects
-        # (e.g. the acting user, whose row was deleted).  Expunge all before
-        # inserting the invite so the subsequent commit does not try to flush
-        # any stale ORM state.
+        # After bulk deletes, expunge stale ORM state (e.g. the acting user's
+        # row, which was deleted) before inserting the invite so the subsequent
+        # commit does not try to flush stale ORM objects.
         db.expunge_all()
 
         # Insert the bootstrap invite in the same transaction as the deletion.
-        bootstrap_invite_url: str | None = None
-        if caller_email:
-            base_url = cfg.public_base_url or ""
-            bootstrap_invite_url = await _mint_admin_invite(db, caller_email, base_url)
+        base_url = cfg.public_base_url or ""
+        bootstrap_invite_url: str | None = await _mint_admin_invite(
+            db, caller_email, base_url
+        )
 
-        # Commit deletes + invite together; VACUUM must run outside a transaction.
+        logger.warning(
+            "Full factory reset committed for caller %s; bootstrap invite URL "
+            "is only in the response body and will not be recoverable afterward.",
+            caller_email,
+        )
         await db.commit()
-
-        for pid in profile_ids:
-            _purge_profile_raw_dir(pid, raw_root)
-
-        if is_sqlite_file:
-            service.vacuum_sqlite(db_path)
 
     else:
         # Data-only reset — delete sleep data, preserve accounts/profiles.
@@ -238,34 +225,32 @@ async def reset_db(
         for table in reversed(Base.metadata.sorted_tables):
             if table.name in _DATA_RESET_SKIP:
                 continue
-            # Pre-count then delete: avoids rowcount (not on the Result type stub).
-            count_row = await db.execute(select(func.count()).select_from(table))
-            tables_cleared[table.name] = count_row.scalar_one()
-            await db.execute(table.delete())
+            cursor = await db.execute(table.delete())
+            tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
 
         total = sum(tables_cleared.values())
+        bootstrap_invite_url = None
 
         await db.commit()
 
-        for pid in profile_ids:
-            _purge_profile_raw_dir(pid, raw_root)
+    # Purge raw backup dirs after commit (idempotent quarantine-rename pattern).
+    for pid in profile_ids:
+        purge_profile_raw_dir(pid, raw_root)
 
-        if is_sqlite_file:
-            service.vacuum_sqlite(db_path)
+    # Schedule VACUUM as a post-response background task.  FastAPI runs sync
+    # background tasks in a thread pool so the event loop is never blocked.
+    if is_sqlite_file:
+        background_tasks.add_task(_vacuum_background, db_path)
 
-        bootstrap_invite_url = None
-
-    size_after = (
-        os.path.getsize(db_path) / (1024 * 1024)
-        if db_path and os.path.exists(db_path)
-        else 0.0
-    )
-
-    return ResetResult(
-        status="success",
-        tables_cleared=tables_cleared,
-        total_rows_deleted=total,
-        size_before_mb=size_before,
-        size_after_mb=size_after,
-        bootstrap_invite_url=bootstrap_invite_url,
+    return JSONResponse(
+        content=ResetResult(
+            status="success",
+            tables_cleared=tables_cleared,
+            total_rows_deleted=total,
+            size_before_mb=size_before,
+            size_after_mb=None,
+            vacuum_scheduled=is_sqlite_file,
+            bootstrap_invite_url=bootstrap_invite_url,
+        ).model_dump(),
+        headers=NO_STORE,
     )
