@@ -103,6 +103,21 @@ describe('authGuard (production)', () => {
         const result = await authGuard(makeRoute('/database', { requiresAdmin: true }) as never)
         expect(result).toBeUndefined()
     })
+
+    it('test_authGuard_defensive_catch_allows_through_when_fetchStatus_rejects', async () => {
+        // fetchStatus is non-rejecting by contract; this exercises the defensive catch
+        // path in authGuard that cannot be triggered by the real composable.
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                fetchStatus: vi.fn().mockRejectedValueOnce(new Error('Network')),
+                isAuthenticated: ref(false) as never,
+                isLocal: ref(false) as never,
+            }) as never,
+        )
+        await expect(
+            authGuard(makeRoute('/invite', { authFree: true }) as never),
+        ).resolves.toBeUndefined()
+    })
 })
 
 // ---------------------------------------------------------------------------
