@@ -235,14 +235,6 @@ async def import_files(
 ) -> JobResponse:
     max_upload_bytes, max_upload_files, max_file_bytes = _get_upload_limits()
 
-    # Step 1: Reserve admission slot BEFORE reading any body bytes.
-    job = reserve_slot(actor.user_id)
-    if job is None:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many active imports. Please wait for existing imports to complete.",
-        )
-
     # Wrap the ASGI receive callable with the ingress byte ceiling.
     # This raises 413 as soon as the cumulative chunk stream exceeds the
     # limit — before Starlette's multipart parser spools to temp files.
@@ -256,11 +248,28 @@ async def import_files(
     # _job_cleanup: True until the job is handed to the worker.  The finally
     # block uses this flag to decide whether to clean up the job.
     _job_cleanup = True
+    # _is_continuation: True when appending to an existing batch job.
+    # Cleanup must NOT release capacity or remove the job on error — the
+    # original reservation still owns that.
+    _is_continuation = False
     tmp: str | None = None
     _requested_profile_id: int | None = None
+    job: ImportJob | None = None
 
     try:
         async with request.form(max_files=max_upload_files) as form:
+            # ── batch fields ──────────────────────────────────────────
+            _batch_id_raw = form.get("batch_id")
+            batch_id: str | None = (
+                str(_batch_id_raw) if isinstance(_batch_id_raw, str) else None
+            )
+            _batch_final_raw = form.get("batch_final")
+            batch_final: bool = (
+                str(_batch_final_raw).lower() != "false"
+                if isinstance(_batch_final_raw, str)
+                else True
+            )
+
             _profile_id_raw = form.get("profile_id")
             if isinstance(_profile_id_raw, str):
                 try:
@@ -269,6 +278,30 @@ async def import_files(
                     raise HTTPException(
                         status_code=422, detail="profile_id must be an integer"
                     ) from None
+
+            # ── job acquisition ───────────────────────────────────────
+            if batch_id is not None:
+                # Continuation of an existing batch upload.
+                job = get_job(batch_id)
+                if job is None:
+                    raise HTTPException(status_code=404, detail="Batch not found")
+                if job.owner_user_id != actor.user_id:
+                    raise HTTPException(status_code=404, detail="Batch not found")
+                if job.state != JobState.PENDING_UPLOAD:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Batch already committed",
+                    )
+                _is_continuation = True
+            else:
+                # New upload — reserve an admission slot.
+                job = reserve_slot(actor.user_id)
+                if job is None:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Too many active imports. Please wait for existing imports to complete.",
+                    )
+
             uploads = [
                 f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
             ]
@@ -292,8 +325,16 @@ async def import_files(
                     detail=f"Total upload size exceeds {max_upload_bytes // (1024**2)} MiB limit",
                 )
 
-            tmp = tempfile.mkdtemp(prefix="snore-upload-")
-            tmp_path = Path(tmp)
+            # ── staging directory ─────────────────────────────────────
+            if _is_continuation:
+                assert job.temp_dir is not None
+                tmp_path = job.temp_dir
+            else:
+                tmp = tempfile.mkdtemp(prefix="snore-upload-")
+                tmp_path = Path(tmp)
+                job.temp_dir = tmp_path
+                tmp = None  # job owns the directory from creation
+
             tmp_root = tmp_path.resolve()
             for upload in uploads:
                 filename = upload.filename or "unknown"
@@ -334,29 +375,33 @@ async def import_files(
                     ) from None
                 await upload.close()
 
-        # Resolve target profile: validate ownership if caller specified one.
+        if not batch_final:
+            # More chunks coming — keep the job in PENDING_UPLOAD.
+            _job_cleanup = False
+            return JobResponse(job_id=job.job_id)
+
+        # ── final chunk: resolve profile, enqueue ─────────────────
         resolved_profile_id = await _resolve_profile_id(
             db, actor, _requested_profile_id
         )
 
-        # Transfer ownership to the job; the worker will clean up on completion.
-        job.temp_dir = tmp_path
-        job.set_file_count(len(uploads))
-        tmp = None  # Job owns the directory now.
+        job.set_file_count(sum(1 for _ in tmp_path.rglob("*") if _.is_file()))
         job.convert_to_pending()
         job.target_profile_id = resolved_profile_id
         _job_cleanup = False  # Worker owns the job from here.
 
     finally:
         # Runs on every exit: normal (no-op), HTTPException, Exception,
-        # CancelledError.  _job_cleanup is False only when the worker started.
+        # CancelledError.  _job_cleanup is False only when the worker started
+        # or when a non-final batch chunk succeeded.
         if _job_cleanup:
             if tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)
-            job.try_cancel()
-            remove_job(job.job_id)
-            job.cleanup_files()
-            job.release_capacity()
+            if not _is_continuation and job is not None:
+                job.try_cancel()
+                remove_job(job.job_id)
+                job.cleanup_files()
+                job.release_capacity()
 
     # Derive profile-scoped backup root from the resolved target profile.
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
