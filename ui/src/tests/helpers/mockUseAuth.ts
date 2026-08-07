@@ -14,6 +14,7 @@ export function makeAuthMock(overrides: Record<string, unknown> = {}): Record<st
         authMode: ref('multiuser'),
         canWrite: ref(true),
         demoAvailable: ref(false),
+        statusUnknown: ref(false),
         profileKey: ref(0),
         fetchStatus: vi.fn().mockResolvedValue(undefined),
         refreshStatus: vi.fn().mockResolvedValue(undefined),

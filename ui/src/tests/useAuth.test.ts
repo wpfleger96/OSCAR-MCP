@@ -267,6 +267,54 @@ describe('useAuth', () => {
         expect(isAuthenticated.value).toBe(true)
     })
 
+    it('fetchStatus_retriesOnce_succeeds_populatesStatus', async () => {
+        // First attempt fails; second attempt (after 500ms backoff) succeeds.
+        vi.useFakeTimers()
+        try {
+            vi.mocked(authApi.getAuthStatus)
+                .mockRejectedValueOnce(new Error('Network'))
+                .mockResolvedValueOnce(mockStatus)
+
+            const { fetchStatus, isAuthenticated } = useAuth()
+            const p = fetchStatus()
+            await vi.advanceTimersByTimeAsync(600) // advance past 500ms retry delay
+            await p
+
+            expect(isAuthenticated.value).toBe(true)
+            expect(authApi.getAuthStatus).toHaveBeenCalledTimes(2)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('fetchStatus_bothAttemptsFail_schedulesSelfHeal', async () => {
+        // Both attempts fail; status stays null; background self-heal fires and succeeds.
+        vi.useFakeTimers()
+        try {
+            vi.mocked(authApi.getAuthStatus)
+                .mockRejectedValueOnce(new Error('Network'))
+                .mockRejectedValueOnce(new Error('Network'))
+                .mockResolvedValueOnce(mockStatus)
+
+            const { fetchStatus, isAuthenticated } = useAuth()
+            const p = fetchStatus()
+            await vi.advanceTimersByTimeAsync(600) // past 500ms retry delay
+            await p
+
+            // Both attempts failed — status still unknown.
+            expect(isAuthenticated.value).toBe(false)
+            expect(authApi.getAuthStatus).toHaveBeenCalledTimes(2)
+
+            // Self-heal fires after 3 seconds and recovers.
+            await vi.advanceTimersByTimeAsync(3_500)
+
+            expect(authApi.getAuthStatus).toHaveBeenCalledTimes(3)
+            expect(isAuthenticated.value).toBe(true)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('login_generationGuard_stalePreLoginFetchCannotOverwriteAuthenticated', async () => {
         // Scenario: fetchStatus starts (gen=N), login() fires before it completes.
         // login() increments generation (gen=N+1). Old fetch resolves last.

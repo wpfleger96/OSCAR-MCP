@@ -8,6 +8,7 @@ const profileKey = ref(0)
 let _fetchPromise: Promise<void> | null = null
 let _lastFetched = 0
 let _generation = 0
+let _healTimer: ReturnType<typeof setTimeout> | null = null
 
 const REVALIDATE_MS = 5 * 60 * 1000
 
@@ -24,13 +25,27 @@ export function useAuth() {
         () => isLocal.value || (status.value?.user?.role !== 'demo' && isAuthenticated.value),
     )
     const demoAvailable = computed(() => status.value?.demo_available ?? false)
+    // Distinct from !isAuthenticated: true while auth state is unknown (fetch pending or failed).
+    const statusUnknown = computed(() => status.value === null)
 
     async function fetchStatus(): Promise<void> {
         const now = Date.now()
         if (status.value !== null && now - _lastFetched < REVALIDATE_MS) return
         if (_fetchPromise !== null) return _fetchPromise
         const gen = _generation
-        _fetchPromise = getAuthStatus(AbortSignal.timeout(10_000))
+
+        async function attempt(): Promise<AuthStatusResponse> {
+            try {
+                return await getAuthStatus(AbortSignal.timeout(10_000))
+            } catch {
+                // Retry once after a short backoff.
+                await new Promise<void>((r) => setTimeout(r, 500))
+                if (_generation !== gen) throw new Error('superseded')
+                return getAuthStatus(AbortSignal.timeout(10_000))
+            }
+        }
+
+        _fetchPromise = attempt()
             .then((s) => {
                 if (_generation === gen) {
                     // Only write if this generation is still the active one.
@@ -40,6 +55,18 @@ export function useAuth() {
                     // Superseded by a newer generation — chain to the active fetch
                     // so callers awaiting this promise get the authenticated result.
                     return _fetchPromise
+                }
+            })
+            .catch(() => {
+                // Both attempts failed (or superseded) — schedule background recovery if still unknown.
+                if (_generation === gen && status.value === null) {
+                    if (_healTimer !== null) clearTimeout(_healTimer)
+                    _healTimer = setTimeout(() => {
+                        _healTimer = null
+                        if (_generation === gen && status.value === null) {
+                            void fetchStatus()
+                        }
+                    }, 3_000)
                 }
             })
             .finally(() => {
@@ -53,6 +80,10 @@ export function useAuth() {
     }
 
     async function refreshStatus(): Promise<void> {
+        if (_healTimer !== null) {
+            clearTimeout(_healTimer)
+            _healTimer = null
+        }
         status.value = null
         _fetchPromise = null
         _generation++ // invalidate any in-flight requests from earlier generation
@@ -71,6 +102,10 @@ export function useAuth() {
     }
 
     function clearAuth(): void {
+        if (_healTimer !== null) {
+            clearTimeout(_healTimer)
+            _healTimer = null
+        }
         status.value = null
         _fetchPromise = null
         _lastFetched = 0
@@ -103,6 +138,7 @@ export function useAuth() {
         role,
         canWrite,
         demoAvailable,
+        statusUnknown,
         profileKey,
         fetchStatus,
         refreshStatus,

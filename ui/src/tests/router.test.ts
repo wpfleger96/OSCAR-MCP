@@ -103,6 +103,21 @@ describe('authGuard (production)', () => {
         const result = await authGuard(makeRoute('/database', { requiresAdmin: true }) as never)
         expect(result).toBeUndefined()
     })
+
+    it('test_authGuard_allows_through_when_fetchStatus_rejects', async () => {
+        // Guard catches fetchStatus rejection and allows auth-free routes through.
+        // Data endpoints will 401 if the session is actually invalid.
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                fetchStatus: vi.fn().mockRejectedValueOnce(new Error('Network')),
+                isAuthenticated: ref(false) as never,
+                isLocal: ref(false) as never,
+            }) as never,
+        )
+        await expect(
+            authGuard(makeRoute('/invite', { authFree: true }) as never),
+        ).resolves.toBeUndefined()
+    })
 })
 
 // ---------------------------------------------------------------------------

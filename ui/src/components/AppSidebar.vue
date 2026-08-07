@@ -114,6 +114,8 @@
                     </DropdownMenuContent>
                 </DropdownMenu>
             </template>
+            <!-- Status unknown: show muted placeholder instead of silently hiding user menu -->
+            <div v-else-if="!isLocal && statusUnknown" class="reconnecting">Reconnecting…</div>
 
             <RouterLink to="/about" class="nav-item">
                 <Info class="h-4 w-4" />
@@ -175,6 +177,7 @@ const {
     activeProfileId,
     canWrite,
     role,
+    statusUnknown,
     setActiveProfile,
     logout,
 } = useAuth()
@@ -299,5 +302,11 @@ async function handleLogout() {
     width: 100%;
     text-decoration: none;
     color: inherit;
+}
+
+.reconnecting {
+    padding: 0.6rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-muted-foreground);
 }
 </style>

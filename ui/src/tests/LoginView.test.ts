@@ -46,6 +46,7 @@ describe('LoginView', () => {
             role: { value: null } as never,
             canWrite: { value: true } as never,
             demoAvailable: { value: true } as never,
+            statusUnknown: { value: false } as never,
             profileKey: { value: 0 } as never,
         })
     })
