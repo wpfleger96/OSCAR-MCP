@@ -118,13 +118,14 @@ class TestStartupMigrations:
         await cleanup_database()
 
     async def test_additive_sync_adds_missing_column_and_index(self, tmp_path):
-        """Additive sync adds columns and indexes absent from existing tables.
+        """Additive sync restores columns and indexes absent from existing tables.
 
-        Simulates a pre-#200 production DB: ``google_link_disabled`` column and
-        ``ix_auth_identities_user_provider`` index are dropped after the first
-        ``init_database`` call, then a second ``init_database`` call must restore
-        both.  A ``SELECT google_link_disabled FROM users`` after the second init
-        must succeed.
+        Simulates a pre-#200 production DB: a user row is inserted, then
+        ``google_link_disabled`` (NOT NULL, server_default='0') and
+        ``display_name`` (nullable, no default) are dropped along with the
+        ``ix_auth_identities_user_provider`` index.  A second ``init_database``
+        call must restore all three, and the pre-existing row must read
+        ``google_link_disabled = 0`` (server_default backfill by SQLite).
         """
         db_path = str(tmp_path / "additive_sync.db")
 
@@ -132,16 +133,26 @@ class TestStartupMigrations:
         await init_database(db_path)
         await cleanup_database()
 
-        # Simulate a pre-#200 DB: drop the column and index that PR #200 added.
+        # Insert a user row with all NOT NULL fields before the columns are dropped.
+        # This lets us verify the server_default backfill on re-add.
         engine = create_engine(f"sqlite:///{db_path}")
         try:
             with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(canonical_email, role, session_version, created_at, updated_at, google_link_disabled) "
+                        "VALUES ('pre_200@example.com', 'member', 0, "
+                        "'2024-01-01T00:00:00', '2024-01-01T00:00:00', 0)"
+                    )
+                )
                 conn.execute(text("ALTER TABLE users DROP COLUMN google_link_disabled"))
+                conn.execute(text("ALTER TABLE users DROP COLUMN display_name"))
                 conn.execute(text("DROP INDEX ix_auth_identities_user_provider"))
         finally:
             engine.dispose()
 
-        # Second init: additive sync must restore the missing column and index.
+        # Second init: additive sync must restore both columns and the index.
         await init_database(db_path)
 
         engine = create_engine(f"sqlite:///{db_path}")
@@ -151,13 +162,26 @@ class TestStartupMigrations:
             assert "google_link_disabled" in col_names, (
                 "additive sync must have added google_link_disabled"
             )
+            assert "display_name" in col_names, (
+                "additive sync must have added display_name"
+            )
             idx_names = {i["name"] for i in insp.get_indexes("auth_identities")}
             assert "ix_auth_identities_user_provider" in idx_names, (
                 "additive sync must have created ix_auth_identities_user_provider"
             )
-            # The column must be readable (not just present in metadata).
+            # Pre-existing row must have google_link_disabled backfilled to 0
+            # by SQLite's ADD COLUMN DEFAULT '0' behaviour.
             with engine.connect() as conn:
-                conn.execute(text("SELECT google_link_disabled FROM users"))
+                row = conn.execute(
+                    text(
+                        "SELECT google_link_disabled FROM users "
+                        "WHERE canonical_email = 'pre_200@example.com'"
+                    )
+                ).fetchone()
+            assert row is not None, "pre-existing user row must survive re-init"
+            assert not row[0], (
+                "google_link_disabled must be backfilled to 0 for pre-existing rows"
+            )
         finally:
             engine.dispose()
             await cleanup_database()

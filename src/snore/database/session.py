@@ -176,7 +176,13 @@ def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
 
     Out of scope: dropped columns, renamed columns, changed types, dropped
     indexes — those require Alembic migration files once post-1.0 is in use.
+    Two additional silent gaps: (a) foreign-key clauses on new columns —
+    SQLite ``ADD COLUMN`` cannot carry ``REFERENCES``, so a new FK column is
+    added without its constraint; (b) new ``UniqueConstraint``s and
+    ``unique=True`` backing indexes — ``table.indexes`` excludes them, so
+    they are never created on existing tables by this helper.
     """
+    from sqlalchemy.exc import OperationalError as _OperationalError  # noqa: PLC0415
     from sqlalchemy.schema import CreateColumn  # noqa: PLC0415
 
     inspector = inspect(engine)
@@ -200,15 +206,35 @@ def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
                 )
             col_ddl = str(CreateColumn(col).compile(dialect=engine.dialect))
             table_id = preparer.quote_identifier(table.name)
-            with engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE {table_id} ADD COLUMN {col_ddl}"))
-            logger.info("Added column %s.%s to existing table", table.name, col.name)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table_id} ADD COLUMN {col_ddl}"))
+            except _OperationalError as exc:
+                # Guard: another process added this column concurrently (rolling
+                # restart).  SQLite says "duplicate column name"; other dialects
+                # say "already has a column named".  Both are safe to skip.
+                msg = str(exc).lower()
+                if (
+                    "duplicate column name" in msg
+                    or "already has a column named" in msg
+                ):
+                    logger.info(
+                        "Column %s.%s added concurrently; skipping",
+                        table.name,
+                        col.name,
+                    )
+                else:
+                    raise
+            else:
+                logger.info(
+                    "Added column %s.%s to existing table", table.name, col.name
+                )
 
         live_index_names = {i["name"] for i in inspector.get_indexes(table.name)}
         for idx in table.indexes:
             if idx.name in live_index_names:
                 continue
-            idx.create(engine)
+            idx.create(engine, checkfirst=True)
             logger.info("Created index %s on existing table %s", idx.name, table.name)
 
 
@@ -316,7 +342,9 @@ def _apply_migrations_sync(sync_url: str) -> None:
             _sync_additive_schema(Base.metadata, engine)
         finally:
             engine.dispose()
-        logger.info("Empty migration chain: schema ensured via create_all")
+        logger.info(
+            "Empty migration chain: schema ensured via create_all + additive sync"
+        )
         return
 
     # Slow path: apply migrations. Wrap the entire block in try/finally so
