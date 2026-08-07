@@ -201,8 +201,7 @@ class LinkedAnalysisSummary(BaseModel):
 class PipelineJobStatus(BaseModel):
     """Stitched view of one import job and its downstream analysis job.
 
-    created_at and finished_at are time.monotonic() floats — ordering only,
-    not wall-clock (same semantics as the analysis jobs endpoint).
+    created_at and finished_at are ISO 8601 UTC datetime strings.
     """
 
     job_id: str
@@ -210,8 +209,8 @@ class PipelineJobStatus(BaseModel):
     state: str
     stage: str
     file_count: int
-    created_at: float
-    finished_at: float | None
+    created_at: str
+    finished_at: str | None
     progress_message: str | None
     sessions_imported: int | None
     import_result: ImportResultSummary | None

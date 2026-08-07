@@ -801,13 +801,9 @@ export interface paths {
          * List Pipeline Jobs
          * @description List all pipeline (import) jobs visible to the authenticated actor.
          *
-         *     Ownership rule: jobs with owner_user_id=None are visible to any authenticated
-         *     user (local-mode parity); jobs with a set owner are visible only to that owner.
-         *     Foreign jobs return 404 on direct access but are simply absent from this list.
-         *
-         *     TTL note: both stores reap terminal jobs after 600s independently — a reaped
-         *     analysis job degrades the stage to "done"; a reaped import job drops the row
-         *     while its analysis job may still appear in GET /analysis/jobs.
+         *     Merges in-memory active/recent jobs with persisted historical records from
+         *     the database.  In-memory jobs take precedence when both exist for the same
+         *     job_id (deduplication).
          */
         get: operations['list_pipeline_jobs_api_v1_import_jobs_get']
         put?: never
@@ -2638,8 +2634,7 @@ export interface components {
          * PipelineJobStatus
          * @description Stitched view of one import job and its downstream analysis job.
          *
-         *     created_at and finished_at are time.monotonic() floats — ordering only,
-         *     not wall-clock (same semantics as the analysis jobs endpoint).
+         *     created_at and finished_at are ISO 8601 UTC datetime strings.
          */
         PipelineJobStatus: {
             /** Analysis Job Id */
@@ -2647,13 +2642,13 @@ export interface components {
             /** Analysis Queued */
             analysis_queued: boolean | null
             /** Created At */
-            created_at: number
+            created_at: string
             /** Error Message */
             error_message: string | null
             /** File Count */
             file_count: number
             /** Finished At */
-            finished_at: number | null
+            finished_at: string | null
             import_result: components['schemas']['ImportResultSummary'] | null
             /** Job Id */
             job_id: string

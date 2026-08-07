@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,33 @@ from snore.api.import_jobs import ImportJob, JobPhase, JobType
 from snore.services.import_service import ImportService
 
 logger = logging.getLogger(__name__)
+
+
+async def _persist_job_record(job: ImportJob) -> None:
+    """Write a terminal import job to the database for long-term persistence."""
+    from snore.database.models import ImportJobRecord  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    async with session_scope(immediate=True) as db:
+        db.add(
+            ImportJobRecord(
+                job_id=job.job_id,
+                job_type=job.job_type.value,
+                owner_user_id=job.owner_user_id,
+                target_profile_id=job.target_profile_id,
+                state=job.state.value,
+                file_count=job.file_count,
+                sessions_imported=job.sessions_imported,
+                import_result_json=job.import_result_snapshot,
+                error_message=job.error_message,
+                analysis_queued=job.analysis_queued,
+                created_at=job.created_at_wall,
+                finished_at=job.finished_at_wall
+                or datetime.now(
+                    UTC
+                ),  # fallback is defensive; _finish always sets _finished_at_wall before terminal
+            )
+        )
 
 
 def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
@@ -150,6 +178,11 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
             terminal_msg=_make_terminal("error", message=str(e)),
         )
     finally:
-        # Ordering: publish terminal (done above), then clean, then release capacity.
+        # Ordering: publish terminal (done above), persist, clean, release capacity.
+        if job.is_terminal:
+            try:
+                asyncio.run(_persist_job_record(job))
+            except Exception:
+                logger.exception("Failed to persist job record for %s", job.job_id)
         job.cleanup_files()
         job.release_capacity()

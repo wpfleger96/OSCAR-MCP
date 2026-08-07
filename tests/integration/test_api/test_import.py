@@ -1,5 +1,6 @@
 import json
 
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -693,8 +694,8 @@ class TestPipelineJobsListAPI:
             assert j["state"] == "succeeded"
             assert j["stage"] == "done"
             assert j["file_count"] == 2
-            assert j["created_at"] > 0
-            assert j["finished_at"] is not None
+            datetime.fromisoformat(j["created_at"])
+            datetime.fromisoformat(j["finished_at"])
             assert "import_result" in j
             assert "linked_analysis" in j
         finally:
@@ -794,5 +795,159 @@ class TestPipelineJobsListAPI:
             assert "imported_session_ids" not in import_result
         finally:
             remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_persisted_job_survives_in_memory_removal(self, api_client, db_session):
+        """A job persisted to DB appears in the list after being removed from memory."""
+        from snore.api.import_jobs import JobPhase, JobType, create_job, remove_job
+        from snore.database.models import ImportJobRecord
+
+        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job.set_file_count(5)
+        try:
+            job.try_start()
+            job.phase_complete(
+                JobPhase.IMPORT,
+                {
+                    "total_imported": 3,
+                    "total_skipped": 1,
+                    "total_failed": 1,
+                    "warnings": ["test warning"],
+                    "imported_session_ids": [1, 2, 3],
+                    "sources": [],
+                },
+            )
+            job._finish(
+                succeeded=True,
+                terminal_msg={"event": "complete", "data": {}},
+            )
+
+            db_session.add(
+                ImportJobRecord(
+                    job_id=job.job_id,
+                    job_type=job.job_type.value,
+                    owner_user_id=job.owner_user_id,
+                    target_profile_id=job.target_profile_id,
+                    state=job.state.value,
+                    file_count=job.file_count,
+                    sessions_imported=job.sessions_imported,
+                    import_result_json=job.import_result_snapshot,
+                    error_message=job.error_message,
+                    analysis_queued=job.analysis_queued,
+                    created_at=job.created_at_wall,
+                    finished_at=job.finished_at_wall,
+                )
+            )
+            db_session.commit()
+
+            # Remove from in-memory store — simulates reaper TTL or restart.
+            remove_job(job.job_id)
+
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            jobs = response.json()["jobs"]
+            assert len(jobs) == 1
+
+            j = jobs[0]
+            assert j["job_id"] == job.job_id
+            assert j["state"] == "succeeded"
+            assert j["stage"] == "done"
+            assert j["file_count"] == 5
+            datetime.fromisoformat(j["created_at"])
+            datetime.fromisoformat(j["finished_at"])
+            assert j["import_result"] is not None
+            assert j["import_result"]["total_imported"] == 3
+            assert j["import_result"]["total_skipped"] == 1
+            assert j["import_result"]["total_failed"] == 1
+            assert j["import_result"]["warnings"] == ["test warning"]
+            assert j["linked_analysis"] is None
+            assert j["analysis_job_id"] is None
+        finally:
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_persisted_job_deduped_against_in_memory(self, api_client, db_session):
+        """When a job exists both in memory and DB, only one copy appears."""
+        from snore.api.import_jobs import JobType, create_job, remove_job
+        from snore.database.models import ImportJobRecord
+
+        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        try:
+            job.try_start()
+            job._finish(
+                succeeded=True,
+                terminal_msg={"event": "complete", "data": {}},
+            )
+
+            db_session.add(
+                ImportJobRecord(
+                    job_id=job.job_id,
+                    job_type=job.job_type.value,
+                    owner_user_id=job.owner_user_id,
+                    target_profile_id=job.target_profile_id,
+                    state=job.state.value,
+                    file_count=job.file_count,
+                    sessions_imported=job.sessions_imported,
+                    import_result_json=None,
+                    error_message=None,
+                    analysis_queued=None,
+                    created_at=job.created_at_wall,
+                    finished_at=job.finished_at_wall,
+                )
+            )
+            db_session.commit()
+
+            # Job is in both stores — list should deduplicate.
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            jobs = response.json()["jobs"]
+            matching = [j for j in jobs if j["job_id"] == job.job_id]
+            assert len(matching) == 1
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_persisted_failed_job_shows_error(self, api_client, db_session):
+        """A failed job persisted to DB shows its error message."""
+        from snore.api.import_jobs import JobType, create_job, remove_job
+        from snore.database.models import ImportJobRecord
+
+        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        try:
+            job.try_start()
+            job._finish(
+                succeeded=False,
+                terminal_msg={"event": "error", "data": {"message": "Disk full"}},
+            )
+
+            db_session.add(
+                ImportJobRecord(
+                    job_id=job.job_id,
+                    job_type=job.job_type.value,
+                    owner_user_id=job.owner_user_id,
+                    target_profile_id=job.target_profile_id,
+                    state=job.state.value,
+                    file_count=job.file_count,
+                    sessions_imported=None,
+                    import_result_json=None,
+                    error_message=job.error_message,
+                    analysis_queued=None,
+                    created_at=job.created_at_wall,
+                    finished_at=job.finished_at_wall,
+                )
+            )
+            db_session.commit()
+            remove_job(job.job_id)
+
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            jobs = response.json()["jobs"]
+            assert len(jobs) == 1
+            assert jobs[0]["state"] == "failed"
+            assert jobs[0]["stage"] == "failed"
+            assert jobs[0]["error_message"] == "Disk full"
+        finally:
             job.cleanup_files()
             job.release_capacity()

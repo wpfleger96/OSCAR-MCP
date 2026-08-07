@@ -41,6 +41,10 @@
                             >{{ detailText(job) }}</span
                         >
                     </div>
+                    <div class="job-timestamp">
+                        <span v-if="job.finished_at">{{ formatTimestamp(job.finished_at) }}</span>
+                        <span v-else>{{ formatTimestamp(job.created_at) }}</span>
+                    </div>
                     <div
                         v-if="job.stage === 'done' && job.import_result"
                         class="job-result-summary"
@@ -141,6 +145,23 @@ function detailText(job: PipelineJobStatus): string | null {
 function detailClass(stage: string): string {
     return stage === 'failed' || stage === 'analysis_failed' ? 'job-error' : ''
 }
+
+function formatTimestamp(iso: string): string {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return '—'
+    const diffMs = Date.now() - d.getTime()
+    const diffMin = Math.floor(diffMs / 60_000)
+    if (diffMin < 1) return 'just now'
+    if (diffMin < 60) return `${diffMin}m ago`
+    const diffH = Math.floor(diffMin / 60)
+    if (diffH < 24) return `${diffH}h ago`
+    return d.toLocaleDateString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    })
+}
 </script>
 
 <style scoped>
@@ -179,6 +200,11 @@ function detailClass(stage: string): string {
 
 .job-stage {
     font-size: 0.8rem;
+    color: var(--color-muted-foreground);
+}
+
+.job-timestamp {
+    font-size: 0.75rem;
     color: var(--color-muted-foreground);
 }
 
