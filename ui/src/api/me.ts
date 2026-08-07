@@ -1,5 +1,6 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
 import type { components } from '@/types/generated'
+import type { DeleteDataResult } from '@/types'
 
 type MeResponse = components['schemas']['MeResponse']
 type MessageResponse = components['schemas']['MessageResponse']
@@ -31,3 +32,5 @@ export const updatePreferences = apiPatch<UserPreferences, [body: UserPreference
     '/auth/me/preferences',
     (body) => ({ data: body }),
 )
+
+export const deleteMyData = apiPost<DeleteDataResult>('/auth/me/delete-data')

@@ -161,16 +161,52 @@
                 </div>
             </section>
 
-            <!-- Danger Zone -->
-            <section v-if="isLocal" class="section">
+            <!-- Danger Zone — visible to admins in multiuser mode or in local mode -->
+            <section v-if="isLocal || role === 'admin'" class="section">
                 <h2 class="section-heading">Danger Zone</h2>
+
+                <!-- Post-full-reset: show the bootstrap invite URL prominently -->
+                <div v-if="bootstrapInviteUrl" class="invite-banner">
+                    <p class="invite-banner-title">
+                        All accounts have been deleted. Use this link to create a new admin account
+                        — save it before leaving this page.
+                    </p>
+                    <div class="invite-url-row">
+                        <code class="invite-url-text">{{ bootstrapInviteUrl }}</code>
+                        <Button variant="outline" size="sm" @click="copyInviteUrl">
+                            {{ inviteCopied ? 'Copied!' : 'Copy' }}
+                        </Button>
+                    </div>
+                </div>
+
                 <div class="danger-card">
                     <div class="vacuum-description">
                         <p class="vacuum-title">Reset Database</p>
                         <p class="vacuum-subtitle">
-                            Delete all session data, devices, and profiles. The schema is preserved
-                            — you can re-import data afterward.
+                            <template v-if="isLocal">
+                                Delete all session data, devices, and profiles. The schema is
+                                preserved — you can re-import data afterward.
+                            </template>
+                            <template v-else>
+                                Delete all sleep data across every user account. Profiles and
+                                accounts are preserved by default.
+                            </template>
                         </p>
+
+                        <!-- Multiuser-only: include_accounts checkbox -->
+                        <label v-if="!isLocal" class="include-accounts-label">
+                            <input
+                                v-model="includeAccounts"
+                                type="checkbox"
+                                class="include-accounts-checkbox"
+                            />
+                            <span>
+                                Also delete all user accounts and invites
+                                <span class="include-accounts-warning"
+                                    >(factory reset — everyone is signed out)</span
+                                >
+                            </span>
+                        </label>
                     </div>
                     <Button
                         variant="destructive"
@@ -182,7 +218,7 @@
                     </Button>
                 </div>
 
-                <div v-if="resetResult" class="vacuum-result">
+                <div v-if="resetResult && !bootstrapInviteUrl" class="vacuum-result">
                     <span class="vacuum-result-label">Last reset:</span>
                     <span class="vacuum-result-value">
                         {{ resetResult.total_rows_deleted.toLocaleString() }} rows deleted,
@@ -220,12 +256,13 @@
 
         <!-- Reset confirmation dialog -->
         <DeleteConfirmDialog
-            v-if="isLocal"
+            v-if="isLocal || role === 'admin'"
             v-model:visible="resetDialogOpen"
             title="Reset Database"
-            message="This will permanently delete ALL data from the database. This cannot be undone."
+            :message="resetDialogMessage"
             :loading="false"
             :deleting="resetting"
+            confirm-phrase="reset"
             @confirm="handleReset"
         >
             <template v-if="data" #preview>
@@ -265,7 +302,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useAuth } from '@/composables/useAuth'
 import StatCard from '@/components/StatCard.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
@@ -287,7 +324,7 @@ import { formatDateShort } from '@/utils/formatting'
 import type { VacuumResult, ResetResult } from '@/types'
 
 const { data, loading, error, reload } = useApiLoad(() => getDbStats())
-const { isLocal } = useAuth()
+const { isLocal, role } = useAuth()
 
 const vacuumDialogOpen = ref(false)
 const vacuuming = ref(false)
@@ -312,19 +349,42 @@ const resetDialogOpen = ref(false)
 const resetting = ref(false)
 const resetResult = ref<ResetResult | null>(null)
 const resetError = ref<string | null>(null)
+const includeAccounts = ref(false)
+const bootstrapInviteUrl = ref<string | null>(null)
+const inviteCopied = ref(false)
+
+const resetDialogMessage = computed(() => {
+    if (!isLocal.value && includeAccounts.value) {
+        return 'This will permanently delete ALL data AND all user accounts. Every user (including you) will be signed out. A one-time admin invite URL will be returned so you can regain access.'
+    }
+    return 'This will permanently delete ALL sleep data from the database. User accounts and profiles are preserved. This cannot be undone.'
+})
 
 async function handleReset(): Promise<void> {
     resetting.value = true
     resetDialogOpen.value = false
     resetError.value = null
+    bootstrapInviteUrl.value = null
     try {
-        resetResult.value = await resetDb()
+        const body = !isLocal.value ? { include_accounts: includeAccounts.value } : undefined
+        resetResult.value = await resetDb(body)
+        bootstrapInviteUrl.value = resetResult.value.bootstrap_invite_url ?? null
         await reload()
     } catch (err: unknown) {
         resetError.value = err instanceof Error ? err.message : 'Reset failed'
     } finally {
         resetting.value = false
     }
+}
+
+function copyInviteUrl(): void {
+    if (!bootstrapInviteUrl.value) return
+    navigator.clipboard.writeText(bootstrapInviteUrl.value).then(() => {
+        inviteCopied.value = true
+        setTimeout(() => {
+            inviteCopied.value = false
+        }, 2000)
+    })
 }
 </script>
 
@@ -529,9 +589,30 @@ async function handleReset(): Promise<void> {
     background: var(--color-card);
     padding: 1rem 1.25rem;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
+}
+
+.include-accounts-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    color: var(--color-foreground);
+}
+
+.include-accounts-checkbox {
+    margin-top: 0.1rem;
+    flex-shrink: 0;
+    accent-color: var(--color-destructive);
+}
+
+.include-accounts-warning {
+    color: var(--color-destructive);
+    font-weight: 500;
 }
 
 .reset-preview {
@@ -545,5 +626,39 @@ async function handleReset(): Promise<void> {
     display: flex;
     justify-content: space-between;
     gap: 2rem;
+}
+
+.invite-banner {
+    border: 2px solid var(--color-destructive);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--color-destructive) 8%, var(--color-card));
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.invite-banner-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--color-destructive);
+    margin: 0;
+}
+
+.invite-url-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.invite-url-text {
+    flex: 1;
+    font-size: 0.8rem;
+    word-break: break-all;
+    background: var(--color-muted);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    color: var(--color-foreground);
 }
 </style>

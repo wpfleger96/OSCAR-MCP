@@ -1,33 +1,113 @@
+import logging
+import os
+import shutil
+
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
-from pydantic import Field
+from fastapi import APIRouter, Body, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db, service_dep
 from snore.api.guards import RequireAdmin
+from snore.database import models
+from snore.database.models import Base
 from snore.database.target import DatabaseTarget
 from snore.services.database_service import DatabaseService
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+# Kept as an empty placeholder — reset has moved to the main router.
+local_only_router = APIRouter()
 
 DatabaseServiceDep = Annotated[DatabaseService, Depends(service_dep(DatabaseService))]
 
-# Separate router for local-mode-only operations.
-# ``/reset`` is removed from the web API in multiuser mode — it is CLI-only.
-local_only_router = APIRouter()
+# Tables preserved by the data-only reset (include_accounts=False).
+# Sleep data tables are deleted; account/auth/profile containers survive.
+_DATA_RESET_SKIP = frozenset(
+    {"users", "auth_identities", "invites", "profiles", "oauth_attempts"}
+)
 
 
 class DatabaseStatsPublic(DatabaseStats):
-    # Exclude server filesystem path from API responses
+    # Exclude server filesystem path from API responses.
     db_path: str = Field(default="", exclude=True)
+
+
+class ResetRequest(BaseModel):
+    include_accounts: bool = False
 
 
 def _get_target() -> DatabaseTarget:
     """Resolve the current database target from the environment/session."""
-    # DatabaseTarget reads SNORE_DATABASE_URL / SNORE_DB_PATH / default chain.
     return DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
+
+
+def _raw_root() -> Path:
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    return DEFAULT_RAW_BACKUP_DIR
+
+
+def _purge_profile_raw_dir(profile_id: int, raw_root: Path) -> None:
+    """Quarantine-rename then rmtree the raw/<profile_id>/ backup dir (idempotent).
+
+    Follows the same two-step pattern as DeletionSaga: atomic rename to
+    .quarantine/ first so the directory is invisible to new imports, then
+    rmtree.  Interruption leaves the dir in .quarantine/ where startup
+    recovery will clean it up.
+    """
+    src = raw_root / str(profile_id)
+    if not src.exists():
+        return
+    quarantine = raw_root / ".quarantine"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    dst = quarantine / str(profile_id)
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    src.rename(dst)
+    shutil.rmtree(dst, ignore_errors=True)
+    logger.info("Purged raw backup for profile %d", profile_id)
+
+
+async def _mint_admin_invite(db: AsyncSession, email: str, base_url: str) -> str:
+    """Insert a new admin invite row and return its redemption URL.
+
+    Called after a full factory reset (include_accounts=True) when all rows
+    have been deleted.  At that point there are no users or pending invites,
+    so the duplicate-guard queries are elided.
+    """
+    import secrets  # noqa: PLC0415
+
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from sqlalchemy import insert  # noqa: PLC0415
+
+    from snore.auth.invite_tokens import hash_invite_token  # noqa: PLC0415
+
+    raw = secrets.token_urlsafe(32)
+    token_hash = hash_invite_token(raw)
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(days=7)
+
+    await db.execute(
+        insert(models.Invite).values(
+            email=email,
+            token_hash=token_hash,
+            role="admin",
+            created_by=None,
+            expires_at=expires_at,
+            created_at=now,
+        )
+    )
+
+    url_base = base_url.rstrip("/") if base_url else ""
+    return f"{url_base}/invite#{raw}" if url_base else f"/invite#{raw}"
 
 
 @router.get("/stats", response_model=DatabaseStatsPublic)
@@ -64,19 +144,37 @@ def vacuum_db(
     return service.vacuum_sqlite(target.sqlite_path)
 
 
-@local_only_router.post("/reset", response_model=ResetResult)
+@router.post("/reset", response_model=ResetResult)
 async def reset_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    _actor: RequireAdmin,
+    actor: RequireAdmin,
+    body: Annotated[ResetRequest | None, Body()] = None,
 ) -> ResetResult:
-    """Delete all rows from all tables (generic) and vacuum if SQLite.
+    """Delete database rows and vacuum.
 
-    Generic row reset works for any dialect.  SQLite targets additionally
-    receive a VACUUM pass after the commit.
+    Two modes selected via the request body:
+
+    ``include_accounts=false`` (default):
+        Delete all sleep data (devices, sessions, waveforms, events, statistics,
+        settings, analysis results, breaths, detected patterns, days, import job
+        records) and purge every ``raw/<profile_id>/`` backup directory.
+        User accounts, auth identities, invites, and profile containers are
+        preserved.  Safe for multiuser deployments — users keep their accounts
+        and can re-import data afterward.
+
+    ``include_accounts=true``:
+        Full factory reset via ``reset_rows()`` (every row in every table) plus
+        raw-dir purge and vacuum.  A fresh bootstrap admin invite is created for
+        the calling admin's email and returned in ``bootstrap_invite_url``.  The
+        caller's session is immediately dead; they must redeem that URL to regain
+        access.
     """
-    import os  # noqa: PLC0415
+    from snore.api.config import get_config  # noqa: PLC0415
+
+    cfg = get_config()
+    req = body or ResetRequest()
 
     is_sqlite_file = target.dialect == "sqlite" and target.location not in (
         "",
@@ -90,16 +188,72 @@ async def reset_db(
         else 0.0
     )
 
-    # Generic row-deletion phase — caller-transaction-owned.
-    tables_cleared = await service.reset_rows()
-    total = sum(tables_cleared.values())
+    raw_root = _raw_root()
 
-    # Commit before VACUUM (SQLite forbids VACUUM inside a transaction).
-    await db.commit()
+    if req.include_accounts:
+        # Full factory reset — record caller's email using Core SQL to avoid
+        # adding the User to the identity map (which would conflict with the
+        # bulk delete that follows and cause a StaleDataError on autoflush).
+        row = (
+            await db.execute(
+                select(models.User.canonical_email).where(
+                    models.User.id == actor.user_id
+                )
+            )
+        ).first()
+        caller_email = row[0] if row else None
 
-    # SQLite-only file maintenance.
-    if is_sqlite_file:
-        service.vacuum_sqlite(db_path)
+        # Collect all profile IDs for raw-dir purge (Core SQL, same reason).
+        profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
+
+        tables_cleared = await service.reset_rows()
+        total = sum(tables_cleared.values())
+
+        # After bulk deletes, the ORM identity map may contain stale objects
+        # (e.g. the acting user, whose row was deleted).  Expunge all before
+        # inserting the invite so the subsequent commit does not try to flush
+        # any stale ORM state.
+        db.expunge_all()
+
+        # Insert the bootstrap invite in the same transaction as the deletion.
+        bootstrap_invite_url: str | None = None
+        if caller_email:
+            base_url = cfg.public_base_url or ""
+            bootstrap_invite_url = await _mint_admin_invite(db, caller_email, base_url)
+
+        # Commit deletes + invite together; VACUUM must run outside a transaction.
+        await db.commit()
+
+        for pid in profile_ids:
+            _purge_profile_raw_dir(pid, raw_root)
+
+        if is_sqlite_file:
+            service.vacuum_sqlite(db_path)
+
+    else:
+        # Data-only reset — delete sleep data, preserve accounts/profiles.
+        profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
+
+        tables_cleared = {}
+        for table in reversed(Base.metadata.sorted_tables):
+            if table.name in _DATA_RESET_SKIP:
+                continue
+            # Pre-count then delete: avoids rowcount (not on the Result type stub).
+            count_row = await db.execute(select(func.count()).select_from(table))
+            tables_cleared[table.name] = count_row.scalar_one()
+            await db.execute(table.delete())
+
+        total = sum(tables_cleared.values())
+
+        await db.commit()
+
+        for pid in profile_ids:
+            _purge_profile_raw_dir(pid, raw_root)
+
+        if is_sqlite_file:
+            service.vacuum_sqlite(db_path)
+
+        bootstrap_invite_url = None
 
     size_after = (
         os.path.getsize(db_path) / (1024 * 1024)
@@ -113,4 +267,5 @@ async def reset_db(
         total_rows_deleted=total,
         size_before_mb=size_before,
         size_after_mb=size_after,
+        bootstrap_invite_url=bootstrap_invite_url,
     )

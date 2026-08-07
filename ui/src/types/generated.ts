@@ -2788,6 +2788,11 @@ export interface components {
          */
         ResetResult: {
             /**
+             * Bootstrap Invite Url
+             * @description Admin invite redemption URL (only present after include_accounts=true reset).
+             */
+            bootstrap_invite_url?: string | null
+            /**
              * Size After Mb
              * @description Database size after reset + vacuum in MB
              */
@@ -2814,6 +2819,42 @@ export interface components {
              * @description Total rows deleted across all tables
              */
             total_rows_deleted: number
+        }
+        /**
+         * DeleteDataResult
+         * @description Result of a per-user delete-all-data operation.
+         */
+        DeleteDataResult: {
+            /**
+             * Status
+             * @description Operation status ('success')
+             */
+            status: string
+            /**
+             * Devices Deleted
+             * @description Device rows deleted (cascades removed all sleep data)
+             */
+            devices_deleted: number
+            /**
+             * Import Jobs Deleted
+             * @description Import job records deleted for this user
+             */
+            import_jobs_deleted: number
+            /**
+             * Profiles Processed
+             * @description Profiles whose raw backup dirs were purged
+             */
+            profiles_processed: number
+            /**
+             * Size Before Mb
+             * @description Database size before deletion in MB
+             */
+            size_before_mb: number
+            /**
+             * Size After Mb
+             * @description Database size after deletion + vacuum in MB
+             */
+            size_after_mb: number
         }
         /**
          * RxAllResponse
