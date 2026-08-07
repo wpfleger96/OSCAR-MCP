@@ -70,7 +70,7 @@
             <!-- uploading: progress bar -->
             <template v-else-if="uploadPhase === 'uploading'">
                 <p class="progress-label">
-                    Uploading… {{ uploadProgress }}%
+                    {{ batchLabel ?? 'Uploading' }}… {{ uploadProgress }}%
                     <span v-if="uploadTotal > 0">
                         ({{ formatBytes(uploadLoaded) }} / {{ formatBytes(uploadTotal) }})
                     </span>
@@ -180,9 +180,14 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import type { AxiosProgressEvent } from 'axios'
 import type { ImportSource, PipelineJobStatus } from '@/types'
-import { detectSources, importFiles, importFromPath, type FileEntry } from '@/api/import'
+import {
+    detectSources,
+    importFiles,
+    importFromPath,
+    type FileEntry,
+    type ChunkedImportProgress,
+} from '@/api/import'
 import { getImportJobs, cancelImport, ACTIVE_PIPELINE_STAGES } from '@/api/importJobs'
 import { formatBytes } from '@/utils/formatting'
 import { Button } from '@/components/ui/button'
@@ -217,6 +222,7 @@ const uploadTotal = ref(0)
 const importError = ref<string | null>(null)
 const isDragging = ref(false)
 const dropError = ref<string | null>(null)
+const batchLabel = ref<string | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
 const hasResMedStructure = computed(
@@ -314,12 +320,15 @@ async function handleImport() {
     uploadTotal.value = 0
     importError.value = null
 
-    const onProgress = (event: AxiosProgressEvent) => {
-        if (event.total) {
-            uploadLoaded.value = event.loaded
-            uploadTotal.value = event.total
-            uploadProgress.value = Math.round((event.loaded / event.total) * 100)
-        }
+    const onProgress = (progress: ChunkedImportProgress) => {
+        uploadLoaded.value = progress.loaded
+        uploadTotal.value = progress.total
+        uploadProgress.value =
+            progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0
+        batchLabel.value =
+            progress.totalBatches > 1
+                ? `Uploading batch ${progress.batchIndex} of ${progress.totalBatches}`
+                : null
     }
 
     try {
@@ -341,6 +350,7 @@ function resetUpload() {
     uploadLoaded.value = 0
     uploadTotal.value = 0
     importError.value = null
+    batchLabel.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
