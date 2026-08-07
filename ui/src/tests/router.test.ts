@@ -104,9 +104,9 @@ describe('authGuard (production)', () => {
         expect(result).toBeUndefined()
     })
 
-    it('test_authGuard_allows_through_when_fetchStatus_rejects', async () => {
-        // Guard catches fetchStatus rejection and allows auth-free routes through.
-        // Data endpoints will 401 if the session is actually invalid.
+    it('test_authGuard_defensive_catch_allows_through_when_fetchStatus_rejects', async () => {
+        // fetchStatus is non-rejecting by contract; this exercises the defensive catch
+        // path in authGuard that cannot be triggered by the real composable.
         vi.mocked(useAuth).mockReturnValue(
             baseMakeAuthMock({
                 fetchStatus: vi.fn().mockRejectedValueOnce(new Error('Network')),

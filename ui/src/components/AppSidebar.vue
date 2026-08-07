@@ -114,8 +114,8 @@
                     </DropdownMenuContent>
                 </DropdownMenu>
             </template>
-            <!-- Status unknown: show muted placeholder instead of silently hiding user menu -->
-            <div v-else-if="!isLocal && statusUnknown" class="reconnecting">Reconnecting…</div>
+            <!-- Status unknown (status is null, so isLocal is necessarily false): show muted placeholder -->
+            <div v-else-if="statusUnknown" class="reconnecting">Reconnecting…</div>
 
             <RouterLink to="/about" class="nav-item">
                 <Info class="h-4 w-4" />

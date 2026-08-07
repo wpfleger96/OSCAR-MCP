@@ -9,6 +9,7 @@ let _fetchPromise: Promise<void> | null = null
 let _lastFetched = 0
 let _generation = 0
 let _healTimer: ReturnType<typeof setTimeout> | null = null
+let _healDelay = 3_000 // doubles on each consecutive failed heal, capped at 30s; reset on success/clearAuth/refreshStatus
 
 const REVALIDATE_MS = 5 * 60 * 1000
 
@@ -34,7 +35,7 @@ export function useAuth() {
         if (_fetchPromise !== null) return _fetchPromise
         const gen = _generation
 
-        async function attempt(): Promise<AuthStatusResponse> {
+        async function attempt(gen: number): Promise<AuthStatusResponse> {
             try {
                 return await getAuthStatus(AbortSignal.timeout(10_000))
             } catch {
@@ -45,12 +46,13 @@ export function useAuth() {
             }
         }
 
-        _fetchPromise = attempt()
+        _fetchPromise = attempt(gen)
             .then((s) => {
                 if (_generation === gen) {
                     // Only write if this generation is still the active one.
                     status.value = s
                     _lastFetched = Date.now()
+                    _healDelay = 3_000 // reset backoff on success
                 } else if (_fetchPromise !== null) {
                     // Superseded by a newer generation — chain to the active fetch
                     // so callers awaiting this promise get the authenticated result.
@@ -58,15 +60,19 @@ export function useAuth() {
                 }
             })
             .catch(() => {
-                // Both attempts failed (or superseded) — schedule background recovery if still unknown.
+                // Both network attempts failed — schedule background recovery if still unknown.
+                // When superseded (generation mismatch), the guard below prevents scheduling;
+                // the superseding fetch owns recovery, and callers self-correct via reactivity.
                 if (_generation === gen && status.value === null) {
                     if (_healTimer !== null) clearTimeout(_healTimer)
+                    const delay = _healDelay
+                    _healDelay = Math.min(_healDelay * 2, 30_000)
                     _healTimer = setTimeout(() => {
                         _healTimer = null
                         if (_generation === gen && status.value === null) {
                             void fetchStatus()
                         }
-                    }, 3_000)
+                    }, delay)
                 }
             })
             .finally(() => {
@@ -88,6 +94,7 @@ export function useAuth() {
         _fetchPromise = null
         _generation++ // invalidate any in-flight requests from earlier generation
         _lastFetched = 0
+        _healDelay = 3_000 // reset backoff when caller explicitly refreshes
         await fetchStatus()
     }
 
@@ -106,6 +113,7 @@ export function useAuth() {
             clearTimeout(_healTimer)
             _healTimer = null
         }
+        _healDelay = 3_000 // reset backoff on explicit clear
         status.value = null
         _fetchPromise = null
         _lastFetched = 0

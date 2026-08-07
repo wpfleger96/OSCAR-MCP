@@ -315,6 +315,63 @@ describe('useAuth', () => {
         }
     })
 
+    it('clearAuth_cancelsPendingSelfHeal_noAdditionalFetchFires', async () => {
+        // Both attempts fail → self-heal timer is scheduled → clearAuth cancels the timer.
+        vi.useFakeTimers()
+        try {
+            vi.mocked(authApi.getAuthStatus)
+                .mockRejectedValueOnce(new Error('Network'))
+                .mockRejectedValueOnce(new Error('Network'))
+
+            const { fetchStatus, clearAuth } = useAuth()
+            const p = fetchStatus()
+            await vi.advanceTimersByTimeAsync(600) // past 500ms retry delay
+            await p
+
+            // Both attempts failed — self-heal is now scheduled.
+            expect(authApi.getAuthStatus).toHaveBeenCalledTimes(2)
+
+            // clearAuth cancels the pending self-heal timer.
+            clearAuth()
+
+            // Advance well past the heal delay — no additional API call should fire.
+            await vi.advanceTimersByTimeAsync(3_500)
+
+            expect(authApi.getAuthStatus).toHaveBeenCalledTimes(2)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('fetchStatus_generationSupersededDuringBackoff_abandonsStalRetry', async () => {
+        // First attempt fails → during the 500ms backoff, refreshStatus() bumps generation →
+        // the stale retry is abandoned by the generation guard; no third call fires.
+        vi.useFakeTimers()
+        try {
+            vi.mocked(authApi.getAuthStatus)
+                .mockRejectedValueOnce(new Error('Network')) // gen=N first attempt
+                .mockResolvedValueOnce(mockStatus) // gen=N+1 fetch from refreshStatus
+
+            const { fetchStatus, refreshStatus, isAuthenticated } = useAuth()
+
+            const oldP = fetchStatus() // starts gen=N; first call fails immediately
+            await vi.advanceTimersByTimeAsync(100) // 100ms into the 500ms backoff
+
+            // Bump generation mid-backoff; this starts gen=N+1's fetch (2nd getAuthStatus call).
+            await refreshStatus()
+            expect(isAuthenticated.value).toBe(true)
+
+            // Advance past the stale backoff — gen=N retry fires but generation guard discards it.
+            await vi.advanceTimersByTimeAsync(500)
+            await oldP // resolves (superseded error is caught internally)
+
+            // Exactly 2 calls: gen=N first attempt + gen=N+1 fetch from refreshStatus.
+            expect(authApi.getAuthStatus).toHaveBeenCalledTimes(2)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('login_generationGuard_stalePreLoginFetchCannotOverwriteAuthenticated', async () => {
         // Scenario: fetchStatus starts (gen=N), login() fires before it completes.
         // login() increments generation (gen=N+1). Old fetch resolves last.

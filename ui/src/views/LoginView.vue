@@ -54,7 +54,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
@@ -63,7 +63,7 @@ import { useAuth } from '@/composables/useAuth'
 import { resolveLandingPath } from '@/router'
 
 const router = useRouter()
-const { login, demoLogin, demoAvailable } = useAuth()
+const { login, demoLogin, demoAvailable, isAuthenticated } = useAuth()
 
 const email = ref('')
 const password = ref('')
@@ -71,6 +71,15 @@ const loading = ref(false)
 const errorMessage = ref<string | null>(null)
 const demoLoading = ref(false)
 const demoError = ref<string | null>(null)
+
+// When background self-heal authenticates the session while the user sits on the login
+// page, navigate to their landing path. Skip if an explicit login handler is already
+// navigating — it owns navigation in that case (guarded by the loading flags it owns).
+watch(isAuthenticated, async (authed) => {
+    if (!authed) return
+    if (loading.value || demoLoading.value) return
+    router.replace(await resolveLandingPath())
+})
 
 async function handleLogin() {
     errorMessage.value = null

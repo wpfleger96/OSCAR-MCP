@@ -168,7 +168,8 @@ export async function authGuard(to: RouteLocationNormalized): Promise<string | b
     try {
         await fetchStatus()
     } catch {
-        // Network failure — allow through (data endpoints will 401 if session is bad).
+        // fetchStatus is non-rejecting by contract; this catch is defensive-only
+        // and cannot be triggered by the real composable.
     }
 
     const authed = isAuthenticated.value || isLocal.value
