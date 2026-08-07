@@ -55,6 +55,7 @@ import uuid
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,7 @@ class ImportJob:
     owner_user_id: int | None = None  # The user who owns this job.
     target_profile_id: int | None = None  # The profile data lands in.
     created_at: float = field(default_factory=time.monotonic)
+    created_at_wall: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # UPLOAD jobs: temp dir with written files.
     temp_dir: Path | None = None
@@ -203,6 +205,7 @@ class ImportJob:
         default_factory=list, init=False, repr=False
     )
     _terminal_at: float | None = field(default=None, init=False, repr=False)
+    _finished_at_wall: datetime | None = field(default=None, init=False, repr=False)
     # True while the slot still counts against admission caps.
     _capacity_held: bool = field(default=True, init=False, repr=False)
     _lock: threading.Lock = field(
@@ -247,6 +250,12 @@ class ImportJob:
         """Monotonic timestamp when the job reached a terminal state, or None."""
         with self._lock:
             return self._terminal_at
+
+    @property
+    def finished_at_wall(self) -> datetime | None:
+        """Wall-clock UTC timestamp when the job reached a terminal state, or None."""
+        with self._lock:
+            return self._finished_at_wall
 
     @property
     def analysis_job_id(self) -> str | None:
@@ -445,6 +454,7 @@ class ImportJob:
                 terminal_msg = self._make_cancel_payload()
                 self._terminal_msg = terminal_msg
                 self._terminal_at = time.monotonic()
+                self._finished_at_wall = datetime.now(UTC)
                 observers = list(self._observers)
             else:
                 observers = []
@@ -487,6 +497,7 @@ class ImportJob:
                         terminal_msg["data"] = data
             self._terminal_msg = terminal_msg
             self._terminal_at = time.monotonic()
+            self._finished_at_wall = datetime.now(UTC)
             observers = list(self._observers)
             self._observers.clear()
         for ch in observers:

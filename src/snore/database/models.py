@@ -48,7 +48,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from snore.database.types import UTCDateTime, ValidatedJSONWithDefault
+from snore.database.types import UTCDateTime, ValidatedJSON, ValidatedJSONWithDefault
 
 # Constraint naming convention — must live here on Base.metadata (not env.py)
 # so that Base.metadata.create_all emits the same deterministic constraint
@@ -793,6 +793,47 @@ class Breath(Base):
         return (
             f"<Breath(id={self.id}, analysis_result_id={self.analysis_result_id}, "
             f"breath_number={self.breath_number})>"
+        )
+
+
+class ImportJobRecord(Base):
+    """Persisted record of a terminal import job (succeeded/failed/cancelled).
+
+    Written once by the import worker thread when a job reaches terminal state.
+    Survives server restarts and the in-memory reaper TTL.
+    """
+
+    __tablename__ = "import_job_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    job_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # No FK: records must survive user/profile deletion.
+    owner_user_id: Mapped[int | None] = mapped_column(Integer)
+    target_profile_id: Mapped[int | None] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sessions_imported: Mapped[int | None] = mapped_column(Integer)
+    import_result_json: Mapped[dict[str, Any] | None] = mapped_column(
+        ValidatedJSON, nullable=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    analysis_queued: Mapped[bool | None] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_import_job_records_owner_user_id", "owner_user_id"),
+        Index("ix_import_job_records_user_created", "owner_user_id", "created_at"),
+        CheckConstraint(
+            "state IN ('succeeded','failed','cancelled')",
+            name="chk_import_job_record_state",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ImportJobRecord(id={self.id}, job_id={self.job_id}, state={self.state})>"
         )
 
 

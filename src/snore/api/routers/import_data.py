@@ -8,13 +8,14 @@ import shutil
 import tempfile
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
+from datetime import datetime
 from pathlib import Path
 from typing import IO, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
@@ -502,29 +503,32 @@ def _to_import_result_summary(result_dict: dict[str, Any]) -> ImportResultSummar
 
 
 @router.get("/jobs", response_model=PipelineJobsListResponse)
-def list_pipeline_jobs(actor: RequireAuth) -> PipelineJobsListResponse:
+async def list_pipeline_jobs(
+    actor: RequireAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PipelineJobsListResponse:
     """List all pipeline (import) jobs visible to the authenticated actor.
 
-    Ownership rule: jobs with owner_user_id=None are visible to any authenticated
-    user (local-mode parity); jobs with a set owner are visible only to that owner.
-    Foreign jobs return 404 on direct access but are simply absent from this list.
+    Merges in-memory active/recent jobs with persisted historical records from
+    the database.  In-memory jobs take precedence when both exist for the same
+    job_id (deduplication).
 
-    TTL note: both stores reap terminal jobs after 600s independently — a reaped
-    analysis job degrades the stage to "done"; a reaped import job drops the row
-    while its analysis job may still appear in GET /analysis/jobs.
+    Ownership: jobs with owner_user_id=None are visible to any authenticated
+    user (local-mode parity); jobs with a set owner are visible only to that owner.
     """
     from snore.api import analysis_jobs as aj_module  # noqa: PLC0415
 
     result: list[PipelineJobStatus] = []
+    in_memory_ids: set[str] = set()
+
     for job in list_jobs(owner_user_id=actor.user_id):
+        in_memory_ids.add(job.job_id)
         analysis_id = job.analysis_job_id
         linked: LinkedAnalysisSummary | None = None
         if analysis_id is not None:
             aj = aj_module.get_job(analysis_id)
             if aj is not None:
-                # Defensive: analysis job should always inherit the same owner as the
-                # parent import job (both are set from actor.user_id at enqueue time),
-                # but guard explicitly so the invariant is self-documenting.
+                # Defensive: analysis jobs always inherit import job owner.
                 if aj.owner_user_id is not None and aj.owner_user_id != actor.user_id:
                     aj = None
             if aj is not None:
@@ -551,8 +555,10 @@ def list_pipeline_jobs(actor: RequireAuth) -> PipelineJobsListResponse:
                 state=import_state.value,
                 stage=stage,
                 file_count=job.file_count,
-                created_at=job.created_at,
-                finished_at=job.finished_at,
+                created_at=job.created_at_wall.isoformat(),
+                finished_at=job.finished_at_wall.isoformat()
+                if job.finished_at_wall
+                else None,
                 progress_message=job.latest_progress_message,
                 sessions_imported=job.sessions_imported,
                 import_result=import_result_summary,
@@ -563,7 +569,51 @@ def list_pipeline_jobs(actor: RequireAuth) -> PipelineJobsListResponse:
             )
         )
 
-    result.sort(key=lambda j: j.created_at, reverse=True)
+    # Historical records from the database (persisted terminal jobs).
+    stmt = (
+        select(models.ImportJobRecord)
+        .where(
+            or_(
+                models.ImportJobRecord.owner_user_id == actor.user_id,
+                models.ImportJobRecord.owner_user_id.is_(None),
+            )
+        )
+        .order_by(models.ImportJobRecord.created_at.desc())
+        .limit(50)
+    )
+    db_records = (await db.execute(stmt)).scalars().all()
+
+    for rec in db_records:
+        if rec.job_id in in_memory_ids:
+            continue
+
+        rec_state = JobState(rec.state)
+        stage = _derive_stage(rec_state, None, rec.analysis_queued, None)
+
+        import_result_summary = None
+        if rec.import_result_json:
+            import_result_summary = _to_import_result_summary(rec.import_result_json)
+
+        result.append(
+            PipelineJobStatus(
+                job_id=rec.job_id,
+                job_type=rec.job_type,
+                state=rec.state,
+                stage=stage,
+                file_count=rec.file_count,
+                created_at=rec.created_at.isoformat(),
+                finished_at=rec.finished_at.isoformat(),
+                progress_message=None,
+                sessions_imported=rec.sessions_imported,
+                import_result=import_result_summary,
+                error_message=rec.error_message,
+                analysis_job_id=None,
+                analysis_queued=rec.analysis_queued,
+                linked_analysis=None,
+            )
+        )
+
+    result.sort(key=lambda j: datetime.fromisoformat(j.created_at), reverse=True)
     return PipelineJobsListResponse(jobs=result)
 
 
