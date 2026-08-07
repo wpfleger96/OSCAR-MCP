@@ -68,7 +68,11 @@
             <template v-if="!isLocal && isAuthenticated">
                 <DropdownMenu>
                     <DropdownMenuTrigger as-child>
-                        <button class="nav-item user-trigger" type="button">
+                        <button
+                            class="nav-item user-trigger"
+                            type="button"
+                            @click="fetchGoogleStatus"
+                        >
                             <User class="h-4 w-4 shrink-0" />
                             <span class="user-name">{{ displayName }}</span>
                             <ChevronUp class="h-3 w-3 shrink-0 ml-auto" />
@@ -106,6 +110,13 @@
                                 Account
                             </RouterLink>
                         </DropdownMenuItem>
+                        <DropdownMenuItem v-if="googleLinked !== null" as-child>
+                            <RouterLink to="/account" class="dropdown-link google-status-link">
+                                <span class="google-status-text">
+                                    Google: {{ googleLinked ? 'Linked' : 'Not linked' }}
+                                </span>
+                            </RouterLink>
+                        </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem @click="handleLogout" class="text-destructive">
                             <LogOut class="h-4 w-4 mr-2" />
@@ -131,7 +142,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
     BarChart3,
@@ -166,6 +177,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useAuth } from '@/composables/useAuth'
+import { getMe } from '@/api/me'
 
 const router = useRouter()
 const { isDark, toggleDark } = useDarkMode()
@@ -183,6 +195,22 @@ const {
 } = useAuth()
 
 const displayName = computed(() => user.value?.display_name || user.value?.email || 'Account')
+
+// Fetched lazily on first dropdown open — avoids an extra request on every page load.
+const googleLinked = ref<boolean | null>(null)
+let _googleFetched = false
+
+async function fetchGoogleStatus(): Promise<void> {
+    if (_googleFetched) return
+    _googleFetched = true
+    try {
+        const me = await getMe()
+        googleLinked.value = me.google_linked
+    } catch {
+        // Silently ignore — the dropdown still opens without the Google status line.
+        _googleFetched = false
+    }
+}
 
 async function switchToProfile(profileId: number) {
     if (profileId === activeProfileId.value) return
@@ -307,6 +335,15 @@ async function handleLogout() {
 .reconnecting {
     padding: 0.6rem 0.75rem;
     font-size: 0.875rem;
+    color: var(--color-muted-foreground);
+}
+
+.google-status-link {
+    padding-left: 2.25rem;
+}
+
+.google-status-text {
+    font-size: 0.75rem;
     color: var(--color-muted-foreground);
 }
 </style>

@@ -1,4 +1,4 @@
-import { apiGet, apiPatch, apiPost } from './client'
+import { apiDelete, apiGet, apiPatch, apiPost } from './client'
 import type { components } from '@/types/generated'
 
 type MeResponse = components['schemas']['MeResponse']
@@ -19,6 +19,8 @@ export const changePassword = apiPost<MessageResponse, [body: PasswordChangeRequ
     '/auth/me/password',
     (body) => ({ data: body }),
 )
+
+export const unlinkGoogle = apiDelete<MessageResponse>('/auth/me/identities/google')
 
 export const getPreferences = apiGet<UserPreferences, [signal?: AbortSignal]>(
     '/auth/me/preferences',

@@ -102,6 +102,44 @@
                 </form>
             </div>
 
+            <!-- Sign-in methods card -->
+            <div class="section-card">
+                <h2>Sign-in methods</h2>
+
+                <div class="field-row">
+                    <span class="field-label">Google</span>
+                    <span class="field-value">{{
+                        me.google_linked ? 'Linked' : 'Not linked'
+                    }}</span>
+                </div>
+
+                <template v-if="me.google_linked">
+                    <p v-if="!me.has_password" class="form-error" role="alert">
+                        Set a password first — Google is currently your only way to sign in.
+                    </p>
+                    <Button
+                        v-else
+                        variant="destructive"
+                        class="self-start"
+                        :disabled="isDemo || unlinkDialogOpen"
+                        @click="unlinkDialogOpen = true"
+                    >
+                        Unlink Google
+                    </Button>
+                    <p v-if="unlinkError" role="alert" class="form-error">{{ unlinkError }}</p>
+                </template>
+
+                <DeleteConfirmDialog
+                    :visible="unlinkDialogOpen"
+                    title="Unlink Google"
+                    message="This will remove Google sign-in from your account and sign you out of all sessions. You will need to sign back in with your password."
+                    :loading="false"
+                    :deleting="unlinking"
+                    @update:visible="unlinkDialogOpen = $event"
+                    @confirm="confirmUnlinkGoogle"
+                />
+            </div>
+
             <!-- Preferences card -->
             <div class="section-card">
                 <h2>Preferences</h2>
@@ -159,8 +197,10 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
@@ -168,6 +208,7 @@ import {
     getMe,
     updateDisplayName,
     changePassword,
+    unlinkGoogle,
     getPreferences,
     updatePreferences,
 } from '@/api/me'
@@ -175,7 +216,8 @@ import type { components } from '@/types/generated'
 
 type UserPreferences = components['schemas']['UserPreferences']
 
-const { role, refreshStatus } = useAuth()
+const router = useRouter()
+const { role, refreshStatus, clearAuth } = useAuth()
 const isDemo = computed(() => role.value === 'demo')
 const { setDateFormat } = useDateFormat()
 
@@ -252,6 +294,28 @@ async function savePassword() {
     // whole view into its error state).
     if (succeeded && me.value) {
         me.value = { ...me.value, has_password: true }
+    }
+}
+
+// ── Sign-in methods (Google unlink) ──────────────────────────────────────────
+
+const unlinkDialogOpen = ref(false)
+const unlinking = ref(false)
+const unlinkError = ref<string | null>(null)
+
+async function confirmUnlinkGoogle() {
+    if (isDemo.value) return
+    unlinkError.value = null
+    unlinking.value = true
+    try {
+        await unlinkGoogle()
+        clearAuth()
+        router.push('/')
+    } catch (e: unknown) {
+        unlinkError.value = e instanceof Error ? e.message : 'Failed to unlink Google'
+        unlinkDialogOpen.value = false
+    } finally {
+        unlinking.value = false
     }
 }
 

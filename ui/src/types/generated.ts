@@ -2419,6 +2419,8 @@ export interface components {
             display_name: string | null
             /** Email */
             email: string
+            /** Google Linked */
+            google_linked: boolean
             /** Has Password */
             has_password: boolean
             /** Id */

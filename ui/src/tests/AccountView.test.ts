@@ -21,6 +21,7 @@ const ME_WITH_PASSWORD = {
     email: 'user@example.com',
     display_name: 'Test User',
     has_password: true,
+    google_linked: false,
     role: 'member',
 }
 
@@ -29,6 +30,7 @@ const ME_WITHOUT_PASSWORD = {
     email: 'google@example.com',
     display_name: null,
     has_password: false,
+    google_linked: true,
     role: 'member',
 }
 
