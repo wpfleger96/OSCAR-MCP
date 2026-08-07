@@ -149,6 +149,37 @@ describe('importFiles', () => {
         }
     })
 
+    it('sends batch_id from first response on subsequent chunks', async () => {
+        const entries = [
+            makeEntry('STR.edf', 1_000_000),
+            makeEntry('DATALOG/2024/20240101_010000_BRP.edf', 50_000_000),
+            makeEntry('DATALOG/2024/20240102_010000_BRP.edf', 50_000_000),
+        ]
+        await importFiles(entries)
+        const calls = vi.mocked(api.post).mock.calls
+        // First call has no batch_id
+        expect((calls[0][1] as FormData).get('batch_id')).toBeNull()
+        // Subsequent calls carry the job_id from the first response
+        for (let i = 1; i < calls.length; i++) {
+            expect((calls[i][1] as FormData).get('batch_id')).toBe('job-1')
+        }
+    })
+
+    it('sends batch_final=true only on the last chunk', async () => {
+        const entries = [
+            makeEntry('STR.edf', 1_000_000),
+            makeEntry('DATALOG/2024/20240101_010000_BRP.edf', 50_000_000),
+            makeEntry('DATALOG/2024/20240102_010000_BRP.edf', 50_000_000),
+        ]
+        await importFiles(entries)
+        const calls = vi.mocked(api.post).mock.calls
+        for (let i = 0; i < calls.length; i++) {
+            const fd = calls[i][1] as FormData
+            const isLast = i === calls.length - 1
+            expect(fd.get('batch_final')).toBe(String(isLast))
+        }
+    })
+
     it('reports correct batch index and total in progress events', async () => {
         const entries = [
             makeEntry('STR.edf', 1_000_000),
@@ -181,5 +212,13 @@ describe('importFiles', () => {
             .mockRejectedValueOnce(new Error('Request failed with status code 413'))
 
         await expect(importFiles(entries)).rejects.toThrow(/Batch \d+\/\d+ failed:/)
+    })
+
+    it('does not send batch fields on single-request uploads', async () => {
+        const entries = [makeEntry('small.edf', 1000)]
+        await importFiles(entries)
+        const fd = vi.mocked(api.post).mock.calls[0][1] as FormData
+        expect(fd.get('batch_id')).toBeNull()
+        expect(fd.get('batch_final')).toBeNull()
     })
 })

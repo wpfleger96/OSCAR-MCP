@@ -101,12 +101,16 @@ async function uploadSingleChunk(
     entries: FileEntry[],
     profileId: number | undefined,
     onProgress?: (event: AxiosProgressEvent) => void,
+    batchId?: string,
+    batchFinal?: boolean,
 ): Promise<JobResponse> {
     const formData = new FormData()
     for (const entry of entries) {
         formData.append('files', entry.file, entry.path)
     }
     if (profileId !== undefined) formData.append('profile_id', String(profileId))
+    if (batchId !== undefined) formData.append('batch_id', batchId)
+    if (batchFinal !== undefined) formData.append('batch_final', String(batchFinal))
     const { data } = await api.post<JobResponse>('/import/', formData, {
         onUploadProgress: onProgress,
     })
@@ -163,11 +167,13 @@ export async function importFiles(
     )
 
     let completedSendBytes = 0
+    let batchId: string | undefined
     let lastJobResponse: JobResponse | null = null
 
     for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i]
         const batchIndex = i + 1
+        const isLast = batchIndex === totalBatches
         const chunkBytes = chunk.reduce((s, e) => s + e.file.size, 0)
 
         try {
@@ -188,7 +194,10 @@ export async function importFiles(
                           })
                       }
                     : undefined,
+                batchId,
+                isLast,
             )
+            if (batchId === undefined) batchId = lastJobResponse.job_id
             completedSendBytes += chunkBytes
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'Upload failed'
