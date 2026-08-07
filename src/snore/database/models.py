@@ -111,6 +111,13 @@ class User(Base):
     preferences: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, nullable=True, default=dict
     )
+    # Set to True when the user explicitly unlinks Google; blocks the email
+    # auto-link path in resolve_login so the next "Sign in with Google" cannot
+    # silently re-establish a severed identity.  Cleared to False when the user
+    # deliberately re-links via the invite-signup flow.
+    google_link_disabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
 
     profiles = relationship(
         "Profile",
@@ -159,6 +166,8 @@ class AuthIdentity(Base):
         UniqueConstraint(
             "provider", "subject", name="uq_auth_identity_provider_subject"
         ),
+        # Covers the (user_id, provider) predicate used by get_me and unlink_google.
+        Index("ix_auth_identities_user_provider", "user_id", "provider"),
     )
 
     def __repr__(self) -> str:

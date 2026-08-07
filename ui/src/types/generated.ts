@@ -511,6 +511,31 @@ export interface paths {
         patch: operations['update_display_name_api_v1_auth_me_display_name_patch']
         trace?: never
     }
+    '/api/v1/auth/me/identities/google': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /**
+         * Unlink Google
+         * @description Delete the user's Google identity and invalidate all sessions.
+         *
+         *     Blocked with 409 when the account has no password — removing Google would
+         *     eliminate the user's only sign-in method.  On success, bumps
+         *     ``session_version`` (invalidates all cookies) and clears the caller's
+         *     session cookie so they must re-authenticate with their password.
+         */
+        delete: operations['unlink_google_api_v1_auth_me_identities_google_delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/auth/me/password': {
         parameters: {
             query?: never
@@ -804,6 +829,9 @@ export interface paths {
          *     Merges in-memory active/recent jobs with persisted historical records from
          *     the database.  In-memory jobs take precedence when both exist for the same
          *     job_id (deduplication).
+         *
+         *     Ownership: jobs with owner_user_id=None are visible to any authenticated
+         *     user (local-mode parity); jobs with a set owner are visible only to that owner.
          */
         get: operations['list_pipeline_jobs_api_v1_import_jobs_get']
         put?: never
@@ -2419,6 +2447,8 @@ export interface components {
             display_name: string | null
             /** Email */
             email: string
+            /** Google Linked */
+            google_linked: boolean
             /** Has Password */
             has_password: boolean
             /** Id */
@@ -4135,6 +4165,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    unlink_google_api_v1_auth_me_identities_google_delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
                 }
             }
         }

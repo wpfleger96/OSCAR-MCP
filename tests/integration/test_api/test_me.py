@@ -115,6 +115,37 @@ class TestGetMe:
         assert resp.status_code == 200
         assert resp.json()["has_password"] is False
 
+    def test_google_linked_false_when_no_identity(self, async_db_session, db_session):
+        """User with no auth_identities row reports google_linked: false."""
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.get("/api/v1/auth/me")
+
+        assert resp.status_code == 200
+        assert resp.json()["google_linked"] is False
+
+    def test_google_linked_true_when_identity_exists(
+        self, async_db_session, db_session
+    ):
+        """User with a google auth_identities row reports google_linked: true."""
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        db_session.add(
+            models.AuthIdentity(
+                user_id=user.id,
+                provider="google",
+                subject="google-sub-test-123",
+                email=user.canonical_email,
+            )
+        )
+        db_session.flush()
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.get("/api/v1/auth/me")
+
+        assert resp.status_code == 200
+        assert resp.json()["google_linked"] is True
+
     def test_unauthenticated_gets_401(self, async_db_session, monkeypatch):
         """Request with no session cookie returns 401 in multiuser mode."""
         _multiuser_env(monkeypatch)
@@ -320,6 +351,82 @@ class TestChangePassword:
             )
 
         await cleanup_database()
+
+    def test_local_mode_unlink_no_set_cookie(self, async_db_session, db_session):
+        """In LOCAL mode, DELETE /identities/google must carry no Set-Cookie header.
+
+        clear_session_cookie is gated on cfg.is_multiuser, so a local-mode
+        unlink response should have no Set-Cookie header at all.
+        """
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        _seed_google_identity(db_session, user.id)
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.delete("/api/v1/auth/me/identities/google")
+
+        assert resp.status_code == 200
+        assert "set-cookie" not in {k.lower() for k in resp.headers}
+
+    @pytest.mark.asyncio
+    async def test_google_link_disabled_blocks_auto_relink(
+        self, async_db_session, db_session
+    ):
+        """After unlink sets google_link_disabled, resolve_login's email auto-link
+        path raises TxFailure so a subsequent 'Sign in with Google' cannot silently
+        re-establish the severed identity."""
+        from snore.api.config import get_config
+        from snore.api.routers.auth._google_resolution import TxFailure, resolve_login
+
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        # Simulate what unlink does: set the flag directly.
+        user.google_link_disabled = True
+        db_session.flush()
+
+        cfg = get_config()
+
+        async with async_db_session.begin():
+            with pytest.raises(TxFailure):
+                await resolve_login(
+                    async_db_session,
+                    cfg,
+                    {
+                        "sub": "brand-new-google-sub-xyz",
+                        "email": user.canonical_email,
+                        "email_verified": True,
+                    },
+                )
+
+    @pytest.mark.asyncio
+    async def test_invite_relink_clears_google_link_disabled(
+        self, async_db_session, db_session
+    ):
+        """link_identity_ticket (used by invite-signup path b) resets
+        google_link_disabled to False so future auto-links are restored."""
+        from snore.api.config import get_config
+        from snore.api.routers.auth._google_resolution import link_identity_ticket
+
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        user.google_link_disabled = True
+        db_session.flush()
+
+        cfg = get_config()
+
+        async with async_db_session.begin():
+            await link_identity_ticket(
+                async_db_session,
+                cfg,
+                # fetch the live user object from the async session
+                await async_db_session.get(models.User, user.id),
+                "re-link-sub-abc",
+                user.canonical_email,
+            )
+
+        # Reload via db_session to confirm the flag was cleared in the DB.
+        db_session.expire_all()
+        db_session.refresh(user)
+        assert user.google_link_disabled is False, (
+            "link_identity_ticket must reset google_link_disabled"
+        )
 
     def test_wrong_current_password_401(self, async_db_session, db_session):
         """Wrong current_password → 401 Authentication failed."""
@@ -565,3 +672,193 @@ class TestPreferences:
         assert resp.status_code == 200
         data = resp.json()
         assert data == {"landing_page": "dashboard", "date_format": "iso"}
+
+
+# ---------------------------------------------------------------------------
+# TestUnlinkGoogle
+# ---------------------------------------------------------------------------
+
+
+def _seed_google_identity(
+    db_session: Session,
+    user_id: int,
+    *,
+    subject: str = "google-sub-unlink-test",
+) -> models.AuthIdentity:
+    """Add a google auth_identity row for the given user."""
+    identity = models.AuthIdentity(
+        user_id=user_id,
+        provider="google",
+        subject=subject,
+        email=None,
+    )
+    db_session.add(identity)
+    db_session.flush()
+    return identity
+
+
+class TestUnlinkGoogle:
+    def test_unlink_google_happy_path(self, async_db_session, db_session):
+        """User with password + Google identity: DELETE succeeds, identity deleted,
+        session_version incremented."""
+        user, profile = _seed_user(
+            db_session, role="member", password="pw-before-unlink"
+        )
+        _seed_google_identity(db_session, user.id)
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.delete("/api/v1/auth/me/identities/google")
+
+        assert resp.status_code == 200
+        assert resp.json()["message"] == "Google account unlinked"
+
+        # Identity rows must be gone.
+        db_session.expire_all()
+        from sqlalchemy import func
+        from sqlalchemy import select as sel
+
+        identity_count = db_session.execute(
+            sel(func.count())
+            .select_from(models.AuthIdentity)
+            .where(
+                models.AuthIdentity.user_id == user.id,
+                models.AuthIdentity.provider == "google",
+            )
+        ).scalar_one()
+        assert identity_count == 0, "Google identity must be deleted"
+
+        # session_version must have been bumped.
+        db_session.refresh(user)
+        assert user.session_version == 1, "session_version must be incremented"
+
+    def test_unlink_google_409_no_password(self, async_db_session, db_session):
+        """User without a password gets 409 (lockout prevention)."""
+        user, profile = _seed_user(db_session, role="member", password=None)
+        _seed_google_identity(db_session, user.id)
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.delete("/api/v1/auth/me/identities/google")
+
+        assert resp.status_code == 409
+        assert "password" in resp.json()["detail"].lower()
+
+    def test_unlink_google_404_no_identity(self, async_db_session, db_session):
+        """User with password but no Google identity gets 404."""
+        user, profile = _seed_user(db_session, role="member", password="some-pw")
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.delete("/api/v1/auth/me/identities/google")
+
+        assert resp.status_code == 404
+
+    def test_demo_cannot_unlink(self, async_db_session, db_session):
+        """Demo role hits 403 on DELETE /identities/google (require_writable guard)."""
+        user, profile = _seed_user(db_session, role="demo", password="pw")
+        _seed_google_identity(db_session, user.id)
+        client = _make_client(async_db_session, user.id, profile.id, "demo")
+
+        resp = client.delete("/api/v1/auth/me/identities/google")
+
+        assert resp.status_code == 403
+
+    def test_get_me_shows_not_linked_after_unlink(self, async_db_session, db_session):
+        """GET /me after unlink returns google_linked: false."""
+        user, profile = _seed_user(db_session, role="member", password="pw2")
+        _seed_google_identity(db_session, user.id)
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        unlink_resp = client.delete("/api/v1/auth/me/identities/google")
+        assert unlink_resp.status_code == 200
+
+        me_resp = client.get("/api/v1/auth/me")
+        assert me_resp.status_code == 200
+        assert me_resp.json()["google_linked"] is False
+
+    @pytest.mark.asyncio
+    async def test_unlink_clears_cookie_and_old_cookie_is_rejected(
+        self, temp_db, monkeypatch
+    ):
+        """Full multiuser stack: after unlink the response clears the cookie;
+        the old session cookie is subsequently rejected with 401."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pw = "multiuser-unlink-test-pw"
+        async with session_scope() as db:
+            user = models.User(
+                canonical_email=f"unlink_{uuid.uuid4().hex[:6]}@test",
+                role="member",
+                session_version=0,
+                password_hash=hash_password(pw),
+            )
+            db.add(user)
+            await db.flush()
+            profile = models.Profile(user_id=user.id, name="Default")
+            db.add(profile)
+            await db.flush()
+            user.default_profile_id = profile.id
+            db.add(
+                models.AuthIdentity(
+                    user_id=user.id,
+                    provider="google",
+                    subject=f"gsub_{uuid.uuid4().hex[:8]}",
+                    email=None,
+                )
+            )
+            user_id = user.id
+            profile_id = profile.id
+
+        old_cookie = encode_session(
+            cfg.session_secret,
+            user_id=user_id,
+            active_profile_id=profile_id,
+            session_version=0,
+        )
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+        ) as client:
+            # Unlink Google with the old cookie.
+            unlink_resp = await client.delete(
+                "/api/v1/auth/me/identities/google",
+                headers={
+                    "origin": "http://127.0.0.1:8000",
+                    "cookie": f"snore_session={old_cookie}",
+                },
+            )
+            assert unlink_resp.status_code == 200, unlink_resp.text
+
+            # Set-Cookie header must clear the session cookie (max-age=0).
+            set_cookie_header = unlink_resp.headers.get("set-cookie", "")
+            c = http.cookies.SimpleCookie()
+            c.load(set_cookie_header)
+            assert "snore_session" in c, (
+                f"Unlink must issue a clear-cookie Set-Cookie; got: {set_cookie_header!r}"
+            )
+            assert c["snore_session"]["max-age"] == "0", (
+                "Clear-cookie must set Max-Age=0"
+            )
+
+            # Old cookie (session_version=0) must now be rejected.
+            old_resp = await client.get(
+                "/api/v1/auth/me",
+                headers={"cookie": f"snore_session={old_cookie}"},
+            )
+            assert old_resp.status_code == 401, (
+                "Stale session cookie must be rejected after session_version increment"
+            )
+
+        await cleanup_database()

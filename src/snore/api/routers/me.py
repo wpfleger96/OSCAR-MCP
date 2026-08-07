@@ -2,11 +2,12 @@
 
 Routes
 ------
-GET   /api/v1/auth/me
-PATCH /api/v1/auth/me/display-name
-POST  /api/v1/auth/me/password
-GET   /api/v1/auth/me/preferences
-PATCH /api/v1/auth/me/preferences
+GET    /api/v1/auth/me
+PATCH  /api/v1/auth/me/display-name
+POST   /api/v1/auth/me/password
+GET    /api/v1/auth/me/preferences
+PATCH  /api/v1/auth/me/preferences
+DELETE /api/v1/auth/me/identities/google
 
 All responses carry ``Cache-Control: no-store`` to prevent credential
 caching by proxies or browsers.
@@ -20,6 +21,9 @@ Security controls
   (canonical_email, client_ip).
 - Password change bumps ``session_version`` and re-issues the caller's
   session cookie so the change takes effect immediately without logout.
+- Google unlink deletes auth_identities rows, bumps ``session_version``,
+  and clears the session cookie so the user must re-authenticate with their
+  password.  Blocked with 409 when no password is set (lockout prevention).
 - Preference updates reject unknown fields (extra="forbid") to prevent
   silent key accumulation in the stored JSON blob.
 - All mutating endpoints require ``RequireWritable``, which blocks demo
@@ -28,11 +32,15 @@ Security controls
 
 from __future__ import annotations
 
+import logging
+
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
+from sqlalchemy import delete, exists, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
@@ -46,10 +54,12 @@ from snore.auth.passwords import (
     validate_password_bytes,
     verify_password_async,
 )
-from snore.auth.session_cookie import set_session_cookie
+from snore.auth.session_cookie import clear_session_cookie, set_session_cookie
 from snore.database import models
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 _PASSWORD_MAX_CHARS = (
     4096  # conservative char cap; byte validator refines to 1024 bytes
@@ -67,6 +77,7 @@ class MeResponse(BaseModel):
     display_name: str | None
     role: str
     has_password: bool
+    google_linked: bool
 
 
 class DisplayNameRequest(BaseModel):
@@ -120,6 +131,19 @@ async def get_me(
     """Return the authenticated user's account information."""
     user = await _get_user_or_401(db, actor.user_id)
 
+    google_linked = bool(
+        (
+            await db.execute(
+                select(
+                    exists().where(
+                        models.AuthIdentity.user_id == actor.user_id,
+                        models.AuthIdentity.provider == "google",
+                    )
+                )
+            )
+        ).scalar()
+    )
+
     return JSONResponse(
         content=MeResponse(
             id=user.id,
@@ -127,6 +151,7 @@ async def get_me(
             display_name=user.display_name,
             role=user.role,
             has_password=user.password_hash is not None,
+            google_linked=google_linked,
         ).model_dump(),
         headers=NO_STORE,
     )
@@ -217,6 +242,68 @@ async def change_password(
             session_version=user.session_version,
             secure=cfg.secure_cookie,
         )
+    return response
+
+
+@router.delete("/identities/google", response_model=MessageResponse)
+async def unlink_google(
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JSONResponse:
+    """Delete the user's Google identity and invalidate all sessions.
+
+    Blocked with 409 when the account has no password — removing Google would
+    eliminate the user's only sign-in method.  On success, bumps
+    ``session_version`` (invalidates all cookies) and clears the caller's
+    session cookie so they must re-authenticate with their password.
+    """
+    from snore.api.config import get_config  # noqa: PLC0415
+
+    cfg = get_config()
+
+    user = await _get_user_or_401(db, actor.user_id)
+
+    if user.password_hash is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Set a password before unlinking Google",
+        )
+
+    # Single DELETE — rowcount check replaces the prior SELECT-EXISTS + DELETE
+    # pair, removing the TOCTOU window and one extra round-trip.
+    result = await db.execute(
+        delete(models.AuthIdentity).where(
+            models.AuthIdentity.user_id == actor.user_id,
+            models.AuthIdentity.provider == "google",
+        )
+    )
+    if result.rowcount == 0:  # type: ignore[attr-defined]
+        raise HTTPException(status_code=404, detail="No Google identity linked")
+
+    # Server-side increment avoids a client-side read-modify-write (lost-update
+    # risk under concurrent writes on non-SQLite backends).  Set
+    # google_link_disabled so the email auto-link path in resolve_login cannot
+    # silently re-establish this identity on the next "Sign in with Google".
+    await db.execute(
+        sa_update(models.User)
+        .where(models.User.id == actor.user_id)
+        .values(
+            session_version=models.User.session_version + 1,
+            google_link_disabled=True,
+        )
+    )
+
+    logger.info("Unlinked Google identity for user id=%s", actor.user_id)
+
+    # Accepted edge: the response is built before the session commits; a commit
+    # failure would leave the cookie cleared but state unchanged — same race
+    # window as change_password.
+    response = JSONResponse(
+        content={"message": "Google account unlinked"},
+        headers=NO_STORE,
+    )
+    if cfg.is_multiuser:
+        clear_session_cookie(response, secure=cfg.secure_cookie)
     return response
 
 
