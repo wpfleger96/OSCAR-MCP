@@ -115,6 +115,10 @@
                 </DropdownMenu>
             </template>
 
+            <RouterLink to="/about" class="nav-item">
+                <Info class="h-4 w-4" />
+                <span>About</span>
+            </RouterLink>
             <button class="nav-item" @click="toggleDark">
                 <Sun v-if="isDark" class="h-4 w-4" />
                 <Moon v-else class="h-4 w-4" />
@@ -137,6 +141,7 @@ import {
     Download,
     FileText,
     HardDrive,
+    Info,
     List,
     LogOut,
     Moon,

@@ -49,6 +49,12 @@ jobs:
             type=semver,pattern={{raw}}
             type=sha,format=short
 
+      - name: Compute build metadata
+        id: build_meta
+        run: |
+          echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         uses: docker/build-push-action@v7
         with:
@@ -61,3 +67,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ steps.build_meta.outputs.sha_short }}
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
