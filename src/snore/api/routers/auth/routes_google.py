@@ -276,6 +276,7 @@ async def google_callback(
             .first()
         )
         if attempt is None:
+            logger.warning("Google callback: no valid attempt for state")
             return _oauth_failure_response()
 
         # Capture what we need before the transaction closes.
@@ -291,6 +292,7 @@ async def google_callback(
         signup_ctx: tuple[int, str] | None = None
         if kind == "signup":
             if attempt.invite_id is None:
+                logger.warning("Google callback: signup attempt missing invite_id")
                 return _oauth_failure_response()
             invite_row = (
                 (
@@ -305,6 +307,7 @@ async def google_callback(
                 .first()
             )
             if invite_row is None:
+                logger.warning("Google callback: invite not valid for signup attempt")
                 return _oauth_failure_response()
             signup_ctx = (attempt.invite_id, invite_row.role)
     # Transaction committed and released here.
@@ -313,6 +316,7 @@ async def google_callback(
     pre_auth_value = request.cookies.get(_PRE_AUTH_COOKIE, "")
     cookie_hash = hashlib.sha256(pre_auth_value.encode()).hexdigest()
     if not hmac.compare_digest(cookie_hash, attempt_browser_hash):
+        logger.warning("Google callback: browser binding cookie mismatch")
         return _oauth_failure_response()
 
     # Network I/O (no transaction held): exchange authorization code.
@@ -333,6 +337,7 @@ async def google_callback(
     if kind == "signup":
         google_email_canonical = normalize_email(str(claims.get("email", "")))
         if google_email_canonical != attempt_expected_email:
+            logger.warning("Google callback: signup email does not match expected")
             return _oauth_failure_response()
 
     # Window 2: fresh transaction — consume + resolve.
@@ -352,10 +357,14 @@ async def google_callback(
                 .values(consumed_at=now)
             )
             if int(consume_result.rowcount) == 0:  # type: ignore[attr-defined]
+                logger.warning(
+                    "Google callback: attempt consume failed (replay or expired)"
+                )
                 raise TxFailure()
 
             if kind == "signup":
                 if signup_ctx is None:  # window-1 invariant; guard, don't assert
+                    logger.warning("Google callback: signup_ctx invariant violated")
                     raise TxFailure()
                 invite_id, invite_role = signup_ctx
                 ticket = await resolve_signup(
