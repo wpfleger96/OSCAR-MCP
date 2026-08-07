@@ -68,26 +68,25 @@ export function buildChunks(
     let batchEntries: FileEntry[] = []
     let batchDataSize = 0
 
-    for (const [, nightFiles] of sortedNights) {
-        const nightSize = nightFiles.reduce((s, e) => s + e.file.size, 0)
-        if (batchDataSize > 0 && anchorSize + batchDataSize + nightSize > chunkSizeLimit) {
+    const flushIfNeeded = (nextSize: number) => {
+        if (batchDataSize > 0 && anchorSize + batchDataSize + nextSize > chunkSizeLimit) {
             chunks.push([...anchorEntries, ...batchEntries])
             batchEntries = []
             batchDataSize = 0
         }
+    }
+
+    for (const [, nightFiles] of sortedNights) {
+        const nightSize = nightFiles.reduce((s, e) => s + e.file.size, 0)
+        flushIfNeeded(nightSize)
         batchEntries.push(...nightFiles)
         batchDataSize += nightSize
     }
 
     for (const entry of undated) {
-        const entrySize = entry.file.size
-        if (batchDataSize > 0 && anchorSize + batchDataSize + entrySize > chunkSizeLimit) {
-            chunks.push([...anchorEntries, ...batchEntries])
-            batchEntries = []
-            batchDataSize = 0
-        }
+        flushIfNeeded(entry.file.size)
         batchEntries.push(entry)
-        batchDataSize += entrySize
+        batchDataSize += entry.file.size
     }
 
     if (batchEntries.length > 0 || chunks.length === 0) {
@@ -148,7 +147,7 @@ export async function importFiles(
                 ? (event) =>
                       onProgress({
                           loaded: event.loaded,
-                          total: event.total ?? totalSize,
+                          total: event.total || totalSize,
                           batchIndex: 1,
                           totalBatches: 1,
                       })

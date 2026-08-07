@@ -319,6 +319,7 @@ async function handleImport() {
     uploadLoaded.value = 0
     uploadTotal.value = 0
     importError.value = null
+    batchLabel.value = null
 
     const onProgress = (progress: ChunkedImportProgress) => {
         uploadLoaded.value = progress.loaded
