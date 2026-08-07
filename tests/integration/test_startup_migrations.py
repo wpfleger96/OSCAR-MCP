@@ -140,10 +140,11 @@ class TestStartupMigrations:
         with patch.object(asyncio, "to_thread", side_effect=_recording_to_thread):
             await init_database(db_path)
 
-        migration_calls = [c for c in calls if c[0] is _apply_migrations_sync]
-        assert len(migration_calls) >= 1, (
-            "``_apply_migrations_sync`` must be called via ``asyncio.to_thread``; "
-            "got zero such calls — migrations may be running on the event loop"
-        )
-
-        await cleanup_database()
+        try:
+            migration_calls = [c for c in calls if c[0] is _apply_migrations_sync]
+            assert len(migration_calls) >= 1, (
+                "``_apply_migrations_sync`` must be called via ``asyncio.to_thread``; "
+                "got zero such calls — migrations may be running on the event loop"
+            )
+        finally:
+            await cleanup_database()

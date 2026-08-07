@@ -157,13 +157,18 @@ def _apply_migrations_sync(sync_url: str) -> None:
     Stale ``alembic_version`` rows left by a pre-flatten DB are silently ignored
     (the owner drops incompatible DBs manually).
 
-    **Fast-path skip:** When the database file already exists and is stamped at
-    the current Alembic head, migrations are skipped entirely using a read-only
-    connection.  This makes ``snore mcp`` startup effectively read-only when the
-    schema is current, avoiding cross-process write conflicts with a live server
-    that already holds the SQLite write lock.  Any failure of the check (missing
-    file, missing table, multiple heads, OperationalError) falls through to the
-    normal migration path so startup is always safe.
+    **Fast-path skip:** The database stamp is read first (before computing heads)
+    via a read-only connection.  When the stamp matches the current head, all
+    Alembic machinery is skipped.  Reading the stamp first means a new migration
+    file landing between the two reads can only force the slow path, never
+    accidentally skip a brand-new migration.  Any failure of the stamp read
+    (missing file, missing table, OperationalError) falls through safely.
+
+    **Unstamped-existing-DB guard:** When the database has application tables but
+    no ``alembic_version`` table (created in zero-migration mode before this
+    migration chain existed), a ``RuntimeError`` is raised with an actionable
+    message rather than letting Alembic replay the full chain onto existing tables
+    and crash with a confusing "table already exists" error.
     """
     import sqlite3 as _sqlite3  # noqa: PLC0415
 
@@ -178,24 +183,9 @@ def _apply_migrations_sync(sync_url: str) -> None:
     # and the slow-path upgrade/stamp call below.
     alembic_cfg = _build_alembic_config(sync_url)
 
-    # Compute heads once — used for the empty-chain early exit and the
-    # fast-path comparison below.
-    heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
-
-    # Empty-chain mode: no migration files → manage schema via create_all.
-    # No alembic_version table is written; stale rows from pre-flatten DBs
-    # are ignored — the owner drops incompatible DBs manually.
-    if not heads:
-        engine = create_engine(sync_url, connect_args={"check_same_thread": False})
-        try:
-            Base.metadata.create_all(engine, checkfirst=True)
-        finally:
-            engine.dispose()
-        logger.info("Empty migration chain: schema ensured via create_all")
-        return
-
-    # Fast-path: skip migrations when the SQLite file is already at the current
-    # Alembic head.  The read-only open avoids acquiring any write lock.
+    # Step 1: Read the stamped version first, before computing heads.
+    # The read-only open avoids acquiring any write lock.
+    stored_version: str | None = None
     if url_obj.get_backend_name() == "sqlite":
         db_file = url_obj.database
         if db_file and db_file != ":memory:":
@@ -211,35 +201,66 @@ def _apply_migrations_sync(sync_url: str) -> None:
                     stored_version = row[0] if row else None
                 finally:
                     ro_conn.close()
-
-                if stored_version is not None and {stored_version} == heads:
-                    logger.debug(
-                        "Schema already at head %s; skipping migrations",
-                        stored_version,
-                    )
-                    return
             except Exception as exc:
                 # Any failure (missing file, missing alembic_version table,
-                # multiple heads mismatch, OperationalError) → fall through
-                # to the normal migration path so startup is always correct.
+                # OperationalError) → fall through to the normal migration path
+                # so startup is always correct.
                 logger.debug(
                     "Migration fast-path check failed; falling through to full"
                     " migration: %s",
                     exc,
                 )
 
+    # Step 2: Compute heads once, after reading the stamp.
+    # Reading the stamp before computing heads means a migration file landing
+    # between the two reads can only make the comparison fail (falling through
+    # to upgrade), never fast-path-skip a brand-new migration.
+    heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+
+    # Fast-path: skip migrations when the database is already at the current
+    # Alembic head.
+    if stored_version is not None and {stored_version} == heads:
+        logger.debug(
+            "Schema already at head %s; skipping migrations",
+            stored_version,
+        )
+        return
+
+    # Empty-chain mode: no migration files → manage schema via create_all.
+    # No alembic_version table is written; stale rows from pre-flatten DBs
+    # are ignored — the owner drops incompatible DBs manually.
+    if not heads:
+        engine = create_engine(sync_url, connect_args={"check_same_thread": False})
+        try:
+            Base.metadata.create_all(engine, checkfirst=True)
+        finally:
+            engine.dispose()
+        logger.info("Empty migration chain: schema ensured via create_all")
+        return
+
+    # Slow path: apply migrations. Wrap the entire block in try/finally so
+    # the engine is always disposed even if alembic_command.upgrade raises.
     engine = create_engine(sync_url, connect_args={"check_same_thread": False})
-    table_names = set(inspect(engine).get_table_names())
+    try:
+        table_names = set(inspect(engine).get_table_names())
 
-    if "sessions" not in table_names:
-        Base.metadata.create_all(engine)
-        alembic_command.stamp(alembic_cfg, "head")
-        logger.info("Fresh database created and stamped at head")
-    else:
-        alembic_command.upgrade(alembic_cfg, "head")
-        logger.info("Database migrations applied (upgrade to head)")
-
-    engine.dispose()
+        if "sessions" not in table_names:
+            Base.metadata.create_all(engine)
+            alembic_command.stamp(alembic_cfg, "head")
+            logger.info("Fresh database created and stamped at head")
+        elif "alembic_version" not in table_names:
+            raise RuntimeError(
+                "Database has application tables but no Alembic stamp: it was "
+                "created in zero-migration mode before this migration chain existed. "
+                "Stamp it at the appropriate baseline "
+                "(uv run alembic stamp <revision>) or drop and re-import it. "
+                "See src/snore/database/migrations/README."
+            )
+        else:
+            alembic_command.upgrade(alembic_cfg, "head")
+            logger.info("Database migrations applied (upgrade to head)")
+    finally:
+        engine.dispose()
 
 
 def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:

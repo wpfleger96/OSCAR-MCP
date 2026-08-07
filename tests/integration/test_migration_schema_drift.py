@@ -22,7 +22,6 @@ from alembic import command as alembic_command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config as AlembicConfig
 from alembic.migration import MigrationContext
-from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, create_engine
 
 import snore.database as _snore_db_pkg
@@ -51,11 +50,10 @@ def _alembic_cfg(db_path: str) -> AlembicConfig:
     return cfg
 
 
-# Guard: skip the test class when versions/ is empty (zero-migration mode).
-# The test auto-reactivates when migration files are added to versions/.
-_cfg = AlembicConfig()
-_cfg.set_main_option("script_location", _migrations_dir())
-_HAS_MIGRATIONS = bool(ScriptDirectory.from_config(_cfg).get_heads())
+# Guard: skip the test class when versions/ contains no migration files
+# (zero-migration mode).  Pure filesystem check — must not raise at pytest
+# collection time even if the directory is absent.
+_HAS_MIGRATIONS = any((Path(_migrations_dir()) / "versions").glob("*.py"))
 
 
 def _structural_diffs(engine: Engine) -> list[tuple[Any, ...]]:
