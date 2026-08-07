@@ -8,7 +8,6 @@ after each test, giving each test a clean engine slot.
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 
 from datetime import UTC, datetime, timedelta
@@ -96,8 +95,10 @@ async def _seed_invite(
         create_async_engine,
     )
 
+    from snore.auth.invite_tokens import hash_invite_token  # noqa: PLC0415
+
     raw = uuid.uuid4().hex
-    token_hash = hashlib.sha256(raw.encode()).hexdigest()
+    token_hash = hash_invite_token(raw)
     now = datetime.now(UTC)
     expires_at = now - timedelta(hours=1) if expired else now + timedelta(days=7)
 
@@ -171,6 +172,32 @@ async def _get_invite(db_url: str, *, email: str) -> models.Invite | None:
         )
     await engine.dispose()
     return invite
+
+
+async def _get_invite_roles(db_url: str, *, email: str) -> list[str]:
+    """Return the roles of all Invite rows for the given email."""
+    from sqlalchemy.ext.asyncio import (  # noqa: PLC0415
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    engine = create_async_engine(db_url, echo=False)
+    factory = async_sessionmaker(
+        bind=engine, expire_on_commit=False, class_=AsyncSession
+    )
+    async with factory() as session:
+        roles = list(
+            (
+                await session.execute(
+                    select(models.Invite.role).where(models.Invite.email == email)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    await engine.dispose()
+    return roles
 
 
 class TestStartupEnsureBootstrapAdmin:
@@ -272,5 +299,5 @@ class TestStartupEnsureBootstrapAdmin:
 
         # Both the seeded member invite and the new admin invite must exist.
         assert await _count_invites(db_url, email=_BOOTSTRAP_EMAIL) == 2
-        invite = await _get_invite(db_url, email=_BOOTSTRAP_EMAIL)
-        assert invite is not None
+        roles = await _get_invite_roles(db_url, email=_BOOTSTRAP_EMAIL)
+        assert sorted(roles) == ["admin", "member"]

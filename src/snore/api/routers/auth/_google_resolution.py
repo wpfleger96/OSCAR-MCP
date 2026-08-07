@@ -218,4 +218,4 @@ async def resolve_signup(
             email=email_raw,
         )
     )
-    return SessionTicket(new_user.id, profile.id, 0)
+    return SessionTicket(new_user.id, profile.id, new_user.session_version)

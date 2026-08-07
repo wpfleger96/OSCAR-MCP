@@ -265,6 +265,11 @@ def load_config(
     bootstrap_admin_email = (
         normalize_email(raw_bootstrap_email) if raw_bootstrap_email else None
     )
+    if bootstrap_admin_email is not None and "@" not in bootstrap_admin_email:
+        raise ConfigError(
+            "SNORE_BOOTSTRAP_ADMIN_EMAIL must be a valid email address, got: "
+            f"{bootstrap_admin_email!r}"
+        )
 
     public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:

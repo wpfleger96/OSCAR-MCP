@@ -69,6 +69,7 @@ async def reset_db(
     service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    _actor: RequireAdmin,
 ) -> ResetResult:
     """Delete all rows from all tables (generic) and vacuum if SQLite.
 

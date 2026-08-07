@@ -367,7 +367,10 @@ async def _startup_ensure_bootstrap_admin() -> None:
     if raw is not None:
         base = cfg.public_base_url.rstrip("/") if cfg.public_base_url else ""
         invite_url = f"{base}/invite#{raw}" if base else f"/invite#{raw}"
-        logger.info(
+        # WARNING, not INFO: the URL carries a live one-time admin credential
+        # and needs operator action — pipelines that restrict WARN+ streams
+        # should treat it as sensitive until redeemed.
+        logger.warning(
             "Bootstrap admin invite created for %s — redeem at: %s",
             email,
             invite_url,
