@@ -252,99 +252,99 @@ class TestRunTxnUsesImmediate:
 
 
 # ---------------------------------------------------------------------------
-# Skip migrations when schema is at head
+# Empty migration chain — schema via create_all
 # ---------------------------------------------------------------------------
 
 
-class TestSkipMigrationsAtHead:
-    """_apply_migrations_sync skips Alembic machinery when the DB is already at head."""
+class TestEmptyChainSchemaCreation:
+    """_apply_migrations_sync uses create_all when versions/ contains no migration files."""
 
-    def test_skips_alembic_when_schema_is_at_head(self, tmp_path):
-        """Alembic upgrade/stamp are NOT called when DB is already at head.
+    def test_alembic_commands_never_invoked(self, tmp_path):
+        """Alembic upgrade/stamp are NOT called in zero-migration mode.
 
-        The read-only sqlite3.connect check compares the stored ``alembic_version``
-        against the current script head(s).  On match, the function returns before
-        creating the ephemeral sync engine, which is the write operation we want to
-        skip when ``snore mcp`` starts against a live server's database.
-        """
-        from unittest.mock import patch
-
-        from snore.database.session import _apply_migrations_sync
-
-        db_path = str(tmp_path / "already_at_head.db")
-        sync_url = f"sqlite:///{db_path}"
-
-        # Arrange: run migrations once so the DB exists at the current head.
-        _apply_migrations_sync(sync_url)
-
-        # Act: run again and capture any Alembic calls.
-        with patch("snore.database.session.alembic_command") as mock_alembic:
-            _apply_migrations_sync(sync_url)
-
-        # Assert: neither upgrade nor stamp should have been called because the
-        # schema was already current.
-        mock_alembic.upgrade.assert_not_called()
-        mock_alembic.stamp.assert_not_called()
-
-    def test_falls_through_when_db_file_missing(self, tmp_path):
-        """Missing DB file → read-only open fails → migrations run normally.
-
-        The OperationalError from sqlite3.connect(mode=ro) on a non-existent file
-        is caught and the code falls through to the full migration path, which
-        creates the database from scratch.
+        With an empty versions/ directory, get_heads() returns [] and the
+        function takes the create_all early-exit path before any Alembic
+        command is reached.
         """
         import os
 
+        from unittest.mock import patch
+
         from snore.database.session import _apply_migrations_sync
 
-        db_path = str(tmp_path / "nonexistent.db")
+        db_path = str(tmp_path / "empty_chain.db")
         sync_url = f"sqlite:///{db_path}"
 
-        # Act: call on a path that does not exist yet.
-        # The fast-path read-only open raises OperationalError and is caught,
-        # so the normal migration path runs and creates the file.
-        _apply_migrations_sync(sync_url)
+        with patch("snore.database.session.alembic_command") as mock_alembic:
+            _apply_migrations_sync(sync_url)
 
-        assert os.path.exists(db_path), "DB file must be created when it did not exist"
+        mock_alembic.upgrade.assert_not_called()
+        mock_alembic.stamp.assert_not_called()
+        assert os.path.exists(db_path), "DB file must be created by create_all"
 
-    def test_falls_through_when_alembic_version_table_missing(self, tmp_path):
-        """No alembic_version table → fast-path exception → migrations run normally.
+    def test_fresh_db_gets_schema_no_alembic_version(self, tmp_path):
+        """Fresh/missing DB file → create_all creates schema; alembic_version absent.
 
-        If the DB exists but ``alembic_version`` was never stamped (e.g. a raw
-        schema created without Alembic), the fast path gets an OperationalError
-        when querying the table.  The exception is caught and the normal upgrade
-        path runs instead.
+        Zero-migration mode never writes alembic_version, so a brand-new
+        database must have application tables but no alembic_version table.
         """
         import sqlite3
 
         from snore.database.session import _apply_migrations_sync
 
-        db_path = str(tmp_path / "no_alembic_table.db")
+        db_path = str(tmp_path / "fresh.db")
         sync_url = f"sqlite:///{db_path}"
 
-        # Arrange: create the file without alembic_version.
-        conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE dummy (id INTEGER PRIMARY KEY)")
-        conn.commit()
-        conn.close()
-
-        # Act: call _apply_migrations_sync on a DB with no alembic_version table.
-        # The fast-path SELECT raises OperationalError → falls through to normal path.
         _apply_migrations_sync(sync_url)
 
-        # Assert: after migration, alembic_version must exist at head.
         conn = sqlite3.connect(db_path)
-        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
         conn.close()
 
-        assert row is not None, "alembic_version must be stamped after fallthrough"
+        assert "sessions" in tables, "sessions table must exist after create_all"
+        assert "statistics" in tables, "statistics table must exist after create_all"
+        assert "alembic_version" not in tables, (
+            "alembic_version must NOT be created in zero-migration mode"
+        )
 
-    def test_falls_through_when_version_does_not_match_head(self, tmp_path):
-        """Outdated version_num → fast-path skips; upgrade runs normally.
+    def test_existing_db_idempotent_no_alembic_version(self, tmp_path):
+        """Existing DB with schema → second create_all(checkfirst=True) is a no-op.
 
-        If the DB has an ``alembic_version`` row but it does not match the current
-        head(s) (e.g. a pre-migration schema), the fast path detects the mismatch
-        and falls through to ``alembic_command.upgrade``.
+        Running _apply_migrations_sync twice on the same database must not
+        raise, must leave tables intact, and must still not write alembic_version.
+        """
+        import sqlite3
+
+        from snore.database.session import _apply_migrations_sync
+
+        db_path = str(tmp_path / "existing.db")
+        sync_url = f"sqlite:///{db_path}"
+
+        _apply_migrations_sync(sync_url)
+        _apply_migrations_sync(sync_url)  # second call must not raise
+
+        conn = sqlite3.connect(db_path)
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        conn.close()
+
+        assert "sessions" in tables
+        assert "alembic_version" not in tables
+
+    def test_stale_alembic_version_row_does_not_cause_failure(self, tmp_path):
+        """DB with a stale alembic_version row → _apply_migrations_sync succeeds.
+
+        Zero-migration mode ignores alembic_version entirely, so a leftover
+        stamp from a pre-flatten database must not cause any exception.
         """
         import sqlite3
 
@@ -352,23 +352,21 @@ class TestSkipMigrationsAtHead:
 
         from snore.database.session import _apply_migrations_sync
 
-        db_path = str(tmp_path / "old_version.db")
+        db_path = str(tmp_path / "stale_stamp.db")
         sync_url = f"sqlite:///{db_path}"
 
-        # Arrange: create the DB at head, then overwrite version with a fake old one.
+        # Arrange: create schema via first call, then manually add a stale stamp.
         _apply_migrations_sync(sync_url)
 
         conn = sqlite3.connect(db_path)
-        conn.execute(
-            "UPDATE alembic_version SET version_num='deadbeef0000000000000000000000000'"
-        )
+        conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+        conn.execute("INSERT INTO alembic_version VALUES ('deadbeef0000')")
         conn.commit()
         conn.close()
 
-        # Act: run with a fake old version — fast path should NOT skip because
-        # the stored version does not match the current Alembic head(s).
+        # Act: second call must succeed and must not invoke alembic upgrade.
         with patch("snore.database.session.alembic_command") as mock_alembic:
             _apply_migrations_sync(sync_url)
 
-        # Assert: upgrade was called (not skipped) because version didn't match head.
-        mock_alembic.upgrade.assert_called_once()
+        mock_alembic.upgrade.assert_not_called()
+        mock_alembic.stamp.assert_not_called()

@@ -38,7 +38,7 @@ def db() -> None:
 @db.command()
 @db_option
 def init(db: str | None) -> None:
-    """Initialize database and apply pending migrations."""
+    """Initialize database schema (create_all; migrations resume post-1.0)."""
     db_path = Path(db).expanduser() if db else Path(DEFAULT_DATABASE_PATH)
     db_existed = db_path.exists()
 

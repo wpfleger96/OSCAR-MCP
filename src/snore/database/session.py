@@ -149,6 +149,14 @@ def _apply_migrations_sync(sync_url: str) -> None:
     Called from within ``asyncio.to_thread`` so it never blocks the event loop.
     Uses the sync pysqlite URL for Alembic.
 
+    **Empty-chain mode (pre-1.0):** When ``versions/`` contains zero migration
+    files, ``ScriptDirectory.get_heads()`` returns ``[]``.  In this mode the
+    function skips all Alembic machinery and ensures the schema via
+    ``Base.metadata.create_all(checkfirst=True)``, which is idempotent on an
+    existing database.  No ``alembic_version`` table is created on this path.
+    Stale ``alembic_version`` rows left by a pre-flatten DB are silently ignored
+    (the owner drops incompatible DBs manually).
+
     **Fast-path skip:** When the database file already exists and is stamped at
     the current Alembic head, migrations are skipped entirely using a read-only
     connection.  This makes ``snore mcp`` startup effectively read-only when the
@@ -170,6 +178,22 @@ def _apply_migrations_sync(sync_url: str) -> None:
     # and the slow-path upgrade/stamp call below.
     alembic_cfg = _build_alembic_config(sync_url)
 
+    # Compute heads once — used for the empty-chain early exit and the
+    # fast-path comparison below.
+    heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+
+    # Empty-chain mode: no migration files → manage schema via create_all.
+    # No alembic_version table is written; stale rows from pre-flatten DBs
+    # are ignored — the owner drops incompatible DBs manually.
+    if not heads:
+        engine = create_engine(sync_url, connect_args={"check_same_thread": False})
+        try:
+            Base.metadata.create_all(engine, checkfirst=True)
+        finally:
+            engine.dispose()
+        logger.info("Empty migration chain: schema ensured via create_all")
+        return
+
     # Fast-path: skip migrations when the SQLite file is already at the current
     # Alembic head.  The read-only open avoids acquiring any write lock.
     if url_obj.get_backend_name() == "sqlite":
@@ -187,8 +211,6 @@ def _apply_migrations_sync(sync_url: str) -> None:
                     stored_version = row[0] if row else None
                 finally:
                     ro_conn.close()
-
-                heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
 
                 if stored_version is not None and {stored_version} == heads:
                     logger.debug(

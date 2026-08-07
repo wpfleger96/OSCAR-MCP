@@ -1,1 +1,12 @@
-Generic single-database configuration.
+Zero-migrations mode (pre-1.0)
+-------------------------------
+Schema is managed by Base.metadata.create_all (session.py: _apply_migrations_sync).
+No migration files exist in versions/.  The Alembic scaffolding (env.py,
+alembic.ini, script.py.mako) is kept wired so migrations can resume without
+structural changes.
+
+Runbook to resume migrations:
+1. alembic revision --autogenerate -m "baseline"
+2. Review and trim the generated file (remove noise for existing tables).
+3. alembic stamp <revision>  — stamp existing create_all-built databases.
+4. Startup handles upgrade to head automatically from then on.

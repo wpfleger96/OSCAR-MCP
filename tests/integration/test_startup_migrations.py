@@ -1,56 +1,26 @@
 """
-Tests for startup database migration behavior in init_database.
+Tests for startup database schema-creation behavior in init_database.
 
-These tests verify:
-- Fresh DB: tables created, alembic_version stamped at current head
-- Idempotence: calling init_database twice is a no-op
+Zero-migration contract (pre-1.0)
+----------------------------------
+With an empty ``versions/`` directory, ``_apply_migrations_sync`` manages the
+schema exclusively via ``Base.metadata.create_all``.  No ``alembic_version``
+table is created on this path, and stale stamps from pre-flatten databases are
+silently ignored.  These tests verify:
+
+- Fresh DB: tables created via create_all; alembic_version NOT stamped.
+- Idempotence: calling init_database twice leaves tables intact with no
+  alembic_version stamp.
+- Stale stamp ignored: a pre-existing alembic_version row does not cause
+  init_database to raise.
+- Off-loop: _apply_migrations_sync runs via asyncio.to_thread (never blocks
+  the event loop).
 """
 
-from pathlib import Path
-
-import pytest
-
-from alembic.config import Config as AlembicConfig
-from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy import inspect as sa_inspect
 
-import snore.database as _snore_db_pkg
-
 from snore.database.session import cleanup_database, init_database
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _migrations_dir() -> str:
-    return str(Path(_snore_db_pkg.__file__).parent / "migrations")
-
-
-def _current_head() -> str:
-    cfg = AlembicConfig()
-    cfg.set_main_option("script_location", _migrations_dir())
-    script = ScriptDirectory.from_config(cfg)
-    head = script.get_current_head()
-    assert head is not None, "No head revision found in migrations directory"
-    return head
-
-
-def _read_version(db_path: str) -> str | None:
-    engine = create_engine(f"sqlite:///{db_path}")
-    try:
-        insp = sa_inspect(engine)
-        if "alembic_version" not in insp.get_table_names():
-            return None
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).fetchone()
-            return row[0] if row else None
-    finally:
-        engine.dispose()
-
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -58,16 +28,18 @@ def _read_version(db_path: str) -> str | None:
 
 
 class TestStartupMigrations:
-    """Verify init_database applies alembic migrations correctly on first call."""
+    """Verify init_database creates schema correctly in zero-migration mode."""
 
     async def test_fresh_database(self, tmp_path):
-        """Fresh DB: tables created via create_all and version stamped at head."""
+        """Fresh DB: tables created via create_all; no alembic_version stamp.
+
+        In zero-migration mode (empty versions/), schema is managed solely by
+        Base.metadata.create_all.  The alembic_version table must NOT be
+        present on a fresh database.
+        """
         db_path = str(tmp_path / "fresh.db")
 
         await init_database(db_path)
-
-        head = _current_head()
-        assert _read_version(db_path) == head
 
         engine = create_engine(f"sqlite:///{db_path}")
         try:
@@ -75,51 +47,68 @@ class TestStartupMigrations:
             tables = set(insp.get_table_names())
             assert "sessions" in tables
             assert "statistics" in tables
-            assert "alembic_version" in tables
+            assert "alembic_version" not in tables
         finally:
             engine.dispose()
+            await cleanup_database()
 
     async def test_idempotent(self, tmp_path):
-        """Calling init_database twice on the same DB is a no-op."""
+        """Calling init_database twice on the same DB is a no-op.
+
+        Both calls must succeed and leave core tables present.  No
+        alembic_version stamp is written in zero-migration mode.
+        """
         db_path = str(tmp_path / "idempotent.db")
 
         await init_database(db_path)
-        version_first = _read_version(db_path)
-
-        # Reset global engine so the second init_database call actually re-runs
-        # _apply_migrations; without this the early-return guard silently skips it.
         await cleanup_database()
-
         await init_database(db_path)
-        version_second = _read_version(db_path)
 
-        head = _current_head()
-        assert version_first == head
-        assert version_second == head
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            insp = sa_inspect(engine)
+            tables = set(insp.get_table_names())
+            assert "sessions" in tables
+            assert "statistics" in tables
+            assert "alembic_version" not in tables
+        finally:
+            engine.dispose()
+            await cleanup_database()
 
-    async def test_unknown_revision_fails_loudly(self, tmp_path):
-        """Pre-squash or unstamped DBs with an unknown revision fail loudly.
+    async def test_stale_stamp_ignored(self, tmp_path):
+        """A stale alembic_version row is silently ignored in zero-migration mode.
 
-        Pre-alpha contract: delete the DB file and re-import rather than
-        attempting an in-place migration from an unrecognized baseline.
+        Zero-migration mode never reads alembic_version, so a leftover row
+        from a pre-flatten database does not cause init_database to raise.
+        Owners drop incompatible DB files manually; no automatic rollback.
         """
         db_path = str(tmp_path / "stale.db")
 
+        # First init creates the schema.
         await init_database(db_path)
         await cleanup_database()
 
-        # Overwrite alembic_version with a revision absent from the migration chain.
+        # Manually create alembic_version with a stale stamp (first init no
+        # longer creates this table in zero-migration mode, so we insert it
+        # ourselves to simulate a DB that carried a pre-flatten stamp).
         engine = create_engine(f"sqlite:///{db_path}")
         try:
             with engine.begin() as conn:
                 conn.execute(
-                    text("UPDATE alembic_version SET version_num='deadbeef0000'")
+                    text(
+                        "CREATE TABLE IF NOT EXISTS alembic_version "
+                        "(version_num VARCHAR(32) NOT NULL)"
+                    )
+                )
+                conn.execute(
+                    text("INSERT INTO alembic_version VALUES ('deadbeef0000')")
                 )
         finally:
             engine.dispose()
 
-        with pytest.raises(Exception, match="deadbeef0000|Can't locate"):
-            await init_database(db_path)
+        # Re-init must succeed — zero-migration mode ignores the stale stamp.
+        await init_database(db_path)
+        await cleanup_database()
 
     async def test_migrations_run_off_event_loop(self, tmp_path):
         """``init_database`` runs ``_apply_migrations_sync`` via ``asyncio.to_thread``.
@@ -156,3 +145,5 @@ class TestStartupMigrations:
             "``_apply_migrations_sync`` must be called via ``asyncio.to_thread``; "
             "got zero such calls — migrations may be running on the event loop"
         )
+
+        await cleanup_database()
