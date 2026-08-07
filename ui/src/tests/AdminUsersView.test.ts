@@ -40,6 +40,9 @@ const USER_A = {
     role: 'member',
     disabled: false,
     created_at: '2026-01-01T00:00:00Z',
+    has_password: true,
+    auth_providers: [],
+    last_login_at: null,
 }
 
 const USER_B = {
@@ -49,6 +52,9 @@ const USER_B = {
     role: 'admin',
     disabled: false,
     created_at: '2026-01-01T00:00:00Z',
+    has_password: false,
+    auth_providers: ['google'],
+    last_login_at: '2026-07-01T12:00:00Z',
 }
 
 const SELF_USER = {
@@ -58,6 +64,9 @@ const SELF_USER = {
     role: 'admin',
     disabled: false,
     created_at: '2026-01-01T00:00:00Z',
+    has_password: true,
+    auth_providers: [],
+    last_login_at: null,
 }
 
 const OTHER_USER = {
@@ -67,6 +76,9 @@ const OTHER_USER = {
     role: 'member',
     disabled: false,
     created_at: '2026-01-01T00:00:00Z',
+    has_password: false,
+    auth_providers: ['google'],
+    last_login_at: '2026-06-15T08:00:00Z',
 }
 
 // ---------------------------------------------------------------------------

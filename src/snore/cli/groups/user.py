@@ -120,6 +120,41 @@ def user_disable(email: str, db: str | None) -> None:
     asyncio.run(_run())
 
 
+@user.command("enable")
+@click.argument("email")
+@db_option
+def user_enable(email: str, db: str | None) -> None:
+    """Re-enable a previously disabled user account."""
+
+    async def _run() -> None:
+        async with db_session(db) as session:
+            from sqlalchemy import select  # noqa: PLC0415
+
+            from snore.database.models import User  # noqa: PLC0415
+
+            canonical = normalize_email(email)
+            u = (
+                (
+                    await session.execute(
+                        select(User).where(User.canonical_email == canonical)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if u is None:
+                print_error(f"User {canonical!r} not found")
+                return
+            if u.disabled_at is None:
+                console.print(f"User {canonical} is already enabled")
+                return
+            u.disabled_at = None
+
+        print_success(f"Enabled user {canonical}")
+
+    asyncio.run(_run())
+
+
 @user.command("invite")
 @click.argument("email")
 @click.option(

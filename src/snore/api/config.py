@@ -57,6 +57,12 @@ Environment variables
     Maximum concurrent sessions processed within a single import-triggered
     analysis job.  Writes are serialized by the write gate; this controls the
     read/compute concurrency.  Default: 4.
+
+``SNORE_BOOTSTRAP_ADMIN_EMAIL``
+    Optional.  Multiuser mode only.  When no active admin user exists at
+    startup, automatically creates a 7-day admin invite for this address and
+    logs the redemption URL.  Empty or whitespace → no-op.  Ignored in local
+    mode.
 """
 
 from __future__ import annotations
@@ -68,6 +74,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from snore.auth.actor import AuthMode
+from snore.auth.emails import normalize_email
 
 
 class ConfigError(ValueError):
@@ -129,6 +136,8 @@ class AppConfig:
     max_jobs_per_user: int  # Per-user active-job cap; default 3.
     max_jobs_global: int  # Global active-job cap; default 10.
     analysis_max_workers: int  # Per-analysis-job session concurrency; default 4.
+    # Bootstrap admin invite: normalized email or None when env var is absent/empty.
+    bootstrap_admin_email: str | None = None
 
     @property
     def is_multiuser(self) -> bool:
@@ -252,6 +261,16 @@ def load_config(
     max_jobs_global = _parse_positive_int("SNORE_MAX_JOBS_GLOBAL", 10)
     analysis_max_workers = _parse_positive_int("SNORE_ANALYSIS_MAX_WORKERS", 4)
 
+    raw_bootstrap_email = os.environ.get("SNORE_BOOTSTRAP_ADMIN_EMAIL", "").strip()
+    bootstrap_admin_email = (
+        normalize_email(raw_bootstrap_email) if raw_bootstrap_email else None
+    )
+    if bootstrap_admin_email is not None and "@" not in bootstrap_admin_email:
+        raise ConfigError(
+            "SNORE_BOOTSTRAP_ADMIN_EMAIL must be a valid email address, got: "
+            f"{bootstrap_admin_email!r}"
+        )
+
     public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:
         if not session_secret:
@@ -317,6 +336,7 @@ def load_config(
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
         analysis_max_workers=analysis_max_workers,
+        bootstrap_admin_email=bootstrap_admin_email,
     )
 
 

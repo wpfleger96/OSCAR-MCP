@@ -61,3 +61,25 @@ def test_max_jobs_per_user_defaults_to_3():
 def test_max_jobs_global_defaults_to_10():
     cfg = load_config(auth_mode_override="local")
     assert cfg.max_jobs_global == 10
+
+
+# ---------------------------------------------------------------------------
+# SNORE_BOOTSTRAP_ADMIN_EMAIL
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_admin_email_defaults_to_none():
+    cfg = load_config(auth_mode_override="local")
+    assert cfg.bootstrap_admin_email is None
+
+
+def test_bootstrap_admin_email_normalized(monkeypatch):
+    monkeypatch.setenv("SNORE_BOOTSTRAP_ADMIN_EMAIL", "  Admin@Example.COM ")
+    cfg = load_config(auth_mode_override="local")
+    assert cfg.bootstrap_admin_email == "admin@example.com"
+
+
+def test_bootstrap_admin_email_without_at_sign_raises(monkeypatch):
+    monkeypatch.setenv("SNORE_BOOTSTRAP_ADMIN_EMAIL", "notanemail")
+    with pytest.raises(ConfigError, match="SNORE_BOOTSTRAP_ADMIN_EMAIL"):
+        load_config(auth_mode_override="local")

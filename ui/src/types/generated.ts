@@ -410,7 +410,7 @@ export interface paths {
          * @description Redeem an invite with a password — create user + profile atomically.
          *
          *     Both token and password are in the request body so neither appears in the
-         *     URL path or access logs.  SNORE_MULTIUSER_PLAN.md:233 (secret hygiene).
+         *     URL path or access logs (secret hygiene).
          *
          *     State machine:
          *     1. Validate the password byte length (shared byte-based validator).
@@ -1712,10 +1712,10 @@ export interface components {
             from_date?: string | null
             /**
              * Missing Only
-             * @description When true, analyze every analyzable session that has no analysis result yet (ignores date range)
+             * @description When true, restrict the batch to sessions that have a flow waveform but no analysis result yet. Composable with from_date/to_date. When true, from_date and to_date are not required.
              * @default false
              */
-            missing_only?: boolean | null
+            missing_only: boolean
             /** Modes */
             modes?: ('aasm' | 'aasm_relaxed' | 'resmed')[]
             /**
@@ -1777,12 +1777,12 @@ export interface components {
             analysis_count: number
             /**
              * Analysis Coverage Pct
-             * @description Percentage of analyzable sessions that have been analyzed
+             * @description Percentage of analyzable sessions (those with a flow waveform) that have been analyzed: sessions_with_analysis / analyzable_session_count * 100
              */
             analysis_coverage_pct: number
             /**
              * Analyzable Session Count
-             * @description Sessions having a flow waveform (the only ones that can be analyzed)
+             * @description Sessions having a flow waveform (prerequisite for analysis)
              */
             analyzable_session_count: number
             /**
@@ -3280,6 +3280,8 @@ export interface components {
         }
         /** UserItem */
         UserItem: {
+            /** Auth Providers */
+            auth_providers: string[]
             /**
              * Created At
              * Format: date-time
@@ -3291,8 +3293,12 @@ export interface components {
             display_name: string | null
             /** Email */
             email: string
+            /** Has Password */
+            has_password: boolean
             /** Id */
             id: number
+            /** Last Login At */
+            last_login_at: string | null
             /** Role */
             role: string
         }
