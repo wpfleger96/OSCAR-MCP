@@ -315,20 +315,22 @@ def _reap_terminal() -> None:
 
 
 async def _run_analysis(job: AnalysisJob) -> None:
-    from snore.database.session import session_scope  # noqa: PLC0415
     from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
-    async with session_scope() as db:
-        facade = AnalysisFacade(db, profile_id=job.profile_id)
-        await facade.run_batch_analysis(
-            session_ids=job.session_ids,
-            modes=job.modes,
-            primary_mode=job.primary_mode,
-            store_results=job.store_results,
-            progress_callback=job.update_progress,
-            cancel_predicate=lambda: job.cancel_requested,
-            max_workers=_get_analysis_workers(),
-        )
+    # No DB session needed here — run_batch_analysis opens its own short-lived
+    # scopes for the id-list query and for each per-session read/write phase.
+    # No DB transaction may remain open across the batch loop: a batch-long read
+    # snapshot pins the WAL and starves checkpoints.
+    facade = AnalysisFacade(None, profile_id=job.profile_id)
+    await facade.run_batch_analysis(
+        session_ids=job.session_ids,
+        modes=job.modes,
+        primary_mode=job.primary_mode,
+        store_results=job.store_results,
+        progress_callback=job.update_progress,
+        cancel_predicate=lambda: job.cancel_requested,
+        max_workers=_get_analysis_workers(),
+    )
 
 
 def _execute_job(job: AnalysisJob) -> None:

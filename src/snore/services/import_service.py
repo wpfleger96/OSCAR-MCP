@@ -137,7 +137,7 @@ class ImportService:
 
         if not dry_run:
             async with write_gate():
-                async with session_scope() as db_session:
+                async with session_scope(immediate=True) as db_session:
                     orphaned = await SessionImporter.cleanup_orphaned_records(
                         db_session
                     )
