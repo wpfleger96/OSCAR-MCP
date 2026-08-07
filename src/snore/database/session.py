@@ -114,6 +114,14 @@ _init_lock: asyncio.Lock | None = None  # Created lazily inside an event loop.
 _init_task: asyncio.Task[None] | None = None  # The in-flight once-init-task.
 _cleanup_task: asyncio.Task[None] | None = None  # The in-flight once-cleanup-task.
 
+# Execution-option key/value for BEGIN IMMEDIATE transactions.
+# Used by session_scope(immediate=True) at connection checkout and by the
+# "begin" event listener that reads them to choose the BEGIN variant.
+# Module-level constants prevent a typo from silently downgrading
+# BEGIN IMMEDIATE to plain BEGIN at either site.
+_TXN_OPT_KEY = "sqlite_txn_mode"
+_TXN_OPT_IMMEDIATE = "IMMEDIATE"
+
 
 def _get_init_lock() -> asyncio.Lock:
     """Return the module-level asyncio.Lock, creating it on first call.
@@ -136,16 +144,70 @@ def _build_alembic_config(database_url: str) -> AlembicConfig:
 
 
 def _apply_migrations_sync(sync_url: str) -> None:
-    """Run Alembic migrations synchronously.
+    """Apply pending migrations, or skip when the schema is already at head.
 
     Called from within ``asyncio.to_thread`` so it never blocks the event loop.
-    Uses the sync pysqlite URL for Alembic — identical to PR-1.
+    Uses the sync pysqlite URL for Alembic.
+
+    **Fast-path skip:** When the database file already exists and is stamped at
+    the current Alembic head, migrations are skipped entirely using a read-only
+    connection.  This makes ``snore mcp`` startup effectively read-only when the
+    schema is current, avoiding cross-process write conflicts with a live server
+    that already holds the SQLite write lock.  Any failure of the check (missing
+    file, missing table, multiple heads, OperationalError) falls through to the
+    normal migration path so startup is always safe.
     """
+    import sqlite3 as _sqlite3  # noqa: PLC0415
+
+    from urllib.parse import quote as _quote  # noqa: PLC0415
+
+    from alembic.script import ScriptDirectory  # noqa: PLC0415
     from sqlalchemy import create_engine  # noqa: PLC0415
+    from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
+
+    url_obj = _make_url(sync_url)
+    # Build the Alembic config once; reused by both the fast-path head check
+    # and the slow-path upgrade/stamp call below.
+    alembic_cfg = _build_alembic_config(sync_url)
+
+    # Fast-path: skip migrations when the SQLite file is already at the current
+    # Alembic head.  The read-only open avoids acquiring any write lock.
+    if url_obj.get_backend_name() == "sqlite":
+        db_file = url_obj.database
+        if db_file and db_file != ":memory:":
+            try:
+                # Percent-encode the path so spaces and special characters in
+                # directory names do not corrupt the URI query string.
+                encoded_path = _quote(db_file, safe="/")
+                ro_conn = _sqlite3.connect(f"file:{encoded_path}?mode=ro", uri=True)
+                try:
+                    row = ro_conn.execute(
+                        "SELECT version_num FROM alembic_version"
+                    ).fetchone()
+                    stored_version = row[0] if row else None
+                finally:
+                    ro_conn.close()
+
+                heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+
+                if stored_version is not None and {stored_version} == heads:
+                    logger.debug(
+                        "Schema already at head %s; skipping migrations",
+                        stored_version,
+                    )
+                    return
+            except Exception as exc:
+                # Any failure (missing file, missing alembic_version table,
+                # multiple heads mismatch, OperationalError) → fall through
+                # to the normal migration path so startup is always correct.
+                logger.debug(
+                    "Migration fast-path check failed; falling through to full"
+                    " migration: %s",
+                    exc,
+                )
 
     engine = create_engine(sync_url, connect_args={"check_same_thread": False})
     table_names = set(inspect(engine).get_table_names())
-    alembic_cfg = _build_alembic_config(sync_url)
 
     if "sessions" not in table_names:
         Base.metadata.create_all(engine)
@@ -171,17 +233,25 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
     SQLAlchemy's logical transaction control is the sole source of truth.
     The connection is left in autocommit mode after the event returns.
 
-    **"begin" — explicit BEGIN:**
+    **"begin" — explicit BEGIN or BEGIN IMMEDIATE:**
     With the DBAPI in autocommit mode, SQLAlchemy's logical transaction does
     not emit a real ``BEGIN`` to SQLite.  Without an explicit ``BEGIN``, a
     released savepoint (``RELEASE SAVEPOINT sp``) writes directly to the
     database file and cannot be undone by a later outer rollback.
 
-    The ``"begin"`` listener executes ``BEGIN`` via a raw cursor whenever
-    SQLAlchemy opens a new logical transaction.  This re-establishes the
-    two-layer semantics: SQLite's outer ``BEGIN`` contains all
-    ``SAVEPOINT`` / ``RELEASE`` / ``ROLLBACK TO`` operations, so an outer
+    The ``"begin"`` listener executes ``BEGIN`` (or ``BEGIN IMMEDIATE`` when
+    the ``"sqlite_txn_mode"`` execution option is ``"IMMEDIATE"``) via a raw
+    cursor whenever SQLAlchemy opens a new logical transaction.  This
+    re-establishes the two-layer semantics: SQLite's outer ``BEGIN`` contains
+    all ``SAVEPOINT`` / ``RELEASE`` / ``ROLLBACK TO`` operations, so an outer
     rollback undoes every released savepoint within it.
+
+    ``BEGIN IMMEDIATE`` acquires the write lock at transaction open rather
+    than at first write, so contending writers queue on ``busy_timeout``
+    instead of failing instantly on a WAL snapshot-upgrade conflict.  Pass
+    ``execution_options={"sqlite_txn_mode": "IMMEDIATE"}`` to the connection
+    before SQL is issued (via ``session_scope(immediate=True)``) to activate
+    this mode.
     """
     from sqlalchemy import event  # noqa: PLC0415
 
@@ -205,6 +275,9 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
             cursor.execute("PRAGMA temp_store=MEMORY")
+            # Cap WAL file growth so checkpoints shrink an oversized WAL back
+            # down to this limit after each checkpoint completes.
+            cursor.execute("PRAGMA journal_size_limit=67108864")  # 64 MB
         finally:
             cursor.close()
 
@@ -212,7 +285,16 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
     def emit_begin(conn: Any) -> None:
         # With DBAPI in autocommit mode, emit an explicit BEGIN so that SQLite's
         # outer transaction wraps all SAVEPOINTs and outer ROLLBACK works correctly.
-        conn.exec_driver_sql("BEGIN")
+        # When session_scope(immediate=True) is used, emit BEGIN IMMEDIATE instead:
+        # this acquires the write lock at transaction open so contending writers
+        # queue on busy_timeout rather than failing instantly on a WAL snapshot
+        # upgrade (SQLite returns SQLITE_BUSY immediately on a deferred→write
+        # upgrade when another connection has committed, bypassing busy_timeout).
+        txn_mode = conn.get_execution_options().get(_TXN_OPT_KEY)
+        if txn_mode == _TXN_OPT_IMMEDIATE:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+        else:
+            conn.exec_driver_sql("BEGIN")
 
 
 async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
@@ -629,12 +711,26 @@ async def check_db_staleness() -> None:
 
 
 @asynccontextmanager
-async def session_scope() -> AsyncGenerator[AsyncSession]:
+async def session_scope(*, immediate: bool = False) -> AsyncGenerator[AsyncSession]:
     """Provide a transactional scope for async database operations.
+
+    Args:
+        immediate: When ``True``, emit ``BEGIN IMMEDIATE`` instead of plain
+            ``BEGIN``.  Gated and bulk write scopes should pass
+            ``immediate=True`` so contending writers queue on
+            ``busy_timeout`` rather than failing instantly on a WAL snapshot
+            upgrade conflict.  SQLite returns ``SQLITE_BUSY`` immediately
+            (bypassing ``busy_timeout``) when a deferred transaction attempts
+            its first write and another connection has committed since the
+            deferred ``BEGIN`` — ``BEGIN IMMEDIATE`` avoids this by acquiring
+            the write lock upfront.
 
     Usage::
 
-        async with session_scope() as session:
+        async with session_scope() as session:              # read or best-effort write
+            result = await session.execute(...)
+
+        async with session_scope(immediate=True) as session:  # write with lock queuing
             session.add(obj)
 
     Calls ``check_db_staleness()`` before opening the session and may
@@ -652,6 +748,17 @@ async def session_scope() -> AsyncGenerator[AsyncSession]:
     session = get_session()
     try:
         async with session.begin():
+            if immediate:
+                # Force connection checkout with the IMMEDIATE option before any
+                # SQL is executed.  The "begin" event listener reads this option
+                # and emits BEGIN IMMEDIATE, so contending writers queue on
+                # busy_timeout rather than fail instantly on a WAL snapshot
+                # upgrade.  SQLAlchemy applies execution options at checkout
+                # before conn.begin() fires the "begin" event, so the option
+                # is visible to the listener when it runs.
+                await session.connection(
+                    execution_options={_TXN_OPT_KEY: _TXN_OPT_IMMEDIATE}
+                )
             yield session
     except Exception:
         # begin() rolls back automatically on __aexit__ with an exception.

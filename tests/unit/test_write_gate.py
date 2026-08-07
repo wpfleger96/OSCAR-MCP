@@ -98,7 +98,7 @@ class TestWriteGateWiring:
             gate_calls.append("exit")
 
         @asynccontextmanager
-        async def mock_session_scope():
+        async def mock_session_scope(*args, **kwargs):
             yield AsyncMock()
 
         with (
@@ -141,7 +141,7 @@ class TestWriteGateWiring:
         mock_write_db = AsyncMock()
 
         @asynccontextmanager
-        async def mock_session_scope():
+        async def mock_session_scope(*args, **kwargs):
             nonlocal _scope_call
             _scope_call += 1
             yield mock_read_db if _scope_call == 1 else mock_write_db
@@ -174,3 +174,67 @@ class TestWriteGateWiring:
         assert "exit" in gate_calls, (
             "write_gate was not exited cleanly during run_analysis store phase"
         )
+
+
+class TestWriteGateCancellationSafety:
+    """Cancellation of a waiter must not leak the lock and deadlock future callers."""
+
+    async def test_cancelled_waiter_releases_gate_when_acquire_completes(self) -> None:
+        """Cancelling write_gate() after the acquire task completes does not leak the lock.
+
+        Protocol:
+        1. Hold ``_gate`` from a helper thread so any new ``write_gate()`` call
+           blocks in ``asyncio.to_thread(_gate.acquire)``.
+        2. Start ``write_gate()`` as an asyncio Task — it blocks waiting for the lock.
+        3. Cancel the Task (simulating a caller that timed out or was cancelled).
+        4. Release the helper thread's hold so the shielded acquire task can complete.
+        5. Give the event loop a moment to run the done-callback.
+        6. Assert ``_gate`` is immediately acquirable (non-blocking) — the callback
+           released the lock, so no future caller can deadlock.
+        """
+        import threading  # noqa: PLC0415
+
+        from snore.database.write_gate import _gate, write_gate  # noqa: PLC0415
+
+        # Step 1: hold _gate from a helper thread.
+        hold_release = threading.Event()
+        hold_acquired = threading.Event()
+
+        def holder() -> None:
+            _gate.acquire()
+            hold_acquired.set()
+            hold_release.wait(timeout=5)
+            _gate.release()
+
+        holder_thread = threading.Thread(target=holder, daemon=True)
+        holder_thread.start()
+        assert hold_acquired.wait(timeout=2), "Holder thread did not acquire the lock"
+
+        # Step 2: start write_gate() as a task — blocked waiting for _gate.
+        async def enter_gate() -> None:
+            async with write_gate():
+                pass  # only reached if not cancelled before the acquire
+
+        gate_task = asyncio.create_task(enter_gate())
+        # Yield briefly so gate_task starts and reaches asyncio.to_thread.
+        await asyncio.sleep(0.02)
+
+        # Step 3: cancel the task while it is blocked in the acquire wait.
+        gate_task.cancel()
+        await asyncio.gather(gate_task, return_exceptions=True)
+
+        # Step 4: release the holder so the shielded acquire_task can complete.
+        hold_release.set()
+        holder_thread.join(timeout=2)
+
+        # Step 5: give the event loop a moment to run the done-callback which
+        # releases _gate if the acquire completed after cancellation.
+        await asyncio.sleep(0.05)
+
+        # Step 6: assert the gate is free — non-blocking acquire must succeed.
+        acquired = _gate.acquire(blocking=False)
+        assert acquired, (
+            "write_gate leaked the lock after cancellation — "
+            "the done-callback did not release it"
+        )
+        _gate.release()
