@@ -50,7 +50,7 @@ from typing import Any
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import inspect
+from sqlalchemy import Engine, MetaData, inspect, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -151,6 +151,67 @@ def _build_alembic_config(database_url: str) -> AlembicConfig:
     return cfg
 
 
+def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
+    """Additively sync columns and indexes from *metadata* onto an existing database.
+
+    Called in empty-chain mode immediately after ``create_all``, which is a
+    no-op for tables that already exist.  The work here is for tables that
+    pre-dated this startup — i.e., rows already in the file when the process
+    started:
+
+    - For each table in *metadata* that exists in the database, compute the
+      model columns absent from the live table and emit
+      ``ALTER TABLE … ADD COLUMN`` for each one.  Column DDL is compiled from
+      the SQLAlchemy column object via ``CreateColumn`` so type strings and
+      defaults are always correct for the engine's dialect.
+    - Guard: a missing column that is ``NOT NULL`` with no ``server_default``
+      raises ``RuntimeError`` with an actionable message.  SQLite cannot
+      ``ADD COLUMN NOT NULL`` without a default — every new non-nullable column
+      must carry a ``server_default`` in its model definition.
+    - For each such table, compare model indexes against live indexes and call
+      ``Index.create(engine)`` for each missing one.
+
+    Idempotent: a second call on an already-synced database is a no-op.
+    Also a no-op on a fresh database (``create_all`` has built everything).
+
+    Out of scope: dropped columns, renamed columns, changed types, dropped
+    indexes — those require Alembic migration files once post-1.0 is in use.
+    """
+    from sqlalchemy.schema import CreateColumn  # noqa: PLC0415
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    preparer = engine.dialect.identifier_preparer
+
+    for table in metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+
+        live_col_names = {col["name"] for col in inspector.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in live_col_names:
+                continue
+            if not col.nullable and col.server_default is None:
+                raise RuntimeError(
+                    f"Cannot add column '{col.name}' to table '{table.name}': "
+                    f"the column is NOT NULL with no server_default.  "
+                    f"SQLite cannot ADD COLUMN NOT NULL without a default — "
+                    f"add a server_default= to the column definition."
+                )
+            col_ddl = str(CreateColumn(col).compile(dialect=engine.dialect))
+            table_id = preparer.quote_identifier(table.name)
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table_id} ADD COLUMN {col_ddl}"))
+            logger.info("Added column %s.%s to existing table", table.name, col.name)
+
+        live_index_names = {i["name"] for i in inspector.get_indexes(table.name)}
+        for idx in table.indexes:
+            if idx.name in live_index_names:
+                continue
+            idx.create(engine)
+            logger.info("Created index %s on existing table %s", idx.name, table.name)
+
+
 def _apply_migrations_sync(sync_url: str) -> None:
     """Apply pending migrations, or skip when the schema is already at head.
 
@@ -159,10 +220,19 @@ def _apply_migrations_sync(sync_url: str) -> None:
 
     **Empty-chain mode (pre-1.0):** When ``versions/`` contains zero migration
     files, ``ScriptDirectory.get_heads()`` returns ``[]``.  In this mode the
-    function skips all Alembic machinery and ensures the schema via
-    ``Base.metadata.create_all(checkfirst=True)``, which is idempotent on an
-    existing database.  No ``alembic_version`` table is created on this path.
-    Stale ``alembic_version`` rows left by a pre-flatten DB are silently ignored
+    function skips all Alembic machinery and ensures the schema in two steps:
+
+    1. ``Base.metadata.create_all(checkfirst=True)`` — creates any tables that
+       do not yet exist.  Idempotent; never alters existing tables.
+    2. ``_sync_additive_schema(Base.metadata, engine)`` — for each table that
+       already existed before step 1, adds any model columns or indexes absent
+       from the live table.  New ``NOT NULL`` columns must carry a
+       ``server_default`` in the model definition; without one a ``RuntimeError``
+       is raised with an actionable message (SQLite cannot ``ADD COLUMN NOT NULL``
+       without a default value).
+
+    No ``alembic_version`` table is created on this path.  Stale
+    ``alembic_version`` rows left by a pre-flatten DB are silently ignored
     (the owner drops incompatible DBs manually).
 
     **Fast-path skip:** The database stamp is read first (before computing heads)
@@ -234,13 +304,16 @@ def _apply_migrations_sync(sync_url: str) -> None:
         )
         return
 
-    # Empty-chain mode: no migration files → manage schema via create_all.
-    # No alembic_version table is written; stale rows from pre-flatten DBs
-    # are ignored — the owner drops incompatible DBs manually.
+    # Empty-chain mode: no migration files → manage schema via create_all then
+    # additive sync.  No alembic_version table is written; stale rows from
+    # pre-flatten DBs are ignored — the owner drops incompatible DBs manually.
+    # New NOT NULL columns must carry a server_default or _sync_additive_schema
+    # raises RuntimeError; SQLite cannot ADD COLUMN NOT NULL without a default.
     if not heads:
         engine = create_engine(sync_url, connect_args={"check_same_thread": False})
         try:
             Base.metadata.create_all(engine, checkfirst=True)
+            _sync_additive_schema(Base.metadata, engine)
         finally:
             engine.dispose()
         logger.info("Empty migration chain: schema ensured via create_all")
