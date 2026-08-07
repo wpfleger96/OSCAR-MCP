@@ -352,6 +352,82 @@ class TestChangePassword:
 
         await cleanup_database()
 
+    def test_local_mode_unlink_no_set_cookie(self, async_db_session, db_session):
+        """In LOCAL mode, DELETE /identities/google must carry no Set-Cookie header.
+
+        clear_session_cookie is gated on cfg.is_multiuser, so a local-mode
+        unlink response should have no Set-Cookie header at all.
+        """
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        _seed_google_identity(db_session, user.id)
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        resp = client.delete("/api/v1/auth/me/identities/google")
+
+        assert resp.status_code == 200
+        assert "set-cookie" not in {k.lower() for k in resp.headers}
+
+    @pytest.mark.asyncio
+    async def test_google_link_disabled_blocks_auto_relink(
+        self, async_db_session, db_session
+    ):
+        """After unlink sets google_link_disabled, resolve_login's email auto-link
+        path raises TxFailure so a subsequent 'Sign in with Google' cannot silently
+        re-establish the severed identity."""
+        from snore.api.config import get_config
+        from snore.api.routers.auth._google_resolution import TxFailure, resolve_login
+
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        # Simulate what unlink does: set the flag directly.
+        user.google_link_disabled = True
+        db_session.flush()
+
+        cfg = get_config()
+
+        async with async_db_session.begin():
+            with pytest.raises(TxFailure):
+                await resolve_login(
+                    async_db_session,
+                    cfg,
+                    {
+                        "sub": "brand-new-google-sub-xyz",
+                        "email": user.canonical_email,
+                        "email_verified": True,
+                    },
+                )
+
+    @pytest.mark.asyncio
+    async def test_invite_relink_clears_google_link_disabled(
+        self, async_db_session, db_session
+    ):
+        """link_identity_ticket (used by invite-signup path b) resets
+        google_link_disabled to False so future auto-links are restored."""
+        from snore.api.config import get_config
+        from snore.api.routers.auth._google_resolution import link_identity_ticket
+
+        user, profile = _seed_user(db_session, role="member", password="pw")
+        user.google_link_disabled = True
+        db_session.flush()
+
+        cfg = get_config()
+
+        async with async_db_session.begin():
+            await link_identity_ticket(
+                async_db_session,
+                cfg,
+                # fetch the live user object from the async session
+                await async_db_session.get(models.User, user.id),
+                "re-link-sub-abc",
+                user.canonical_email,
+            )
+
+        # Reload via db_session to confirm the flag was cleared in the DB.
+        db_session.expire_all()
+        db_session.refresh(user)
+        assert user.google_link_disabled is False, (
+            "link_identity_ticket must reset google_link_disabled"
+        )
+
     def test_wrong_current_password_401(self, async_db_session, db_session):
         """Wrong current_password → 401 Authentication failed."""
         user, profile = _seed_user(db_session, role="member", password="correct-pw")
@@ -710,7 +786,6 @@ class TestUnlinkGoogle:
         )
         set_config(cfg)
 
-        from snore.auth.passwords import hash_password
         from snore.database.session import (
             cleanup_database,
             init_database,

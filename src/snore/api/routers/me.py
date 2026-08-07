@@ -40,6 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import delete, exists, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
@@ -268,31 +269,35 @@ async def unlink_google(
             detail="Set a password before unlinking Google",
         )
 
-    google_exists = bool(
-        (
-            await db.execute(
-                select(
-                    exists().where(
-                        models.AuthIdentity.user_id == actor.user_id,
-                        models.AuthIdentity.provider == "google",
-                    )
-                )
-            )
-        ).scalar()
-    )
-    if not google_exists:
-        raise HTTPException(status_code=404, detail="No Google identity linked")
-
-    await db.execute(
+    # Single DELETE — rowcount check replaces the prior SELECT-EXISTS + DELETE
+    # pair, removing the TOCTOU window and one extra round-trip.
+    result = await db.execute(
         delete(models.AuthIdentity).where(
             models.AuthIdentity.user_id == actor.user_id,
             models.AuthIdentity.provider == "google",
         )
     )
-    user.session_version += 1
+    if result.rowcount == 0:  # type: ignore[attr-defined]
+        raise HTTPException(status_code=404, detail="No Google identity linked")
+
+    # Server-side increment avoids a client-side read-modify-write (lost-update
+    # risk under concurrent writes on non-SQLite backends).  Set
+    # google_link_disabled so the email auto-link path in resolve_login cannot
+    # silently re-establish this identity on the next "Sign in with Google".
+    await db.execute(
+        sa_update(models.User)
+        .where(models.User.id == actor.user_id)
+        .values(
+            session_version=models.User.session_version + 1,
+            google_link_disabled=True,
+        )
+    )
 
     logger.info("Unlinked Google identity for user id=%s", actor.user_id)
 
+    # Accepted edge: the response is built before the session commits; a commit
+    # failure would leave the cookie cleared but state unchanged — same race
+    # window as change_password.
     response = JSONResponse(
         content={"message": "Google account unlinked"},
         headers=NO_STORE,

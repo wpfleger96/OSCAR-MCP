@@ -97,6 +97,9 @@ async def link_identity_ticket(
             email=email_raw,
         )
     )
+    # A deliberate re-link via the invite-signup path clears any previous
+    # unlink flag so the auto-link path is restored for future logins.
+    user.google_link_disabled = False
     # Audit trail: linking changes who can access the account without a
     # password, so operators need a record of when it happened.
     logger.info(
@@ -140,7 +143,7 @@ async def resolve_login(
         .scalars()
         .first()
     )
-    if user is None or user.role == "admin":
+    if user is None or user.role == "admin" or user.google_link_disabled:
         raise TxFailure()
     return await link_identity_ticket(db, cfg, user, sub, email_raw)
 

@@ -110,13 +110,9 @@
                                 Account
                             </RouterLink>
                         </DropdownMenuItem>
-                        <DropdownMenuItem v-if="googleLinked !== null" as-child>
-                            <RouterLink to="/account" class="dropdown-link google-status-link">
-                                <span class="google-status-text">
-                                    Google: {{ googleLinked ? 'Linked' : 'Not linked' }}
-                                </span>
-                            </RouterLink>
-                        </DropdownMenuItem>
+                        <DropdownMenuLabel v-if="googleLinked !== null" class="google-status-label">
+                            Google: {{ googleLinked ? 'Linked' : 'Not linked' }}
+                        </DropdownMenuLabel>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem @click="handleLogout" class="text-destructive">
                             <LogOut class="h-4 w-4 mr-2" />
@@ -142,7 +138,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
     BarChart3,
@@ -199,18 +195,30 @@ const displayName = computed(() => user.value?.display_name || user.value?.email
 // Fetched lazily on first dropdown open — avoids an extra request on every page load.
 const googleLinked = ref<boolean | null>(null)
 let _googleFetched = false
+let _googleFetchAttempts = 0
 
 async function fetchGoogleStatus(): Promise<void> {
-    if (_googleFetched) return
+    if (_googleFetched || _googleFetchAttempts >= 2) return
+    _googleFetchAttempts++
     _googleFetched = true
     try {
         const me = await getMe()
         googleLinked.value = me.google_linked
     } catch {
         // Silently ignore — the dropdown still opens without the Google status line.
+        // Retries are capped at 2 total attempts to avoid a storm on persistent errors.
         _googleFetched = false
     }
 }
+
+// Reset stale cached status on logout so the next session sees fresh data.
+watch(isAuthenticated, (v) => {
+    if (!v) {
+        _googleFetched = false
+        _googleFetchAttempts = 0
+        googleLinked.value = null
+    }
+})
 
 async function switchToProfile(profileId: number) {
     if (profileId === activeProfileId.value) return
@@ -338,12 +346,10 @@ async function handleLogout() {
     color: var(--color-muted-foreground);
 }
 
-.google-status-link {
+.google-status-label {
     padding-left: 2.25rem;
-}
-
-.google-status-text {
     font-size: 0.75rem;
+    font-weight: normal;
     color: var(--color-muted-foreground);
 }
 </style>
