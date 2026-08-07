@@ -24,7 +24,16 @@ These tests verify:
 
 import pytest
 
-from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, text
+from sqlalchemy import (
+    Column,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    create_engine,
+    text,
+)
 from sqlalchemy import inspect as sa_inspect
 
 from snore.database.session import cleanup_database, init_database
@@ -194,7 +203,7 @@ class TestStartupMigrations:
         """
         from snore.database.session import _sync_additive_schema
 
-        db_path = str(tmp_path / "notfull_guard.db")
+        db_path = str(tmp_path / "not_null_guard.db")
 
         # Create a v1 table with just a primary key.
         v1_meta = MetaData()
@@ -215,6 +224,79 @@ class TestStartupMigrations:
 
             with pytest.raises(RuntimeError, match="required_field"):
                 _sync_additive_schema(v2_meta, engine)
+        finally:
+            engine.dispose()
+
+    async def test_additive_sync_race_tolerance(self, tmp_path):
+        """Concurrent column/index additions are silently skipped; unrelated errors re-raise.
+
+        Simulates rolling-restart races: the helper's inspector holds a stale
+        pre-race snapshot (column/index appears missing) while another process
+        already applied the change.  Three scenarios are exercised:
+
+        - Column added concurrently → "duplicate column name" OperationalError swallowed.
+        - Index created concurrently → "already exists" OperationalError swallowed
+          (patching ``Index.create`` because the TOCTOU window between checkfirst's
+          PRAGMA and CREATE INDEX is too tight to reproduce reliably in a unit test).
+        - Unrelated OperationalError (e.g. "database is locked") propagates.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        from snore.database.session import _sync_additive_schema
+
+        db_path = str(tmp_path / "race_tolerance.db")
+
+        # v1: items table with just id.
+        v1_meta = MetaData()
+        Table("items", v1_meta, Column("id", Integer, primary_key=True))
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            v1_meta.create_all(engine)
+
+            # v2: adds a nullable column and an index.
+            v2_meta = MetaData()
+            items_v2 = Table(
+                "items",
+                v2_meta,
+                Column("id", Integer, primary_key=True),
+                Column("val", String(50), nullable=True),
+            )
+            idx_v2 = Index("ix_items_val", items_v2.c.val)
+
+            # Another process already added "val" to the DB before us.
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE items ADD COLUMN val VARCHAR(50)"))
+
+            # 1. Column race: stale inspector says "val" is missing; the DB has it.
+            #    ALTER TABLE raises "duplicate column name: val" — must be swallowed.
+            stale_col = MagicMock()
+            stale_col.get_table_names.return_value = ["items"]
+            stale_col.get_columns.return_value = [{"name": "id"}]
+            stale_col.get_indexes.return_value = [{"name": "ix_items_val"}]
+            with patch("snore.database.session.inspect", return_value=stale_col):
+                _sync_additive_schema(v2_meta, engine)  # must not raise
+
+            # 2. Index race: stale inspector says index is missing; patch idx.create
+            #    to raise "already exists" as the losing process would see.
+            stale_idx = MagicMock()
+            stale_idx.get_table_names.return_value = ["items"]
+            stale_idx.get_columns.return_value = [{"name": "id"}, {"name": "val"}]
+            stale_idx.get_indexes.return_value = []
+            concurrent_idx_err = OperationalError(
+                "index ix_items_val already exists", None, None
+            )
+            with patch("snore.database.session.inspect", return_value=stale_idx):
+                with patch.object(idx_v2, "create", side_effect=concurrent_idx_err):
+                    _sync_additive_schema(v2_meta, engine)  # must not raise
+
+            # 3. Unrelated OperationalError from the index path must propagate.
+            locked_err = OperationalError("database is locked", None, None)
+            with patch("snore.database.session.inspect", return_value=stale_idx):
+                with patch.object(idx_v2, "create", side_effect=locked_err):
+                    with pytest.raises(OperationalError, match="database is locked"):
+                        _sync_additive_schema(v2_meta, engine)
         finally:
             engine.dispose()
 

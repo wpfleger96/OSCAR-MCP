@@ -51,12 +51,14 @@ from typing import Any
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import Engine, MetaData, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.schema import CreateColumn
 
 from snore.constants import DEFAULT_DATABASE_PATH
 from snore.database.models import Base
@@ -167,7 +169,11 @@ def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
     - Guard: a missing column that is ``NOT NULL`` with no ``server_default``
       raises ``RuntimeError`` with an actionable message.  SQLite cannot
       ``ADD COLUMN NOT NULL`` without a default — every new non-nullable column
-      must carry a ``server_default`` in its model definition.
+      must carry a ``server_default`` in its model definition.  A non-constant
+      ``server_default`` (e.g. ``text("CURRENT_TIMESTAMP")``) passes this guard
+      but SQLite rejects ``ADD COLUMN`` with a non-constant default on populated
+      tables ("Cannot add a column with non-constant default") — new columns on
+      existing tables need constant server defaults.
     - For each such table, compare model indexes against live indexes and call
       ``Index.create(engine)`` for each missing one.
 
@@ -182,9 +188,8 @@ def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
     ``unique=True`` backing indexes — ``table.indexes`` excludes them, so
     they are never created on existing tables by this helper.
     """
-    from sqlalchemy.exc import OperationalError as _OperationalError  # noqa: PLC0415
-    from sqlalchemy.schema import CreateColumn  # noqa: PLC0415
-
+    # The inspector caches per-table reflection results; each get_columns /
+    # get_indexes call is issued exactly once per table per run.
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     preparer = engine.dialect.identifier_preparer
@@ -209,15 +214,11 @@ def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
             try:
                 with engine.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {table_id} ADD COLUMN {col_ddl}"))
-            except _OperationalError as exc:
+            except OperationalError as exc:
                 # Guard: another process added this column concurrently (rolling
-                # restart).  SQLite says "duplicate column name"; other dialects
-                # say "already has a column named".  Both are safe to skip.
-                msg = str(exc).lower()
-                if (
-                    "duplicate column name" in msg
-                    or "already has a column named" in msg
-                ):
+                # restart).  SQLite (and MySQL, lowercased) emit "duplicate column
+                # name"; the repo is SQLite-only.
+                if "duplicate column name" in str(exc).lower():
                     logger.info(
                         "Column %s.%s added concurrently; skipping",
                         table.name,
@@ -234,8 +235,20 @@ def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
         for idx in table.indexes:
             if idx.name in live_index_names:
                 continue
-            idx.create(engine, checkfirst=True)
-            logger.info("Created index %s on existing table %s", idx.name, table.name)
+            try:
+                idx.create(engine, checkfirst=True)
+            except OperationalError as exc:
+                # Guard: checkfirst=True emits a PRAGMA check then plain CREATE
+                # INDEX (not IF NOT EXISTS); two racing processes can both pass
+                # the check.  The loser gets "already exists".
+                if "already exists" in str(exc).lower():
+                    logger.info("Index %s created concurrently; skipping", idx.name)
+                else:
+                    raise
+            else:
+                logger.info(
+                    "Created index %s on existing table %s", idx.name, table.name
+                )
 
 
 def _apply_migrations_sync(sync_url: str) -> None:
