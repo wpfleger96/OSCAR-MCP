@@ -16,6 +16,8 @@ the category of drift that actually breaks the application.
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from alembic import command as alembic_command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config as AlembicConfig
@@ -36,16 +38,6 @@ _STRUCTURAL_DIFF_TYPES = frozenset(
 # Base.metadata.create_all; existing DBs must drop and reimport.
 _NO_MIGRATION_TABLES: frozenset[str] = frozenset({"breaths"})
 
-# Naming convention from migrations/env.py — must match so constraint name
-# comparisons use the same pattern alembic used when creating the tables.
-_NAMING_CONVENTION = {
-    "ix": "ix_%(column_0_label)s",
-    "uq": "uq_%(table_name)s_%(column_0_name)s",
-    "ck": "ck_%(table_name)s_%(constraint_name)s",
-    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
-    "pk": "pk_%(table_name)s",
-}
-
 
 def _migrations_dir() -> str:
     return str(Path(_snore_db_pkg.__file__).parent / "migrations")
@@ -58,9 +50,14 @@ def _alembic_cfg(db_path: str) -> AlembicConfig:
     return cfg
 
 
+# Guard: skip the test class when versions/ contains no migration files
+# (zero-migration mode).  Pure filesystem check — must not raise at pytest
+# collection time even if the directory is absent.
+_HAS_MIGRATIONS = any((Path(_migrations_dir()) / "versions").glob("*.py"))
+
+
 def _structural_diffs(engine: Engine) -> list[tuple[Any, ...]]:
     """Return only structural (add/remove table/column) diffs against Base.metadata."""
-    Base.metadata.naming_convention = _NAMING_CONVENTION
     with engine.connect() as conn:
         mc = MigrationContext.configure(
             conn,
@@ -85,6 +82,10 @@ def _structural_diffs(engine: Engine) -> list[tuple[Any, ...]]:
     return structural
 
 
+@pytest.mark.skipif(
+    not _HAS_MIGRATIONS,
+    reason="versions/ is empty (zero-migration mode); auto-reactivates when migration files are added",
+)
 class TestMigrationSchemaDrift:
     """Verify the migration chain leaves no structural gap against models.py."""
 

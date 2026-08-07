@@ -28,7 +28,7 @@ Technical documentation for the SNORE system architecture, components, and desig
 ├─────────────────────────────────────────────┤
 │         SQLite Database ✅                  │
 │  Universal schema, direct BLOB storage      │
-│  Alembic migrations, 10 tables              │
+│  create_all schema; Alembic kept (pre-1.0)  │
 ├─────────────────────────────────────────────┤
 │         CLI Import Tool ✅                  │
 │  snore import (auto-detection)              │
