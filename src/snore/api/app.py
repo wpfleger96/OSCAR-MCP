@@ -123,8 +123,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _startup_purge_expired_oauth_attempts()
 
     # Auto-create demo user and import bundled fixture data if not present.
+    # Bootstrap a first admin invite when no active admin exists yet.
     if cfg.is_multiuser:
         await _startup_ensure_demo_data(app)
+        await _startup_ensure_bootstrap_admin()
 
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
@@ -221,6 +223,157 @@ async def _startup_ensure_demo_data(app: FastAPI) -> None:
         logger.warning(
             "Demo startup initialization failed — demo login will be unavailable",
             exc_info=True,
+        )
+
+
+async def _create_bootstrap_admin_invite(email: str) -> str | None:
+    """Create a bootstrap admin invite if one is needed.
+
+    Returns the raw (unhashed) token when a new invite was inserted, or None
+    when skipped (active admin exists, user row already exists for the address,
+    or a valid pending admin invite is already present).
+
+    The redemption URL (containing the one-time token) is deliberately written
+    to the server log as the delivery channel; the invite is single-use with a
+    7-day expiry, so logs should be treated as sensitive until it is redeemed.
+    """
+    import secrets  # noqa: PLC0415
+
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from sqlalchemy import insert, literal, null, select  # noqa: PLC0415
+
+    from snore.auth.invite import invite_valid_clauses  # noqa: PLC0415
+    from snore.auth.invite_tokens import hash_invite_token  # noqa: PLC0415
+    from snore.database import models  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+    from snore.database.types import UTCDateTime  # noqa: PLC0415
+
+    async with session_scope() as db:
+        now = datetime.now(UTC)
+
+        active_admin = (
+            (
+                await db.execute(
+                    select(models.User).where(
+                        models.User.role == "admin",
+                        models.User.disabled_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if active_admin is not None:
+            logger.debug("Bootstrap admin: active admin user already exists — skipping")
+            return None
+
+        # Guard: if ANY user row exists for this email (regardless of role or
+        # disabled state), an invite would be unredeemable — the redemption
+        # route rejects addresses that already have an account.
+        existing_user = (
+            (
+                await db.execute(
+                    select(models.User).where(
+                        models.User.canonical_email == email,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing_user is not None:
+            logger.warning(
+                "Bootstrap admin: a user with email %s already exists but is not an"
+                " active admin — recover with the snore user CLI"
+                " (e.g. 'snore user enable %s')",
+                email,
+                email,
+            )
+            return None
+
+        raw = secrets.token_urlsafe(32)
+        token_hash = hash_invite_token(raw)
+        expires_at = now + timedelta(days=7)
+
+        # Atomic INSERT … SELECT … WHERE NOT EXISTS: the pending-admin check and
+        # the insert are one statement so concurrent startups cannot both insert.
+        # A pending MEMBER invite for the same address does not block — only a
+        # pending ADMIN invite prevents creation.
+        pending = (
+            select(models.Invite.id)
+            .where(
+                models.Invite.email == email,
+                models.Invite.role == "admin",
+                *invite_valid_clauses(now),
+            )
+            .exists()
+        )
+        stmt = insert(models.Invite).from_select(
+            ["email", "token_hash", "role", "created_by", "expires_at", "created_at"],
+            select(
+                literal(email),
+                literal(token_hash),
+                literal("admin"),
+                null(),
+                literal(expires_at, UTCDateTime()),
+                literal(now, UTCDateTime()),
+            ).where(~pending),
+        )
+        result = await db.execute(stmt)
+        if int(result.rowcount) == 0:  # type: ignore[attr-defined]
+            logger.info(
+                "Bootstrap admin invite for %s is already pending"
+                " — if its URL is lost, revoke it ('snore user invite-revoke %s')"
+                " and restart to mint a new one",
+                email,
+                email,
+            )
+            return None
+
+    return raw
+
+
+async def _startup_ensure_bootstrap_admin() -> None:
+    """Auto-create a bootstrap admin invite when no active admin user exists.
+
+    No-op when ``SNORE_BOOTSTRAP_ADMIN_EMAIL`` is unset.  Idempotent: returns
+    early if an active admin user exists, a user row already exists for the
+    bootstrap address, or a valid pending admin invite for that address is
+    already present.  Failures are logged as warnings and never prevent startup.
+
+    The redemption URL (containing the one-time token) is deliberately written
+    to the server log as the delivery channel; the invite is single-use with a
+    7-day expiry, so logs should be treated as sensitive until it is redeemed.
+    """
+    from snore.api.config import get_config  # noqa: PLC0415
+
+    cfg = get_config()
+    if cfg.bootstrap_admin_email is None:
+        return
+
+    email = cfg.bootstrap_admin_email
+    raw: str | None = None
+    try:
+        raw = await _create_bootstrap_admin_invite(email)
+    except Exception:
+        logger.warning(
+            "Bootstrap admin invite creation failed"
+            " — create one manually with: snore user invite %s --role admin",
+            email,
+            exc_info=True,
+        )
+
+    if raw is not None:
+        base = cfg.public_base_url.rstrip("/") if cfg.public_base_url else ""
+        invite_url = f"{base}/invite#{raw}" if base else f"/invite#{raw}"
+        # WARNING, not INFO: the URL carries a live one-time admin credential
+        # and needs operator action — pipelines that restrict WARN+ streams
+        # should treat it as sensitive until redeemed.
+        logger.warning(
+            "Bootstrap admin invite created for %s — redeem at: %s",
+            email,
+            invite_url,
         )
 
 

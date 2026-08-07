@@ -891,7 +891,7 @@ class TestP2UploadLifecycle:
 
     @pytest.mark.asyncio
     async def test_upload_cancel_drives_real_handler(
-        self, async_db_session, db_session, monkeypatch
+        self, async_db_session, db_session, monkeypatch, tmp_path
     ):
         """Cancel a real POST /api/v1/import mid-copy via httpx.AsyncClient.
 
@@ -938,8 +938,22 @@ class TestP2UploadLifecycle:
         monkeypatch.setattr(import_mod, "_copy_chunked", blocking_copy)
         monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
+        # Redirect snore-upload-* dirs to test-private tmp_path (xdist-safe):
+        # asserting on the shared global tempdir races with upload tests running
+        # concurrently in other workers.
+        original_mkdtemp = tempfile.mkdtemp
+
+        def redirected_mkdtemp(
+            prefix: str = "tmp", suffix: str = "", dir: str | None = None
+        ) -> str:
+            if prefix == "snore-upload-":
+                return original_mkdtemp(prefix=prefix, suffix=suffix, dir=str(tmp_path))
+            return original_mkdtemp(prefix=prefix, suffix=suffix, dir=dir)
+
+        monkeypatch.setattr(tempfile, "mkdtemp", redirected_mkdtemp)
+
         count_before = jobs_mod._global_count
-        tmpdir_before = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+        tmpdir_before = set(glob.glob(f"{tmp_path}/snore-upload-*"))
 
         app = create_app()
 
@@ -1026,14 +1040,14 @@ class TestP2UploadLifecycle:
 
             # Poll until finally-cleanup finishes (max 2s, 20 × 0.1s).
             for _ in range(20):
-                remaining = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+                remaining = set(glob.glob(f"{tmp_path}/snore-upload-*"))
                 if not (remaining - tmpdir_before):
                     break
                 await asyncio.sleep(0.1)
 
         app.dependency_overrides.clear()
 
-        tmpdir_after = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+        tmpdir_after = set(glob.glob(f"{tmp_path}/snore-upload-*"))
         leaked = tmpdir_after - tmpdir_before
         assert not leaked, (
             f"snore-upload-* leaked after CancelledError: {leaked}\n"

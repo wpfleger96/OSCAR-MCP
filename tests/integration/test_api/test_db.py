@@ -1,5 +1,11 @@
+import uuid
+
 from datetime import datetime
 from unittest.mock import patch
+
+from snore.auth.actor import ActorContext, AuthMode, Role
+from snore.database import models
+from tests.helpers.api_client import make_test_client
 
 
 def _patch_target(temp_db: object) -> object:
@@ -8,6 +14,15 @@ def _patch_target(temp_db: object) -> object:
 
     target = DatabaseTarget.from_url(str(temp_db))
     return patch("snore.api.routers.db._get_target", return_value=target)
+
+
+def _member_actor(user_id: int) -> ActorContext:
+    return ActorContext(
+        user_id=user_id,
+        profile_id=999,
+        role=Role.MEMBER,
+        mode=AuthMode.LOCAL,
+    )
 
 
 class TestDbStats:
@@ -34,6 +49,23 @@ class TestDbStats:
         data = response.json()
         assert data["device_count"] >= 1
         assert data["session_count"] >= 1
+
+    def test_admin_gets_200(self, api_client, temp_db):
+        with _patch_target(temp_db):
+            response = api_client.get("/api/v1/db/stats")
+        assert response.status_code == 200
+
+    def test_member_gets_403(self, async_db_session, db_session, temp_db):
+        member = models.User(
+            canonical_email=f"member_{uuid.uuid4().hex[:8]}@test.local",
+            role="member",
+        )
+        db_session.add(member)
+        db_session.flush()
+        client = make_test_client(async_db_session, actor=_member_actor(member.id))
+        with _patch_target(temp_db):
+            response = client.get("/api/v1/db/stats")
+        assert response.status_code == 403
 
 
 class TestDbVacuum:

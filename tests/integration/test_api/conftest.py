@@ -1,6 +1,7 @@
 import pytest
 
 import snore.api.import_jobs as _import_job_store
+import snore.auth.lockout as _lockout
 
 from tests.helpers.api_client import make_test_client
 
@@ -40,6 +41,20 @@ def reset_import_job_store():
     _import_job_store._per_user_count.clear()
     _import_job_store._global_count = 0
     _import_job_store._import_queue.clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_auth_throttle_stores():
+    """Clear the module-global rate-limit and lockout stores before each test.
+
+    All three are per-process singletons keyed by client IP (or email + IP),
+    and every test request presents the same client IP — so auth-endpoint
+    traffic from earlier tests in the same worker would otherwise count
+    against later tests' sliding windows and lock-out counters.
+    """
+    _lockout.get_rate_limit_store()._entries.clear()
+    _lockout.get_lockout_store()._entries.clear()
+    _lockout.get_invite_lockout_store()._entries.clear()
 
 
 @pytest.fixture

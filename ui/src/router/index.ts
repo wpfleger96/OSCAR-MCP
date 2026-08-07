@@ -122,6 +122,7 @@ const router = createRouter({
             path: '/database',
             name: 'database',
             component: () => import('@/views/DatabaseView.vue'),
+            meta: { requiresAdmin: true },
         },
         {
             path: '/validation',

@@ -20,6 +20,7 @@ Security controls
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -142,6 +143,7 @@ async def login(
         user_row.password_hash = new_hash
 
     lockout.record_success(canonical, ip)
+    user_row.last_login_at = datetime.now(UTC)
 
     # Opportunistic cleanup of expired/consumed oauth_attempts rows.
     await opportunistic_purge_oauth_attempts(db)
@@ -218,6 +220,7 @@ async def demo_login(
         active_profile_id=demo_user.default_profile_id,
         mode=cfg.auth_mode,
     )
+    demo_user.last_login_at = datetime.now(UTC)
 
     response = JSONResponse(
         content={"message": "Logged in as demo"},
