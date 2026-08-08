@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  # Auto-release is disabled for this repo. Trigger a release from the Actions tab.
   workflow_dispatch:
 
 permissions:
