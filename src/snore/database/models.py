@@ -806,10 +806,11 @@ class Breath(Base):
 
 
 class ImportJobRecord(Base):
-    """Persisted record of a terminal import job (succeeded/failed/cancelled).
+    """Persisted record of an import job, updated at each state transition.
 
-    Written once by the import worker thread when a job reaches terminal state.
-    Survives server restarts and the in-memory reaper TTL.
+    Written at PENDING, RUNNING, and terminal states so the job survives server
+    restarts.  Orphaned non-terminal rows are marked failed at startup by
+    ``_recover_orphaned_import_jobs``.
     """
 
     __tablename__ = "import_job_records"
@@ -829,13 +830,15 @@ class ImportJobRecord(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     analysis_queued: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
-    finished_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    # None for non-terminal states; set when the job reaches terminal state.
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
     __table_args__ = (
         Index("ix_import_job_records_owner_user_id", "owner_user_id"),
         Index("ix_import_job_records_user_created", "owner_user_id", "created_at"),
         CheckConstraint(
-            "state IN ('succeeded','failed','cancelled')",
+            "state IN ('pending_upload','pending','running','succeeded','failed','cancelled')",
             name="chk_import_job_record_state",
         ),
     )

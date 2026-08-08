@@ -1,6 +1,6 @@
 import json
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -837,6 +837,7 @@ class TestPipelineJobsListAPI:
                     analysis_queued=job.analysis_queued,
                     created_at=job.created_at_wall,
                     finished_at=job.finished_at_wall,
+                    updated_at=datetime.now(UTC),
                 )
             )
             db_session.commit()
@@ -894,6 +895,7 @@ class TestPipelineJobsListAPI:
                     analysis_queued=None,
                     created_at=job.created_at_wall,
                     finished_at=job.finished_at_wall,
+                    updated_at=datetime.now(UTC),
                 )
             )
             db_session.commit()
@@ -936,6 +938,7 @@ class TestPipelineJobsListAPI:
                     analysis_queued=None,
                     created_at=job.created_at_wall,
                     finished_at=job.finished_at_wall,
+                    updated_at=datetime.now(UTC),
                 )
             )
             db_session.commit()
@@ -951,3 +954,49 @@ class TestPipelineJobsListAPI:
         finally:
             job.cleanup_files()
             job.release_capacity()
+
+    def test_non_terminal_db_rows_excluded_from_list(self, api_client, db_session):
+        """Non-terminal ImportJobRecord rows with no in-memory counterpart are hidden.
+
+        Startup recovery should clear these, but if recovery is skipped (e.g. DB
+        locked at boot), a non-terminal DB row must not appear as a phantom
+        forever-running job in the jobs list.  Only terminal DB history is shown.
+        """
+        import uuid
+
+        from snore.database.models import ImportJobRecord
+
+        for state in ["pending_upload", "pending", "running"]:
+            db_session.add(
+                ImportJobRecord(
+                    job_id=uuid.uuid4().hex,
+                    job_type="upload",
+                    owner_user_id=None,
+                    target_profile_id=None,
+                    state=state,
+                    file_count=0,
+                    sessions_imported=None,
+                    import_result_json=None,
+                    error_message=None,
+                    analysis_queued=None,
+                    created_at=datetime.now(UTC),
+                    finished_at=None,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+        db_session.commit()
+
+        response = api_client.get("/api/v1/import/jobs")
+        assert response.status_code == 200
+        jobs = response.json()["jobs"]
+
+        states_returned = {j["state"] for j in jobs}
+        assert "pending_upload" not in states_returned, (
+            "Non-terminal DB row (pending_upload) must not appear as phantom"
+        )
+        assert "pending" not in states_returned, (
+            "Non-terminal DB row (pending) must not appear as phantom"
+        )
+        assert "running" not in states_returned, (
+            "Non-terminal DB row (running) must not appear as phantom"
+        )

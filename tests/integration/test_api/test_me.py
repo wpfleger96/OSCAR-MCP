@@ -980,6 +980,7 @@ class TestDeleteData:
                 file_count=1,
                 created_at=now,
                 finished_at=now,
+                updated_at=now,
             )
 
         db_session.add(_job(user_a.id, profile_a.id))

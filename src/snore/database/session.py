@@ -281,11 +281,14 @@ def _apply_migrations_sync(sync_url: str) -> None:
     accidentally skip a brand-new migration.  Any failure of the stamp read
     (missing file, missing table, OperationalError) falls through safely.
 
-    **Unstamped-existing-DB guard:** When the database has application tables but
+    **Unstamped-existing-DB path:** When the database has application tables but
     no ``alembic_version`` table (created in zero-migration mode before this
-    migration chain existed), a ``RuntimeError`` is raised with an actionable
-    message rather than letting Alembic replay the full chain onto existing tables
-    and crash with a confusing "table already exists" error.
+    migration chain existed), the DB is stamped at the no-op ``001_baseline``
+    revision and upgraded to head, then ``_sync_additive_schema`` runs to add
+    any model columns/indexes the pre-chain database is missing — migrations
+    only cover schema changes made after the chain was introduced, so the
+    additive sync is what restores earlier drift (e.g. a pre-#200 database
+    missing ``users.google_link_disabled``).
     """
     import sqlite3 as _sqlite3  # noqa: PLC0415
 
@@ -371,12 +374,19 @@ def _apply_migrations_sync(sync_url: str) -> None:
             alembic_command.stamp(alembic_cfg, "head")
             logger.info("Fresh database created and stamped at head")
         elif "alembic_version" not in table_names:
-            raise RuntimeError(
-                "Database has application tables but no Alembic stamp: it was "
-                "created in zero-migration mode before this migration chain existed. "
-                "Stamp it at the appropriate baseline "
-                "(uv run alembic stamp <revision>) or drop and re-import it. "
-                "See src/snore/database/migrations/README."
+            # Existing DB from before the migration chain existed (created in
+            # zero-migration mode via create_all with no Alembic stamp).  Stamp
+            # at the no-op baseline so the subsequent upgrade applies only the
+            # schema changes that are genuinely missing, rather than replaying
+            # the full chain onto already-existing tables.  Migrations only
+            # cover post-chain schema changes, so additive sync must run once
+            # here to restore pre-chain drift (missing columns/indexes).
+            alembic_command.stamp(alembic_cfg, "001_baseline")
+            alembic_command.upgrade(alembic_cfg, "head")
+            _sync_additive_schema(Base.metadata, engine)
+            logger.info(
+                "Stamped existing DB at 001_baseline, upgraded to head, and"
+                " synced pre-chain schema drift"
             )
         else:
             alembic_command.upgrade(alembic_cfg, "head")

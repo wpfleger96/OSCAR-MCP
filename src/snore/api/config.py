@@ -58,6 +58,12 @@ Environment variables
     analysis job.  Writes are serialized by the write gate; this controls the
     read/compute concurrency.  Default: 4.
 
+``SNORE_COMPUTE_MAX_WORKERS``
+    Number of worker *processes* in the shared CPU process pool used for
+    device-data parsing and analysis compute.  Each worker carries a full
+    Python + NumPy runtime (~75-150 MB RSS); on machines with limited RAM set
+    this to ``1``.  Default: ``max(1, cpu_count - 1)``.
+
 ``SNORE_BOOTSTRAP_ADMIN_EMAIL``
     Optional.  Multiuser mode only.  When no active admin user exists at
     startup, automatically creates a 7-day admin invite for this address and
@@ -137,6 +143,10 @@ class AppConfig:
     max_jobs_global: int  # Global active-job cap; default 10.
     analysis_max_workers: int  # Per-analysis-job session concurrency; default 4.
     # Bootstrap admin invite: normalized email or None when env var is absent/empty.
+    # Fields with defaults must come after fields without defaults.
+    compute_max_workers: int = max(
+        1, (os.cpu_count() or 2) - 1
+    )  # Shared CPU process pool size.
     bootstrap_admin_email: str | None = None
 
     @property
@@ -260,6 +270,9 @@ def load_config(
     max_jobs_per_user = _parse_positive_int("SNORE_MAX_JOBS_PER_USER", 3)
     max_jobs_global = _parse_positive_int("SNORE_MAX_JOBS_GLOBAL", 10)
     analysis_max_workers = _parse_positive_int("SNORE_ANALYSIS_MAX_WORKERS", 4)
+    compute_max_workers = _parse_positive_int(
+        "SNORE_COMPUTE_MAX_WORKERS", max(1, (os.cpu_count() or 2) - 1)
+    )
 
     raw_bootstrap_email = os.environ.get("SNORE_BOOTSTRAP_ADMIN_EMAIL", "").strip()
     bootstrap_admin_email = (
@@ -336,6 +349,7 @@ def load_config(
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
         analysis_max_workers=analysis_max_workers,
+        compute_max_workers=compute_max_workers,
         bootstrap_admin_email=bootstrap_admin_email,
     )
 

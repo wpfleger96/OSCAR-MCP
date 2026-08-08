@@ -294,6 +294,9 @@ async def import_files(
                         detail="Batch already committed",
                     )
                 _is_continuation = True
+                # Update activity timestamp so the stale-upload reaper doesn't
+                # reclaim this job while a slow continuation chunk is in flight.
+                job.touch()
             else:
                 # New upload — reserve an admission slot.
                 job = reserve_slot(actor.user_id)
@@ -375,6 +378,8 @@ async def import_files(
                         ),
                     ) from None
                 await upload.close()
+                # Refresh activity so the stale-upload reaper sees a live upload.
+                job.touch()
 
         if not batch_final:
             # More chunks coming — keep the job in PENDING_UPLOAD.
@@ -409,6 +414,16 @@ async def import_files(
 
     profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(job.target_profile_id)
 
+    # Persist PENDING state BEFORE enqueuing so startup recovery always sees the
+    # row, even if the server crashes between the write and the worker picking it
+    # up.  Writing first also prevents the worker's RUNNING upsert from racing
+    # ahead of this PENDING write and leaving the DB in a stale state.
+    try:
+        from snore.api.import_worker import _upsert_job_record  # noqa: PLC0415
+
+        await _upsert_job_record(job)
+    except Exception:
+        logger.exception("Failed to persist PENDING state for job %s", job.job_id)
     # Enqueue for serial execution — /progress is observer-only.
     enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
@@ -439,6 +454,12 @@ async def import_from_path(
 
     profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(resolved_profile_id)
 
+    try:
+        from snore.api.import_worker import _upsert_job_record  # noqa: PLC0415
+
+        await _upsert_job_record(job)
+    except Exception:
+        logger.exception("Failed to persist PENDING state for job %s", job.job_id)
     enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
 
@@ -569,14 +590,20 @@ async def list_pipeline_jobs(
             )
         )
 
-    # Historical records from the database (persisted terminal jobs).
+    # Historical records from the database — terminal states only.  Non-terminal
+    # rows (pending_upload, pending, running) represent in-flight jobs whose
+    # live state lives in memory; if they appear here without an in-memory
+    # counterpart they are orphans that startup recovery should have cleared.
+    # Filtering to terminal states keeps phantom "forever running" rows out of
+    # the UI when recovery is skipped or encounters a locked DB at boot.
     stmt = (
         select(models.ImportJobRecord)
         .where(
             or_(
                 models.ImportJobRecord.owner_user_id == actor.user_id,
                 models.ImportJobRecord.owner_user_id.is_(None),
-            )
+            ),
+            models.ImportJobRecord.state.in_(["succeeded", "failed", "cancelled"]),
         )
         .order_by(models.ImportJobRecord.created_at.desc())
         .limit(50)
@@ -602,7 +629,9 @@ async def list_pipeline_jobs(
                 stage=stage,
                 file_count=rec.file_count,
                 created_at=rec.created_at.isoformat(),
-                finished_at=rec.finished_at.isoformat(),
+                finished_at=rec.finished_at.isoformat()
+                if rec.finished_at is not None
+                else None,
                 progress_message=None,
                 sessions_imported=rec.sessions_imported,
                 import_result=import_result_summary,

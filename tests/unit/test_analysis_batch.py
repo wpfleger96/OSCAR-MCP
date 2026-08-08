@@ -398,9 +398,10 @@ class TestBatchCoordinatorHandle:
         Exact deterministic boundary: dispatched == max_workers == 2 (both
         from the first window), cancelled == n_total - max_workers == 18.
         """
-        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
         import unittest.mock  # noqa: PLC0415
 
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
         from contextlib import asynccontextmanager  # noqa: PLC0415
 
         from snore.services.analysis_facade import (  # noqa: PLC0415
@@ -412,7 +413,7 @@ class TestBatchCoordinatorHandle:
         coord = BatchAnalysisCoordinator()
 
         compute_calls: list[int] = []
-        compute_lock = asyncio.Lock()
+        compute_lock = threading.Lock()
 
         # Mock session_scope so _run_one never touches the real DB.
         mock_raw = unittest.mock.MagicMock()
@@ -431,42 +432,45 @@ class TestBatchCoordinatorHandle:
             return_value=mock_raw
         )
 
-        async def instrumented_to_thread(func, *args, **kwargs):
-            # _compute_only(raw) is the call; track that it fires.
-            async with compute_lock:
+        def instrumented_compute(raw):
+            # _compute_session_in_process(raw) is the call; track that it fires.
+            with compute_lock:
                 compute_calls.append(len(compute_calls) + 1)
-                if len(compute_calls) >= max_workers:
-                    pass  # signal tracked by count
-            return unittest.mock.MagicMock()  # mock AnalysisResult
+            return unittest.mock.MagicMock()  # mock AnalysisComputation
 
-        with (
-            unittest.mock.patch(
-                "snore.database.session.session_scope", mock_session_scope
-            ),
-            unittest.mock.patch(
-                "snore.analysis.service.AnalysisService",
-                return_value=mock_svc,
-            ),
-            unittest.mock.patch(
-                "asyncio.to_thread", side_effect=instrumented_to_thread
-            ),
-        ):
-            # progress_callback triggers cancel on the very first completion.
-            # This fires before _fill_window can pull any more sessions, so the
-            # exact boundary is: dispatched == max_workers (first window only),
-            # cancelled == n_total - max_workers.
-            def on_progress(completed: int, total: int | None) -> None:
-                if completed >= 1:
-                    coord.cancel()
+        with ThreadPoolExecutor(max_workers=max_workers) as _pool:
+            with (
+                unittest.mock.patch(
+                    "snore.database.session.session_scope", mock_session_scope
+                ),
+                unittest.mock.patch(
+                    "snore.analysis.service.AnalysisService",
+                    return_value=mock_svc,
+                ),
+                unittest.mock.patch(
+                    "snore.utils.process_pool.get_pool", return_value=_pool
+                ),
+                unittest.mock.patch(
+                    "snore.analysis.service._compute_session_in_process",
+                    side_effect=instrumented_compute,
+                ),
+            ):
+                # progress_callback triggers cancel on the very first completion.
+                # This fires before _fill_window can pull any more sessions, so the
+                # exact boundary is: dispatched == max_workers (first window only),
+                # cancelled == n_total - max_workers.
+                def on_progress(completed: int, total: int | None) -> None:
+                    if completed >= 1:
+                        coord.cancel()
 
-            pairs = [(i, None) for i in range(1, n_total + 1)]
-            result = await coord.submit(
-                session_pairs=pairs,
-                profile_id=1,
-                store_results=False,
-                max_workers=max_workers,
-                progress_callback=on_progress,
-            )
+                pairs = [(i, None) for i in range(1, n_total + 1)]
+                result = await coord.submit(
+                    session_pairs=pairs,
+                    profile_id=1,
+                    store_results=False,
+                    max_workers=max_workers,
+                    progress_callback=on_progress,
+                )
 
         # 1. total == matched_total (always).
         assert result.total == n_total, (
@@ -498,9 +502,10 @@ class TestBatchCoordinatorHandle:
         any checkpoint — entries are pruned as tasks complete so the
         coordinator's retained metadata stays window-bounded (O(max_workers)).
         """
-        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
         import unittest.mock  # noqa: PLC0415
 
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
         from contextlib import asynccontextmanager  # noqa: PLC0415
 
         from snore.services.analysis_facade import (  # noqa: PLC0415
@@ -514,7 +519,7 @@ class TestBatchCoordinatorHandle:
         peak_in_flight: list[int] = []
         peak_session_dates: list[int] = []
         in_flight = 0
-        in_flight_lock = asyncio.Lock()
+        in_flight_lock = threading.Lock()
 
         # Mock session_scope and AnalysisService so _run_one never touches the DB.
         mock_raw = unittest.mock.MagicMock()
@@ -527,35 +532,41 @@ class TestBatchCoordinatorHandle:
         async def mock_session_scope(**kwargs):
             yield unittest.mock.AsyncMock()
 
-        async def counting_to_thread(func, *args, **kwargs):
+        def counting_compute(raw):
             nonlocal in_flight
-            async with in_flight_lock:
+            with in_flight_lock:
                 in_flight += 1
                 peak_in_flight.append(in_flight)
                 # Snapshot session_dates size at each enqueue — must be window-bounded.
                 peak_session_dates.append(len(coord.session_dates))
-            await asyncio.sleep(0)  # yield to let other tasks start
-            async with in_flight_lock:
+            with in_flight_lock:
                 in_flight -= 1
-            return unittest.mock.MagicMock()  # mock AnalysisResult
+            return unittest.mock.MagicMock()  # mock AnalysisComputation
 
-        with (
-            unittest.mock.patch(
-                "snore.database.session.session_scope", mock_session_scope
-            ),
-            unittest.mock.patch(
-                "snore.analysis.service.AnalysisService",
-                return_value=mock_svc,
-            ),
-            unittest.mock.patch("asyncio.to_thread", side_effect=counting_to_thread),
-        ):
-            pairs = [(i, None) for i in range(1, n_total + 1)]
-            result = await coord.submit(
-                session_pairs=pairs,
-                profile_id=1,
-                store_results=False,
-                max_workers=max_workers,
-            )
+        with ThreadPoolExecutor(max_workers=max_workers * 2) as _pool:
+            with (
+                unittest.mock.patch(
+                    "snore.database.session.session_scope", mock_session_scope
+                ),
+                unittest.mock.patch(
+                    "snore.analysis.service.AnalysisService",
+                    return_value=mock_svc,
+                ),
+                unittest.mock.patch(
+                    "snore.utils.process_pool.get_pool", return_value=_pool
+                ),
+                unittest.mock.patch(
+                    "snore.analysis.service._compute_session_in_process",
+                    side_effect=counting_compute,
+                ),
+            ):
+                pairs = [(i, None) for i in range(1, n_total + 1)]
+                result = await coord.submit(
+                    session_pairs=pairs,
+                    profile_id=1,
+                    store_results=False,
+                    max_workers=max_workers,
+                )
 
         assert result.total == n_total
         assert result.successful == n_total

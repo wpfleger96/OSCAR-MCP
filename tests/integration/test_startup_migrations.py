@@ -1,23 +1,24 @@
 """
 Tests for startup database schema-creation behavior in init_database.
 
-Zero-migration contract (pre-1.0)
-----------------------------------
-With an empty ``versions/`` directory, ``_apply_migrations_sync`` manages the
-schema exclusively via ``Base.metadata.create_all`` followed by
-``_sync_additive_schema``.  No ``alembic_version`` table is created on this
-path, and stale stamps from pre-flatten databases are silently ignored.
+Migration-chain contract (post-migration introduction)
+------------------------------------------------------
+With a non-empty ``versions/`` directory, ``_apply_migrations_sync`` manages the
+schema via Alembic.  ``_sync_additive_schema`` remains the safety net for
+pre-chain (unstamped) databases, whose drift is not covered by migration files.
 These tests verify:
 
-- Fresh DB: tables created via create_all; alembic_version NOT stamped.
-- Idempotence: calling init_database twice leaves tables intact with no
-  alembic_version stamp.
-- Stale stamp ignored: a pre-existing alembic_version row does not cause
-  init_database to raise.
+- Fresh DB: tables created via create_all and stamped at head; alembic_version
+  IS present after first init.
+- Idempotence: calling init_database twice is a fast-path no-op; tables and
+  alembic_version remain intact.
+- Existing unstamped DB: a DB created in zero-migration mode (tables exist but
+  no alembic_version) is automatically stamped at 001_baseline and upgraded to
+  head — no manual operator action required.
 - Off-loop: _apply_migrations_sync runs via asyncio.to_thread (never blocks
   the event loop).
-- Additive sync: columns and indexes missing from existing tables are added on
-  the next startup.
+- Additive sync: columns and indexes missing from a pre-chain (unstamped)
+  database are added when it is stamped and upgraded.
 - NOT NULL guard: _sync_additive_schema raises RuntimeError when a new NOT NULL
   column lacks a server_default.
 """
@@ -44,14 +45,13 @@ from snore.database.session import cleanup_database, init_database
 
 
 class TestStartupMigrations:
-    """Verify init_database creates schema correctly in zero-migration mode."""
+    """Verify init_database creates schema correctly."""
 
     async def test_fresh_database(self, tmp_path):
-        """Fresh DB: tables created via create_all; no alembic_version stamp.
+        """Fresh DB: tables created and alembic_version stamped at head.
 
-        In zero-migration mode (empty versions/), schema is managed solely by
-        Base.metadata.create_all.  The alembic_version table must NOT be
-        present on a fresh database.
+        With a migration chain present, the schema is created via create_all
+        and then stamped.  The alembic_version table IS present after first init.
         """
         db_path = str(tmp_path / "fresh.db")
 
@@ -63,7 +63,7 @@ class TestStartupMigrations:
             tables = set(insp.get_table_names())
             assert "sessions" in tables
             assert "statistics" in tables
-            assert "alembic_version" not in tables
+            assert "alembic_version" in tables
         finally:
             engine.dispose()
             await cleanup_database()
@@ -71,8 +71,8 @@ class TestStartupMigrations:
     async def test_idempotent(self, tmp_path):
         """Calling init_database twice on the same DB is a no-op.
 
-        Both calls must succeed and leave core tables present.  No
-        alembic_version stamp is written in zero-migration mode.
+        Both calls must succeed and leave core tables and alembic_version
+        present.  The second call takes the fast-path (stamp matches head).
         """
         db_path = str(tmp_path / "idempotent.db")
 
@@ -86,55 +86,57 @@ class TestStartupMigrations:
             tables = set(insp.get_table_names())
             assert "sessions" in tables
             assert "statistics" in tables
-            assert "alembic_version" not in tables
+            assert "alembic_version" in tables
         finally:
             engine.dispose()
             await cleanup_database()
 
-    async def test_stale_stamp_ignored(self, tmp_path):
-        """A stale alembic_version row is silently ignored in zero-migration mode.
+    async def test_existing_unstamped_db_gets_stamped_and_upgraded(self, tmp_path):
+        """A DB created in zero-migration mode (no alembic_version) is auto-upgraded.
 
-        Zero-migration mode never reads alembic_version, so a leftover row
-        from a pre-flatten database does not cause init_database to raise.
-        Owners drop incompatible DB files manually; no automatic rollback.
+        Simulates the scenario where an operator has a DB that was created by
+        Base.metadata.create_all before this migration chain existed.  The
+        startup path must stamp at 001_baseline and upgrade to head rather than
+        raising an error.
         """
-        db_path = str(tmp_path / "stale.db")
+        db_path = str(tmp_path / "unstamped.db")
 
-        # First init creates the schema.
-        await init_database(db_path)
-        await cleanup_database()
+        # Simulate a DB from zero-migration mode: tables exist, no alembic_version.
+        from snore.database.models import Base
 
-        # Manually create alembic_version with a stale stamp (first init no
-        # longer creates this table in zero-migration mode, so we insert it
-        # ourselves to simulate a DB that carried a pre-flatten stamp).
         engine = create_engine(f"sqlite:///{db_path}")
         try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "CREATE TABLE IF NOT EXISTS alembic_version "
-                        "(version_num VARCHAR(32) NOT NULL)"
-                    )
-                )
-                conn.execute(
-                    text("INSERT INTO alembic_version VALUES ('deadbeef0000')")
-                )
+            Base.metadata.create_all(engine)
+            insp = sa_inspect(engine)
+            assert "sessions" in insp.get_table_names()
+            assert "alembic_version" not in insp.get_table_names()
         finally:
             engine.dispose()
 
-        # Re-init must succeed — zero-migration mode ignores the stale stamp.
+        # Re-init must succeed (no error raised) and stamp the DB.
         await init_database(db_path)
-        await cleanup_database()
+
+        engine2 = create_engine(f"sqlite:///{db_path}")
+        try:
+            insp2 = sa_inspect(engine2)
+            tables = set(insp2.get_table_names())
+            assert "alembic_version" in tables
+            assert "sessions" in tables
+        finally:
+            engine2.dispose()
+            await cleanup_database()
 
     async def test_additive_sync_adds_missing_column_and_index(self, tmp_path):
-        """Additive sync restores columns and indexes absent from existing tables.
+        """Additive sync restores columns and indexes absent from a pre-chain DB.
 
-        Simulates a pre-#200 production DB: a user row is inserted, then
-        ``google_link_disabled`` (NOT NULL, server_default='0') and
-        ``display_name`` (nullable, no default) are dropped along with the
-        ``ix_auth_identities_user_provider`` index.  A second ``init_database``
-        call must restore all three, and the pre-existing row must read
-        ``google_link_disabled = 0`` (server_default backfill by SQLite).
+        Simulates a pre-#200 production DB — which by definition predates the
+        migration chain, so ``alembic_version`` is also dropped: a user row is
+        inserted, then ``google_link_disabled`` (NOT NULL, server_default='0')
+        and ``display_name`` (nullable, no default) are dropped along with the
+        ``ix_auth_identities_user_provider`` index.  The next ``init_database``
+        call routes through the unstamped-existing-DB path (stamp + upgrade +
+        additive sync) and must restore all three, with the pre-existing row
+        reading ``google_link_disabled = 0`` (server_default backfill by SQLite).
         """
         db_path = str(tmp_path / "additive_sync.db")
 
@@ -158,6 +160,9 @@ class TestStartupMigrations:
                 conn.execute(text("ALTER TABLE users DROP COLUMN google_link_disabled"))
                 conn.execute(text("ALTER TABLE users DROP COLUMN display_name"))
                 conn.execute(text("DROP INDEX ix_auth_identities_user_provider"))
+                # A pre-chain DB has no Alembic stamp; dropping it routes the
+                # next init through the unstamped-existing-DB path.
+                conn.execute(text("DROP TABLE alembic_version"))
         finally:
             engine.dispose()
 

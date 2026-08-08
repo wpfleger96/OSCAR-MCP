@@ -65,6 +65,10 @@ logger = logging.getLogger(__name__)
 # How long to retain terminal jobs before the reaper removes them.
 JOB_TTL_SECONDS: float = 600.0
 
+# How long a PENDING_UPLOAD job may be idle (no chunk received) before the
+# reaper treats it as abandoned and releases its admission slot.
+PENDING_UPLOAD_TIMEOUT_SECONDS: float = 1800.0
+
 # Per-user and global admission caps.
 # These are read from the app config at call time so tests can override via env.
 # The module-level defaults mirror config.py's env-var defaults (SNORE_MAX_JOBS_PER_USER=3,
@@ -211,6 +215,12 @@ class ImportJob:
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )
+    # Wall-clock timestamp of last upload activity (initialised to created_at_wall).
+    # Updated by touch() on each continuation chunk to prevent the stale-upload
+    # reaper from reclaiming a slow-but-active upload.
+    _last_activity_wall: datetime = field(
+        default_factory=lambda: datetime.now(UTC), init=False, repr=False
+    )
     # Import-phase durability fields — set after import commits, before analysis.
     # Carried in EVERY terminal payload produced after import_committed=True
     # (success, analysis failure, and cancellation) so that late observers and
@@ -279,6 +289,15 @@ class ImportJob:
         """Record the number of files submitted with this job."""
         with self._lock:
             self._file_count = n
+
+    def touch(self) -> None:
+        """Reset last-activity wall-clock timestamp to now.
+
+        Called on each continuation-chunk receipt to prevent the stale-upload
+        reaper from reclaiming a slow-but-active multi-chunk upload.
+        """
+        with self._lock:
+            self._last_activity_wall = datetime.now(UTC)
 
     @property
     def latest_progress_message(self) -> str | None:
@@ -462,6 +481,44 @@ class ImportJob:
             for ch in observers:
                 ch.put(terminal_msg)
         return True
+
+    def try_cancel_if_stale_upload(self, timeout_seconds: float) -> float | None:
+        """Atomically cancel only if this job is still PENDING_UPLOAD and idle.
+
+        Both the state check and the idle-duration check are performed under a
+        single lock acquisition so a concurrent ``convert_to_pending()`` (final
+        chunk success, client already received HTTP 200) can never be reaped:
+        once the state transitions to PENDING the lock-held state check fails
+        and this method returns None without touching the job.
+
+        Returns the idle duration in seconds when the job was in PENDING_UPLOAD,
+        was idle beyond *timeout_seconds*, and was atomically transitioned to
+        CANCELLED.  Returns None otherwise — including when the job was already
+        CANCELLED or had converted to PENDING before this call ran.
+
+        Returning the idle seconds (computed under the lock) lets the caller log
+        an accurate duration without re-reading ``_last_activity_wall`` outside
+        the lock.
+        """
+        observers: list[ObserverChannel] = []
+        terminal_msg: dict[str, Any]
+        with self._lock:
+            if self._state != JobState.PENDING_UPLOAD:
+                return None
+            idle = (datetime.now(UTC) - self._last_activity_wall).total_seconds()
+            if idle <= timeout_seconds:
+                return None
+            # Both conditions satisfied — perform cancel transition atomically.
+            self._cancel_flag = True
+            self._state = JobState.CANCELLED
+            terminal_msg = self._make_cancel_payload()
+            self._terminal_msg = terminal_msg
+            self._terminal_at = time.monotonic()
+            self._finished_at_wall = datetime.now(UTC)
+            observers = list(self._observers)
+        for ch in observers:
+            ch.put(terminal_msg)
+        return idle
 
     def _finish(
         self, *, succeeded: bool, terminal_msg: dict[str, Any] | None = None
@@ -845,14 +902,49 @@ def start_import_worker(
     return t, stop_event
 
 
+def _reap_stale_pending_uploads() -> None:
+    """Cancel and remove PENDING_UPLOAD jobs that have exceeded the idle timeout.
+
+    A PENDING_UPLOAD job is stale when no chunk has arrived for
+    ``PENDING_UPLOAD_TIMEOUT_SECONDS``.  Each candidate is evaluated with
+    ``try_cancel_if_stale_upload``, which atomically checks *both* state and
+    idle duration under the job lock — this closes the race where a job's
+    final chunk arrives and ``convert_to_pending()`` succeeds between the
+    reaper's snapshot and its cancel call.  Only jobs for which the method
+    returns a float (idle seconds, computed under the lock) are removed and
+    cleaned up; None means "not stale" or "wrong state".
+
+    Ordering mirrors ``shutdown()``: cancel → remove → cleanup_files →
+    release_capacity (capacity is released last so the slot owns the disk it
+    admitted throughout cleanup).
+    """
+    with _lock:
+        candidates = list(_jobs.values())
+    for job in candidates:
+        idle = job.try_cancel_if_stale_upload(PENDING_UPLOAD_TIMEOUT_SECONDS)
+        if idle is None:
+            continue
+        logger.info("Reaped stale PENDING_UPLOAD job %s (idle %.0fs)", job.job_id, idle)
+        with _lock:
+            _jobs.pop(job.job_id, None)
+        job.cleanup_files()
+        job.release_capacity()
+
+
 def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Event]:
-    """Start a background daemon thread that reaps terminal jobs every *interval* seconds."""
+    """Start a background daemon thread that reaps jobs every *interval* seconds.
+
+    Each iteration runs both the terminal-job TTL reaper and the stale
+    PENDING_UPLOAD reaper so abandoned multi-chunk uploads release their
+    admission slots promptly.
+    """
     stop_event = threading.Event()
 
     def _reap_loop() -> None:
         while not stop_event.wait(timeout=interval):
             try:
                 _reap_terminal()
+                _reap_stale_pending_uploads()
             except Exception:
                 logger.exception("Reaper iteration failed")
 

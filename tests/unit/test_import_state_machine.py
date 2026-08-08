@@ -21,6 +21,7 @@ import shutil
 import threading
 import time
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -164,6 +165,15 @@ class TestImportJobStateMachine:
         job.try_start()
         result = job.try_start()
         assert result is False
+
+    def test_touch_updates_last_activity(self, tmp_path):
+        """touch() advances _last_activity_wall to the current time."""
+        job = _make_upload_job(tmp_path)
+        # Backdate the activity timestamp to an hour ago.
+        old_activity = datetime.now(UTC) - timedelta(hours=1)
+        job._last_activity_wall = old_activity
+        job.touch()
+        assert job._last_activity_wall > old_activity
 
     def test_finish_running_transitions_to_succeeded(self, tmp_path):
         """_finish(succeeded=True) moves a RUNNING job to SUCCEEDED."""
