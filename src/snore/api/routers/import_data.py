@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
 import shutil
@@ -24,9 +23,7 @@ from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
     JobState,
-    JobType,
     cancel_job,
-    create_job,
     enqueue_for_execution,
     get_job,
     list_jobs,
@@ -42,8 +39,7 @@ from snore.api.schemas import (
 )
 from snore.auth.actor import ActorContext
 from snore.database import models
-from snore.services.import_service import ImportService, safe_relative_path
-from snore.services.schemas import ImportSource
+from snore.services.import_service import safe_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +79,7 @@ class _ByteCeilingReceive:
 
 router = APIRouter()
 
-# Routes that accept server-local filesystem paths.  These are registered
-# ONLY in local auth mode — in multiuser the loopback-peer check is
-# worthless behind Cloudflare, so we structurally exclude them.
+# Kept as an empty router for app.py backward compatibility (conditionally included in non-multiuser mode).
 local_only_router = APIRouter()
 
 # Chunk size for the off-event-loop file copy.
@@ -118,15 +112,6 @@ def _copy_chunked(src_file: IO[bytes], dest: Path, max_bytes: int) -> None:
         raise
 
 
-class DetectRequest(BaseModel):
-    path: str
-
-
-class ImportPathRequest(BaseModel):
-    sources: list[ImportSource]
-    profile_id: int | None = None
-
-
 class JobResponse(BaseModel):
     job_id: str
 
@@ -145,22 +130,6 @@ def _get_upload_limits() -> tuple[int, int, int]:
         return cfg.max_upload_bytes, cfg.max_upload_files, cfg.max_file_bytes
     except Exception:
         return 2 * 1024 * 1024 * 1024, 10_000, 256 * 1024 * 1024
-
-
-def _require_localhost(request: Request) -> None:
-    # is_loopback covers 127.0.0.0/8, ::1, and IPv4-mapped ::ffff:127.0.0.1
-    # (seen when uvicorn binds dual-stack).
-    client_host = request.client.host if request.client else None
-    try:
-        is_local = (
-            client_host is not None and ipaddress.ip_address(client_host).is_loopback
-        )
-    except ValueError:
-        is_local = False
-    if not is_local:
-        raise HTTPException(
-            status_code=403, detail="Filesystem access restricted to localhost"
-        )
 
 
 async def _resolve_profile_id(
@@ -192,13 +161,6 @@ async def _resolve_profile_id(
             raise HTTPException(status_code=403, detail="Profile not owned by user")
         return requested_id
     return actor.profile_id
-
-
-@local_only_router.post("/detect", response_model=list[ImportSource])
-def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
-    _require_localhost(request)
-    service = ImportService()
-    return service.detect_sources(Path(body.path))
 
 
 @router.post(
@@ -425,41 +387,6 @@ async def import_files(
     except Exception:
         logger.exception("Failed to persist PENDING state for job %s", job.job_id)
     # Enqueue for serial execution — /progress is observer-only.
-    enqueue_for_execution(job, profile_raw_root)
-    return JobResponse(job_id=job.job_id)
-
-
-@local_only_router.post("/path", response_model=JobResponse, status_code=202)
-async def import_from_path(
-    body: ImportPathRequest,
-    request: Request,
-    actor: RequireWritable,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> JobResponse:
-    _require_localhost(request)
-
-    resolved_profile_id = await _resolve_profile_id(db, actor, body.profile_id)
-
-    try:
-        job = create_job(
-            JobType.PATH, owner_user_id=actor.user_id, sources=body.sources
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=429, detail="Too many active imports.") from exc
-
-    job.target_profile_id = resolved_profile_id
-    job.set_file_count(len(body.sources))
-
-    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
-
-    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(resolved_profile_id)
-
-    try:
-        from snore.api.import_worker import _upsert_job_record  # noqa: PLC0415
-
-        await _upsert_job_record(job)
-    except Exception:
-        logger.exception("Failed to persist PENDING state for job %s", job.job_id)
     enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
 

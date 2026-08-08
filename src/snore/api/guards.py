@@ -17,9 +17,6 @@ Auth classification for ``/api/v1/*`` routes:
 - **Public routes** (no auth): ``/api/v1/auth/*`` (login, logout, status,
   invite lookup/redeem).  These are intentionally unauthenticated.
 
-- **Local-only routes** (not registered in multiuser): ``/import/detect``,
-  ``/import/path``.
-
 ``require_auth``
     Returns the ``ActorContext`` for the request.  Raises 401 if the
     middleware did not resolve one (unauthenticated in multiuser mode or
@@ -32,20 +29,16 @@ Auth classification for ``/api/v1/*`` routes:
 ``require_admin``
     Extends ``require_auth``: additionally raises 403 if the actor is not
     admin.  Use for account/invite lifecycle and maintenance commands.
-
-``require_local_only``
-    Raises 403 in multiuser mode.  Registered only for local-mode-only routes
-    such as ``/import/detect`` and ``/import/path``.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 
 from snore.api.deps import get_actor
-from snore.auth.actor import ActorContext, AuthMode
+from snore.auth.actor import ActorContext
 
 
 def require_auth(actor: Annotated[ActorContext, Depends(get_actor)]) -> ActorContext:
@@ -78,20 +71,6 @@ def require_admin(
     if not actor.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     return actor
-
-
-def require_local_only(request: Request) -> None:
-    """Require local auth mode; raise 403 in multiuser mode.
-
-    Used for server-path import routes that must not exist in multiuser.
-    """
-    from snore.api.config import get_config  # noqa: PLC0415
-
-    if get_config().auth_mode is AuthMode.MULTIUSER:
-        raise HTTPException(
-            status_code=403,
-            detail="Server-path import is not available in multiuser mode",
-        )
 
 
 RequireAuth = Annotated[ActorContext, Depends(require_auth)]

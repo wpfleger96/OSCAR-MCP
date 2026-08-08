@@ -92,118 +92,25 @@
 
         <!-- Active / recent import jobs -->
         <ImportJobsPanel :jobs="importJobs" @cancel="handleCancelImportJob" />
-
-        <!-- Server path section — local mode on localhost only; the route is not
-             registered in multiuser mode and the server enforces 403 otherwise -->
-        <details v-if="isLocalhost && isLocal" class="path-section">
-            <summary class="path-summary">Import from server path (localhost)</summary>
-            <div class="path-content">
-                <!-- idle / detecting: path input -->
-                <template v-if="pathPhase === 'idle' || pathPhase === 'detecting'">
-                    <div class="path-row">
-                        <input
-                            v-model="sourcePath"
-                            type="text"
-                            placeholder="/mnt/sd-card"
-                            class="path-input"
-                            @keydown.enter="handleDetect"
-                        />
-                        <Button
-                            :disabled="!sourcePath || pathPhase === 'detecting'"
-                            @click="handleDetect"
-                        >
-                            <Loader2
-                                v-if="pathPhase === 'detecting'"
-                                class="mr-2 h-4 w-4 animate-spin"
-                            />
-                            Detect Sources
-                        </Button>
-                    </div>
-                    <p v-if="detectError" class="error-text">{{ detectError }}</p>
-                    <p v-if="noSourcesDetected" class="path-no-sources">
-                        No CPAP data sources found at that path.
-                    </p>
-                </template>
-
-                <!-- detected / importing / error: source cards with checkboxes -->
-                <template
-                    v-else-if="
-                        pathPhase === 'detected' ||
-                        pathPhase === 'importing' ||
-                        pathPhase === 'error'
-                    "
-                >
-                    <div class="detected-sources">
-                        <label
-                            v-for="(src, i) in detectedSources"
-                            :key="i"
-                            class="source-card source-card-selectable"
-                            :class="{ 'source-card-checked': selectedSources.has(i) }"
-                        >
-                            <input
-                                type="checkbox"
-                                :checked="selectedSources.has(i)"
-                                class="source-checkbox"
-                                @change="toggleSource(i)"
-                            />
-                            <div class="source-card-body">
-                                <div class="source-parser">{{ src.parser_name }}</div>
-                                <div v-if="src.device_serial" class="source-meta">
-                                    Serial: {{ src.device_serial }}
-                                </div>
-                                <div v-if="src.data_root" class="source-meta">
-                                    Data root: {{ src.data_root }}
-                                </div>
-                                <div class="source-meta source-path">{{ src.root_path }}</div>
-                            </div>
-                        </label>
-                    </div>
-                    <p v-if="pathImportError" class="error-text">{{ pathImportError }}</p>
-                    <div class="card-actions">
-                        <Button variant="outline" @click="resetPath">Change path</Button>
-                        <Button
-                            :disabled="selectedSources.size === 0 || pathPhase === 'importing'"
-                            @click="handlePathImport"
-                        >
-                            <Loader2
-                                v-if="pathPhase === 'importing'"
-                                class="mr-2 h-4 w-4 animate-spin"
-                            />
-                            Import Selected ({{ selectedSources.size }})
-                        </Button>
-                    </div>
-                </template>
-            </div>
-        </details>
     </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import type { ImportSource, PipelineJobStatus } from '@/types'
-import {
-    detectSources,
-    importFiles,
-    importFromPath,
-    type FileEntry,
-    type ChunkedImportProgress,
-} from '@/api/import'
+import type { PipelineJobStatus } from '@/types'
+import { importFiles, type FileEntry, type ChunkedImportProgress } from '@/api/import'
 import { getImportJobs, cancelImport, ACTIVE_PIPELINE_STAGES } from '@/api/importJobs'
 import { formatBytes } from '@/utils/formatting'
 import { Button } from '@/components/ui/button'
 import ImportJobsPanel from '@/components/ImportJobsPanel.vue'
-import { Upload, Folder, Loader2, CheckCircle2, AlertTriangle } from '@lucide/vue'
+import { Upload, Folder, CheckCircle2, AlertTriangle } from '@lucide/vue'
 import { useAuth } from '@/composables/useAuth'
-
-// UI-only gate; server enforces 403 on non-localhost requests
-const isLocalhost =
-    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
 
 // ---------------------------------------------------------------------------
 // Profile selection
 // ---------------------------------------------------------------------------
 
-const { profiles, activeProfileId, isLocal } = useAuth()
+const { profiles, activeProfileId } = useAuth()
 const selectedProfileId = ref<number | null>(activeProfileId.value)
 
 // ---------------------------------------------------------------------------
@@ -353,75 +260,6 @@ function resetUpload() {
     importError.value = null
     batchLabel.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
-}
-
-// ---------------------------------------------------------------------------
-// Server-path flow state
-// ---------------------------------------------------------------------------
-
-type PathPhase = 'idle' | 'detecting' | 'detected' | 'importing' | 'error'
-
-const pathPhase = ref<PathPhase>('idle')
-const sourcePath = ref('')
-const detectedSources = ref<ImportSource[]>([])
-const selectedSources = ref<Set<number>>(new Set())
-const noSourcesDetected = ref(false)
-const detectError = ref<string | null>(null)
-const pathImportError = ref<string | null>(null)
-
-function toggleSource(i: number) {
-    const next = new Set(selectedSources.value)
-    if (next.has(i)) next.delete(i)
-    else next.add(i)
-    selectedSources.value = next
-}
-
-async function handleDetect() {
-    if (!sourcePath.value) return
-    pathPhase.value = 'detecting'
-    detectError.value = null
-    noSourcesDetected.value = false
-
-    try {
-        const sources = await detectSources({ path: sourcePath.value })
-        detectedSources.value = sources
-        if (sources.length === 0) {
-            noSourcesDetected.value = true
-            pathPhase.value = 'idle'
-        } else {
-            selectedSources.value = new Set(sources.map((_, i) => i))
-            pathPhase.value = 'detected'
-        }
-    } catch (e: unknown) {
-        detectError.value = e instanceof Error ? e.message : 'Detection failed'
-        pathPhase.value = 'idle'
-    }
-}
-
-async function handlePathImport() {
-    const selected = detectedSources.value.filter((_, i) => selectedSources.value.has(i))
-    if (selected.length === 0) return
-    pathPhase.value = 'importing'
-    pathImportError.value = null
-
-    try {
-        await importFromPath({ sources: selected }, selectedProfileId.value ?? undefined)
-        resetPath()
-        void fetchImportJobs()
-    } catch (e: unknown) {
-        pathImportError.value = e instanceof Error ? e.message : 'Import failed'
-        pathPhase.value = 'error'
-    }
-}
-
-function resetPath() {
-    pathPhase.value = 'idle'
-    sourcePath.value = ''
-    detectedSources.value = []
-    selectedSources.value = new Set()
-    noSourcesDetected.value = false
-    detectError.value = null
-    pathImportError.value = null
 }
 
 // ---------------------------------------------------------------------------
@@ -643,134 +481,5 @@ onUnmounted(() => {
     font-size: 0.875rem;
     color: var(--color-destructive);
     margin: 0;
-}
-
-/* ---- Server-path section ---- */
-
-.path-section {
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    background: var(--color-card);
-    overflow: hidden;
-}
-
-.path-summary {
-    padding: 0.75rem 1rem;
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: var(--color-muted-foreground);
-    cursor: pointer;
-    user-select: none;
-    list-style: none;
-}
-
-.path-summary::-webkit-details-marker {
-    display: none;
-}
-
-.path-summary::before {
-    content: '▶ ';
-    font-size: 0.7rem;
-    color: var(--color-muted-foreground);
-}
-
-details[open] .path-summary::before {
-    content: '▼ ';
-}
-
-.path-content {
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    border-top: 1px solid var(--color-border);
-}
-
-.path-row {
-    display: flex;
-    gap: 0.5rem;
-}
-
-.path-input {
-    flex: 1;
-    height: 2.25rem;
-    border: 1px solid var(--color-input);
-    border-radius: var(--radius-md);
-    background: transparent;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    color: var(--color-foreground);
-    outline: none;
-}
-
-.path-input:focus {
-    box-shadow: 0 0 0 1px var(--color-ring);
-}
-
-.path-no-sources {
-    font-size: 0.85rem;
-    color: var(--color-muted-foreground);
-    margin: 0;
-}
-
-/* ---- Source cards (path section) ---- */
-
-.detected-sources {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-}
-
-.source-card {
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 0.75rem 1rem;
-    background: var(--color-card);
-}
-
-.source-card-selectable {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.75rem;
-    cursor: pointer;
-    transition: border-color 0.15s;
-}
-
-.source-card-selectable:hover {
-    border-color: var(--color-primary);
-}
-
-.source-card-checked {
-    border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 6%, var(--color-card));
-}
-
-.source-checkbox {
-    margin-top: 0.15rem;
-    flex-shrink: 0;
-    accent-color: var(--color-primary);
-}
-
-.source-card-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-}
-
-.source-parser {
-    font-weight: 600;
-    font-size: 0.9rem;
-    color: var(--color-foreground);
-}
-
-.source-meta {
-    font-size: 0.8rem;
-    color: var(--color-muted-foreground);
-    margin-top: 0.15rem;
-}
-
-.source-path {
-    font-family: monospace;
-    font-size: 0.75rem;
 }
 </style>

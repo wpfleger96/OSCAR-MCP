@@ -13,6 +13,7 @@ import pytest
 import snore.api.analysis_jobs as jobs
 
 from snore.api.analysis_jobs import (
+    _DEFAULT_ANALYSIS_JOB_CONCURRENCY,
     _DEFAULT_ANALYSIS_MAX_WORKERS,
     JOB_TTL_SECONDS,
     MAX_QUEUED,
@@ -20,12 +21,14 @@ from snore.api.analysis_jobs import (
     AnalysisJobSource,
     AnalysisJobState,
     _get_analysis_workers,
+    _get_job_concurrency,
     _reap_terminal,
     cancel_job,
     enqueue,
     get_job,
     list_jobs,
     shutdown,
+    start_worker,
 )
 
 # ---------------------------------------------------------------------------
@@ -38,12 +41,12 @@ def clean_analysis_jobs():
     """Reset global analysis job state before and after each test."""
     jobs._all_jobs.clear()
     jobs._queue.clear()
-    jobs._worker_thread = None
+    jobs._worker_threads = []
     jobs._stop_event = None
     yield
     jobs._all_jobs.clear()
     jobs._queue.clear()
-    jobs._worker_thread = None
+    jobs._worker_threads = []
     jobs._stop_event = None
 
 
@@ -379,6 +382,7 @@ def test_get_analysis_workers_returns_configured_value():
         max_jobs_per_user=3,
         max_jobs_global=10,
         analysis_max_workers=6,
+        analysis_job_concurrency=2,
     )
     set_config(cfg)
     try:
@@ -398,3 +402,222 @@ def test_get_analysis_workers_falls_back_to_default_when_config_raises(monkeypat
         lambda **_kw: (_ for _ in ()).throw(RuntimeError("config unavailable")),
     )
     assert _get_analysis_workers() == _DEFAULT_ANALYSIS_MAX_WORKERS
+
+
+# ---------------------------------------------------------------------------
+# 10. _get_job_concurrency reads config and falls back gracefully
+# ---------------------------------------------------------------------------
+
+
+def test_get_job_concurrency_returns_configured_value():
+    from snore.api.config import AppConfig, reset_config, set_config
+    from snore.auth.actor import AuthMode
+
+    cfg = AppConfig(
+        auth_mode=AuthMode.LOCAL,
+        session_secret="",
+        public_base_url="",
+        public_origin=None,
+        bind_host="127.0.0.1",
+        trusted_proxies=frozenset(),
+        dev_origins=frozenset(),
+        cors_origins=["http://localhost:5173"],
+        google_client_id="",
+        google_client_secret="",
+        oauth_attempt_ttl_seconds=600,
+        pre_auth_cookie_ttl_seconds=600,
+        max_upload_bytes=512 * 1024 * 1024,
+        max_file_bytes=256 * 1024 * 1024,
+        max_upload_files=10_000,
+        max_jobs_per_user=3,
+        max_jobs_global=10,
+        analysis_max_workers=4,
+        analysis_job_concurrency=3,
+    )
+    set_config(cfg)
+    try:
+        assert _get_job_concurrency() == 3
+    finally:
+        reset_config()
+
+
+def test_get_job_concurrency_returns_max_queued_when_config_value_is_none():
+    """analysis_job_concurrency=None (unset env var) resolves to MAX_QUEUED."""
+    from snore.api.config import AppConfig, reset_config, set_config
+    from snore.auth.actor import AuthMode
+
+    cfg = AppConfig(
+        auth_mode=AuthMode.LOCAL,
+        session_secret="",
+        public_base_url="",
+        public_origin=None,
+        bind_host="127.0.0.1",
+        trusted_proxies=frozenset(),
+        dev_origins=frozenset(),
+        cors_origins=["http://localhost:5173"],
+        google_client_id="",
+        google_client_secret="",
+        oauth_attempt_ttl_seconds=600,
+        pre_auth_cookie_ttl_seconds=600,
+        max_upload_bytes=512 * 1024 * 1024,
+        max_file_bytes=256 * 1024 * 1024,
+        max_upload_files=10_000,
+        max_jobs_per_user=3,
+        max_jobs_global=10,
+        analysis_max_workers=4,
+        analysis_job_concurrency=None,
+    )
+    set_config(cfg)
+    try:
+        assert _get_job_concurrency() == MAX_QUEUED
+    finally:
+        reset_config()
+
+
+def test_get_job_concurrency_falls_back_to_default_when_config_raises(monkeypatch):
+    import snore.api.config as _config_mod
+
+    monkeypatch.setattr(_config_mod, "_config", None)
+    monkeypatch.setattr(
+        _config_mod,
+        "load_config",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("config unavailable")),
+    )
+    assert _get_job_concurrency() == _DEFAULT_ANALYSIS_JOB_CONCURRENCY
+
+
+# ---------------------------------------------------------------------------
+# 11. Worker concurrency: two jobs run simultaneously with concurrency=2
+# ---------------------------------------------------------------------------
+
+
+def test_two_jobs_run_concurrently():
+    """Under the default concurrency (MAX_QUEUED), both jobs reach RUNNING before either finishes."""
+    import threading
+
+    from unittest.mock import patch
+
+    job1_running = threading.Event()
+    job2_running = threading.Event()
+    release = threading.Event()
+
+    # job1_ref holds the first job so fake_execute can tell them apart.
+    job1_ref: list[AnalysisJob | None] = [None]
+
+    def fake_execute(job: AnalysisJob) -> None:
+        if not job.try_start():
+            return
+        if job is job1_ref[0]:
+            job1_running.set()
+        else:
+            job2_running.set()
+        release.wait(timeout=5.0)
+        job.finish(succeeded=True)
+
+    # No _get_job_concurrency patch: the default (MAX_QUEUED) allows all admitted
+    # jobs to start immediately, so 2 jobs trivially run concurrently.
+    with patch("snore.api.analysis_jobs._execute_job", side_effect=fake_execute):
+        job1 = enqueue(profile_id=1, session_ids=[1], source=AnalysisJobSource.BATCH)
+        job2 = enqueue(profile_id=1, session_ids=[2], source=AnalysisJobSource.BATCH)
+        assert job1 is not None and job2 is not None
+        job1_ref[0] = job1
+
+        threads, stop_event = start_worker()
+        try:
+            assert job1_running.wait(timeout=3.0), "job1 never reached RUNNING"
+            assert job2_running.wait(timeout=3.0), (
+                "job2 never reached RUNNING concurrently with job1"
+            )
+        finally:
+            release.set()
+            stop_event.set()
+            with jobs._condition:
+                jobs._condition.notify_all()
+            for t in threads:
+                t.join(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# 12. Worker serialization: with concurrency=1, jobs run one at a time
+# ---------------------------------------------------------------------------
+
+
+def test_serial_when_concurrency_one():
+    """With concurrency=1, job2 does not start until job1 finishes."""
+    import threading
+
+    from unittest.mock import patch
+
+    job1_running = threading.Event()
+    job1_done = threading.Event()
+    job2_started = threading.Event()
+    release_job1 = threading.Event()
+
+    job1_ref: list[AnalysisJob | None] = [None]
+
+    def fake_execute(job: AnalysisJob) -> None:
+        if not job.try_start():
+            return
+        if job is job1_ref[0]:
+            job1_running.set()
+            release_job1.wait(timeout=5.0)
+            job.finish(succeeded=True)
+            job1_done.set()
+        else:
+            job2_started.set()
+            job.finish(succeeded=True)
+
+    with (
+        patch("snore.api.analysis_jobs._execute_job", side_effect=fake_execute),
+        patch("snore.api.analysis_jobs._get_job_concurrency", return_value=1),
+    ):
+        job1 = enqueue(profile_id=1, session_ids=[1], source=AnalysisJobSource.BATCH)
+        job2 = enqueue(profile_id=1, session_ids=[2], source=AnalysisJobSource.BATCH)
+        assert job1 is not None and job2 is not None
+        job1_ref[0] = job1
+
+        threads, stop_event = start_worker()
+        try:
+            assert job1_running.wait(timeout=3.0), "job1 never started"
+            # job2 must NOT start while job1 is still blocked.
+            assert not job2_started.wait(timeout=0.3), (
+                "job2 started while job1 was still running"
+            )
+            release_job1.set()
+            assert job1_done.wait(timeout=3.0), "job1 never finished"
+            assert job2_started.wait(timeout=3.0), (
+                "job2 never started after job1 finished"
+            )
+        finally:
+            stop_event.set()
+            with jobs._condition:
+                jobs._condition.notify_all()
+            for t in threads:
+                t.join(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# 13. shutdown() joins all N worker threads; none survive
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_joins_all_worker_threads():
+    """shutdown() waits for all analysis-job-worker-* threads to exit."""
+    import threading
+
+    from unittest.mock import patch
+
+    with patch("snore.api.analysis_jobs._get_job_concurrency", return_value=3):
+        threads, _stop = start_worker()
+
+    assert len(threads) == 3
+    assert all(t.is_alive() for t in threads), "Workers should be alive before shutdown"
+
+    shutdown(timeout=5.0)
+
+    alive = [
+        t for t in threading.enumerate() if t.name.startswith("analysis-job-worker")
+    ]
+    assert not alive, (
+        f"Worker threads still alive after shutdown: {[t.name for t in alive]}"
+    )

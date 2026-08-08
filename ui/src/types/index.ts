@@ -71,8 +71,6 @@ export type RERAEvent = Schemas['RERAEvent']
 
 // Import
 export type ImportSource = Schemas['ImportSource']
-export type DetectRequest = Schemas['DetectRequest']
-export type ImportPathRequest = Schemas['ImportPathRequest']
 export type PipelineJobStatus = Schemas['PipelineJobStatus']
 export type PipelineJobsListResponse = Schemas['PipelineJobsListResponse']
 export type LinkedAnalysisSummary = Schemas['LinkedAnalysisSummary']

@@ -142,17 +142,6 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                     cancel_predicate=lambda: job.cancel_requested,
                 )
             )
-        elif job.job_type == JobType.PATH and job.sources is not None:
-            result = asyncio.run(
-                service.import_sources(
-                    job.sources,
-                    backup=True,
-                    backup_root=profile_raw_root,
-                    profile_id=target_profile_id,
-                    progress_callback=lambda msg: job.report_progress(msg),
-                    cancel_predicate=lambda: job.cancel_requested,
-                )
-            )
         else:
             raise ValueError("Invalid job configuration")
 

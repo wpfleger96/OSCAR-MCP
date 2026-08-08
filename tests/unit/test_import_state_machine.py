@@ -435,7 +435,7 @@ class TestShutdown:
     def test_shutdown_cancels_pending_jobs(self, tmp_path):
         """shutdown() cancels PENDING jobs and clears them cleanly."""
         job1 = _make_upload_job(tmp_path)
-        job2 = create_job(JobType.PATH, sources=[])
+        job2 = create_job(JobType.PATH)
 
         shutdown(timeout=1.0)
 
@@ -799,11 +799,11 @@ class TestRouteWorkerBehavior:
 
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 return_value=[],
             ),
             patch(
-                "snore.api.routers.import_data.ImportService.import_sources",
+                "snore.api.import_worker.ImportService.import_sources",
                 new_callable=AsyncMock,
                 return_value=fake_result,
             ),
@@ -833,7 +833,7 @@ class TestRouteWorkerBehavior:
         job.target_profile_id = 1
 
         with patch(
-            "snore.api.routers.import_data.ImportService.detect_sources",
+            "snore.api.import_worker.ImportService.detect_sources",
             side_effect=_slow_detect,
         ):
             start_import_worker(_run_import)
@@ -873,7 +873,7 @@ class TestRouteWorkerBehavior:
         ch = job.attach_observer()
 
         with patch(
-            "snore.api.routers.import_data.ImportService.detect_sources",
+            "snore.api.import_worker.ImportService.detect_sources",
             side_effect=_blocking_detect,
         ):
             start_import_worker(_run_import)
@@ -918,7 +918,7 @@ class TestRouteWorkerBehavior:
         job.target_profile_id = 1
 
         with patch(
-            "snore.api.routers.import_data.ImportService.detect_sources",
+            "snore.api.import_worker.ImportService.detect_sources",
             side_effect=_slow_detect,
         ):
             start_import_worker(_run_import)
@@ -1008,11 +1008,11 @@ class TestRouteHTTPBoundary:
             )
             with (
                 patch(
-                    "snore.api.routers.import_data.ImportService.detect_sources",
+                    "snore.api.import_worker.ImportService.detect_sources",
                     return_value=[],
                 ),
                 patch(
-                    "snore.api.routers.import_data.ImportService.import_sources",
+                    "snore.api.import_worker.ImportService.import_sources",
                     new_callable=AsyncMock,
                     return_value=fake_result,
                 ),
@@ -1116,7 +1116,7 @@ class TestRouteHTTPBoundary:
 
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 side_effect=_slow_detect,
             ),
             TestClient(app, raise_server_exceptions=True) as client,
@@ -1174,7 +1174,7 @@ class TestRouteHTTPBoundary:
 
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 side_effect=_slow_detect,
             ),
             TestClient(app, raise_server_exceptions=True) as client,
@@ -1263,9 +1263,9 @@ class TestSerialWorkerQueue:
         def callback1(job: ImportJob, root: object) -> None:
             self._fake_run(job, root, gate1, order)
 
-        job1 = create_job(JobType.PATH, sources=[])
+        job1 = create_job(JobType.PATH)
         job1.target_profile_id = 1
-        job2 = create_job(JobType.PATH, sources=[])
+        job2 = create_job(JobType.PATH)
         job2.target_profile_id = 1
 
         start_import_worker(callback1)
@@ -1376,9 +1376,9 @@ class TestSerialWorkerQueue:
             job.release_capacity()
             raise RuntimeError("deliberate test error in run_callback")
 
-        job1 = create_job(JobType.PATH, sources=[])
+        job1 = create_job(JobType.PATH)
         job1.target_profile_id = 1
-        job2 = create_job(JobType.PATH, sources=[])
+        job2 = create_job(JobType.PATH)
         job2.target_profile_id = 1
 
         # We need two different behaviors, so swap callback via a counter.

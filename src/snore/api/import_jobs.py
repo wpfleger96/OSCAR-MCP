@@ -106,6 +106,9 @@ ACTIVE_STATES = frozenset({JobState.PENDING_UPLOAD, JobState.PENDING, JobState.R
 
 class JobType(Enum):
     UPLOAD = "upload"
+    # PATH is historical-only: the server-path import feature was removed.
+    # This member is retained so existing DB rows with job_type='path' can be
+    # surfaced by in-memory jobs without a ValueError on enum lookup.
     PATH = "path"
 
 
@@ -189,8 +192,6 @@ class ImportJob:
 
     # UPLOAD jobs: temp dir with written files.
     temp_dir: Path | None = None
-    # PATH jobs: sources list.
-    sources: list[Any] | None = None
 
     # File count — protected by _lock (written by the request handler before the worker starts).
     _file_count: int = field(default=0, init=False, repr=False)
@@ -656,7 +657,7 @@ def reserve_slot(owner_user_id: int | None) -> ImportJob | None:
 def create_job(
     job_type: JobType, owner_user_id: int | None = None, **kwargs: Any
 ) -> ImportJob:
-    """Create a job directly in PENDING state (for PATH jobs which have no upload phase).
+    """Create a job directly in PENDING state, bypassing the PENDING_UPLOAD phase.
 
     Also increments caps.  If over-limit, raises RuntimeError.
     """
