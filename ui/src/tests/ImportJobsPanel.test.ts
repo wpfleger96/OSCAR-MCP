@@ -85,13 +85,32 @@ describe('ImportJobsPanel', () => {
         expect(wrapper.find('button[title="Cancel job"]').exists()).toBe(false)
     })
 
-    it('test_cancel_click_emits_cancel_with_job_id', async () => {
+    it('test_cancel_click_emits_cancel_with_job_object', async () => {
         const job = makeJob({ job_id: 'abc-123', stage: 'importing' })
         const wrapper = mount(ImportJobsPanel, { props: { jobs: [job] } })
 
         await wrapper.find('button[title="Cancel job"]').trigger('click')
 
-        expect(wrapper.emitted('cancel')).toEqual([['abc-123']])
+        expect(wrapper.emitted('cancel')).toEqual([[job]])
+    })
+
+    it('test_analyzing_row_cancel_emits_full_job_object', async () => {
+        const job = makeJob({
+            stage: 'analyzing',
+            analysis_job_id: 'aj-99',
+            linked_analysis: {
+                job_id: 'aj-99',
+                state: 'running',
+                progress_completed: 2,
+                progress_total: 5,
+                error_message: null,
+            },
+        })
+        const wrapper = mount(ImportJobsPanel, { props: { jobs: [job] } })
+
+        await wrapper.find('button[title="Cancel job"]').trigger('click')
+
+        expect(wrapper.emitted('cancel')).toEqual([[job]])
     })
 
     it('test_analysis_skipped_shows_warning_text', () => {

@@ -372,6 +372,23 @@ class TestImportJobOwnership:
             job.cleanup_files()
             job.release_capacity()
 
+    def test_cancel_terminal_job_returns_409(self, api_client):
+        """DELETE /import/{job_id} for a job already in SUCCEEDED state returns 409."""
+        from snore.api.import_jobs import JobType, create_job, remove_job
+
+        job = create_job(JobType.PATH, owner_user_id=None)
+        try:
+            job.try_start()
+            job._finish(succeeded=True, terminal_msg={"event": "complete", "data": {}})
+
+            response = api_client.delete(f"/api/v1/import/{job.job_id}")
+            assert response.status_code == 409
+            assert "cannot be cancelled" in response.json()["detail"]
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
 
 class TestImportTargetProfile:
     """target_profile_id enforcement for file upload and path import endpoints."""

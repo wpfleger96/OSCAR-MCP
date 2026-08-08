@@ -588,7 +588,11 @@ def cancel_import(job_id: str, actor: RequireWritable) -> None:
     ):
         # 404 instead of 403 — no information about foreign job IDs.
         raise HTTPException(status_code=404, detail="Import job not found")
-    cancel_job(job_id)
+    if not cancel_job(job_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Import job is already finished and cannot be cancelled",
+        )
 
 
 _SSE_TIMEOUT = object()
