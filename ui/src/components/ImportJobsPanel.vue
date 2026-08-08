@@ -70,7 +70,7 @@
                     variant="ghost"
                     size="icon"
                     title="Cancel job"
-                    @click="emit('cancel', job.job_id)"
+                    @click="emit('cancel', job)"
                 >
                     <X class="h-4 w-4" />
                 </Button>
@@ -86,7 +86,7 @@ import type { PipelineJobStatus } from '@/types'
 import { ACTIVE_PIPELINE_STAGES } from '@/api/importJobs'
 
 defineProps<{ jobs: PipelineJobStatus[] }>()
-const emit = defineEmits<{ cancel: [jobId: string] }>()
+const emit = defineEmits<{ cancel: [job: PipelineJobStatus] }>()
 
 function isActive(stage: string): boolean {
     return ACTIVE_PIPELINE_STAGES.has(stage)

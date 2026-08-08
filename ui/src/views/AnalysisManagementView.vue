@@ -311,9 +311,10 @@ async function fetchJobs() {
 async function handleCancelJob(jobId: string) {
     try {
         await cancelAnalysisJob(jobId)
-        await fetchJobs()
-    } catch (err: unknown) {
-        error.value = err instanceof Error ? err.message : 'Failed to cancel job'
+    } catch {
+        /* job may already be terminal or returned 409 */
+    } finally {
+        void fetchJobs()
     }
 }
 

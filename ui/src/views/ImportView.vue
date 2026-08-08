@@ -100,6 +100,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { PipelineJobStatus } from '@/types'
 import { importFiles, type FileEntry, type ChunkedImportProgress } from '@/api/import'
 import { getImportJobs, cancelImport, ACTIVE_PIPELINE_STAGES } from '@/api/importJobs'
+import { cancelAnalysisJob } from '@/api/analysis'
 import { formatBytes } from '@/utils/formatting'
 import { Button } from '@/components/ui/button'
 import ImportJobsPanel from '@/components/ImportJobsPanel.vue'
@@ -293,11 +294,15 @@ function schedulePoll() {
     }, 3000)
 }
 
-async function handleCancelImportJob(jobId: string) {
+async function handleCancelImportJob(job: PipelineJobStatus) {
     try {
-        await cancelImport(jobId)
+        if ((job.stage === 'analysis_queued' || job.stage === 'analyzing') && job.analysis_job_id) {
+            await cancelAnalysisJob(job.analysis_job_id)
+        } else {
+            await cancelImport(job.job_id)
+        }
     } catch {
-        /* job may already be terminal or reaped */
+        /* job may already be terminal, reaped, or returned 409 */
     } finally {
         void fetchImportJobs()
     }

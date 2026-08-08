@@ -197,4 +197,8 @@ async def cancel_analysis_job(job_id: str, actor: RequireWritable) -> None:
     ):
         # 404 instead of 403 — no information leak about other users' job IDs.
         raise HTTPException(status_code=404, detail="Job not found")
-    analysis_jobs.cancel_job(job_id)
+    if not analysis_jobs.cancel_job(job_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Analysis job is already finished and cannot be cancelled",
+        )

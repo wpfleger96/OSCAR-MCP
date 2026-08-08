@@ -338,6 +338,23 @@ class TestAnalysisJobsAPI:
         assert response.status_code == 204
         assert job.state == aj_store.AnalysisJobState.CANCELLED
 
+    def test_delete_terminal_job_returns_409(self, api_client):
+        """DELETE /analysis/jobs/{job_id} for a job already in CANCELLED state returns 409."""
+        job = aj_store.enqueue(
+            profile_id=1,
+            session_ids=[1, 2],
+            source=aj_store.AnalysisJobSource.BATCH,
+            owner_user_id=None,
+        )
+        assert job is not None
+        # Drive the job to a terminal state by cancelling it directly.
+        aj_store.cancel_job(job.job_id)
+        assert job.state == aj_store.AnalysisJobState.CANCELLED
+
+        response = api_client.delete(f"/api/v1/analysis/jobs/{job.job_id}")
+        assert response.status_code == 409
+        assert "cannot be cancelled" in response.json()["detail"]
+
     def test_list_jobs_includes_enqueued_job(self, api_client):
         job = aj_store.enqueue(
             profile_id=1,
