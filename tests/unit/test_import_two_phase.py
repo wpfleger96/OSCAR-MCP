@@ -33,7 +33,7 @@ from snore.api.import_jobs import (
 
 
 def _make_job() -> ImportJob:
-    return create_job(JobType.PATH, sources=[])
+    return create_job(JobType.PATH)
 
 
 def _drain(ch: ObserverChannel, *, timeout: float = 0.1) -> list[dict]:

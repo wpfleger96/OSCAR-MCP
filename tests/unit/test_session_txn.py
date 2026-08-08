@@ -522,13 +522,22 @@ class TestNonEmptyChainPaths:
         conn.close()
         assert "sessions" in tables, "sessions table must exist after create_all"
 
-    def test_unstamped_existing_db_raises_actionable_error(self, tmp_path):
-        """DB with sessions but no alembic_version → RuntimeError with clear message."""
+    def test_unstamped_existing_db_gets_stamped_at_baseline_and_upgraded(
+        self, tmp_path
+    ):
+        """DB with sessions but no alembic_version → stamped, upgraded, and synced.
+
+        This is the upgrade path for installs that existed before the migration
+        chain was introduced (zero-migration-mode DBs).  Instead of raising, the
+        startup path stamps at 001_baseline, upgrades to head, and runs
+        _sync_additive_schema to restore pre-chain drift (missing columns and
+        indexes are not covered by the migration files).  The sync is patched
+        here because the fixture table is a minimal skeleton, not a real
+        pre-chain schema; test_startup_migrations exercises the real sync.
+        """
         import sqlite3
 
-        from unittest.mock import patch
-
-        import pytest
+        from unittest.mock import ANY, patch
 
         from snore.database.session import _apply_migrations_sync
 
@@ -544,8 +553,10 @@ class TestNonEmptyChainPaths:
         with (
             self._fake_heads(["fakehead0001"]),
             patch("snore.database.session.alembic_command") as mock_alembic,
+            patch("snore.database.session._sync_additive_schema") as mock_sync,
         ):
-            with pytest.raises(RuntimeError, match="zero-migration mode"):
-                _apply_migrations_sync(sync_url)
+            _apply_migrations_sync(sync_url)  # must NOT raise
 
-        mock_alembic.upgrade.assert_not_called()
+        mock_alembic.stamp.assert_called_once_with(ANY, "001_baseline")
+        mock_alembic.upgrade.assert_called_once_with(ANY, "head")
+        mock_sync.assert_called_once()

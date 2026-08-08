@@ -58,6 +58,22 @@ Environment variables
     analysis job.  Writes are serialized by the write gate; this controls the
     read/compute concurrency.  Default: 4.
 
+``SNORE_ANALYSIS_JOB_CONCURRENCY``
+    Maximum number of analysis jobs processed concurrently.  When unset (the
+    default), all admitted jobs start immediately — bounded only by the
+    admission cap ``MAX_QUEUED`` (10).  Set to a lower value on
+    memory-constrained machines: each concurrent job holds up to
+    ``analysis_max_workers`` in-flight sessions' raw blobs (~10 MB each) while
+    awaiting shared process-pool slots.  CPU is already capped globally by
+    ``SNORE_COMPUTE_MAX_WORKERS``, so job concurrency affects fairness and
+    latency, not total throughput.  Accepts a positive integer.
+
+``SNORE_COMPUTE_MAX_WORKERS``
+    Number of worker *processes* in the shared CPU process pool used for
+    device-data parsing and analysis compute.  Each worker carries a full
+    Python + NumPy runtime (~75-150 MB RSS); on machines with limited RAM set
+    this to ``1``.  Default: ``max(1, cpu_count - 1)``.
+
 ``SNORE_BOOTSTRAP_ADMIN_EMAIL``
     Optional.  Multiuser mode only.  When no active admin user exists at
     startup, automatically creates a 7-day admin invite for this address and
@@ -137,6 +153,13 @@ class AppConfig:
     max_jobs_global: int  # Global active-job cap; default 10.
     analysis_max_workers: int  # Per-analysis-job session concurrency; default 4.
     # Bootstrap admin invite: normalized email or None when env var is absent/empty.
+    # Fields with defaults must come after fields without defaults.
+    analysis_job_concurrency: int | None = (
+        None  # None = all admitted jobs run immediately (capped at MAX_QUEUED); each concurrent job adds up to analysis_max_workers sessions' memory.
+    )
+    compute_max_workers: int = max(
+        1, (os.cpu_count() or 2) - 1
+    )  # Shared CPU process pool size.
     bootstrap_admin_email: str | None = None
 
     @property
@@ -178,6 +201,20 @@ def _parse_positive_int(env_key: str, default: int, unit_label: str = "") -> int
         raise ConfigError(msg) from exc
     if value <= 0:
         raise ConfigError(msg)
+    return value
+
+
+def _parse_optional_positive_int(env_key: str) -> int | None:
+    """Parse an env var as a positive integer, returning None when unset or empty."""
+    raw = os.environ.get(env_key, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{env_key} must be a positive integer") from exc
+    if value <= 0:
+        raise ConfigError(f"{env_key} must be a positive integer")
     return value
 
 
@@ -260,6 +297,12 @@ def load_config(
     max_jobs_per_user = _parse_positive_int("SNORE_MAX_JOBS_PER_USER", 3)
     max_jobs_global = _parse_positive_int("SNORE_MAX_JOBS_GLOBAL", 10)
     analysis_max_workers = _parse_positive_int("SNORE_ANALYSIS_MAX_WORKERS", 4)
+    analysis_job_concurrency = _parse_optional_positive_int(
+        "SNORE_ANALYSIS_JOB_CONCURRENCY"
+    )
+    compute_max_workers = _parse_positive_int(
+        "SNORE_COMPUTE_MAX_WORKERS", max(1, (os.cpu_count() or 2) - 1)
+    )
 
     raw_bootstrap_email = os.environ.get("SNORE_BOOTSTRAP_ADMIN_EMAIL", "").strip()
     bootstrap_admin_email = (
@@ -336,6 +379,8 @@ def load_config(
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
         analysis_max_workers=analysis_max_workers,
+        analysis_job_concurrency=analysis_job_concurrency,
+        compute_max_workers=compute_max_workers,
         bootstrap_admin_email=bootstrap_admin_email,
     )
 

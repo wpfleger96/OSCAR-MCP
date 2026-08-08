@@ -30,7 +30,7 @@ from snore.api.schemas import LinkedAnalysisSummary
 
 
 def _make_job(owner_user_id: int | None = None) -> ImportJob:
-    return create_job(JobType.PATH, owner_user_id=owner_user_id, sources=[])
+    return create_job(JobType.PATH, owner_user_id=owner_user_id)
 
 
 def _fake_import_result() -> dict:

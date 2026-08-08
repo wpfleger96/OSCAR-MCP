@@ -863,23 +863,6 @@ export interface paths {
         patch?: never
         trace?: never
     }
-    '/api/v1/import/detect': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /** Detect Sources */
-        post: operations['detect_sources_api_v1_import_detect_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
     '/api/v1/import/jobs': {
         parameters: {
             query?: never
@@ -901,23 +884,6 @@ export interface paths {
         get: operations['list_pipeline_jobs_api_v1_import_jobs_get']
         put?: never
         post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/import/path': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /** Import From Path */
-        post: operations['import_from_path_api_v1_import_path_post']
         delete?: never
         options?: never
         head?: never
@@ -2120,11 +2086,6 @@ export interface components {
              */
             waveform_count: number
         }
-        /** DetectRequest */
-        DetectRequest: {
-            /** Path */
-            path: string
-        }
         /**
          * DeviceDetail
          * @description Full device detail including usage summary, current settings, and settings history.
@@ -2389,13 +2350,6 @@ export interface components {
              * @description Event start timestamp (seconds)
              */
             start_time: number
-        }
-        /** ImportPathRequest */
-        ImportPathRequest: {
-            /** Profile Id */
-            profile_id?: number | null
-            /** Sources */
-            sources: components['schemas']['ImportSource'][]
         }
         /**
          * ImportResultSummary
@@ -4761,39 +4715,6 @@ export interface operations {
             }
         }
     }
-    detect_sources_api_v1_import_detect_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['DetectRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['ImportSource'][]
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
     list_pipeline_jobs_api_v1_import_jobs_get: {
         parameters: {
             query?: never
@@ -4810,39 +4731,6 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['PipelineJobsListResponse']
-                }
-            }
-        }
-    }
-    import_from_path_api_v1_import_path_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['ImportPathRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['JobResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
                 }
             }
         }

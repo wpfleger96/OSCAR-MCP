@@ -136,6 +136,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Clean orphaned import-spool temp directories left by a crashed process.
     _cleanup_stale_upload_tempdirs()
 
+    # Mark any import jobs that were in-progress at the last crash as failed.
+    await _recover_orphaned_import_jobs()
+
     # Start a single lifespan-owned TTL reaper, the analysis job worker, and the
     # import job worker (serialises execution to avoid SQLite write-lock contention).
     reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
@@ -154,7 +157,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
                 f"after timeout: {still_alive}. Active import writes may be interrupted."
             )
+        # Stop analysis jobs first — they may have futures in the shared process
+        # pool, so the pool must still be alive while they drain.
         _shutdown_analysis_jobs()
+        from snore.utils.process_pool import shutdown_pool  # noqa: PLC0415
+
+        shutdown_pool(wait=False)
         lease.release()
 
 
@@ -419,6 +427,47 @@ def _cleanup_stale_upload_tempdirs() -> None:
             logger.warning("Could not check/remove stale temp dir %s: %s", entry, exc)
     if cleaned:
         logger.info("Startup: removed %d stale upload temp dir(s)", cleaned)
+
+
+async def _recover_orphaned_import_jobs() -> None:
+    """Mark any in-progress import jobs in the database as failed at startup.
+
+    Jobs in PENDING_UPLOAD, PENDING, or RUNNING state at startup are orphans
+    from a previous server run that crashed or was killed.  They will never
+    reach a terminal state on their own, so this function marks them failed so
+    operators and the jobs-list endpoint see an honest final state.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from sqlalchemy import update  # noqa: PLC0415
+
+    from snore.database import models  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    now = datetime.now(UTC)
+    try:
+        async with session_scope(immediate=True) as db:
+            result = await db.execute(
+                update(models.ImportJobRecord)
+                .where(
+                    models.ImportJobRecord.state.in_(
+                        ["pending_upload", "pending", "running"]
+                    )
+                )
+                .values(
+                    state="failed",
+                    error_message="Server restarted while job was in progress",
+                    finished_at=now,
+                    updated_at=now,
+                )
+            )
+            count = result.rowcount or 0  # type: ignore[attr-defined]
+        if count > 0:
+            logger.info(
+                "Startup recovery: marked %d orphaned import job(s) as failed", count
+            )
+    except Exception as exc:
+        logger.warning("Orphaned import job recovery failed: %s", exc)
 
 
 def create_app() -> FastAPI:

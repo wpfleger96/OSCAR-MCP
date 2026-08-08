@@ -10,9 +10,11 @@ import os
 import xml.etree.ElementTree as ET
 
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+from concurrent.futures.process import BrokenProcessPool
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -64,10 +66,28 @@ from snore.parsers.unified import (
     WaveformData,
     extract_basic_stats,
 )
+from snore.utils.process_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_EVENT_DURATION_SECONDS = 10.0  # OSCAR's default apnea duration
+
+
+def _oscar_parse_session_worker(
+    session_id: int,
+    summary_path: "Path | None",
+    events_path: "Path | None",
+    device_info: DeviceInfo,
+    base_path: "Path",
+) -> UnifiedSession:
+    """Parse one OSCAR session in a subprocess.
+
+    Instantiates a fresh ``OscarDeviceParser`` — no meaningful instance state
+    is transferred across the process boundary.
+    """
+    return OscarDeviceParser()._parse_single_session(
+        session_id, summary_path, events_path, device_info, base_path
+    )
 
 
 class OscarDeviceParser(DeviceParser):
@@ -435,10 +455,12 @@ class OscarDeviceParser(DeviceParser):
             if progress_callback:
                 progress_callback(f"Parsing session {completed}/{total}...")
 
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures: dict[Any, Any] = {}
+        try:
+            pool = get_pool()
             futures = {
-                executor.submit(
-                    self._parse_single_session,
+                pool.submit(
+                    _oscar_parse_session_worker,
                     session_id,
                     summary_path,
                     events_path,
@@ -452,9 +474,7 @@ class OscarDeviceParser(DeviceParser):
                 session_id = futures[future]
 
                 if limit is not None and sessions_yielded >= limit:
-                    for remaining_future in futures:
-                        if not remaining_future.done():
-                            remaining_future.cancel()
+                    cancel_pending(futures)
                     break
 
                 try:
@@ -462,10 +482,19 @@ class OscarDeviceParser(DeviceParser):
                     emit_progress()
                     yield session
                     sessions_yielded += 1
+                except BrokenProcessPool:
+                    raise
                 except Exception as e:
                     logger.error(f"Failed to parse session {session_id}: {e}")
                     emit_progress()
                     continue
+        except BrokenProcessPool as exc:
+            raise RuntimeError(
+                f"Parser worker process crashed: {exc}. "
+                "Reduce SNORE_COMPUTE_MAX_WORKERS if memory is constrained."
+            ) from exc
+        finally:
+            cancel_pending(futures)
 
     def _parse_single_session(
         self,

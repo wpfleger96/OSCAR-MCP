@@ -5,6 +5,7 @@ parsed. A night can be dropped (per-session date filter, or a parse failure), so
 truncating the night list up front would under-deliver.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -43,7 +44,14 @@ def test_limit_counts_yielded_sessions_not_nights_parallel():
         patch.object(parser, "_preload_str_settings", return_value={}),
         patch.object(parser, "_preload_str_summaries", return_value={}),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
-        patch.object(parser, "_parse_single_session_bundle", side_effect=fake_bundle),
+        patch(
+            "snore.parsers.resmed_edf.get_pool",
+            return_value=ThreadPoolExecutor(max_workers=4),
+        ),
+        patch(
+            "snore.parsers.resmed_edf._resmed_parse_bundle_worker",
+            side_effect=fake_bundle,
+        ),
     ):
         result = list(parser.parse_sessions(Path("/data"), limit=2, parallel=True))
 

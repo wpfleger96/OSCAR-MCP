@@ -1,6 +1,4 @@
-import { apiPost } from './client'
 import api from './client'
-import type { ImportSource, ImportPathRequest } from '@/types'
 import type { AxiosProgressEvent } from 'axios'
 
 export interface FileEntry {
@@ -113,22 +111,6 @@ async function uploadSingleChunk(
     const { data } = await api.post<JobResponse>('/import/', formData, {
         onUploadProgress: onProgress,
     })
-    return data
-}
-
-export const detectSources = apiPost<ImportSource[], [body: { path: string }]>(
-    '/import/detect',
-    (body) => ({ data: body }),
-)
-
-export async function importFromPath(
-    body: ImportPathRequest,
-    profileId?: number,
-): Promise<JobResponse> {
-    const { data } = await api.post<JobResponse>(
-        '/import/path',
-        profileId !== undefined ? { ...body, profile_id: profileId } : body,
-    )
     return data
 }
 

@@ -805,8 +805,12 @@ class BatchAnalysisCoordinator:
         """
         import time  # noqa: PLC0415
 
-        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.analysis.service import (  # noqa: PLC0415
+            AnalysisService,
+            _compute_session_in_process,
+        )
         from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.utils.process_pool import get_pool  # noqa: PLC0415
 
         matched_total = len(session_pairs)
         self._total = matched_total
@@ -815,11 +819,6 @@ class BatchAnalysisCoordinator:
         # Do NOT reset _cancel_requested if cancel() was called before submit().
 
         modes_list: list[str] | None = list(modes) if modes is not None else None
-
-        def _compute_only(raw: Any) -> Any:
-            """Pure-compute phase — NumPy/scipy only, zero DB access."""
-            inputs = AnalysisService.prepare_inputs(raw)
-            return AnalysisService().compute_analysis(inputs)
 
         # Plain iterator over the materialized list.  The sliding window enqueues
         # pairs up to max_workers; session_dates is pruned as tasks complete so
@@ -833,7 +832,7 @@ class BatchAnalysisCoordinator:
         session_dates.clear()
 
         async def _run_one(sid: int) -> str:
-            """Read → thread-compute → write, all async."""
+            """Read → process-compute → write, all async."""
             if self._is_cancelled():
                 return "cancelled"
             try:
@@ -851,8 +850,10 @@ class BatchAnalysisCoordinator:
                         primary_mode=primary_mode,
                     )
 
-                # --- Compute phase: NumPy only in a thread, no session held ---
-                computation = await asyncio.to_thread(_compute_only, raw)
+                # --- Compute phase: NumPy only in a subprocess, no session held ---
+                computation = await asyncio.get_running_loop().run_in_executor(
+                    get_pool(), _compute_session_in_process, raw
+                )
                 processing_time_ms = int((time.monotonic() - t_start) * 1000)
 
                 # --- Write phase: persist result on the event loop, with retry ---

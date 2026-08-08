@@ -1112,3 +1112,22 @@ def _compute_leak_valid(
         return leak_sample < LEAK_VALID_THRESHOLD_LPM, None
 
     return None, "channel_unaligned"
+
+
+def _compute_session_in_process(raw: RawSessionBlobs) -> AnalysisComputation:
+    """Pure-compute phase suitable for a subprocess worker.
+
+    Replicates the closure body from ``BatchAnalysisCoordinator._run_one``
+    at module level so it can be pickled and dispatched to the shared
+    ``ProcessPoolExecutor``.  No DB access — all inputs arrive as
+    ``RawSessionBlobs`` (bytes + plain Python); all outputs are plain
+    Python / NumPy (``AnalysisComputation`` is a picklable dataclass).
+
+    Args:
+        raw: DB-fetched blobs from the I/O phase.
+
+    Returns:
+        ``AnalysisComputation`` envelope ready for the write phase.
+    """
+    inputs = AnalysisService.prepare_inputs(raw)
+    return AnalysisService().compute_analysis(inputs)

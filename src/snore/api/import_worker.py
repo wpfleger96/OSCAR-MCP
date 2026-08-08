@@ -24,31 +24,55 @@ from snore.services.import_service import ImportService
 logger = logging.getLogger(__name__)
 
 
-async def _persist_job_record(job: ImportJob) -> None:
-    """Write a terminal import job to the database for long-term persistence."""
+async def _upsert_job_record(job: ImportJob) -> None:
+    """Upsert the current job state to the database for crash-recovery durability.
+
+    Called at each state transition (PENDING → RUNNING → terminal) so a server
+    restart can detect orphaned in-progress rows and mark them failed.  Uses
+    SQLite's ``ON CONFLICT DO UPDATE`` so the same job_id is never double-inserted
+    regardless of how many times this function is called.
+    """
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert  # noqa: PLC0415
+
     from snore.database.models import ImportJobRecord  # noqa: PLC0415
     from snore.database.session import session_scope  # noqa: PLC0415
 
-    async with session_scope(immediate=True) as db:
-        db.add(
-            ImportJobRecord(
-                job_id=job.job_id,
-                job_type=job.job_type.value,
-                owner_user_id=job.owner_user_id,
-                target_profile_id=job.target_profile_id,
-                state=job.state.value,
-                file_count=job.file_count,
-                sessions_imported=job.sessions_imported,
-                import_result_json=job.import_result_snapshot,
-                error_message=job.error_message,
-                analysis_queued=job.analysis_queued,
-                created_at=job.created_at_wall,
-                finished_at=job.finished_at_wall
-                or datetime.now(
-                    UTC
-                ),  # fallback is defensive; _finish always sets _finished_at_wall before terminal
-            )
+    now = datetime.now(UTC)
+    finished = job.finished_at_wall if job.is_terminal else None
+
+    stmt = (
+        sqlite_insert(ImportJobRecord)
+        .values(
+            job_id=job.job_id,
+            job_type=job.job_type.value,
+            owner_user_id=job.owner_user_id,
+            target_profile_id=job.target_profile_id,
+            state=job.state.value,
+            file_count=job.file_count,
+            sessions_imported=job.sessions_imported,
+            import_result_json=job.import_result_snapshot,
+            error_message=job.error_message,
+            analysis_queued=job.analysis_queued,
+            created_at=job.created_at_wall,
+            finished_at=finished,
+            updated_at=now,
         )
+        .on_conflict_do_update(
+            index_elements=["job_id"],
+            set_={
+                "state": job.state.value,
+                "file_count": job.file_count,
+                "sessions_imported": job.sessions_imported,
+                "import_result_json": job.import_result_snapshot,
+                "error_message": job.error_message,
+                "analysis_queued": job.analysis_queued,
+                "finished_at": finished,
+                "updated_at": now,
+            },
+        )
+    )
+    async with session_scope(immediate=True) as db:
+        await db.execute(stmt)
 
 
 def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
@@ -84,6 +108,13 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         return {"event": event, "data": data}
 
     try:
+        # Persist RUNNING state — the worker loop already called try_start()
+        # so job.state is RUNNING by the time this function executes.
+        try:
+            asyncio.run(_upsert_job_record(job))
+        except Exception:
+            logger.exception("Failed to upsert RUNNING state for job %s", job.job_id)
+
         service = ImportService()
         # Consume the snapshotted target_profile_id so DB writes land in the
         # correct profile even if the default profile changes between job creation
@@ -104,17 +135,6 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
             result = asyncio.run(
                 service.import_sources(
                     sources,
-                    backup=True,
-                    backup_root=profile_raw_root,
-                    profile_id=target_profile_id,
-                    progress_callback=lambda msg: job.report_progress(msg),
-                    cancel_predicate=lambda: job.cancel_requested,
-                )
-            )
-        elif job.job_type == JobType.PATH and job.sources is not None:
-            result = asyncio.run(
-                service.import_sources(
-                    job.sources,
                     backup=True,
                     backup_root=profile_raw_root,
                     profile_id=target_profile_id,
@@ -181,7 +201,7 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         # Ordering: publish terminal (done above), persist, clean, release capacity.
         if job.is_terminal:
             try:
-                asyncio.run(_persist_job_record(job))
+                asyncio.run(_upsert_job_record(job))
             except Exception:
                 logger.exception("Failed to persist job record for %s", job.job_id)
         job.cleanup_files()

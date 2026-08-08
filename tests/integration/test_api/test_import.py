@@ -1,56 +1,14 @@
 import json
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from fastapi import HTTPException, Request
-
 import snore.api.analysis_jobs as aj_store
 import snore.api.import_jobs as job_store
 
-from snore.api.routers.import_data import _require_localhost
-from snore.services.schemas import ImportResult, ImportSource
-
-
-class TestDetectSources:
-    def test_remote_client_gets_403(self, api_client):
-        """Default TestClient host is 'testclient', should get 403."""
-        response = api_client.post("/api/v1/import/detect", json={"path": "/tmp"})
-        assert response.status_code == 403
-
-    def test_localhost_returns_empty_list_for_nonexistent_path(
-        self, localhost_api_client
-    ):
-        """Localhost client with nonexistent path returns 200 with empty list."""
-        response = localhost_api_client.post(
-            "/api/v1/import/detect", json={"path": "/tmp/nonexistent_snore_path"}
-        )
-        assert response.status_code == 200
-        assert response.json() == []
-
-    def test_localhost_returns_sources_shape(self, localhost_api_client):
-        """Mocked sources have expected keys."""
-        fake_sources = [
-            ImportSource(
-                parser_name="resmed",
-                root_path="/mnt/sd",
-                device_serial="12345",
-            )
-        ]
-        with patch(
-            "snore.api.routers.import_data.ImportService.detect_sources",
-            return_value=fake_sources,
-        ):
-            response = localhost_api_client.post(
-                "/api/v1/import/detect", json={"path": "/mnt/sd"}
-            )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-        assert data[0]["parser_name"] == "resmed"
-        assert data[0]["root_path"] == "/mnt/sd"
+from snore.services.schemas import ImportResult
 
 
 class TestImportUpload:
@@ -207,11 +165,11 @@ class TestImportProgress:
         )
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 return_value=[],
             ),
             patch(
-                "snore.api.routers.import_data.ImportService.import_sources",
+                "snore.api.import_worker.ImportService.import_sources",
                 new_callable=AsyncMock,
                 return_value=fake_result,
             ),
@@ -261,11 +219,11 @@ class TestUploadBackupEnabled:
         )
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 return_value=[],
             ),
             patch(
-                "snore.api.routers.import_data.ImportService.import_sources",
+                "snore.api.import_worker.ImportService.import_sources",
                 new_callable=AsyncMock,
                 return_value=fake_result,
             ) as mock_import,
@@ -294,34 +252,6 @@ class TestUploadBackupEnabled:
             "Upload route must call import_sources(backup=True); "
             f"got backup={kwargs.get('backup')!r}"
         )
-
-
-class TestPathImport:
-    def test_non_localhost_gets_403(self, api_client):
-        """Non-localhost client is rejected with 403."""
-        response = api_client.post(
-            "/api/v1/import/path",
-            json={"sources": []},
-        )
-        assert response.status_code == 403
-
-    def test_localhost_returns_202_with_job_id(self, localhost_api_client):
-        """Localhost import/path returns 202 with a job_id."""
-        response = localhost_api_client.post(
-            "/api/v1/import/path",
-            json={"sources": []},
-        )
-        assert response.status_code == 202
-        data = response.json()
-        assert "job_id" in data
-        assert isinstance(data["job_id"], str)
-
-        from snore.api.import_jobs import get_job, remove_job
-
-        job = get_job(data["job_id"])
-        assert job is not None
-        assert job.sources == []
-        remove_job(data["job_id"])
 
 
 class TestStaleTempDirCleanup:
@@ -387,24 +317,6 @@ class TestStaleTempDirCleanup:
         _cleanup_stale_upload_tempdirs()
 
         assert other.exists(), "Non-snore-upload dirs must never be removed"
-
-
-class TestRequireLocalhost:
-    @pytest.mark.parametrize(
-        "host", ["127.0.0.1", "127.0.0.9", "::1", "::ffff:127.0.0.1"]
-    )
-    def test_loopback_hosts_allowed(self, host):
-        request = Request({"type": "http", "client": (host, 12345)})
-        _require_localhost(request)  # does not raise
-
-    @pytest.mark.parametrize(
-        "client", [("10.0.0.5", 12345), ("testclient", 50000), None]
-    )
-    def test_non_loopback_rejected(self, client):
-        request = Request({"type": "http", "client": client})
-        with pytest.raises(HTTPException) as exc_info:
-            _require_localhost(request)
-        assert exc_info.value.status_code == 403
 
 
 class TestImportJobOwnership:
@@ -547,101 +459,6 @@ class TestImportTargetProfile:
                 job.cleanup_files()
                 job.release_capacity()
 
-    def test_path_import_with_valid_profile_id_uses_that_profile(
-        self, localhost_api_client, monkeypatch
-    ):
-        """Path import with a valid owned profile_id lands in that profile."""
-        import snore.api.routers.import_data as import_mod
-
-        from snore.api.import_jobs import get_job, remove_job
-
-        monkeypatch.setattr(
-            import_mod, "enqueue_for_execution", lambda job, root=None: None
-        )
-
-        # Create a second profile via the profiles API.
-        resp = localhost_api_client.post(
-            "/api/v1/profiles/", json={"name": "Path Profile"}
-        )
-        assert resp.status_code == 201
-        second_profile_id = resp.json()["id"]
-
-        sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
-        job = None
-        try:
-            response = localhost_api_client.post(
-                "/api/v1/import/path",
-                json={"sources": sources, "profile_id": second_profile_id},
-            )
-            assert response.status_code == 202
-            job = get_job(response.json()["job_id"])
-            assert job is not None
-            assert job.target_profile_id == second_profile_id
-        finally:
-            if job is not None:
-                remove_job(job.job_id)
-                job.cleanup_files()
-                job.release_capacity()
-
-    def test_path_import_with_foreign_profile_id_returns_403(
-        self, localhost_api_client, monkeypatch
-    ):
-        """Path import with a profile_id not owned by this user returns 403."""
-        import snore.api.routers.import_data as import_mod
-
-        monkeypatch.setattr(
-            import_mod, "enqueue_for_execution", lambda job, root=None: None
-        )
-
-        sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
-        response = localhost_api_client.post(
-            "/api/v1/import/path",
-            json={"sources": sources, "profile_id": 999999},
-        )
-        assert response.status_code == 403
-
-    def test_path_import_profile_id_wire_field_routes_to_correct_profile(
-        self, localhost_api_client, monkeypatch
-    ):
-        """Wire contract: JSON field `profile_id` (not `target_profile_id`) selects the target.
-
-        This test uses the exact field name the frontend sends. Pydantic drops unknown
-        fields silently, so a field-name mismatch would cause fallback to actor.profile_id
-        and the assertion on job.target_profile_id would fail.
-        """
-        import snore.api.routers.import_data as import_mod
-
-        from snore.api.import_jobs import get_job, remove_job
-
-        monkeypatch.setattr(
-            import_mod, "enqueue_for_execution", lambda job, root=None: None
-        )
-
-        resp = localhost_api_client.post(
-            "/api/v1/profiles/", json={"name": "Wire Contract Profile"}
-        )
-        assert resp.status_code == 201
-        second_profile_id = resp.json()["id"]
-
-        sources = [{"parser_name": "resmed", "root_path": "/tmp", "device_serial": "x"}]
-        job = None
-        try:
-            response = localhost_api_client.post(
-                "/api/v1/import/path",
-                json={"sources": sources, "profile_id": second_profile_id},
-            )
-            assert response.status_code == 202
-            job = get_job(response.json()["job_id"])
-            assert job is not None
-            assert job.target_profile_id == second_profile_id, (
-                "profile_id wire field must route import to the specified profile"
-            )
-        finally:
-            if job is not None:
-                remove_job(job.job_id)
-                job.cleanup_files()
-                job.release_capacity()
-
 
 class TestPipelineJobsListAPI:
     """Integration tests for GET /api/v1/import/jobs."""
@@ -674,7 +491,7 @@ class TestPipelineJobsListAPI:
         """A completed job appears in the list with the expected response fields."""
         from snore.api.import_jobs import JobType, create_job, remove_job
 
-        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job = create_job(JobType.PATH, owner_user_id=None)
         job.set_file_count(2)
         try:
             job.try_start()
@@ -708,7 +525,7 @@ class TestPipelineJobsListAPI:
         from snore.api.import_jobs import JobType, create_job, remove_job
 
         # Create the import job.
-        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job = create_job(JobType.PATH, owner_user_id=None)
         try:
             job.try_start()
 
@@ -751,7 +568,7 @@ class TestPipelineJobsListAPI:
         from snore.api.import_jobs import JobType, create_job, remove_job
 
         # api_client actor gets user_id=1; create a job owned by user 9999.
-        job = create_job(JobType.PATH, owner_user_id=9999, sources=[])
+        job = create_job(JobType.PATH, owner_user_id=9999)
         try:
             response = api_client.get("/api/v1/import/jobs")
             assert response.status_code == 200
@@ -766,7 +583,7 @@ class TestPipelineJobsListAPI:
         """import_result in the response must never contain imported_session_ids."""
         from snore.api.import_jobs import JobPhase, JobType, create_job, remove_job
 
-        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job = create_job(JobType.PATH, owner_user_id=None)
         try:
             job.try_start()
             job.phase_complete(
@@ -803,7 +620,7 @@ class TestPipelineJobsListAPI:
         from snore.api.import_jobs import JobPhase, JobType, create_job, remove_job
         from snore.database.models import ImportJobRecord
 
-        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job = create_job(JobType.PATH, owner_user_id=None)
         job.set_file_count(5)
         try:
             job.try_start()
@@ -837,6 +654,7 @@ class TestPipelineJobsListAPI:
                     analysis_queued=job.analysis_queued,
                     created_at=job.created_at_wall,
                     finished_at=job.finished_at_wall,
+                    updated_at=datetime.now(UTC),
                 )
             )
             db_session.commit()
@@ -872,7 +690,7 @@ class TestPipelineJobsListAPI:
         from snore.api.import_jobs import JobType, create_job, remove_job
         from snore.database.models import ImportJobRecord
 
-        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job = create_job(JobType.PATH, owner_user_id=None)
         try:
             job.try_start()
             job._finish(
@@ -894,6 +712,7 @@ class TestPipelineJobsListAPI:
                     analysis_queued=None,
                     created_at=job.created_at_wall,
                     finished_at=job.finished_at_wall,
+                    updated_at=datetime.now(UTC),
                 )
             )
             db_session.commit()
@@ -914,7 +733,7 @@ class TestPipelineJobsListAPI:
         from snore.api.import_jobs import JobType, create_job, remove_job
         from snore.database.models import ImportJobRecord
 
-        job = create_job(JobType.PATH, owner_user_id=None, sources=[])
+        job = create_job(JobType.PATH, owner_user_id=None)
         try:
             job.try_start()
             job._finish(
@@ -936,6 +755,7 @@ class TestPipelineJobsListAPI:
                     analysis_queued=None,
                     created_at=job.created_at_wall,
                     finished_at=job.finished_at_wall,
+                    updated_at=datetime.now(UTC),
                 )
             )
             db_session.commit()
@@ -951,3 +771,97 @@ class TestPipelineJobsListAPI:
         finally:
             job.cleanup_files()
             job.release_capacity()
+
+    def test_non_terminal_db_rows_excluded_from_list(self, api_client, db_session):
+        """Non-terminal ImportJobRecord rows with no in-memory counterpart are hidden.
+
+        Startup recovery should clear these, but if recovery is skipped (e.g. DB
+        locked at boot), a non-terminal DB row must not appear as a phantom
+        forever-running job in the jobs list.  Only terminal DB history is shown.
+        """
+        import uuid
+
+        from snore.database.models import ImportJobRecord
+
+        for state in ["pending_upload", "pending", "running"]:
+            db_session.add(
+                ImportJobRecord(
+                    job_id=uuid.uuid4().hex,
+                    job_type="upload",
+                    owner_user_id=None,
+                    target_profile_id=None,
+                    state=state,
+                    file_count=0,
+                    sessions_imported=None,
+                    import_result_json=None,
+                    error_message=None,
+                    analysis_queued=None,
+                    created_at=datetime.now(UTC),
+                    finished_at=None,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+        db_session.commit()
+
+        response = api_client.get("/api/v1/import/jobs")
+        assert response.status_code == 200
+        jobs = response.json()["jobs"]
+
+        states_returned = {j["state"] for j in jobs}
+        assert "pending_upload" not in states_returned, (
+            "Non-terminal DB row (pending_upload) must not appear as phantom"
+        )
+        assert "pending" not in states_returned, (
+            "Non-terminal DB row (pending) must not appear as phantom"
+        )
+        assert "running" not in states_returned, (
+            "Non-terminal DB row (running) must not appear as phantom"
+        )
+
+    def test_historical_path_job_type_renders_without_error(
+        self, api_client, db_session
+    ):
+        """A historical DB row with job_type='path' must render correctly in GET /import/jobs.
+
+        The server-path import feature was removed, but existing databases may contain
+        rows with job_type='path'.  These must not cause errors or disappear from the
+        jobs list — backward compatibility for the DB column is required.
+        """
+        import uuid
+
+        from snore.database.models import ImportJobRecord
+
+        historical_job_id = uuid.uuid4().hex
+        db_session.add(
+            ImportJobRecord(
+                job_id=historical_job_id,
+                job_type="path",
+                owner_user_id=None,
+                target_profile_id=None,
+                state="succeeded",
+                file_count=3,
+                sessions_imported=2,
+                import_result_json=None,
+                error_message=None,
+                analysis_queued=None,
+                created_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        db_session.commit()
+
+        response = api_client.get("/api/v1/import/jobs")
+        assert response.status_code == 200
+        jobs = response.json()["jobs"]
+
+        matching = [j for j in jobs if j["job_id"] == historical_job_id]
+        assert len(matching) == 1, (
+            "Historical job with job_type='path' must appear in GET /import/jobs"
+        )
+        j = matching[0]
+        assert j["job_type"] == "path"
+        assert j["state"] == "succeeded"
+        assert j["stage"] == "done"
+        assert j["file_count"] == 3
+        assert j["sessions_imported"] == 2
