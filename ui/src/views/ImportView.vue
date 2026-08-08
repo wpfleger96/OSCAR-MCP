@@ -296,9 +296,8 @@ function schedulePoll() {
 
 async function handleCancelImportJob(job: PipelineJobStatus) {
     try {
-        const analysisId = job.linked_analysis?.job_id ?? job.analysis_job_id
-        if ((job.stage === 'analysis_queued' || job.stage === 'analyzing') && analysisId) {
-            await cancelAnalysisJob(analysisId)
+        if ((job.stage === 'analysis_queued' || job.stage === 'analyzing') && job.analysis_job_id) {
+            await cancelAnalysisJob(job.analysis_job_id)
         } else {
             await cancelImport(job.job_id)
         }

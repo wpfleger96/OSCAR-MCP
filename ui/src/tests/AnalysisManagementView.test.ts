@@ -31,7 +31,12 @@ vi.mock('@/api/analysis', async (importOriginal) => {
 
 import AnalysisManagementView from '@/views/AnalysisManagementView.vue'
 import { useAuth } from '@/composables/useAuth'
-import { runBatchAnalysis } from '@/api/analysis'
+import {
+    runBatchAnalysis,
+    getAnalysisSessions,
+    getAnalysisJobs,
+    cancelAnalysisJob,
+} from '@/api/analysis'
 import { makeAuthMock } from './helpers/mockUseAuth'
 
 describe('AnalysisManagementView — analyze missing', () => {
@@ -40,6 +45,13 @@ describe('AnalysisManagementView — analyze missing', () => {
         vi.mocked(useAuth).mockReturnValue(
             makeAuthMock({ canWrite: ref(true), isAuthenticated: ref(true) }) as never,
         )
+        vi.mocked(getAnalysisSessions).mockResolvedValue({
+            items: [],
+            total: 0,
+            limit: 25,
+            offset: 0,
+        })
+        vi.mocked(getAnalysisJobs).mockResolvedValue({ jobs: [] })
         vi.mocked(runBatchAnalysis).mockResolvedValue({ job_id: 'job-1', session_count: 5 })
     })
 
@@ -79,5 +91,23 @@ describe('AnalysisManagementView — analyze missing', () => {
         const [body] = vi.mocked(runBatchAnalysis).mock.calls[0]
         expect(body).not.toHaveProperty('missing_only')
         expect(body).toMatchObject({ store_results: true })
+    })
+
+    it('test_handleCancelJob_409_silenced_and_list_still_refreshed', async () => {
+        vi.mocked(cancelAnalysisJob).mockRejectedValueOnce(
+            Object.assign(new Error('409 Conflict'), { status: 409 }),
+        )
+        const wrapper = await mountView()
+        const fetchCallsBefore = vi.mocked(getAnalysisJobs).mock.calls.length
+        const vm = wrapper.vm as unknown as {
+            handleCancelJob: (jobId: string) => Promise<void>
+            error: string | null
+        }
+
+        await vm.handleCancelJob('job-already-done')
+        await flushPromises()
+
+        expect(vm.error).toBeNull()
+        expect(vi.mocked(getAnalysisJobs).mock.calls.length).toBeGreaterThan(fetchCallsBefore)
     })
 })

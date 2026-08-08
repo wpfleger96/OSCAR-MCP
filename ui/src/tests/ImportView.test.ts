@@ -85,23 +85,17 @@ describe('ImportView cancel handler', () => {
         vi.mocked(cancelAnalysisJob).mockResolvedValue(undefined)
     })
 
-    it('test_analyzing_stage_calls_cancelAnalysisJob_with_linked_job_id', async () => {
+    it('test_analyzing_stage_calls_cancelAnalysisJob_with_analysis_job_id', async () => {
         const job = makeJob({
             stage: 'analyzing',
-            linked_analysis: {
-                job_id: 'aj-linked',
-                state: 'running',
-                progress_completed: 0,
-                progress_total: 5,
-                error_message: null,
-            },
+            analysis_job_id: 'aj-123',
         })
         const wrapper = await mountWithJob(job)
 
         await wrapper.find('.cancel-trigger').trigger('click')
         await flushPromises()
 
-        expect(cancelAnalysisJob).toHaveBeenCalledWith('aj-linked')
+        expect(cancelAnalysisJob).toHaveBeenCalledWith('aj-123')
         expect(cancelImport).not.toHaveBeenCalled()
     })
 
@@ -130,12 +124,11 @@ describe('ImportView cancel handler', () => {
         expect(cancelAnalysisJob).not.toHaveBeenCalled()
     })
 
-    it('test_analyzing_stage_with_null_ids_falls_back_to_cancelImport', async () => {
+    it('test_analyzing_stage_with_null_analysis_job_id_falls_back_to_cancelImport', async () => {
         const job = makeJob({
             job_id: 'import-2',
             stage: 'analyzing',
             analysis_job_id: null,
-            linked_analysis: null,
         })
         const wrapper = await mountWithJob(job)
 

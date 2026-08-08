@@ -373,13 +373,14 @@ class TestImportJobOwnership:
             job.release_capacity()
 
     def test_cancel_terminal_job_returns_409(self, api_client):
-        """DELETE /import/{job_id} for a job already in SUCCEEDED state returns 409."""
-        from snore.api.import_jobs import JobType, create_job, remove_job
+        """DELETE /import/{job_id} for a job already in a terminal state returns 409."""
+        from snore.api.import_jobs import JobType, cancel_job, create_job, remove_job
 
         job = create_job(JobType.PATH, owner_user_id=None)
         try:
-            job.try_start()
-            job._finish(succeeded=True, terminal_msg={"event": "complete", "data": {}})
+            # Drive to CANCELLED (terminal) via the public API, same pattern as
+            # the analysis counterpart.
+            cancel_job(job.job_id)
 
             response = api_client.delete(f"/api/v1/import/{job.job_id}")
             assert response.status_code == 409
