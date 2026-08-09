@@ -131,7 +131,7 @@ Unchanged from v3.1 (stdio conversation: overview → worst-FL windows → breat
 
 No tier may fabricate a UTC offset for device wall-clock columns. Every DTO carrying `offset_seconds` also carries its anchoring session's tier-2 wall-clock start (`session_start_wall_clock` + `timezone_status`) so offsets are client-interpretable.
 
-Known inconsistency: the OSCAR binary parser (`src/snore/parsers/oscar_device.py`) derives session/event times from epoch-ms and stores UTC-derived instants in the naive tier-2 columns, whereas ResMed timestamps are device-local wall-clock — documented, not fixed.
+Known inconsistency (declared-timezone profiles excepted): the OSCAR binary parser (`src/snore/parsers/oscar_device.py`) derives session/event times from epoch-ms. When the owning profile declares an IANA timezone, those instants are converted to that zone's wall clock at import — matching ResMed's device-local semantics in the naive tier-2 columns. Profiles without a declared timezone retain the legacy behavior: UTC-derived wall-clock stored under `timezone_status: "unknown"`.
 
 ### 1. Shared building blocks
 

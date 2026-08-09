@@ -618,6 +618,7 @@ class ResmedEDFParser(DeviceParser):
         sort_by: str | None = None,
         parallel: bool = True,
         progress_callback: Callable[[str], None] | None = None,
+        timezone_name: str | None = None,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all ResMed sessions from the given path.
@@ -632,6 +633,8 @@ class ResmedEDFParser(DeviceParser):
             sort_by: Sort order (date-asc, date-desc, or None)
             parallel: Enable parallel parsing (default: True)
             progress_callback: Optional callback for progress messages
+            timezone_name: Ignored — ResMed EDF timestamps are already
+                device-local wall-clock; no conversion is needed.
         """
         path = Path(path)
 

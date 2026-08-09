@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from snore.services.import_service import ImportService, safe_relative_path
+from snore.services.schemas import ImportSource
 
 
 class TestDetectSources:
@@ -64,6 +67,71 @@ class TestDetectSources:
         assert len(result) == 2
         assert result[0].device_serial == "AAA"
         assert result[1].device_serial == "BBB"
+
+
+class TestProfileTimezoneWiring:
+    async def test_stored_profile_timezone_reaches_parser(self, tmp_path):
+        """Profile.timezone loaded at import time is passed to parse_sessions."""
+        mock_parser = MagicMock()
+        mock_parser.parser_id = "oscar_binary"
+        mock_parser.parse_sessions.return_value = iter([])
+
+        fake_db = MagicMock()
+        fake_db.get = AsyncMock(
+            return_value=SimpleNamespace(timezone="America/New_York")
+        )
+
+        @asynccontextmanager
+        async def fake_scope(**kwargs):
+            yield fake_db
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        service = ImportService()
+
+        with (
+            patch("snore.services.import_service.session_scope", fake_scope),
+            patch(
+                "snore.services.import_service.parser_registry.list_parsers",
+                return_value=[mock_parser],
+            ),
+        ):
+            await service.import_sources(
+                [source], profile_id=42, dry_run=True, backup=False
+            )
+
+        fake_db.get.assert_awaited_once()
+        assert fake_db.get.await_args.args[1] == 42
+        mock_parser.parse_sessions.assert_called_once()
+        call_kwargs = mock_parser.parse_sessions.call_args.kwargs
+        assert call_kwargs["timezone_name"] == "America/New_York"
+
+    async def test_missing_profile_passes_none(self, tmp_path):
+        mock_parser = MagicMock()
+        mock_parser.parser_id = "oscar_binary"
+        mock_parser.parse_sessions.return_value = iter([])
+
+        fake_db = MagicMock()
+        fake_db.get = AsyncMock(return_value=None)
+
+        @asynccontextmanager
+        async def fake_scope(**kwargs):
+            yield fake_db
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        service = ImportService()
+
+        with (
+            patch("snore.services.import_service.session_scope", fake_scope),
+            patch(
+                "snore.services.import_service.parser_registry.list_parsers",
+                return_value=[mock_parser],
+            ),
+        ):
+            await service.import_sources(
+                [source], profile_id=42, dry_run=True, backup=False
+            )
+
+        assert mock_parser.parse_sessions.call_args.kwargs["timezone_name"] is None
 
 
 class TestSafeRelativePath:

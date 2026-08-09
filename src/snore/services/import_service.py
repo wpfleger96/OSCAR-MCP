@@ -135,6 +135,16 @@ class ImportService:
 
             backup_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
 
+        # Profile-declared IANA timezone: parsers whose source data encodes
+        # absolute instants (OSCAR epoch-ms) use it to emit device-local
+        # wall-clock times matching the ResMed contract; None keeps legacy
+        # UTC wall-clock (A6).
+        from snore.database.models import Profile  # noqa: PLC0415
+
+        async with session_scope() as db_session:
+            profile = await db_session.get(Profile, profile_id)
+            timezone_name = profile.timezone if profile else None
+
         if not dry_run:
             async with write_gate():
                 async with session_scope(immediate=True) as db_session:
@@ -211,6 +221,7 @@ class ImportService:
                 sort_by=sort_by,
                 parallel=parallel,
                 progress_callback=emit,
+                timezone_name=timezone_name,
             )
             emit("Detected sessions — starting import")
 

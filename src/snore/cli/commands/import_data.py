@@ -74,6 +74,27 @@ async def _resolve_and_import(
     )
 
 
+async def _resolve_profile_timezone(
+    actor_user: str | None, actor_profile: str | None
+) -> str | None:
+    """Best-effort profile timezone so dry-run display matches the real import.
+
+    Returns None when no profile can be resolved — dry-run must keep working
+    against an unconfigured database (legacy UTC wall-clock in that case).
+    """
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.database.models import Profile  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    try:
+        async with session_scope() as db:
+            profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
+            profile = await db.get(Profile, profile_id)
+            return profile.timezone if profile else None
+    except click.ClickException:
+        return None
+
+
 @click.command("import")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--force", is_flag=True, help="Re-import existing sessions")
@@ -274,6 +295,9 @@ def import_data(
 
             parse_root = Path(source.root_path)
             try:
+                timezone_name = asyncio.run(
+                    _resolve_profile_timezone(actor_user, actor_profile)
+                )
                 sessions = list(
                     parser.parse_sessions(
                         parse_root,
@@ -283,6 +307,7 @@ def import_data(
                         sort_by=sort_by if sort_by != "filesystem" else None,
                         parallel=not no_parallel,
                         progress_callback=_progress,
+                        timezone_name=timezone_name,
                     )
                 )
             except Exception as e:
