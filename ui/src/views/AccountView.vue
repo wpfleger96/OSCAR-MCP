@@ -253,6 +253,7 @@ import {
     deleteMyData,
 } from '@/api/me'
 import type { components } from '@/types/generated'
+import type { AxiosError } from 'axios'
 
 type UserPreferences = components['schemas']['UserPreferences']
 
@@ -429,7 +430,12 @@ async function handleDeleteData(): Promise<void> {
         const result = await deleteMyData()
         deleteDataSuccess.value = `Deleted: ${result.devices_deleted} device(s), ${result.import_jobs_deleted} import record(s) across ${result.profiles_processed} profile(s).`
     } catch (e: unknown) {
-        deleteDataError.value = e instanceof Error ? e.message : 'Failed to delete data'
+        if ((e as AxiosError).response?.status === 409) {
+            deleteDataError.value =
+                'Another reset or data deletion is in progress — wait for it to finish and try again.'
+        } else {
+            deleteDataError.value = e instanceof Error ? e.message : 'Failed to delete data'
+        }
     } finally {
         deletingData.value = false
     }
