@@ -24,6 +24,7 @@ from snore.mcp.schemas import (
     BreathTableQuery,
     BreathTableResponse,
     BreathTableRow,
+    tz_fields,
 )
 from snore.mcp.tools._capabilities import (
     build_device_capabilities,
@@ -143,8 +144,7 @@ async def get_breath_table(
             session_id=r.session_id,
             breath_number=r.breath_number,
             session_start_wall_clock=r.session_start_wall_clock.isoformat(),
-            timezone_status=str(r.timezone_status),
-            timezone_name=r.timezone_name,
+            **tz_fields(r),
             start_offset_seconds=r.start_offset_seconds,
             end_offset_seconds=r.end_offset_seconds,
             ti_s=r.ti,
@@ -179,8 +179,7 @@ async def get_breath_table(
     bins = [
         BreathTableBin(
             session_start_wall_clock=b.session_start_wall_clock.isoformat(),
-            timezone_status=str(b.timezone_status),
-            timezone_name=b.timezone_name,
+            **tz_fields(b),
             bin_start_offset=b.bin_start_offset,
             bin_end_offset=b.bin_end_offset,
             breath_count=b.breath_count,
@@ -219,14 +218,13 @@ async def get_breath_table(
 
     # Response-level anchor label — cached in the service instance, so this
     # re-uses the resolution already done inside get_breath_table.
-    tz_status, tz_name = await bs.resolve_timezone()
+    tz = await bs.resolve_timezone()
 
     return BreathTableResponse(
         query=mapped_query,
         session_id=top_session_id,
         session_start_wall_clock=top_session_start,
-        timezone_status=str(tz_status),
-        timezone_name=tz_name,
+        **tz_fields(tz),
         analysis_status=str(dto.analysis_status),
         algo_versions=(
             dto.algo_versions.model_dump(mode="json")

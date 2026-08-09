@@ -1,4 +1,4 @@
-"""Acceptance tests for breath-row persistence (plan v3.8, §A pinned obligations).
+"""Acceptance tests for breath-row persistence.
 
 Pinned scenarios:
 A1. Fresh import → Breath rows present.
@@ -546,6 +546,42 @@ class TestValidityFlagsEndToEnd:
             assert rows, "analysis must persist Breath rows"
             assert all(r.ramp_active is None for r in rows)
             assert all(r.ramp_active_reason == "not_available" for r in rows)
+            assert all(r.mask_off is None for r in rows)
+            assert all(r.mask_off_reason == "segments_unknown" for r in rows)
+
+    async def test_malformed_stored_segments_degrade_to_unknown(self, temp_db):
+        """Malformed mask_on_segments JSON must not crash analysis.
+
+        The stored column value is untrusted; a wrong-shape item is rejected by
+        _parse_mask_on_segments (warning + None) so analysis completes with
+        mask_off=None / "segments_unknown" instead of raising.
+        """
+        await init_database(str(temp_db))
+        async with session_scope() as db:
+            _, profile_id = await _make_profile(db)
+            session_id = await _seed_flow_session(
+                db,
+                profile_id,
+                duration_s=300.0,
+                mask_on_segments=[[0.0, 100.0, 200.0]],  # 3-element item: malformed
+                settings={},
+            )
+            svc = AnalysisService(db, profile_id=profile_id)
+            await svc.analyze_session(session_id)
+
+        async with session_scope() as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(models.Breath).where(
+                            models.Breath.session_id == session_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert rows, "analysis must still persist Breath rows"
             assert all(r.mask_off is None for r in rows)
             assert all(r.mask_off_reason == "segments_unknown" for r in rows)
 

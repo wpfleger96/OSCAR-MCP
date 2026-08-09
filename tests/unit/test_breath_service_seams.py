@@ -4941,6 +4941,22 @@ class TestNightlySummaryReraRdi:
         assert summary.rdi is None
         assert summary.rdi_reason == NullReason.DURATION_ZERO
 
+    async def test_rera_proxy_version_null_when_analysis_not_run(
+        self, async_db_session
+    ):
+        """Session without analysis → no RERA scan ran, so rera_count is None
+        and rera_proxy_version must be None (not stamped 'v2')."""
+        therapy_date = date(2025, 8, 3)
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_summary(therapy_date, device_id=dev.id)
+
+        assert summary.rera_count is None
+        assert summary.rera_proxy_version is None
+
     async def test_range_summary_bulk_matches_per_night_summary(self, async_db_session):
         """get_nightly_range_summary over N nights produces identical per-night fields as get_nightly_summary."""
         therapy_dates = [date(2025, 8, 10), date(2025, 8, 11)]
@@ -5261,6 +5277,30 @@ class TestDeriveMvFromFlow:
         assert out_t.size == 0
         assert out_v.size == 0
 
+    def test_non_monotonic_offsets_return_empty(self):
+        """Offsets with an inversion would produce garbage windows via
+        searchsorted → empty arrays (downstream metrics go null)."""
+        offsets = np.concatenate([np.arange(0.0, 100.0), np.arange(50.0, 200.0)])
+        values = np.full_like(offsets, 8.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size == 0
+        assert out_v.size == 0
+
+    def test_nan_values_treated_as_zero(self):
+        """NaN flow samples count as 0.0 flow instead of poisoning the
+        cumulative sum: alternating 10/NaN → derived MV ≈ 5, all finite."""
+        offsets = np.arange(0.0, 200.0, 1.0)
+        values = np.full_like(offsets, 10.0)
+        values[::2] = np.nan
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size > 0
+        assert np.all(np.isfinite(out_v))
+        assert np.allclose(out_v, 5.0, atol=0.5)
+
 
 @pytest.mark.unit
 class TestCaMvFlowFallback:
@@ -5378,6 +5418,87 @@ class TestCaMvFlowFallback:
         assert len(result.ca_events) == 1
         assert result.ca_events[0].mv_source == "device"
         assert result.mv_source == "device"
+
+    async def test_mixed_mv_sources_yield_mixed_night_source(self, async_db_session):
+        """Two sessions on one night — one with a device mv waveform, one with
+        only flow → per-event mv_source is 'device' / 'flow_derived' per
+        session and the night-level mv_source is 'mixed'."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 4)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+        session_a = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(seconds=1200),
+            duration_seconds=1200.0,
+        )
+        session_b = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=2),
+            end_time=start_a + timedelta(hours=2, seconds=1200),
+            duration_seconds=1200.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        n = 1200
+        ts = np.arange(n, dtype=np.float32)
+        # Session A: device mv channel; session B: flow only (fallback path)
+        async_db_session.add_all(
+            [
+                models.Waveform(
+                    session_id=session_a.id,
+                    waveform_type="mv",
+                    sample_rate=1.0,
+                    sample_count=n,
+                    data_blob=_make_waveform_blob_from_arrays(
+                        ts, np.full(n, 8.0, dtype=np.float32)
+                    ),
+                ),
+                models.Waveform(
+                    session_id=session_b.id,
+                    waveform_type="flow",
+                    sample_rate=1.0,
+                    sample_count=n,
+                    data_blob=_make_waveform_blob_from_arrays(
+                        ts, np.full(n, 12.0, dtype=np.float32)
+                    ),
+                ),
+                models.Event(
+                    session_id=session_a.id,
+                    event_type="CA",
+                    start_time=session_a.start_time + timedelta(seconds=300),
+                    duration_seconds=10.0,
+                ),
+                models.Event(
+                    session_id=session_b.id,
+                    event_type="CA",
+                    start_time=session_b.start_time + timedelta(seconds=300),
+                    duration_seconds=10.0,
+                ),
+            ]
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert len(result.ca_events) == 2
+        source_by_session = {ev.session_id: ev.mv_source for ev in result.ca_events}
+        assert source_by_session[session_a.id] == "device"
+        assert source_by_session[session_b.id] == "flow_derived"
+        assert result.mv_source == "mixed"
 
     async def test_pb_zero_episodes_yields_zero_pct(self, async_db_session):
         """Analyzed-OK session with pb_json present but zero PB episodes →

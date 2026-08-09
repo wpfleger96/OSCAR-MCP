@@ -173,6 +173,64 @@ class TestDeclaredTimezoneConversion:
         )
 
 
+class TestDstTransitionNight:
+    """A session straddling the real US fall-back transition of 2024-11-03.
+
+    America/New_York falls back at 06:00 UTC (02:00 EDT → 01:00 EST): each
+    epoch instant must convert with its own offset — UTC-4 before the
+    transition, UTC-5 after — and the therapy date must stay the night of
+    Nov 2 throughout.
+    """
+
+    # 05:30 UTC == 01:30 EDT (UTC-4), before the fall-back.
+    START_MS = int(datetime(2024, 11, 3, 5, 30, tzinfo=UTC).timestamp() * 1000)
+    # 07:30 UTC == 02:30 EST (UTC-5), after the fall-back.
+    END_MS = int(datetime(2024, 11, 3, 7, 30, tzinfo=UTC).timestamp() * 1000)
+
+    def test_each_instant_converts_with_its_own_offset(self, tmp_path):
+        # Event at 06:30 UTC == 01:30 EST — the repeated wall-clock hour.
+        event_at_ms = int(datetime(2024, 11, 3, 6, 30, tzinfo=UTC).timestamp() * 1000)
+        events = _make_events(self.START_MS, self.END_MS, event_at_ms)
+
+        session = _parse_session(
+            tmp_path, self.START_MS, self.END_MS, "America/New_York", events
+        )
+
+        # Start converts with the pre-transition EDT offset (UTC-4).
+        assert session.start_time == datetime(2024, 11, 3, 1, 30)
+        # End converts with the post-transition EST offset (UTC-5): 2 h of
+        # elapsed time advance the wall clock by only 1 h across the fold.
+        assert session.end_time == datetime(2024, 11, 3, 2, 30)
+
+        # The event lands in the repeated 01:30 wall-clock hour (EST fold),
+        # one real hour after the session start's identical wall-clock value.
+        assert len(session.events) == 1
+        assert session.events[0].start_time == datetime(2024, 11, 3, 1, 30)
+
+    def test_therapy_date_stays_correct_across_transition(self, tmp_path):
+        session = _parse_session(
+            tmp_path, self.START_MS, self.END_MS, "America/New_York"
+        )
+
+        # Both endpoints are pre-noon local → therapy night of Nov 2 on both
+        # sides of the transition.
+        assert DayManager.get_day_for_session(session.start_time) == date(2024, 11, 2)
+        assert DayManager.get_day_for_session(session.end_time) == date(2024, 11, 2)
+
+    def test_offsets_flip_at_the_transition_instant(self):
+        before = datetime(2024, 11, 3, 5, 59, tzinfo=UTC).timestamp()
+        after = datetime(2024, 11, 3, 6, 1, tzinfo=UTC).timestamp()
+        # 05:59 UTC → 01:59 EDT; two minutes later, 06:01 UTC → 01:01 EST:
+        # the wall clock steps backwards because each instant uses its own
+        # offset.
+        assert _epoch_to_wall_clock(before, "America/New_York") == datetime(
+            2024, 11, 3, 1, 59
+        )
+        assert _epoch_to_wall_clock(after, "America/New_York") == datetime(
+            2024, 11, 3, 1, 1
+        )
+
+
 class TestEpochToWallClock:
     def test_dst_summer_offset(self):
         # 2024-07-15 00:30 UTC == 20:30 EDT (UTC-4) July 14

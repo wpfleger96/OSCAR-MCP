@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
@@ -132,6 +134,43 @@ class TestProfileTimezoneWiring:
             )
 
         assert mock_parser.parse_sessions.call_args.kwargs["timezone_name"] is None
+
+    async def test_corrupt_stored_timezone_raises_clean_runtime_error(self, tmp_path):
+        """A corrupt Profile.timezone fails eagerly with an actionable RuntimeError.
+
+        ZoneInfoNotFoundError is a KeyError subclass, so if it escaped from the
+        lazy parse generators the CLI's `except RuntimeError` would miss it and
+        the user would see a raw traceback.  import_sources must validate the
+        stored name up front and re-raise as RuntimeError.
+        """
+        mock_parser = MagicMock()
+        mock_parser.parser_id = "oscar_binary"
+
+        fake_db = MagicMock()
+        fake_db.get = AsyncMock(return_value=SimpleNamespace(timezone="Not/A_Zone"))
+
+        @asynccontextmanager
+        async def fake_scope(**kwargs):
+            yield fake_db
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        service = ImportService()
+
+        with (
+            patch("snore.services.import_service.session_scope", fake_scope),
+            patch(
+                "snore.services.import_service.parser_registry.list_parsers",
+                return_value=[mock_parser],
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="snore profile set-timezone"):
+                # Real (non-dry-run) import path — validation fires before any
+                # parsing or DB writes.
+                await service.import_sources(
+                    [source], profile_id=42, dry_run=False, backup=False
+                )
+
+        mock_parser.parse_sessions.assert_not_called()
 
 
 class TestSafeRelativePath:

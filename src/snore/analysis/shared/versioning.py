@@ -1,6 +1,7 @@
-"""Algorithm versioning types and version constants for PR-A.
+"""Algorithm versioning types and version constants.
 
-Appendix A §1 / plan step 4 (binding typed contracts).
+Binding typed contracts for how analysis runs are versioned, stored, and
+compared for staleness.
 
 The stored engine_versions_json shape is the nested AlgoVersions composition:
 
@@ -96,7 +97,13 @@ class AlgorithmIdentity(BaseModel):
         return cls()
 
 
-# Fields whose mismatch blocks cross-epoch comparisons (§1 note 3).
+# Fields whose mismatch blocks cross-epoch comparisons.
+# trigger_cycle and validity_flags are intentionally excluded: neither feeds a
+# cross-epoch distribution (trigger/cycle labels are per-breath experimental
+# metadata; ramp_active/mask_off validity flags gate rows, not aggregates), so
+# a version bump in either need not refuse comparisons.  A solo bump of an
+# excluded key MUST be accompanied by a format_version bump so old rows still
+# go stale — format_version is in this set and catches it.
 CROSS_VERSION_REFUSAL_KEYS: frozenset[str] = frozenset(
     {
         "format_version",

@@ -396,9 +396,10 @@ class TestCompareEpochsMixedPrimaryMode:
         assert len(result.epochs) == 1
         ep = result.epochs[0]
         assert ep.null_reason is None
-        # RERA fields degraded
+        # RERA fields degraded; version is null because the scan never ran
         assert ep.rera_proxy_count is None
         assert ep.rera_reason == "primary_mode_mismatch"
+        assert ep.rera_proxy_version is None
         # FL distributions still populated
         assert ep.mid_insp_flattening.median is not None
         assert ep.mid_insp_flattening.n_breaths == 3
@@ -440,6 +441,8 @@ class TestCompareEpochsNoData:
         assert ep.nights_with_data == 0
         # Session exists but has no OK analysis
         assert ep.nights_missing_analysis == 1
+        # No RERA scan ran → no criterion version to stamp
+        assert ep.rera_proxy_version is None
 
     async def test_epoch_with_no_sessions_at_all_returns_no_data_in_range(
         self, async_db_session: AsyncSession, async_test_profile: Any

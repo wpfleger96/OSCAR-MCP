@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import EventContext, EventRow, EventsResponse
+from snore.mcp.schemas import EventContext, EventRow, EventsResponse, tz_fields
 from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
@@ -83,13 +83,12 @@ async def get_events(
             if device_id is not None
             else None
         )
-        tz_status, tz_name = await bs.resolve_timezone()
+        tz = await bs.resolve_timezone()
         return EventsResponse(
             date=event_date.isoformat(),
             session_id=None,
             session_start_wall_clock=None,
-            timezone_status=str(tz_status),
-            timezone_name=tz_name,
+            **tz_fields(tz),
             events=[],
             total_events=0,
             device_capabilities=caps,
@@ -116,8 +115,7 @@ async def get_events(
                 session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
                 event_type=ev.event_type,
                 start_time_wall_clock=ev.event_start_wall_clock.isoformat(),
-                timezone_status=str(ev.timezone_status),
-                timezone_name=ev.timezone_name,
+                **tz_fields(ev),
                 offset_seconds=ev.offset_seconds,
                 duration_seconds=ev.duration_seconds,
                 spo2_drop_pct=None,
@@ -164,8 +162,7 @@ async def get_events(
         date=event_date.isoformat(),
         session_id=anchor_session_id,
         session_start_wall_clock=anchor_session_start,
-        timezone_status=str(contextual_events[0].timezone_status),
-        timezone_name=contextual_events[0].timezone_name,
+        **tz_fields(contextual_events[0]),
         events=rows,
         total_events=total_events,
         truncated=truncated,

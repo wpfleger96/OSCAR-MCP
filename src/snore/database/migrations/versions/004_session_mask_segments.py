@@ -47,4 +47,7 @@ def downgrade() -> None:
     insp = sa_inspect(bind)
     existing_cols = {c["name"] for c in insp.get_columns(_TABLE)}
     if _COLUMN in existing_cols:
-        op.drop_column(_TABLE, _COLUMN)
+        # batch_alter_table is the SQLite-portable way to drop a column
+        # (table-copy recreate), matching the 002 migration's convention.
+        with op.batch_alter_table(_TABLE) as batch_op:
+            batch_op.drop_column(_COLUMN)

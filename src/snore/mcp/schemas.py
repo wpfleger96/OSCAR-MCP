@@ -28,6 +28,21 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 
+def tz_fields(source: Any) -> dict[str, Any]:
+    """Schema kwargs for the tier-2 timezone companion fields.
+
+    Accepts any service DTO with ``timezone_status`` / ``timezone_name``
+    attributes, or the ``(TimezoneStatus, str | None)`` tuple returned by
+    ``BreathService.resolve_timezone``.  Splat into a response constructor:
+    ``**tz_fields(dto)``.
+    """
+    if isinstance(source, tuple):
+        status, name = source
+    else:
+        status, name = source.timezone_status, source.timezone_name
+    return {"timezone_status": str(status), "timezone_name": name}
+
+
 class DeviceCapabilities(BaseModel):
     """Capabilities declared by the device/dataset for a queried range (G2)."""
 
@@ -152,7 +167,8 @@ class NightlyRow(BaseModel):
     rera_proxy_count: int | None = None
     rera_proxy_reason: str | None = None
     # Version of the query-time RERA-proxy criterion (independent of the
-    # persisted AlgorithmIdentity); null when analysis has not been run.
+    # persisted AlgorithmIdentity); stamped only when the RERA scan ran
+    # (rera_proxy_count non-null), null otherwise.
     rera_proxy_version: str | None = None
 
     # Breath timing aggregates — from breath-level analysis; null + reason when analysis hasn't run
@@ -473,7 +489,8 @@ class EpochStats(BaseModel):
     rera_proxy_count: int | None = None
     rera_reason: str | None = None
     # Version of the query-time RERA-proxy criterion (independent of the
-    # persisted AlgorithmIdentity).
+    # persisted AlgorithmIdentity); stamped only when the RERA scan ran
+    # (rera_proxy_count non-null), null otherwise.
     rera_proxy_version: str | None = None
     rx_settings: dict[str, str] = {}
 

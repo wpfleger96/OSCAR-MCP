@@ -1605,3 +1605,66 @@ class TestProfileTimezoneCommand:
 
         assert result.exit_code == 0
         assert "America/New_York" in result.output
+
+
+class TestImportCorruptTimezone:
+    """A corrupt stored Profile.timezone must fail the real import cleanly.
+
+    ZoneInfoNotFoundError is a KeyError subclass; if it escaped to the CLI it
+    would bypass the `except RuntimeError` handler and print a raw traceback.
+    The service re-raises it as RuntimeError, which the CLI renders as a
+    click error with the `snore profile set-timezone` remediation hint.
+    """
+
+    @pytest.fixture
+    async def db_with_corrupt_timezone(self, temp_db):
+        """Database with one user + profile whose timezone is corrupt."""
+        await init_database(str(temp_db))
+        async with session_scope() as session:
+            _profile = await _create_test_user_and_profile(session)
+            # Written directly — bypasses `snore profile set-timezone`
+            # validation, simulating a corrupted stored value.
+            _profile.timezone = "Not/A_Zone"
+        return temp_db
+
+    def test_corrupt_timezone_yields_clean_error(
+        self, cli_runner, db_with_corrupt_timezone, tmp_path, monkeypatch
+    ):
+        import logging
+
+        from unittest.mock import patch
+
+        import snore.logging_config as logging_config
+
+        from snore.services.import_service import ImportService
+        from snore.services.schemas import ImportSource
+
+        # Pin the normal (non-debug) user path: the CLI re-raises errors when
+        # the root logger is at DEBUG, and setup_logging would set it there.
+        monkeypatch.setattr(logging_config, "_logging_configured", True)
+        root_logger = logging.getLogger()
+        original_level = root_logger.level
+        root_logger.setLevel(logging.INFO)
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        try:
+            with patch.object(ImportService, "detect_sources", return_value=[source]):
+                result = cli_runner.invoke(
+                    cli,
+                    [
+                        "import",
+                        str(tmp_path),
+                        "--db",
+                        str(db_with_corrupt_timezone),
+                        "--no-backup",
+                    ],
+                )
+        finally:
+            root_logger.setLevel(original_level)
+
+        assert result.exit_code != 0
+        # Clean, actionable click error — not a raw traceback.
+        assert "Not/A_Zone" in result.output
+        assert "snore profile set-timezone" in result.output
+        assert "Traceback" not in result.output
+        assert not isinstance(result.exception, KeyError)

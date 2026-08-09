@@ -1,6 +1,6 @@
 """get_waveform_window / render_window tool adapters.
 
-Architecture (plan §9 in-scope/out-of-scope split):
+Architecture (DB-fetch / pure-compute split):
 - DB fetch runs INSIDE the server's scope_provider context: ``fetch_waveform_raw``
   holds the AsyncSession only during the query; the scope closes before CPU work begins.
 - ``waveform_response_from_raw`` and ``render_png_from_raw`` are PURE — they call
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import WaveformChannelSchema, WaveformWindowResponse
+from snore.mcp.schemas import WaveformChannelSchema, WaveformWindowResponse, tz_fields
 from snore.mcp.tools._scaffold import _check_response_size, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
@@ -155,8 +155,7 @@ def waveform_response_from_raw(raw: RawWaveformWindow) -> WaveformWindowResponse
     return WaveformWindowResponse(
         session_id=session_id,
         session_start_wall_clock=session_start_wall_clock,
-        timezone_status=str(window.timezone_status),
-        timezone_name=window.timezone_name,
+        **tz_fields(window),
         window_start_offset_s=window.window_start_offset,
         window_end_offset_s=window.window_end_offset,
         channels=channels,

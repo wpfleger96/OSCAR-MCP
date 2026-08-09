@@ -448,7 +448,8 @@ def import_data(
         raise click.ClickException(f"{total_failed} session(s) failed to import")
 
     # Analysis phase — post-commit, separate from import transaction.
-    # Import data is fully committed before this phase begins (plan §A1).
+    # Import data is fully committed before this phase begins, so an analysis
+    # failure can never roll back or hide a successful import.
     if not no_analyze and all_imported_session_ids:
         from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415

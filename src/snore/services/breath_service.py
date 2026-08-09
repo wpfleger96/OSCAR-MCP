@@ -1,10 +1,9 @@
 """BreathService — query layer over the breaths table.
 
-All types in this module are the Appendix-A typed seam definitions (plan v3.8).
-PR-B (Duncan) consumes these seams; PR-A (this PR) defines and implements them.
-
-All types live here per Appendix A §13 note ("All types live in
-src/snore/services/breath_service.py").
+This module is the single home for the typed seam contract consumed by the MCP
+tool layer: every DTO, enum, and seam function the tool adapters depend on is
+defined (or re-exported) here, so adapters import one surface and never reach
+into ORM models or analysis internals.
 """
 
 from __future__ import annotations
@@ -79,6 +78,7 @@ __all__ = [
     "NightlyAnalysisSummary",
     "NightlyRangeSummary",
     "DeviceCapabilities",
+    "MvSource",
     "CaDetail",
     "CaAnalysisResult",
     "RawCaEvent",
@@ -95,12 +95,12 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Appendix A §1 re-exported from versioning (single source of truth)
+# Analysis-status/versioning types re-exported from versioning (single source of truth)
 # ---------------------------------------------------------------------------
 
 
 class SessionCoverage(BaseModel):
-    """Per-session analysis coverage entry (Appendix A §1)."""
+    """Per-session analysis coverage entry."""
 
     session_id: int
     analysis_status: AnalysisStatus
@@ -445,8 +445,9 @@ class EpochBreathStats(BaseModel):
     rera_proxy_count: int | None
     rera_reason: NullReason | None
     # Version of the query-time RERA-proxy criterion (not part of
-    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).
-    rera_proxy_version: str = RERA_PROXY_ALGO_VERSION
+    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).  Stamped only when the
+    # RERA scan actually ran (rera_proxy_count is non-null); None otherwise.
+    rera_proxy_version: str | None = None
     rx_settings: dict[str, str]
 
 
@@ -692,8 +693,8 @@ async def fetch_waveform_window_raw(
     ``request.session_id`` must be set (direct callers must have a resolved session).
     Verifies ``Device.profile_id == profile_id`` via a join; raises ``ValueError``
     when the session is not found or is not owned by ``profile_id``.  Derives
-    ``session_start`` from the DB row — never from caller-supplied data (plan §9
-    lines 720-735).
+    ``session_start`` from the DB row — never from caller-supplied data, so a
+    forged anchor cannot shift window offsets.
     """
 
     from sqlalchemy import select  # noqa: PLC0415
@@ -707,7 +708,7 @@ async def fetch_waveform_window_raw(
         )
 
     # Full-tuple ownership query: Session + Device (profile) + Day (date) + optional device.
-    # plan §9 lines 822-825: the session must match profile_id, therapy_date, AND device_id.
+    # Ownership contract: the session must match profile_id, therapy_date, AND device_id.
     stmt = (
         select(models.Session.start_time)
         .join(models.Device, models.Session.device_id == models.Device.id)
@@ -829,8 +830,9 @@ class NightlyAnalysisSummary(BaseModel):
     rera_count: int | None
     rera_reason: NullReason | None
     # Version of the query-time RERA-proxy criterion (not part of
-    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).
-    rera_proxy_version: str = RERA_PROXY_ALGO_VERSION
+    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).  Stamped only when the
+    # RERA scan actually ran (rera_count is non-null); None otherwise.
+    rera_proxy_version: str | None = None
     primary_mode: str | None
     fl_median: float | None
     fl_95th: float | None
@@ -903,6 +905,15 @@ class DeviceCapabilities(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class MvSource(StrEnum):
+    """Provenance of the MV channel used in CA analysis."""
+
+    DEVICE = "device"
+    FLOW_DERIVED = "flow_derived"
+    # Night-level only: sessions on the night used different MV sources.
+    MIXED = "mixed"
+
+
 class CaDetail(BaseModel):
     """Per-CA event analysis."""
 
@@ -918,8 +929,8 @@ class CaDetail(BaseModel):
     ps_reason: NullReason | None
     stability_index: float | None
     stability_reason: NullReason | None
-    # MV provenance: "device" | "flow_derived" | None (no MV channel available)
-    mv_source: str | None = None
+    # MV provenance: DEVICE | FLOW_DERIVED | None (no MV channel available)
+    mv_source: MvSource | None = None
 
 
 class CaAnalysisResult(BaseModel):
@@ -936,14 +947,14 @@ class CaAnalysisResult(BaseModel):
     pb_reason: NullReason | None
     mv_rolling_variance: float | None
     mv_variance_reason: NullReason | None
-    # Night-level MV provenance: "device" | "flow_derived" | "mixed" | None,
+    # Night-level MV provenance: DEVICE | FLOW_DERIVED | MIXED | None,
     # aggregated across sessions that contributed an MV channel.
-    mv_source: str | None = None
+    mv_source: MvSource | None = None
     mv_fallback_version: str = MV_FALLBACK_ALGO_VERSION
 
 
 # ---------------------------------------------------------------------------
-# §12 — CA-analysis fetch/compute seam (plan §9 conformance)
+# §12 — CA-analysis fetch/compute seam (DB fetch in-scope; compute pure)
 # ---------------------------------------------------------------------------
 
 
@@ -1280,7 +1291,7 @@ class BreathService:
     ) -> DayAnalysisStatus:
         """Reduce per-session coverage to a day-level DayAnalysisStatus.
 
-        Precedence (plan §1 line 864):
+        Precedence:
         1. Multiple distinct algorithm identities among OK sessions → MIXED_VERSION
         2. All OK → OK
         3. All NOT_RUN → NOT_RUN
@@ -1290,7 +1301,7 @@ class BreathService:
         if not coverages:
             return DayAnalysisStatus.NOT_RUN
 
-        # plan §1 line 864 rule 1: multiple distinct identities → MIXED_VERSION
+        # Rule 1: multiple distinct identities → MIXED_VERSION
         if len(identities) > 1:
             id_strs = {str(i.model_dump()) for i in identities}
             if len(id_strs) > 1:
@@ -1298,19 +1309,19 @@ class BreathService:
 
         statuses = {c.analysis_status for c in coverages}
 
-        # plan §1 line 864 rule 2: all OK → OK
+        # Rule 2: all OK → OK
         if statuses == {AnalysisStatus.OK}:
             return DayAnalysisStatus.OK
 
-        # plan §1 line 864 rule 3: all NOT_RUN → NOT_RUN
+        # Rule 3: all NOT_RUN → NOT_RUN
         if statuses == {AnalysisStatus.NOT_RUN}:
             return DayAnalysisStatus.NOT_RUN
 
-        # plan §1 line 864 rule 4: all STALE_VERSION → STALE
+        # Rule 4: all STALE_VERSION → STALE
         if statuses == {AnalysisStatus.STALE_VERSION}:
             return DayAnalysisStatus.STALE
 
-        # plan §1 line 864 rule 5: any other mix → PARTIAL
+        # Rule 5: any other mix → PARTIAL
         return DayAnalysisStatus.PARTIAL
 
     # ------------------------------------------------------------------
@@ -1633,11 +1644,15 @@ class BreathService:
     ) -> FindWindowsResult:
         """N windows matching criterion, worst first.
 
-        See Appendix A §6 for full construction rules and dedup logic.
+        Windows are built per criterion (worst flattening over leak-valid
+        breaths, CA-centered, or FL run ending in recovery), severity-ranked
+        worst-first, and deduplicated by overlap so the same span is never
+        reported twice.  Options irrelevant to the chosen criterion are
+        rejected with ValueError rather than silently ignored.
         """
         opts = options or WindowCriterionOptions()
 
-        # Validate criterion-irrelevant options per §6 docstring
+        # Validate criterion-irrelevant options (see docstring)
         defaults = WindowCriterionOptions()
         if criterion == WindowCriterion.WORST_FLATTENING_LEAK_VALID:
             bad = [
@@ -1742,7 +1757,7 @@ class BreathService:
                 identities.append(algo.identity)
                 primary_modes.append(algo.run.primary_mode)
 
-        # Determine day_status via centralized reducer (plan §1 line 864)
+        # Determine day_status via the centralized reducer (_reduce_day_status)
         day_status = self._reduce_day_status(coverage, identities)
 
         # Check identity uniformity for CROSS_VERSION_REFUSAL_KEYS
@@ -2568,6 +2583,9 @@ class BreathService:
                     else _null_dist,
                     rera_proxy_count=rera_count,
                     rera_reason=rera_reason,
+                    rera_proxy_version=(
+                        RERA_PROXY_ALGO_VERSION if rera_count is not None else None
+                    ),
                     rx_settings=all_rx[0] if all_rx else {},
                 )
             )
@@ -2850,6 +2868,9 @@ class BreathService:
             algorithm_identity=algo_identity,
             rera_count=final_rera_count,
             rera_reason=rera_reason,
+            rera_proxy_version=(
+                RERA_PROXY_ALGO_VERSION if final_rera_count is not None else None
+            ),
             primary_mode=uniform_primary_mode,
             fl_median=fl_median,
             fl_95th=fl_95th,
@@ -3166,7 +3187,7 @@ class BreathService:
             )
 
         # Date range of actual data — only days with at least one Session count
-        # as "imported nights" (plan §13 lines 949-961).
+        # as "imported nights"; empty Day rows never widen the reported range.
         from sqlalchemy import exists  # noqa: PLC0415
 
         day_stmt = select(models.Day).where(
@@ -3259,7 +3280,7 @@ class BreathService:
             )
             all_setting_keys = sorted(set(str(k) for k in setting_rows))
 
-        # rx_keys_present: only keys that actually have non-null values (plan §11)
+        # rx_keys_present: only keys that actually have non-null values
         from snore.analysis.rx_tracker import RX_KEYS as _RX_KEYS  # noqa: PLC0415
 
         rx_keys: list[str] = []
@@ -3331,7 +3352,7 @@ class BreathService:
                 raise ValueError(
                     "event_types must be None or a list of non-empty strings"
                 )
-            # Deduplicate (order-preserving), then enforce the 50-item cap (plan §13).
+            # Deduplicate (order-preserving), then enforce the 50-item cap.
             event_types = list(dict.fromkeys(event_types))
             if len(event_types) > 50:
                 raise ValueError("event_types must contain at most 50 unique values")
@@ -3363,7 +3384,7 @@ class BreathService:
 
             # Pre-load all needed channels for this session ONCE — one DB fetch for
             # all events rather than two per event (fix: per-event blob read N+1).
-            # Corrupt blobs still raise ValueError per plan IMPORTANT-8.
+            # Corrupt blobs still raise ValueError — never silently skipped.
             session_duration_s = session_row.duration_seconds or 32400.0
             pre_raw = await _fetch_waveform_blobs(
                 self._db,
@@ -3481,7 +3502,7 @@ class BreathService:
 
         # Validate explicit session_id BEFORE the empty-day return.
         # An owned device on an empty date with an explicit session_id must raise,
-        # not silently return a synthetic empty window (plan §9 lines 822-825).
+        # not silently return a synthetic empty window.
         if not day_sessions:
             if request.session_id is not None:
                 raise ValueError(
@@ -3612,7 +3633,7 @@ class BreathService:
 
         ca_day_status = self._reduce_day_status(coverage, identities_for_reduce)
 
-        # plan §12 lines 984-993: MIXED_VERSION must return algorithm_identity=None
+        # MIXED_VERSION contract: no single identity is representative → None
         if ca_day_status == DayAnalysisStatus.MIXED_VERSION:
             algo_identity = None
 
@@ -3622,7 +3643,7 @@ class BreathService:
         elif ca_day_status == DayAnalysisStatus.STALE:
             ca_null_reason = NullReason.ANALYSIS_STALE
         elif ca_day_status == DayAnalysisStatus.MIXED_VERSION:
-            # plan §12 lines 984-993: conflicting algo identities → ALGO_VERSION_MISMATCH
+            # Conflicting algo identities → ALGO_VERSION_MISMATCH
             ca_null_reason = NullReason.ALGO_VERSION_MISMATCH
         elif ca_day_status == DayAnalysisStatus.PARTIAL:
             ca_null_reason = None
@@ -3643,7 +3664,7 @@ class BreathService:
             is_ok = session_id in ok_session_ids
 
             # Pre-fetch MV + THERAPY_PRESSURE + EPAP blobs once per session.
-            # Corrupt blobs still raise ValueError per plan IMPORTANT-8.
+            # Corrupt blobs still raise ValueError — never silently skipped.
             session_cap = max(session_duration_s, 1.0)
             pre_raw = await _fetch_waveform_blobs(
                 self._db,
@@ -3663,25 +3684,6 @@ class BreathService:
                 session_id,
                 session_start,
             )
-
-            # No device MV channel → fetch FLOW blobs for the flow-derived MV
-            # fallback (compute_ca_analysis runs derive_mv_from_flow on them).
-            flow_raw: RawWaveformWindow | None = None
-            if WaveformChannelName.MV in pre_raw.missing_channels:
-                flow_raw = await _fetch_waveform_blobs(
-                    self._db,
-                    WaveformWindowRequest(
-                        therapy_date=therapy_date,
-                        session_id=session_id,
-                        device_id=resolved_device_id,
-                        channels=[WaveformChannelName.FLOW],
-                        offset_start=0.0,
-                        offset_end=session_cap,
-                        window_cap_seconds=session_cap,
-                    ),
-                    session_id,
-                    session_start,
-                )
 
             # Fetch CA events for this session
             ca_rows = (
@@ -3705,6 +3707,30 @@ class BreathService:
                 )
                 for ev in ca_rows
             ]
+
+            # No device MV channel → fetch FLOW blobs for the flow-derived MV
+            # fallback (compute_ca_analysis runs derive_mv_from_flow on them).
+            # Derived MV is only consumed for per-event metrics (CA events
+            # present) or rolling-variance bins (analysis-OK session), so skip
+            # the fetch entirely when neither consumer exists.
+            flow_raw: RawWaveformWindow | None = None
+            if WaveformChannelName.MV in pre_raw.missing_channels and (
+                raw_events or is_ok
+            ):
+                flow_raw = await _fetch_waveform_blobs(
+                    self._db,
+                    WaveformWindowRequest(
+                        therapy_date=therapy_date,
+                        session_id=session_id,
+                        device_id=resolved_device_id,
+                        channels=[WaveformChannelName.FLOW],
+                        offset_start=0.0,
+                        offset_end=session_cap,
+                        window_cap_seconds=session_cap,
+                    ),
+                    session_id,
+                    session_start,
+                )
 
             # Load programmatic_result_json for OK sessions (PB% computation)
             pb_json: dict[str, Any] | None = None
@@ -3791,15 +3817,20 @@ def derive_mv_from_flow(
     have timestamp gaps, so uniform sampling is never assumed.
 
     Returns ``(out_offsets, out_values)``; empty arrays when the input is too
-    short to cover a single window.  O(n log n): cumsum + searchsorted, no
-    per-window scans.
+    short to cover a single window or when ``offsets`` is not non-decreasing
+    (searchsorted requires sorted input — unsorted offsets would silently
+    produce garbage windows, so downstream metrics go null instead).  NaN
+    samples in ``values`` are treated as 0.0 flow so they cannot poison the
+    cumulative sum.  O(n log n): cumsum + searchsorted, no per-window scans.
     """
     import numpy as np  # noqa: PLC0415
 
     if offsets.size == 0 or float(offsets[-1]) - float(offsets[0]) < window_s:
         return np.array([]), np.array([])
+    if np.any(np.diff(offsets) < 0):
+        return np.array([]), np.array([])
 
-    clipped = np.clip(values, 0.0, None)
+    clipped = np.clip(np.where(np.isnan(values), 0.0, values), 0.0, None)
     csum = np.concatenate(([0.0], np.cumsum(clipped, dtype=np.float64)))
 
     out_times = np.arange(
@@ -3868,8 +3899,8 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
     combined_bin_means: list[float] = []
     mv_rolling_var: float | None = None
     mv_var_reason: NullReason | None = NullReason.NOT_AVAILABLE
-    # MV provenance per contributing session ("device" / "flow_derived")
-    mv_sources_seen: set[str] = set()
+    # MV provenance per contributing session (DEVICE / FLOW_DERIVED)
+    mv_sources_seen: set[MvSource] = set()
 
     for sd in raw.session_data:
         session_start_f = sd.session_start.timestamp()
@@ -3889,21 +3920,43 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
         # MV fallback: no device MV channel → derive MV from the flow waveform
         # and insert it under the MV key so all downstream code (slope,
         # stability, rolling variance) works unchanged.
-        mv_source: str | None = None
+        mv_source: MvSource | None = None
         if WaveformChannelName.MV in pre_ch:
-            mv_source = "device"
+            mv_source = MvSource.DEVICE
         elif sd.flow_waveform is not None:
-            flow_window = compute_waveform_window(sd.flow_waveform)
-            for flow_ch in flow_window.channels:
-                if flow_ch.channel_type == WaveformChannelName.FLOW:
-                    mv_off, mv_val = derive_mv_from_flow(
-                        np.array(flow_ch.offset_seconds),
-                        np.array(flow_ch.values),
+            # Deserialize the raw FLOW blob straight to numpy — bypassing the
+            # render-oriented compute_waveform_window avoids a numpy → list →
+            # numpy round trip over the full-session flow signal.  Window
+            # slicing and corrupt-blob semantics mirror compute_waveform_window.
+            from snore.analysis.data.waveform_loader import (  # noqa: PLC0415
+                deserialize_waveform_blob,
+            )
+
+            flow_req = sd.flow_waveform.request
+            for flow_ch in sd.flow_waveform.channels:
+                if flow_ch.waveform_type != WaveformChannelName.FLOW:
+                    continue
+                if flow_ch.sample_count <= 0 or not flow_ch.raw_bytes:
+                    break  # absent channel → no fallback (mv_source stays None)
+                try:
+                    flow_off, flow_val = deserialize_waveform_blob(
+                        flow_ch.raw_bytes, flow_ch.sample_count
                     )
-                    if mv_off.size > 0:
-                        pre_ch[WaveformChannelName.MV] = (mv_off, mv_val)
-                        mv_source = "flow_derived"
-                    break
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid waveform data for channel "
+                        f"'{flow_ch.waveform_type.value}'"
+                    ) from exc
+                in_window = (flow_off >= flow_req.offset_start) & (
+                    flow_off <= flow_req.offset_end
+                )
+                mv_off, mv_val = derive_mv_from_flow(
+                    flow_off[in_window], flow_val[in_window]
+                )
+                if mv_off.size > 0:
+                    pre_ch[WaveformChannelName.MV] = (mv_off, mv_val)
+                    mv_source = MvSource.FLOW_DERIVED
+                break
         if mv_source is not None:
             mv_sources_seen.add(mv_source)
 
@@ -3912,7 +3965,7 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
             offset_s = ev_start_f - session_start_f
 
             # --- preceding_mv_slope + stability_index ---
-            # Window: prior 60 s (plan §12 line 976: stability uses 60-second window)
+            # Contract: both metrics use the 60 s window preceding the event
             preceding_mv_slope: float | None = None
             preceding_mv_reason: NullReason | None = NullReason.NOT_AVAILABLE
             stability_index: float | None = None
@@ -3927,7 +3980,7 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                 ts_slice = off_mv[lo:hi]
                 v_slice = val_mv[lo:hi]
                 if len(ts_slice) >= 2:
-                    # plan §12 line 976: slope in L/min per MINUTE
+                    # Contract: slope is reported in L/min per MINUTE;
                     # _mv_slope returns L/min per SECOND (offset_seconds as x)
                     slope_per_s = _mv_slope(ts_slice.tolist(), v_slice.tolist())
                     if slope_per_s is not None:
@@ -4048,11 +4101,11 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
 
     # Aggregate MV provenance across contributing sessions
     if not mv_sources_seen:
-        night_mv_source: str | None = None
+        night_mv_source: MvSource | None = None
     elif len(mv_sources_seen) == 1:
         night_mv_source = next(iter(mv_sources_seen))
     else:
-        night_mv_source = "mixed"
+        night_mv_source = MvSource.MIXED
 
     return CaAnalysisResult(
         query_date=raw.therapy_date,

@@ -99,7 +99,8 @@ class TestWriteGateWiring:
 
         @asynccontextmanager
         async def mock_session_scope(*args, **kwargs):
-            yield AsyncMock()
+            # get() -> None so the profile-timezone preflight sees no profile.
+            yield AsyncMock(get=AsyncMock(return_value=None))
 
         with (
             patch("snore.services.import_service.write_gate", recording_gate),

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
-from snore.mcp.schemas import FindWindowsResponse, WindowRow
+from snore.mcp.schemas import FindWindowsResponse, WindowRow, tz_fields
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
 from snore.mcp.tools._helpers import str_or_none
@@ -122,8 +122,7 @@ async def find_windows(
             criterion=str(w.criterion),
             session_id=w.session_id,
             session_start_wall_clock=w.session_start_wall_clock.isoformat(),
-            timezone_status=str(w.timezone_status),
-            timezone_name=w.timezone_name,
+            **tz_fields(w),
             window_start_offset=w.window_start_offset,
             window_end_offset=w.window_end_offset,
             reason_summary=w.reason_summary,
