@@ -328,6 +328,7 @@ import { useApiLoad } from '@/composables/useApiLoad'
 import { getDbStats, vacuumDb, resetDb } from '@/api/db'
 import { formatDateShort } from '@/utils/formatting'
 import type { VacuumResult, ResetResult } from '@/types'
+import type { AxiosError } from 'axios'
 
 const { data, loading, error, reload } = useApiLoad(() => getDbStats())
 const { isLocal, role } = useAuth()
@@ -386,7 +387,10 @@ async function handleReset(): Promise<void> {
     } catch (err: unknown) {
         // Post-reset 401 is expected when include_accounts=true: the session is
         // intentionally dead.  Don't show an error when the invite URL was set.
-        if (!bootstrapInviteUrl.value) {
+        if ((err as AxiosError).response?.status === 409) {
+            resetError.value =
+                'Another reset or data deletion is in progress — wait for it to finish and try again.'
+        } else if (!bootstrapInviteUrl.value) {
             resetError.value = err instanceof Error ? err.message : 'Reset failed'
         }
     } finally {

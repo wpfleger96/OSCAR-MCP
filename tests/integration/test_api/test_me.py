@@ -1051,3 +1051,26 @@ class TestDeleteData:
         assert data["status"] == "success"
         assert data["devices_deleted"] == 0
         assert data["import_jobs_deleted"] == 0
+
+    def test_409_when_lock_held(self, async_db_session, db_session, monkeypatch):
+        """delete-data returns 409 immediately when the reset lock is already held.
+
+        Both /db/reset and /auth/me/delete-data share the one lock in
+        snore.api.deps, so a concurrent reset (or delete-data) blocks
+        the other without queueing on the SQLite write lock.
+        """
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import snore.api.deps as deps  # noqa: PLC0415
+
+        user, profile = _seed_user(db_session, role="member")
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        mock_lock = MagicMock()
+        mock_lock.locked = lambda: True
+        monkeypatch.setattr(deps, "_reset_lock", mock_lock)
+
+        resp = client.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 409
+        assert "already in progress" in resp.json()["detail"]

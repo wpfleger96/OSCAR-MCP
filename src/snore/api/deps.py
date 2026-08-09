@@ -1,8 +1,10 @@
+import asyncio
+
 from collections.abc import AsyncGenerator, Callable
 from datetime import date, datetime, time
 from typing import Annotated
 
-from fastapi import Depends, Query, Request
+from fastapi import Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.auth.actor import ActorContext, AuthMode
@@ -29,6 +31,27 @@ async def get_db_immediate() -> AsyncGenerator[AsyncSession]:
 
 
 ImmediateDbDep = Annotated[AsyncSession, Depends(get_db_immediate)]
+
+
+_reset_lock = asyncio.Lock()
+
+
+async def require_reset_lock() -> AsyncGenerator[None]:
+    """Serialize destructive DB operations (admin reset, per-user delete-all).
+
+    Non-blocking: a request arriving while another reset holds the lock gets
+    409 immediately instead of queueing on the SQLite write lock.
+    """
+    if _reset_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="A database reset or data deletion is already in progress",
+        )
+    async with _reset_lock:
+        yield
+
+
+ResetLockDep = Annotated[None, Depends(require_reset_lock)]
 
 
 async def get_raw_session() -> AsyncGenerator[AsyncSession]:

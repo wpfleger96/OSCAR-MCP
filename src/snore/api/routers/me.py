@@ -45,11 +45,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import delete, exists, select
 from sqlalchemy import update as sa_update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
 from snore.api.constants import NO_STORE
-from snore.api.deps import get_db
+from snore.api.deps import ResetLockDep, get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
 from snore.auth.lockout import get_lockout_store
@@ -357,6 +358,9 @@ async def update_preferences(
 @router.post("/delete-data", response_model=DeleteDataResult)
 async def delete_my_data(
     actor: RequireWritable,
+    # Ordering is load-bearing: auth resolves first, lock acquired before the
+    # BEGIN IMMEDIATE write-lock escalation, lock released after session closes.
+    _lock: ResetLockDep,
     db: Annotated[AsyncSession, Depends(get_db)],
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
@@ -389,9 +393,6 @@ async def delete_my_data(
     """
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
 
-    # Acquire the write lock immediately before any reads or writes.
-    await db.connection(execution_options=TXN_OPT_IMMEDIATE)
-
     target = DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
     is_sqlite_file = target.dialect == "sqlite" and target.location not in (
         "",
@@ -405,13 +406,24 @@ async def delete_my_data(
         else 0.0
     )
 
-    (
-        devices_deleted,
-        import_jobs_deleted,
-        profiles_processed,
-    ) = await DatabaseService.delete_user_data(
-        db, actor.user_id, DEFAULT_RAW_BACKUP_DIR
-    )
+    try:
+        # Acquire the write lock immediately before any reads or writes.
+        await db.connection(execution_options=TXN_OPT_IMMEDIATE)
+
+        (
+            devices_deleted,
+            import_jobs_deleted,
+            profiles_processed,
+        ) = await DatabaseService.delete_user_data(
+            db, actor.user_id, DEFAULT_RAW_BACKUP_DIR
+        )
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            raise HTTPException(
+                status_code=409,
+                detail="Database is busy (an import or analysis may be running) — try again shortly",
+            ) from None
+        raise
 
     # Schedule VACUUM as a post-response background task.  FastAPI runs sync
     # background tasks in a thread pool so the event loop is never blocked.

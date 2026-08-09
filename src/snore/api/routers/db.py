@@ -10,10 +10,11 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import insert, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.constants import NO_STORE
-from snore.api.deps import ImmediateDbDep, service_dep
+from snore.api.deps import ImmediateDbDep, ResetLockDep, service_dep
 from snore.api.guards import RequireAdmin
 from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
@@ -120,10 +121,13 @@ def vacuum_db(
 
 @router.post("/reset", response_model=ResetResult)
 async def reset_db(
-    service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
-    db: ImmediateDbDep,
     actor: RequireAdmin,
+    # Ordering is load-bearing: auth resolves first (unauthenticated requests
+    # never touch the lock), lock acquired before BEGIN IMMEDIATE is attempted,
+    # lock released only after the DB session closes.
+    _lock: ResetLockDep,
+    db: ImmediateDbDep,
     background_tasks: BackgroundTasks,
     body: Annotated[ResetRequest | None, Body()] = None,
 ) -> JSONResponse:
@@ -140,8 +144,8 @@ async def reset_db(
         and can re-import data afterward.
 
     ``include_accounts=true``:
-        Full factory reset via ``reset_rows()`` (every row in every table) plus
-        raw-dir purge and vacuum.  A fresh bootstrap admin invite is created for
+        Full factory reset (every row in every table) plus raw-dir purge and
+        vacuum.  A fresh bootstrap admin invite is created for
         the calling admin's email and returned in ``bootstrap_invite_url``.  The
         caller's session is immediately dead; they must redeem that URL to regain
         access.
@@ -171,67 +175,78 @@ async def reset_db(
 
     raw_root = _raw_root()
 
-    if req.include_accounts:
-        # Full factory reset.
-        #
-        # Fetch caller email BEFORE any deletes — this is a hard precondition.
-        # If the calling user's row can't be found, abort rather than wiping
-        # the database and leaving the system with no admin and no invite.
-        row = (
-            await db.execute(
-                select(models.User.canonical_email).where(
-                    models.User.id == actor.user_id
+    try:
+        if req.include_accounts:
+            # Full factory reset.
+            #
+            # Fetch caller email BEFORE any deletes — this is a hard precondition.
+            # If the calling user's row can't be found, abort rather than wiping
+            # the database and leaving the system with no admin and no invite.
+            row = (
+                await db.execute(
+                    select(models.User.canonical_email).where(
+                        models.User.id == actor.user_id
+                    )
                 )
-            )
-        ).first()
-        caller_email = row[0] if row else None
+            ).first()
+            caller_email = row[0] if row else None
 
-        if not caller_email:
+            if not caller_email:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not resolve caller email; reset aborted to prevent data loss.",
+                )
+
+            # Collect all profile IDs for raw-dir purge (Core SQL, avoids ORM
+            # identity-map conflicts with the bulk delete that follows).
+            profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
+
+            tables_cleared = {}
+            for table in reversed(Base.metadata.sorted_tables):
+                cursor = await db.execute(table.delete())
+                tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
+            total = sum(tables_cleared.values())
+
+            # After bulk deletes, expunge stale ORM state (e.g. the acting user's
+            # row, which was deleted) before inserting the invite so the subsequent
+            # commit does not try to flush stale ORM objects.
+            db.expunge_all()
+
+            # Insert the bootstrap invite in the same transaction as the deletion.
+            base_url = cfg.public_base_url or ""
+            bootstrap_invite_url: str | None = await _mint_admin_invite(
+                db, caller_email, base_url
+            )
+
+            logger.warning(
+                "Full factory reset committed for caller %s; bootstrap invite URL "
+                "is only in the response body and will not be recoverable afterward.",
+                caller_email,
+            )
+            await db.commit()
+
+        else:
+            # Data-only reset — delete sleep data, preserve accounts/profiles.
+            profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
+
+            tables_cleared = {}
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name in _DATA_RESET_SKIP:
+                    continue
+                cursor = await db.execute(table.delete())
+                tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
+
+            total = sum(tables_cleared.values())
+            bootstrap_invite_url = None
+
+            await db.commit()
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():
             raise HTTPException(
-                status_code=500,
-                detail="Could not resolve caller email; reset aborted to prevent data loss.",
-            )
-
-        # Collect all profile IDs for raw-dir purge (Core SQL, avoids ORM
-        # identity-map conflicts with the bulk delete that follows).
-        profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
-
-        tables_cleared = await service.reset_rows()
-        total = sum(tables_cleared.values())
-
-        # After bulk deletes, expunge stale ORM state (e.g. the acting user's
-        # row, which was deleted) before inserting the invite so the subsequent
-        # commit does not try to flush stale ORM objects.
-        db.expunge_all()
-
-        # Insert the bootstrap invite in the same transaction as the deletion.
-        base_url = cfg.public_base_url or ""
-        bootstrap_invite_url: str | None = await _mint_admin_invite(
-            db, caller_email, base_url
-        )
-
-        logger.warning(
-            "Full factory reset committed for caller %s; bootstrap invite URL "
-            "is only in the response body and will not be recoverable afterward.",
-            caller_email,
-        )
-        await db.commit()
-
-    else:
-        # Data-only reset — delete sleep data, preserve accounts/profiles.
-        profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
-
-        tables_cleared = {}
-        for table in reversed(Base.metadata.sorted_tables):
-            if table.name in _DATA_RESET_SKIP:
-                continue
-            cursor = await db.execute(table.delete())
-            tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
-
-        total = sum(tables_cleared.values())
-        bootstrap_invite_url = None
-
-        await db.commit()
+                status_code=409,
+                detail="Database is busy (an import or analysis may be running) — try again shortly",
+            ) from None
+        raise
 
     # Purge raw backup dirs after commit (idempotent quarantine-rename pattern).
     for pid in profile_ids:

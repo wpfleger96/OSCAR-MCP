@@ -10,7 +10,6 @@ from sqlalchemy import ColumnElement, create_engine, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
-from snore.database.models import Base
 from snore.services.schemas import DatabaseStats, VacuumResult
 
 __all__ = ["DatabaseService", "_vacuum_background"]
@@ -280,23 +279,6 @@ class DatabaseService:
             first_session=first_session,
             last_session=last_session,
         )
-
-    async def reset_rows(self) -> dict[str, int]:
-        """Delete all rows from all data tables.  Caller-transaction-owned.
-
-        Performs generic typed ``table.delete()`` statements in FK-safe order.
-        Does NOT commit — the caller owns the transaction.
-        Does NOT VACUUM — call ``vacuum_sqlite()`` separately if needed.
-
-        Returns:
-            Mapping of table name → rows deleted.
-        """
-        tables_cleared: dict[str, int] = {}
-        for table in reversed(Base.metadata.sorted_tables):
-            cursor = await self.db_session.execute(table.delete())
-            count = cursor.rowcount or 0  # type: ignore[attr-defined]
-            tables_cleared[table.name] = count
-        return tables_cleared
 
     def vacuum_sqlite(self, db_path: str) -> VacuumResult:
         """Run VACUUM on a SQLite file-backed database.

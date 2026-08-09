@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -6,6 +8,8 @@ from pydantic import BaseModel
 
 from snore.api.middleware import _AUTH_PATH_PREFIX
 from snore.exceptions import NotFoundError
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "NotFoundError",
@@ -58,6 +62,9 @@ async def not_found_handler(request: Request, exc: Exception) -> JSONResponse:
 
 
 async def server_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception(
+        "Unhandled server error on %s %s", request.method, request.url.path
+    )
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(

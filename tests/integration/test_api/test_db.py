@@ -1,7 +1,8 @@
+import inspect
 import uuid
 
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -335,3 +336,49 @@ class TestDbResetMultiuser:
         assert response.status_code == 200
         # The raw dir should no longer exist (purged via quarantine).
         assert not profile_dir.exists(), "Profile raw dir must be purged after reset"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency guards
+# ---------------------------------------------------------------------------
+
+
+class TestDbResetConcurrency:
+    def test_409_when_lock_held(self, api_client, monkeypatch, temp_db):
+        """Reset returns 409 immediately when the reset lock is already held.
+
+        Monkeypatching the module-level lock is safe here because
+        require_reset_lock does a LOAD_GLOBAL lookup at call time, so it
+        sees the replacement value on the next request.
+        """
+        import snore.api.deps as deps  # noqa: PLC0415
+
+        mock_lock = MagicMock()
+        mock_lock.locked = lambda: True
+        monkeypatch.setattr(deps, "_reset_lock", mock_lock)
+
+        with _patch_target(temp_db):
+            response = api_client.post("/api/v1/db/reset")
+
+        assert response.status_code == 409
+        assert "already in progress" in response.json()["detail"]
+
+    def test_no_database_service_in_reset_db_signature(self):
+        """reset_db must not take a DatabaseService parameter.
+
+        A DatabaseService dependency constructs its own get_db session.
+        Having that alongside ImmediateDbDep's BEGIN IMMEDIATE session means
+        two concurrent sessions: the plain deferred session's first write
+        blocks on the write lock held by the immediate session, producing
+        OperationalError("database is locked") after busy_timeout=5000ms.
+        This structural regression test guards against reintroducing that bug.
+        """
+        from snore.api.routers.db import reset_db  # noqa: PLC0415
+
+        sig = inspect.signature(reset_db)
+        for name, param in sig.parameters.items():
+            annotation_str = str(param.annotation)
+            assert "DatabaseService" not in annotation_str, (
+                f"reset_db parameter '{name}' references DatabaseService — "
+                "this would reintroduce the dual-session deadlock"
+            )
