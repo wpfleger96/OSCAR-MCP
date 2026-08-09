@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.rx_tracker import RX_KEYS, RxTracker
+from snore.analysis.rx_tracker import RX_KEYS, RxTracker, changed_setting_keys
 from snore.mcp.schemas import (
     DeviceCapabilities,
     SettingsEpoch,
     SettingsTimelineResponse,
 )
 from snore.mcp.tools._capabilities import _has_analysis, build_device_capabilities
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 
 
 async def get_settings_timeline(
@@ -77,7 +83,7 @@ async def get_settings_timeline(
         # Determine which keys changed vs. previous epoch for this device
         key = dev_id if dev_id is not None else -1
         prev = prev_settings.get(key, {})
-        changed_keys = [k for k in settings if settings[k] != prev.get(k)]
+        changed_keys = sorted(changed_setting_keys(prev, settings))
         prev_settings[key] = settings
 
         # Clip epoch boundaries to requested range
@@ -93,10 +99,62 @@ async def get_settings_timeline(
                 settings=settings,
                 changed_keys=changed_keys if prev else [],
                 device_id=dev_id,
-                device_capabilities=caps_cache.get(dev_id)
-                if dev_id is not None
-                else None,
             )
         )
 
-    return SettingsTimelineResponse(epochs=epochs, total_epochs=len(epochs))
+    caps_by_device: dict[str, DeviceCapabilities] = {
+        str(dev_id): caps for dev_id, caps in caps_cache.items() if caps is not None
+    }
+    return SettingsTimelineResponse(
+        epochs=epochs,
+        total_epochs=len(epochs),
+        device_capabilities_by_device=caps_by_device,
+    )
+
+
+def register(mcp: FastMCP) -> None:
+    from snore.mcp.validation import parse_date_range  # noqa: PLC0415
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_settings_timeline(
+        ctx: Context,
+        start: str,
+        end: str,
+        device_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return therapy settings epochs for a date range.
+
+        Each epoch represents a contiguous period of identical settings.
+        Changed keys are flagged on the epoch where the change first appears.
+        Uses generic RX_KEYS only (mode, epr_level, epr_mode, pressure_min,
+        pressure_max, pressure_fixed, ipap, epap, ps).
+
+        Each epoch's ``device_id`` is ``null`` (never ``0``) when no device is
+        associated with the epoch.
+
+        Args:
+            start: Start date in YYYY-MM-DD format.
+            end: End date in YYYY-MM-DD format.
+            device_id: Optional device ID filter. Use get_data_overview to list devices.
+
+        Returns:
+            SettingsTimelineResponse with epochs list and total_epochs count.
+            Also includes ``device_capabilities_by_device``, a map keyed by
+            device_id (a timeline can span multiple devices, so capabilities are
+            per-device rather than the single ``device_capabilities`` field
+            used by single-device tools).
+        """
+        from snore.mcp.tools.settings import (
+            get_settings_timeline as _impl,  # noqa: PLC0415
+        )
+
+        start_d, end_d = parse_date_range(start, end)
+        return await _scope_and_run(
+            ctx,
+            _impl,
+            tool_name="get_settings_timeline",
+            start=start_d,
+            end=end_d,
+            device_id=device_id,
+        )

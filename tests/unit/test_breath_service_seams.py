@@ -448,6 +448,215 @@ class TestFindWindows:
         assert len(result.windows) > 0
         assert result.windows[0].worst_mid_insp_flattening == pytest.approx(0.35)
 
+    async def test_worst_flattening_none_flattening_breaths_skipped(
+        self, async_db_session
+    ):
+        """Breaths with mid_insp_flattening=None are never selected as anchors.
+
+        Real fragment breaths skip the classifier and arrive with
+        mid_insp_flattening=None. With default options (no threshold), the
+        eligibility filter must exclude them unconditionally so the f-string
+        format in reason_summary never sees a None value.
+        """
+        from snore.analysis.types import ComputedBreath  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 2, 1)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        # Build a mix: two breaths with real flattening values, one with None.
+        base_breath = {
+            "breath_number": 0,
+            "start_offset_s": 0.0,
+            "end_offset_s": 3.0,
+            "inspiration_time_s": 1.2,
+            "expiration_time_s": 1.8,
+            "total_time_s": 3.0,
+            "i_e_ratio": 0.67,
+            "duty_cycle": 0.4,
+            "peak_flow_lpm": 30.0,
+            "peak_exp_flow_lpm": 20.0,
+            "tidal_volume_ml": 400.0,
+            "respiratory_rate_rolling": 15.0,
+            "flatness_index": 0.2,
+            "flow_class": 3,
+            "flow_confidence": 0.9,
+            "is_recovery_breath": False,
+            "inferred_trigger_type": "normal",
+            "trigger_confidence": 0.8,
+            "inferred_cycle_type": "normal",
+            "cycle_confidence": 0.75,
+            "trigger_cycle_applicable": True,
+            "trigger_cycle_reason": None,
+            "leak_valid": True,
+            "leak_valid_reason": None,
+            "ramp_active": None,
+            "ramp_active_reason": "not_available",
+            "mask_off": False,
+            "mask_off_reason": None,
+        }
+
+        breaths = []
+        for i, mid_fl in enumerate([0.8, None, 0.6, 0.7, 0.5, 0.4, 0.3]):
+            b = ComputedBreath(
+                **{
+                    **base_breath,
+                    "breath_number": i + 1,
+                    "mid_insp_flattening": mid_fl,
+                    "start_offset_s": float(i * 4),
+                    "end_offset_s": float(i * 4 + 3),
+                }
+            )
+            breaths.append(b)
+
+        from snore.analysis.modes.types import ModeResult  # noqa: PLC0415
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.analysis.types import AnalysisComputation  # noqa: PLC0415
+        from snore.analysis.types import (
+            AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+        )
+
+        result_dto = AnalysisResultDTO(
+            session_id=session.id,
+            session_duration_hours=7.0,
+            total_breaths=len(breaths),
+            machine_events=[],
+            mode_results={
+                "aasm": ModeResult(
+                    mode_name="aasm", apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                )
+            },
+            timestamp_start=session.start_time.timestamp(),
+            timestamp_end=(session.end_time or session.start_time).timestamp(),
+        )
+        computation = AnalysisComputation(
+            summary=result_dto, breaths=breaths, primary_mode="aasm"
+        )
+        await AnalysisService(async_db_session, profile_id=profile_id).store_result(
+            computation, processing_time_ms=10
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=5,
+            device_id=dev.id,
+        )
+
+        assert result.day_status == DayAnalysisStatus.OK
+        assert len(result.windows) > 0
+        for w in result.windows:
+            assert w.worst_mid_insp_flattening is not None
+
+    async def test_single_primary_mode_session_reports_primary_mode(
+        self, async_db_session
+    ):
+        """find_windows populates primary_mode when all sessions share one primary mode.
+
+        A day with a single WORST_FLATTENING_LEAK_VALID session analysed with
+        primary_mode='aasm' must set result.primary_mode == 'aasm'.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 2, 10)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=10
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=3,
+            device_id=dev.id,
+        )
+
+        assert result.day_status == DayAnalysisStatus.OK
+        assert result.primary_mode == "aasm"
+
+    async def test_mixed_primary_modes_yields_none_primary_mode(self, async_db_session):
+        """find_windows returns primary_mode=None when sessions differ in primary mode.
+
+        WORST_FLATTENING_LEAK_VALID does not refuse on primary_mode mismatch
+        (only FL_RUN_ENDING_IN_RECOVERY does), so windows may still be returned,
+        but result.primary_mode must be None.
+        """
+        from snore.analysis.modes.types import ModeResult  # noqa: PLC0415
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.analysis.types import AnalysisComputation  # noqa: PLC0415
+        from snore.analysis.types import (
+            AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 2, 11)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        session_a = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(hours=3),
+            duration_seconds=3 * 3600.0,
+        )
+        session_b = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=4),
+            end_time=start_a + timedelta(hours=7),
+            duration_seconds=3 * 3600.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        # Store analysis for each session with a different primary_mode
+        for sess, pm in [(session_a, "aasm"), (session_b, "aasm_relaxed")]:
+            result_dto = AnalysisResultDTO(
+                session_id=sess.id,
+                session_duration_hours=3.0,
+                total_breaths=10,
+                machine_events=[],
+                mode_results={
+                    pm: ModeResult(
+                        mode_name=pm, apneas=[], hypopneas=[], ahi=0.0, rdi=0.0
+                    )
+                },
+                timestamp_start=sess.start_time.timestamp(),
+                timestamp_end=(sess.end_time or sess.start_time).timestamp(),
+            )
+            computation = AnalysisComputation(
+                summary=result_dto, breaths=[], primary_mode=pm
+            )
+            await AnalysisService(async_db_session, profile_id=profile_id).store_result(
+                computation, processing_time_ms=10
+            )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
+            n=3,
+            device_id=dev.id,
+        )
+
+        # Mixed primary modes → primary_mode=None; no early-return for WORST_FLATTENING
+        assert result.primary_mode is None
+        assert result.day_status != DayAnalysisStatus.NOT_RUN
+
 
 # ---------------------------------------------------------------------------
 # compare_epochs
@@ -973,6 +1182,129 @@ class TestComputeWaveformWindow:
 
 
 # ---------------------------------------------------------------------------
+# fetch_ca_analysis / compute_ca_analysis seam (module-level)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFetchCaAnalysis:
+    async def test_fetch_returns_dto_free_of_orm_handles(self, async_db_session):
+        """fetch_ca_analysis returns a RawCaAnalysis carrying no ORM/DB objects.
+
+        Verifies that RawCaAnalysis, its session_data, pre_waveform, and
+        ca_events fields all contain only plain Python/Pydantic values so that
+        compute_ca_analysis can run outside the DB scope safely.
+        """
+        from snore.services.breath_service import (  # noqa: PLC0415
+            BreathService,
+            RawCaAnalysis,
+            RawCaSessionData,
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 6, 20)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(async_db_session, session, profile_id)
+        # Add a CA event so session_data is populated
+        ca_event = models.Event(
+            session_id=session.id,
+            event_type="CA",
+            start_time=session.start_time + timedelta(minutes=5),
+            duration_seconds=10.0,
+        )
+        async_db_session.add(ca_event)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert isinstance(raw, RawCaAnalysis)
+        assert len(raw.session_data) == 1
+
+        sd = raw.session_data[0]
+        assert isinstance(sd, RawCaSessionData)
+        # No ORM model types anywhere in the DTO
+        assert isinstance(sd.session_id, int)
+        assert isinstance(sd.session_start, datetime)
+        assert len(sd.ca_events) == 1
+        assert sd.ca_events[0].duration_seconds == pytest.approx(10.0)
+        # pre_waveform carries bytes, not SQLAlchemy rows
+        from snore.services.breath_service import RawWaveformWindow  # noqa: PLC0415
+
+        assert isinstance(sd.pre_waveform, RawWaveformWindow)
+        for ch in sd.pre_waveform.channels:
+            assert isinstance(ch.raw_bytes, bytes)
+
+    async def test_compute_is_deterministic_on_fixed_raw(self, async_db_session):
+        """compute_ca_analysis produces identical output when called twice with the same raw.
+
+        Verifies that the pure function has no mutable state — identical inputs
+        always yield identical CaAnalysisResult values.
+        """
+        from snore.services.breath_service import (  # noqa: PLC0415
+            BreathService,
+            compute_ca_analysis,
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 6, 21)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(async_db_session, session, profile_id)
+        ca_event = models.Event(
+            session_id=session.id,
+            event_type="CA",
+            start_time=session.start_time + timedelta(minutes=15),
+            duration_seconds=8.0,
+        )
+        async_db_session.add(ca_event)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        result1 = compute_ca_analysis(raw)
+        result2 = compute_ca_analysis(raw)
+
+        assert result1.model_dump() == result2.model_dump()
+
+    async def test_orchestrator_equals_fetch_plus_compute(self, async_db_session):
+        """get_ca_analysis(date) == compute_ca_analysis(fetch_ca_analysis(date)).
+
+        Verifies that the convenience orchestrator produces bit-identical output
+        to the explicit fetch+compute composition.
+        """
+        from snore.services.breath_service import (  # noqa: PLC0415
+            BreathService,
+            compute_ca_analysis,
+        )
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 6, 22)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        await _store_analysis_with_breaths(async_db_session, session, profile_id)
+        ca_event = models.Event(
+            session_id=session.id,
+            event_type="CA",
+            start_time=session.start_time + timedelta(minutes=15),
+            duration_seconds=8.0,
+        )
+        async_db_session.add(ca_event)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+        composed = compute_ca_analysis(raw)
+        orchestrated = await svc.get_ca_analysis(
+            therapy_date=therapy_date, device_id=dev.id
+        )
+
+        assert composed.model_dump() == orchestrated.model_dump()
+
+
+# ---------------------------------------------------------------------------
 # A-suite rework — drives store_result() production path
 # ---------------------------------------------------------------------------
 
@@ -1234,6 +1566,7 @@ class TestVendorApplicability:
             timestamps=t,
             flow_values=flow,
             flow_pattern_by_number={},
+            breath_shape_by_number={},
             recovery_breath_indices=set(),
             leak_timestamps=None,
             leak_values=None,
@@ -1283,6 +1616,7 @@ class TestVendorApplicability:
             timestamps=t,
             flow_values=flow,
             flow_pattern_by_number={},
+            breath_shape_by_number={},
             recovery_breath_indices=set(),
             leak_timestamps=None,
             leak_values=None,

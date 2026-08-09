@@ -21,7 +21,8 @@ import os
 import re
 
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+from concurrent.futures.process import BrokenProcessPool
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -55,8 +56,40 @@ from snore.parsers.unified import (
     WaveformType,
     extract_basic_stats,
 )
+from snore.utils.process_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
+
+
+def _resmed_parse_bundle_worker(
+    night_date: str,
+    segments: dict[str, dict[str, "Path"]],
+    device_info: DeviceInfo,
+    base_path: "Path",
+    str_settings_cache: "dict[date, dict[str, float]] | None",
+    str_summaries_cache: "dict[date, dict[str, float]] | None",
+    date_from: str | None,
+    date_to: str | None,
+    str_series11: bool,
+) -> UnifiedSession | None:
+    """Parse one night bundle in a subprocess.
+
+    Instantiates a fresh ``ResmedEDFParser`` so no bound-method state is
+    transferred across the process boundary.  The only instance-level flag
+    needed is ``_str_series11``, which is passed explicitly.
+    """
+    parser = ResmedEDFParser()
+    parser._str_series11 = str_series11
+    return parser._parse_single_session_bundle(
+        night_date,
+        segments,
+        device_info,
+        base_path,
+        str_settings_cache,
+        str_summaries_cache,
+        date_from,
+        date_to,
+    )
 
 
 class ResmedEDFParser(DeviceParser):
@@ -622,10 +655,12 @@ class ResmedEDFParser(DeviceParser):
                 f"Parsing {len(night_items)} nights in parallel with {os.cpu_count()} workers"
             )
 
-            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            futures: dict[Any, Any] = {}
+            try:
+                pool = get_pool()
                 futures = {
-                    executor.submit(
-                        self._parse_single_session_bundle,
+                    pool.submit(
+                        _resmed_parse_bundle_worker,
                         night_date,
                         segments,
                         device_info,
@@ -634,6 +669,7 @@ class ResmedEDFParser(DeviceParser):
                         str_summaries_cache,
                         date_from,
                         date_to,
+                        self._str_series11,
                     ): night_date
                     for night_date, segments in night_items
                 }
@@ -655,13 +691,13 @@ class ResmedEDFParser(DeviceParser):
                         logger.debug(
                             f"Reached session limit of {limit}, cancelling remaining"
                         )
-                        for remaining_future in futures:
-                            if not remaining_future.done():
-                                remaining_future.cancel()
+                        cancel_pending(futures)
                         break
 
                     try:
                         session = future.result()
+                    except BrokenProcessPool:
+                        raise
                     except Exception as e:
                         logger.error(f"Failed to parse night {night_date}: {e}")
                         emit_progress()
@@ -674,6 +710,13 @@ class ResmedEDFParser(DeviceParser):
 
                     yield session
                     sessions_yielded += 1
+            except BrokenProcessPool as exc:
+                raise RuntimeError(
+                    f"Parser worker process crashed: {exc}. "
+                    "Reduce SNORE_COMPUTE_MAX_WORKERS if memory is constrained."
+                ) from exc
+            finally:
+                cancel_pending(futures)
         else:
             completed = 0
 
@@ -1191,6 +1234,29 @@ class ResmedEDFParser(DeviceParser):
         from snore.parsers.resmed_file_index import group_session_files
 
         return group_session_files(datalog_dir)
+
+    def parse_night_session(
+        self,
+        night_date: str,
+        segments: dict[str, dict[str, Path]],
+        device_info: DeviceInfo,
+        base_path: Path,
+        str_settings_cache: dict[date, dict[str, float]] | None = None,
+        str_summaries_cache: dict[date, dict[str, float]] | None = None,
+    ) -> UnifiedSession | None:
+        """Lower-level public entry point for callers that pre-supply ``device_info``
+        and pre-grouped segment files (used by demo fixture import).
+
+        Delegates to ``_parse_night_session``.
+        """
+        return self._parse_night_session(
+            night_date=night_date,
+            segments=segments,
+            device_info=device_info,
+            base_path=base_path,
+            str_settings_cache=str_settings_cache,
+            str_summaries_cache=str_summaries_cache,
+        )
 
     def _parse_night_session(
         self,

@@ -1,91 +1,45 @@
-"""Invite redemption — idempotent transaction runner for invite consumption.
+"""Invite validity — the single definition of what makes an invite redeemable.
 
-The redemption step is a single conditional UPDATE:
-    UPDATE invites
-    SET redeemed_at = NOW()
-    WHERE id = :invite_id
-      AND redeemed_at IS NULL
-      AND revoked_at IS NULL
-      AND expires_at > NOW()
+An invite is valid iff it is unredeemed, unrevoked, and unexpired.  Every
+consumer — lookup, redemption (as a conditional UPDATE guard), Google signup,
+and the admin list — must use the helpers here rather than restating the
+predicate, so the definition cannot drift between call sites.
 
-Because the UPDATE is conditioned on ``redeemed_at IS NULL`` it is naturally
-idempotent: a replay of the same invite ID has no effect after the first
-successful commit.  ``run_txn`` retries this unit on SQLite contention —
-exactly one invite row is ever consumed, guaranteed by the ``IS NULL`` check.
-
-This module exposes only the transaction-level helper.  The auth router
-(Phase 2) calls ``redeem_invite`` from inside a larger transaction that also
-creates the user/identity row.
+Consumption itself stays a conditional UPDATE guarded by these clauses:
+because the write is conditioned on ``redeemed_at IS NULL`` it is naturally
+idempotent — exactly one request can ever consume a given invite, even under
+concurrent replays.
 """
 
 from __future__ import annotations
 
-import logging
+from datetime import datetime
 
-from datetime import UTC, datetime
-
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import ColumnElement
 
 from snore.database import models
-from snore.database.txn import run_txn
 
-logger = logging.getLogger(__name__)
-
-__all__ = ["InviteRedemptionError", "redeem_invite"]
+__all__ = ["InviteRedemptionError", "invite_valid_clauses", "is_invite_valid"]
 
 
 class InviteRedemptionError(Exception):
     """Raised when an invite cannot be redeemed (expired, revoked, or already used)."""
 
 
-async def redeem_invite(invite_id: int) -> None:
-    """Conditionally consume an invite by setting ``redeemed_at``.
+def invite_valid_clauses(now: datetime) -> tuple[ColumnElement[bool], ...]:
+    """SQL clauses selecting valid invites: unredeemed, unrevoked, unexpired."""
+    return (
+        models.Invite.redeemed_at.is_(None),
+        models.Invite.revoked_at.is_(None),
+        models.Invite.expires_at > now,
+    )
 
-    Uses ``run_txn`` for automatic retry on SQLite contention.  The
-    ``redeemed_at IS NULL`` guard makes the write idempotent — a concurrent
-    second claim of the same invite is detected and rejected.
 
-    Args:
-        invite_id: Primary key of the ``Invite`` row to redeem.
-
-    Raises:
-        InviteRedemptionError: If the invite is expired, revoked, or already
-            redeemed (including by a concurrent request that won the race).
-    """
-
-    async def _do_redeem(db: AsyncSession) -> None:
-        now = datetime.now(UTC)
-        # Conditional UPDATE: only touches rows where the invite is still valid.
-        result = await db.execute(
-            update(models.Invite)
-            .where(
-                models.Invite.id == invite_id,
-                models.Invite.redeemed_at.is_(None),
-                models.Invite.revoked_at.is_(None),
-                models.Invite.expires_at > now,
-            )
-            .values(redeemed_at=now)
-        )
-        if result.rowcount == 0:  # type: ignore[attr-defined]
-            # Read the current invite state to give a precise error message.
-            invite = (
-                (
-                    await db.execute(
-                        select(models.Invite).where(models.Invite.id == invite_id)
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            if invite is None:
-                raise InviteRedemptionError(f"Invite {invite_id} not found")
-            if invite.redeemed_at is not None:
-                raise InviteRedemptionError("Invite has already been redeemed")
-            if invite.revoked_at is not None:
-                raise InviteRedemptionError("Invite has been revoked")
-            if invite.expires_at <= now:
-                raise InviteRedemptionError("Invite has expired")
-            raise InviteRedemptionError("Invite cannot be redeemed")
-
-    await run_txn(_do_redeem)
+def is_invite_valid(invite: models.Invite | None, now: datetime) -> bool:
+    """In-memory counterpart of :func:`invite_valid_clauses`."""
+    return (
+        invite is not None
+        and invite.redeemed_at is None
+        and invite.revoked_at is None
+        and invite.expires_at > now
+    )

@@ -88,3 +88,53 @@ class TestUpdateProfile:
         profile_id = profiles[0]["id"]
         response = api_client.patch(f"/api/v1/profiles/{profile_id}", json={})
         assert response.status_code == 422
+
+
+class TestProfileResponseFields:
+    """ProfileResponse must include created_at and is_default fields."""
+
+    def test_list_profiles_includes_created_at(self, api_client):
+        """GET /profiles/ items include a non-null created_at timestamp."""
+        profiles = api_client.get("/api/v1/profiles/").json()
+        assert len(profiles) >= 1
+        for p in profiles:
+            assert "created_at" in p, f"created_at missing from profile {p}"
+            assert p["created_at"] is not None
+
+    def test_list_profiles_includes_is_default(self, api_client):
+        """GET /profiles/ items include is_default; the auto-provisioned profile is default."""
+        profiles = api_client.get("/api/v1/profiles/").json()
+        assert len(profiles) >= 1
+        # In local mode the auto-provisioned profile is the user's default.
+        assert "is_default" in profiles[0], "is_default missing from profile"
+        assert profiles[0]["is_default"] is True
+
+    def test_create_profile_response_includes_created_at_and_is_default(
+        self, api_client
+    ):
+        """POST /profiles/ response includes created_at and is_default."""
+        resp = api_client.post("/api/v1/profiles/", json={"name": "FieldsCheck"})
+        assert resp.status_code == 201
+        body = resp.json()
+        assert "created_at" in body
+        assert "is_default" in body
+        assert body["created_at"] is not None
+
+    def test_set_default_profile_updates_is_default(self, api_client):
+        """PATCH /{id} with default=true makes that profile is_default=True."""
+        # Create a second profile.
+        second = api_client.post(
+            "/api/v1/profiles/", json={"name": "Second Default Test"}
+        ).json()
+        second_id = second["id"]
+
+        # Set it as default.
+        resp = api_client.patch(f"/api/v1/profiles/{second_id}", json={"default": True})
+        assert resp.status_code == 200
+        assert resp.json()["is_default"] is True
+
+        # List profiles — the new default is_default=True, others are False.
+        profiles = api_client.get("/api/v1/profiles/").json()
+        defaults = [p for p in profiles if p["is_default"]]
+        assert len(defaults) == 1, f"Expected exactly 1 default, got: {defaults}"
+        assert defaults[0]["id"] == second_id

@@ -6,17 +6,49 @@ from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.auth.actor import ActorContext, AuthMode
-from snore.database.session import get_session
+from snore.database.session import check_db_staleness, get_session, session_scope
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
     """FastAPI dependency that provides a committed/rolled-back AsyncSession."""
+    async with session_scope() as session:
+        yield session
+
+
+async def get_db_immediate() -> AsyncGenerator[AsyncSession]:
+    """FastAPI dependency providing a BEGIN IMMEDIATE session for bulk writes.
+
+    Acquires the SQLite write lock at transaction open (BEGIN IMMEDIATE) so
+    contending writers queue on busy_timeout rather than failing instantly on a
+    WAL snapshot-upgrade conflict.  Use for endpoints that perform large bulk
+    deletes (e.g. /db/reset, /auth/me/delete-data) to prevent SQLITE_BUSY
+    bypassing the timeout that a deferred-BEGIN transaction would trigger.
+    """
+    async with session_scope(immediate=True) as session:
+        yield session
+
+
+ImmediateDbDep = Annotated[AsyncSession, Depends(get_db_immediate)]
+
+
+async def get_raw_session() -> AsyncGenerator[AsyncSession]:
+    """FastAPI dependency yielding an AsyncSession WITHOUT an open transaction.
+
+    Use when a handler needs fine-grained transaction control (e.g., splitting
+    a read transaction from network I/O from a write transaction).
+
+    Staleness check: ``check_db_staleness`` is called once at dependency
+    resolution (when the session is created), not per transaction.  Handlers
+    that run multiple explicit transactions with network I/O between them may
+    observe a DB-file swap between transactions; the swap will be detected and
+    the engine rebuilt at the start of the next request.  Sessions already open
+    when a swap occurs keep their connection to the OLD unlinked inode; any
+    writes they commit are lost when the inode's last file descriptor closes.
+    """
+    await check_db_staleness()
     session = get_session()
     try:
-        async with session.begin():
-            yield session
-    except Exception:
-        raise
+        yield session
     finally:
         await session.close()
 

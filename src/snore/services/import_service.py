@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
 from snore.database.txn import run_txn
+from snore.database.write_gate import write_gate
 from snore.parsers.register_all import register_all_parsers
 from snore.parsers.registry import parser_registry
 from snore.parsers.unified import UnifiedSession
@@ -113,41 +114,6 @@ class ImportService:
             profile_id:  Resolved profile ID — required.  All devices and sessions
                          created during this import are owned by this profile.
         """
-        return await self._import_sources_async(
-            sources,
-            force=force,
-            batch_size=batch_size,
-            backup=backup,
-            backup_root=backup_root,
-            sort_by=sort_by,
-            limit=limit,
-            date_from=date_from,
-            date_to=date_to,
-            parallel=parallel,
-            dry_run=dry_run,
-            progress_callback=progress_callback,
-            cancel_predicate=cancel_predicate,
-            profile_id=profile_id,
-        )
-
-    async def _import_sources_async(
-        self,
-        sources: list[ImportSource],
-        *,
-        force: bool = False,
-        batch_size: int = 50,
-        backup: bool = True,
-        backup_root: Path | None = None,
-        sort_by: str | None = None,
-        limit: int | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        parallel: bool = True,
-        dry_run: bool = False,
-        progress_callback: Callable[[str], None] | None = None,
-        cancel_predicate: Callable[[], bool] | None = None,
-        profile_id: int,
-    ) -> ImportResult:
 
         def emit(msg: str) -> None:
             if progress_callback:
@@ -170,10 +136,13 @@ class ImportService:
             backup_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
 
         if not dry_run:
-            async with session_scope() as db_session:
-                orphaned = await SessionImporter.cleanup_orphaned_records(db_session)
-                if orphaned > 0:
-                    emit(f"Cleaned up {orphaned} orphaned records from database")
+            async with write_gate():
+                async with session_scope(immediate=True) as db_session:
+                    orphaned = await SessionImporter.cleanup_orphaned_records(
+                        db_session
+                    )
+                    if orphaned > 0:
+                        emit(f"Cleaned up {orphaned} orphaned records from database")
 
         parser_map = {p.parser_id: p for p in parser_registry.list_parsers()}
 
@@ -299,7 +268,8 @@ class ImportService:
                         db=db,
                     )
 
-                ci, cs, cf, chunk_ids = await run_txn(_import_chunk)
+                async with write_gate():
+                    ci, cs, cf, chunk_ids = await run_txn(_import_chunk)
                 imported += ci
                 skipped += cs
                 failed += cf

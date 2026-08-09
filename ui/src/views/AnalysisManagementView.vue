@@ -2,12 +2,19 @@
     <div class="analysis-mgmt">
         <h1 class="page-title">Analysis Management</h1>
 
+        <!-- Active analysis jobs banner -->
+        <AnalysisJobsBanner
+            v-if="activeJobs.length > 0 || recentlyFinishedJobs.length > 0"
+            :jobs="[...activeJobs, ...recentlyFinishedJobs]"
+            @cancel="handleCancelJob"
+        />
+
         <!-- Filter bar -->
         <div class="filter-bar">
             <input v-model="fromDate" type="date" class="date-input" />
             <input v-model="toDate" type="date" class="date-input" />
             <Toggle v-model:pressed="analyzedOnly" variant="outline"> Analyzed Only </Toggle>
-            <Button variant="outline" size="sm" @click="batchDialogOpen = true">
+            <Button v-if="canWrite" variant="outline" size="sm" @click="batchDialogOpen = true">
                 <Play class="mr-2 h-4 w-4" />
                 Run Batch
             </Button>
@@ -61,7 +68,7 @@
                         </TableCell>
                         <TableCell>
                             <Button
-                                v-if="s.has_analysis"
+                                v-if="canWrite && s.has_analysis"
                                 variant="ghost"
                                 size="icon"
                                 title="Delete analysis"
@@ -85,17 +92,6 @@
 
         <div v-if="error" class="error-state">
             <AlertTriangle class="inline h-4 w-4" /> {{ error }}
-        </div>
-
-        <!-- Batch result -->
-        <div v-if="batchResult" class="section-card batch-result">
-            <h2>Batch Analysis Result</h2>
-            <div class="batch-stats">
-                <StatCard label="Total" :value="batchResult.total" :decimals="0" />
-                <StatCard label="Successful" :value="batchResult.successful" :decimals="0" />
-                <StatCard label="Cancelled" :value="batchResult.cancelled ?? 0" :decimals="0" />
-                <StatCard label="Failed" :value="batchResult.failed" :decimals="0" />
-            </div>
         </div>
 
         <!-- Batch dialog -->
@@ -146,6 +142,15 @@
                 <AlertDialogFooter>
                     <AlertDialogCancel>Cancel</AlertDialogCancel>
                     <Button
+                        variant="outline"
+                        :disabled="batchRunning"
+                        @click="handleAnalyzeMissing"
+                    >
+                        <Loader2 v-if="batchRunning" class="mr-2 h-4 w-4 animate-spin" />
+                        <Play v-else class="mr-2 h-4 w-4" />
+                        Analyze Missing
+                    </Button>
+                    <Button
                         :disabled="!batchFrom || !batchTo || batchRunning"
                         @click="handleBatchRun"
                     >
@@ -177,7 +182,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import {
     Table,
     TableBody,
@@ -199,18 +204,24 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import StatCard from '@/components/StatCard.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
+import AnalysisJobsBanner from '@/components/AnalysisJobsBanner.vue'
 import { Loader2, AlertTriangle, Play, Trash2 } from '@lucide/vue'
 import {
     getAnalysisSessions,
     runBatchAnalysis,
     deleteAnalysis,
     getAnalysisDeletePreview,
+    getAnalysisJobs,
+    cancelAnalysisJob,
+    type AnalysisJobInfo,
 } from '@/api/analysis'
 import { formatDateShort } from '@/utils/formatting'
-import type { AnalysisListItem, BatchAnalysisResult, AnalysisDeletePreview } from '@/types'
+import type { AnalysisListItem, AnalysisDeletePreview } from '@/types'
+import { useAuth } from '@/composables/useAuth'
+
+const { canWrite } = useAuth()
 
 const sessions = ref<AnalysisListItem[]>([])
 const loading = ref(true)
@@ -228,7 +239,19 @@ const batchFrom = ref('')
 const batchTo = ref('')
 const batchMode = ref('aasm')
 const batchRunning = ref(false)
-const batchResult = ref<BatchAnalysisResult | null>(null)
+
+const analysisJobs = ref<AnalysisJobInfo[]>([])
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let stopped = false
+
+const activeJobs = computed(() =>
+    analysisJobs.value.filter((j) => j.state === 'queued' || j.state === 'running'),
+)
+const recentlyFinishedJobs = computed(() =>
+    analysisJobs.value.filter(
+        (j) => j.state === 'succeeded' || j.state === 'failed' || j.state === 'cancelled',
+    ),
+)
 
 const deleteDialogVisible = ref(false)
 const deletePreviewLoading = ref(false)
@@ -259,6 +282,42 @@ async function fetchPage(newOffset: number): Promise<void> {
     }
 }
 
+function schedulePoll() {
+    if (stopped || pollTimer !== null) return
+    pollTimer = setTimeout(async () => {
+        pollTimer = null
+        if (stopped) return
+        await fetchJobs()
+    }, 3000)
+}
+
+async function fetchJobs() {
+    try {
+        const { jobs } = await getAnalysisJobs()
+        if (stopped) return
+        const hadActive = activeJobs.value.length > 0
+        analysisJobs.value = jobs
+        const hasActive = jobs.some((j) => j.state === 'queued' || j.state === 'running')
+        if (hasActive) {
+            schedulePoll()
+        } else if (hadActive) {
+            void fetchPage(0)
+        }
+    } catch {
+        // Ignore poll errors silently
+    }
+}
+
+async function handleCancelJob(jobId: string) {
+    try {
+        await cancelAnalysisJob(jobId)
+    } catch {
+        /* job may already be terminal or returned 409 */
+    } finally {
+        void fetchJobs()
+    }
+}
+
 async function handleBatchRun(): Promise<void> {
     if (batchFrom.value && batchTo.value && batchFrom.value > batchTo.value) {
         error.value = 'From date must be before To date'
@@ -267,17 +326,35 @@ async function handleBatchRun(): Promise<void> {
     }
     batchRunning.value = true
     try {
-        batchResult.value = await runBatchAnalysis({
+        await runBatchAnalysis({
             from_date: batchFrom.value,
             to_date: batchTo.value,
             modes: [batchMode.value],
             store_results: true,
         })
         batchDialogOpen.value = false
-        void fetchPage(0)
+        void fetchJobs()
     } catch (err: unknown) {
         batchDialogOpen.value = false
-        error.value = err instanceof Error ? err.message : 'Batch analysis failed'
+        error.value = err instanceof Error ? err.message : 'Failed to queue batch analysis'
+    } finally {
+        batchRunning.value = false
+    }
+}
+
+async function handleAnalyzeMissing(): Promise<void> {
+    batchRunning.value = true
+    try {
+        await runBatchAnalysis({
+            missing_only: true,
+            modes: [batchMode.value],
+            store_results: true,
+        })
+        batchDialogOpen.value = false
+        void fetchJobs()
+    } catch (err: unknown) {
+        batchDialogOpen.value = false
+        error.value = err instanceof Error ? err.message : 'Failed to queue batch analysis'
     } finally {
         batchRunning.value = false
     }
@@ -316,21 +393,22 @@ async function executeDelete(): Promise<void> {
 
 watch([fromDate, toDate, analyzedOnly], () => void fetchPage(0))
 
-onMounted(() => void fetchPage(0))
+onMounted(() => {
+    void fetchJobs()
+    void fetchPage(0)
+})
+
+onUnmounted(() => {
+    stopped = true
+    if (pollTimer !== null) {
+        clearTimeout(pollTimer)
+        pollTimer = null
+    }
+})
 </script>
 
 <style scoped>
 .analysis-mgmt {
     max-width: 1200px;
-}
-
-.batch-result {
-    margin-top: 1rem;
-}
-
-.batch-stats {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 0.75rem;
 }
 </style>

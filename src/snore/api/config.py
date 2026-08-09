@@ -52,6 +52,33 @@ Environment variables
 
 ``SNORE_MAX_JOBS_GLOBAL``
     Maximum active jobs across all users.  Default: 10.
+
+``SNORE_ANALYSIS_MAX_WORKERS``
+    Maximum concurrent sessions processed within a single import-triggered
+    analysis job.  Writes are serialized by the write gate; this controls the
+    read/compute concurrency.  Default: 4.
+
+``SNORE_ANALYSIS_JOB_CONCURRENCY``
+    Maximum number of analysis jobs processed concurrently.  When unset (the
+    default), all admitted jobs start immediately — bounded only by the
+    admission cap ``MAX_QUEUED`` (10).  Set to a lower value on
+    memory-constrained machines: each concurrent job holds up to
+    ``analysis_max_workers`` in-flight sessions' raw blobs (~10 MB each) while
+    awaiting shared process-pool slots.  CPU is already capped globally by
+    ``SNORE_COMPUTE_MAX_WORKERS``, so job concurrency affects fairness and
+    latency, not total throughput.  Accepts a positive integer.
+
+``SNORE_COMPUTE_MAX_WORKERS``
+    Number of worker *processes* in the shared CPU process pool used for
+    device-data parsing and analysis compute.  Each worker carries a full
+    Python + NumPy runtime (~75-150 MB RSS); on machines with limited RAM set
+    this to ``1``.  Default: ``max(1, cpu_count - 1)``.
+
+``SNORE_BOOTSTRAP_ADMIN_EMAIL``
+    Optional.  Multiuser mode only.  When no active admin user exists at
+    startup, automatically creates a 7-day admin invite for this address and
+    logs the redemption URL.  Empty or whitespace → no-op.  Ignored in local
+    mode.
 """
 
 from __future__ import annotations
@@ -63,6 +90,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from snore.auth.actor import AuthMode
+from snore.auth.emails import normalize_email
 
 
 class ConfigError(ValueError):
@@ -111,15 +139,36 @@ class AppConfig:
     dev_origins: frozenset[tuple[str, str, int]]  # Pre-parsed; validated at startup.
     # CORS allowed origins (parsed from CORS_ORIGINS env var; default localhost:5173).
     cors_origins: list[str]
+    # Google OAuth credentials (empty string = not configured; Google routes return 503).
+    google_client_id: str
+    google_client_secret: str
+    # OAuth flow timing (seconds).
+    oauth_attempt_ttl_seconds: int  # Window for completing an OAuth flow; default 600.
+    pre_auth_cookie_ttl_seconds: int  # Browser-binding cookie TTL; default 600.
     # Upload / job resource bounds
-    max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 512 MiB.
+    max_upload_bytes: int  # Per-upload ingress ceiling (bytes); default 2 GiB.
     max_file_bytes: int  # Per-file size limit (bytes); default 256 MiB.
+    max_upload_files: int  # Per-upload file count ceiling; default 10 000.
     max_jobs_per_user: int  # Per-user active-job cap; default 3.
     max_jobs_global: int  # Global active-job cap; default 10.
+    analysis_max_workers: int  # Per-analysis-job session concurrency; default 4.
+    # Bootstrap admin invite: normalized email or None when env var is absent/empty.
+    # Fields with defaults must come after fields without defaults.
+    analysis_job_concurrency: int | None = (
+        None  # None = all admitted jobs run immediately (capped at MAX_QUEUED); each concurrent job adds up to analysis_max_workers sessions' memory.
+    )
+    compute_max_workers: int = max(
+        1, (os.cpu_count() or 2) - 1
+    )  # Shared CPU process pool size.
+    bootstrap_admin_email: str | None = None
 
     @property
     def is_multiuser(self) -> bool:
         return self.auth_mode is AuthMode.MULTIUSER
+
+    @property
+    def is_google_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
 
     @property
     def secure_cookie(self) -> bool:
@@ -140,6 +189,33 @@ class AppConfig:
 
 
 _config: AppConfig | None = None
+
+
+def _parse_positive_int(env_key: str, default: int, unit_label: str = "") -> int:
+    """Parse an env var as a positive integer; raise ConfigError on failure."""
+    suffix = f" {unit_label}" if unit_label else ""
+    msg = f"{env_key} must be a positive integer{suffix}"
+    try:
+        value = int(os.environ.get(env_key, str(default)))
+    except ValueError as exc:
+        raise ConfigError(msg) from exc
+    if value <= 0:
+        raise ConfigError(msg)
+    return value
+
+
+def _parse_optional_positive_int(env_key: str) -> int | None:
+    """Parse an env var as a positive integer, returning None when unset or empty."""
+    raw = os.environ.get(env_key, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{env_key} must be a positive integer") from exc
+    if value <= 0:
+        raise ConfigError(f"{env_key} must be a positive integer")
+    return value
 
 
 def load_config(
@@ -199,42 +275,44 @@ def load_config(
         if o.strip()
     ]
 
+    # Google OAuth credentials — optional; missing = Google routes return 503.
+    google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+
+    oauth_attempt_ttl_seconds = _parse_positive_int(
+        "SNORE_OAUTH_ATTEMPT_TTL_SECONDS", 600, "(seconds)"
+    )
+    pre_auth_cookie_ttl_seconds = _parse_positive_int(
+        "SNORE_PRE_AUTH_COOKIE_TTL_SECONDS", 600, "(seconds)"
+    )
+
     # Resource bounds — read with safe int parsing.
-    try:
-        max_upload_bytes = int(
-            os.environ.get("SNORE_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))
-        )
-    except ValueError as exc:
+    max_upload_bytes = _parse_positive_int(
+        "SNORE_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024, "(bytes)"
+    )
+    max_file_bytes = _parse_positive_int(
+        "SNORE_MAX_FILE_BYTES", 256 * 1024 * 1024, "(bytes)"
+    )
+    max_upload_files = _parse_positive_int("SNORE_MAX_UPLOAD_FILES", 10000)
+    max_jobs_per_user = _parse_positive_int("SNORE_MAX_JOBS_PER_USER", 3)
+    max_jobs_global = _parse_positive_int("SNORE_MAX_JOBS_GLOBAL", 10)
+    analysis_max_workers = _parse_positive_int("SNORE_ANALYSIS_MAX_WORKERS", 4)
+    analysis_job_concurrency = _parse_optional_positive_int(
+        "SNORE_ANALYSIS_JOB_CONCURRENCY"
+    )
+    compute_max_workers = _parse_positive_int(
+        "SNORE_COMPUTE_MAX_WORKERS", max(1, (os.cpu_count() or 2) - 1)
+    )
+
+    raw_bootstrap_email = os.environ.get("SNORE_BOOTSTRAP_ADMIN_EMAIL", "").strip()
+    bootstrap_admin_email = (
+        normalize_email(raw_bootstrap_email) if raw_bootstrap_email else None
+    )
+    if bootstrap_admin_email is not None and "@" not in bootstrap_admin_email:
         raise ConfigError(
-            "SNORE_MAX_UPLOAD_BYTES must be a positive integer (bytes)"
-        ) from exc
-    if max_upload_bytes <= 0:
-        raise ConfigError("SNORE_MAX_UPLOAD_BYTES must be a positive integer (bytes)")
-
-    try:
-        max_file_bytes = int(
-            os.environ.get("SNORE_MAX_FILE_BYTES", str(256 * 1024 * 1024))
+            "SNORE_BOOTSTRAP_ADMIN_EMAIL must be a valid email address, got: "
+            f"{bootstrap_admin_email!r}"
         )
-    except ValueError as exc:
-        raise ConfigError(
-            "SNORE_MAX_FILE_BYTES must be a positive integer (bytes)"
-        ) from exc
-    if max_file_bytes <= 0:
-        raise ConfigError("SNORE_MAX_FILE_BYTES must be a positive integer (bytes)")
-
-    try:
-        max_jobs_per_user = int(os.environ.get("SNORE_MAX_JOBS_PER_USER", "3"))
-    except ValueError as exc:
-        raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer") from exc
-    if max_jobs_per_user <= 0:
-        raise ConfigError("SNORE_MAX_JOBS_PER_USER must be a positive integer")
-
-    try:
-        max_jobs_global = int(os.environ.get("SNORE_MAX_JOBS_GLOBAL", "10"))
-    except ValueError as exc:
-        raise ConfigError("SNORE_MAX_JOBS_GLOBAL must be a positive integer") from exc
-    if max_jobs_global <= 0:
-        raise ConfigError("SNORE_MAX_JOBS_GLOBAL must be a positive integer")
 
     public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:
@@ -291,14 +369,23 @@ def load_config(
         trusted_proxies=trusted_proxies,
         dev_origins=frozenset(dev_origins),
         cors_origins=cors_origins,
+        google_client_id=google_client_id,
+        google_client_secret=google_client_secret,
+        oauth_attempt_ttl_seconds=oauth_attempt_ttl_seconds,
+        pre_auth_cookie_ttl_seconds=pre_auth_cookie_ttl_seconds,
         max_upload_bytes=max_upload_bytes,
         max_file_bytes=max_file_bytes,
+        max_upload_files=max_upload_files,
         max_jobs_per_user=max_jobs_per_user,
         max_jobs_global=max_jobs_global,
+        analysis_max_workers=analysis_max_workers,
+        analysis_job_concurrency=analysis_job_concurrency,
+        compute_max_workers=compute_max_workers,
+        bootstrap_admin_email=bootstrap_admin_email,
     )
 
 
-def _validate_origin_url(url: str, *, require_http_loopback: bool = False) -> None:
+def validate_origin_url(url: str, *, require_http_loopback: bool = False) -> None:
     """Shared validator for http/https origin URLs.
 
     Accepts http and https only; rejects userinfo, path, query, fragment,
@@ -353,7 +440,7 @@ def _validate_public_base_url(url: str) -> None:
     canonical origin without ambiguity.
     """
     try:
-        _validate_origin_url(url, require_http_loopback=True)
+        validate_origin_url(url, require_http_loopback=True)
     except ConfigError as exc:
         raise ConfigError(f"SNORE_PUBLIC_BASE_URL {exc}") from exc
 
@@ -366,7 +453,7 @@ def _validate_dev_origin(url: str) -> None:
     schemes (``javascript:``, etc.) or partial URLs from silently collapsing
     into a host-wide origin.
     """
-    _validate_origin_url(url)
+    validate_origin_url(url)
 
 
 def get_config() -> AppConfig:

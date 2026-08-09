@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  # Auto-release is disabled for this repo. Trigger a release from the Actions tab.
+  workflow_dispatch:
 
 permissions:
   contents: write

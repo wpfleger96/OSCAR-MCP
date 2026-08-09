@@ -20,6 +20,8 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
+from snore.auth.emails import normalize_email
+
 # Maximum lockout duration in seconds (15 minutes).
 MAX_LOCKOUT_SECONDS: float = 15 * 60
 
@@ -46,7 +48,7 @@ class LockoutStore:
 
     def is_locked(self, email: str, ip: str) -> bool:
         """Return True if the (email, ip) pair is currently locked out."""
-        key = (email.lower().strip(), ip)
+        key = (normalize_email(email), ip)
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -61,7 +63,7 @@ class LockoutStore:
         than evicting an active lockout — evicting an active lockout would
         turn a flood into an auth bypass.
         """
-        key = (email.lower().strip(), ip)
+        key = (normalize_email(email), ip)
         now = time.monotonic()
         with self._lock:
             if key in self._entries:
@@ -85,7 +87,7 @@ class LockoutStore:
 
     def record_success(self, email: str, ip: str) -> None:
         """Clear the lockout state after a successful authentication."""
-        key = (email.lower().strip(), ip)
+        key = (normalize_email(email), ip)
         with self._lock:
             self._entries.pop(key, None)
 

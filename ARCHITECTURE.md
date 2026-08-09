@@ -13,13 +13,13 @@ Technical documentation for the SNORE system architecture, components, and desig
 │        Vue 3 Frontend (ui/)                │
 │  Dashboard, Session Explorer, Waveforms     │
 │  PrimeVue components + uPlot charts         │
-├─────────────────────────────────────────────┤
-│        FastAPI REST API (api/)              │
-│  12 routers, 36 endpoints, LTTB            │
-│  OpenAPI docs at /docs                      │
-├─────────────────────────────────────────────┤
+├──────────────┬──────────────┬──────────────┤
+│ FastAPI REST │   CLI (cli/) │  MCP Server  │
+│ API (api/)   │  Click cmds  │  (mcp/)      │
+│ 17 routers   │  snore cmds  │  10 tools    │
+├──────────────┴──────────────┴──────────────┤
 │        Service Layer (services/)            │
-│  12 services: business logic between        │
+│  13 services: business logic between        │
 │  CLI/API and database                       │
 ├─────────────────────────────────────────────┤
 │        Analysis Layer (Parser Agnostic)     │
@@ -28,7 +28,7 @@ Technical documentation for the SNORE system architecture, components, and desig
 ├─────────────────────────────────────────────┤
 │         SQLite Database ✅                  │
 │  Universal schema, direct BLOB storage      │
-│  Alembic migrations, 10 tables              │
+│  create_all schema; Alembic kept (pre-1.0)  │
 ├─────────────────────────────────────────────┤
 │         CLI Import Tool ✅                  │
 │  snore import (auto-detection)              │
@@ -320,20 +320,25 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 
 **Application:** `src/snore/api/app.py`
 
-**Routers (12):**
+**Routers:**
 | Router | Prefix | Endpoints |
 |--------|--------|-----------|
+| auth | `/auth` | Login/logout/demo-login/status, active profile, invite lookup/redeem, Google OAuth (login + invite signup, single callback) |
+| me | `/auth/me` | Self-service account: display name, password, preferences |
+| admin | `/admin` | User management, invite lifecycle (admin-only) |
+| profiles | `/profiles` | Profile CRUD |
 | sessions | `/sessions` | List, detail, enable/disable, delete, bulk delete-preview |
-| waveforms | `/waveforms` | List types, get data (LTTB downsampling), compare events |
-| events | `/events` | List, match machine vs programmatic |
-| analysis | `/analysis` | List status, get result, run, delete, batch analysis |
+| waveforms | `/sessions` | List types, get data (LTTB downsampling), compare events |
+| events | `/sessions` | List, match machine vs programmatic |
+| analysis | (v1 prefix) | List status, get result, run, delete, batch analysis |
 | stats | `/stats` | Summary, periods, trends, records |
 | devices | `/devices` | List, detail |
 | days | `/days` | List, detail |
 | rx | `/rx` | History, current, compare |
-| import | `/import` | Detect sources, upload+import |
+| reports | `/reports` | Report generation |
+| import | `/import` | Upload files, SSE progress, cancel, pipeline job list; detect + path-import (local mode only) |
 | export | `/export` | CSV, JSON, raw file download |
-| db | `/db` | Stats, vacuum |
+| db | `/db` | Stats, vacuum; reset (local mode only) |
 | validation | `/validate` | Batch validation report |
 
 **Key patterns:**
@@ -343,7 +348,21 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 - LTTB downsampling: 720k-point waveforms served in <100ms via `max_points` param
 - CORS: Configured for Vue dev server (`localhost:5173`)
 - OpenAPI: Auto-generated docs at `/docs`
-- Auth/rate-limit middleware (`api/middleware.py`): no-op stubs — designed for production swap-in
+- Auth middleware (`api/middleware.py`): `AuthMiddleware` resolves the actor from the signed session cookie on every request (auto-provisions the local actor in local mode); `AuthPathMiddleware` enforces the CSRF Origin/Referer check on unsafe methods, a 16 KiB body cap on `/api/v1/auth/*`, and blanket `Cache-Control: no-store` on auth responses; `RateLimitMiddleware` applies a per-IP 30 req/60 s window to `/api/v1/auth/*` in multiuser mode
+
+### Background Job Pipeline
+
+Imports and analysis run as serialised background jobs to avoid SQLite write-lock contention.
+
+**Two-phase import flow:**
+1. `POST /import` — accepts multipart upload, reserves an admission slot, writes files to a temp directory, and returns a `job_id` immediately (HTTP 202).
+2. The persistent import worker thread (`api/import_worker.py`) picks up the job from the FIFO queue and runs `ImportService.import_sources()`. On success it emits a non-terminal `phase_complete` SSE event carrying the import result, then enqueues a downstream `AnalysisJob`.
+3. The import job terminates with `complete` (or `error`/cancel). Every terminal payload carries `import_committed=True` and the full import result whenever the import phase committed to the database, so late or stalled SSE observers always learn that data landed.
+4. `GET /import/{id}/progress` — SSE stream; connecting after the job is terminal delivers the stored terminal event immediately.
+
+**Admission caps** — `SNORE_MAX_JOBS_PER_USER` (default 3) and `SNORE_MAX_JOBS_GLOBAL` (default 10) gate new reservations before any request body bytes are read. The slot counts until `release_capacity()` is called after temp-file cleanup.
+
+**TTL reaper** — `api/import_jobs.py` runs both a dedicated background reaper thread (every 60 s) and an eager reap-on-read inside `get_job` / `list_jobs` / `reserve_slot` (because HTTP handlers poll the store on every request). `api/analysis_jobs.py` reaps inline after each job completes inside the worker loop — sufficient there because the analysis store is accessed only by the worker thread and a low-frequency list endpoint.
 
 ---
 
@@ -365,6 +384,7 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 | SessionService | Session CRUD and filtering |
 | StatsService | Statistics calculations and summaries |
 | WaveformService | Waveform data access, formatting, event comparison |
+| WriterLeaseManager | Shared/exclusive SQLite writer lease acquired at startup; serialises import + analysis writes |
 
 Prescription/therapy settings tracking lives in `analysis/rx_tracker.py` (RxTracker),
 which returns the Pydantic responses from `services/schemas.py` directly.
@@ -505,6 +525,59 @@ FastAPI Routers (api/routers/)
     ↓
 JSON Response → Vue Frontend (ui/)
 ```
+
+---
+
+## MCP Server
+
+`src/snore/mcp/` implements the third presentation layer — a peer of the CLI and the FastAPI REST API. It exposes SNORE data to LLM clients via the Model Context Protocol.
+
+### Transports
+
+Two transports are supported, selected at startup:
+
+- **stdio** (`snore mcp stdio`): local tool use; no authentication. A `StaticRuntime` resolves the active profile at startup from the first live profile row and watches for database file replacement (inode change → auto-refresh).
+- **streamable-HTTP** (`snore mcp serve`): multi-user, OAuth 2.1 via FastMCP's `GoogleProvider`. Each request carries a per-user `ActorRuntime` that reads `profile_id` from the request context var rather than a startup-time lookup.
+
+Both transports share the same tool and resource registrations; the only difference is which `SNORERuntime` implementation is yielded by the FastMCP lifespan.
+
+### SNORERuntime Protocol Seam
+
+Tools never import a database session factory directly. Instead, `server.py` yields a `SNORERuntime` instance from its FastMCP lifespan context, and every tool accesses `runtime.scope_provider()` and `runtime.profile_id` through this interface:
+
+```
+StaticRuntime     — stdio path; profile_id resolved at startup
+ActorRuntime      — OAuth HTTP path; profile_id from per-request context var
+```
+
+`_scope_and_run(ctx, impl, *, tool_name, **kwargs)` in `server.py` captures the common scaffold shared by seven of the ten tools: open scope → call impl with `(db, profile_id=..., **kwargs)` → `model_dump(mode="json")` → `_check_response_size`.
+
+### Tool Modules
+
+Each tool is defined in `src/snore/mcp/tools/<name>.py` and owns a `register(mcp: FastMCP) -> None` function. `make_server` calls every module's `register` so the tool registration logic is co-located with the tool's DB-fetch and mapping code.
+
+| Module | Tool name | Pattern |
+|--------|-----------|---------|
+| `overview.py` | `get_data_overview` | `_scope_and_run` |
+| `settings.py` | `get_settings_timeline` | `_scope_and_run` |
+| `summary.py` | `get_nightly_summary` | `_scope_and_run` |
+| `events.py` | `get_events` | `_scope_and_run` |
+| `breath_table.py` | `get_breath_table` | `_scope_and_run` |
+| `windows.py` | `find_windows` | `_scope_and_run` |
+| `epochs.py` | `compare_epochs` | `_scope_and_run` |
+| `ca_analysis.py` | `get_ca_analysis` | fetch inside scope, compute outside |
+| `waveform.py` | `get_waveform` | `_fetch_waveform_for_tool` helper |
+| `waveform.py` | `render_window` | `_fetch_waveform_for_tool` helper |
+
+### Tiered Data Model
+
+Tools implement progressive disclosure across three tiers:
+
+| Tier | Tools | Description |
+|------|-------|-------------|
+| 1 (primary) | overview, summary, settings, events, epochs, ca_analysis | Computed metrics — indices, percentiles, aggregates |
+| 2 (secondary) | render_window | PNG charts — visual inspection of waveform windows ≤15 min |
+| 3 (escape hatch) | get_waveform, breath_table | Raw arrays and per-breath rows for deep inspection |
 
 ---
 

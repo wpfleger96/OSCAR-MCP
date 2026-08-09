@@ -27,7 +27,9 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "argon2-cffi>=23.1.0",
     "itsdangerous>=2.2.0",
+    "authlib>=1.4.0",
     "fastmcp>=3,<4",
+    "matplotlib>=3.11",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +46,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# src/snore/demo/fixtures/ (~64 MB EDF) is intentionally shipped in the wheel:
+# the startup hook resolves it via importlib.resources.files("snore.demo").
 packages = ["src/snore"]
 
 [tool.pytest.ini_options]
@@ -77,7 +81,7 @@ explicit_package_bases = true
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["numpy.*", "scipy.*", "mne.*", "pyedflib.*", "plotext.*", "ureg.*"]
+module = ["numpy.*", "scipy.*", "mne.*", "pyedflib.*", "plotext.*", "ureg.*", "matplotlib.*"]
 ignore_missing_imports = true  # Only for external libs without stubs
 
 [[tool.mypy.overrides]]

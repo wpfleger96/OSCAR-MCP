@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from snore.services.schemas import (
     DayDetail,
     DayListItem,
+    ImportSource,
     RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
@@ -15,7 +16,11 @@ from snore.services.schemas import (
     RxSettingChange,
 )
 
+DISPLAY_NAME_MAX_LEN: int = 150
+
 __all__ = [
+    "DISPLAY_NAME_MAX_LEN",
+    "MessageResponse",
     "AnalysisMode",
     "PaginatedResponse",
     "WaveformDataResponse",
@@ -34,7 +39,19 @@ __all__ = [
     "RxComparisonResponse",
     "RxSettingChange",
     "RxChangesResponse",
+    "AnalysisJobStatus",
+    "AnalysisJobsListResponse",
+    "AnalysisJobEnqueued",
+    "ImportSourceResultSummary",
+    "ImportResultSummary",
+    "LinkedAnalysisSummary",
+    "PipelineJobStatus",
+    "PipelineJobsListResponse",
 ]
+
+
+class MessageResponse(BaseModel):
+    message: str
 
 
 class PaginatedResponse[T](BaseModel):
@@ -104,6 +121,14 @@ AnalysisMode = Literal["aasm", "aasm_relaxed", "resmed"]
 class BatchAnalysisRequest(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
+    missing_only: bool = Field(
+        default=False,
+        description=(
+            "When true, restrict the batch to sessions that have a flow waveform "
+            "but no analysis result yet. Composable with from_date/to_date. "
+            "When true, from_date and to_date are not required."
+        ),
+    )
     modes: list[AnalysisMode] = Field(
         default_factory=lambda: cast(list[AnalysisMode], ["aasm"])
     )
@@ -116,10 +141,84 @@ class BatchAnalysisRequest(BaseModel):
         ),
     )
     store_results: bool = True
-    max_sessions: int = Field(default=1000, le=10000, ge=1)
 
 
 class ValidationRequest(BaseModel):
     from_date: date
     to_date: date
     mode: AnalysisMode = "aasm"
+
+
+class AnalysisJobStatus(BaseModel):
+    job_id: str
+    state: str
+    source: str
+    session_count: int
+    progress_completed: int
+    progress_total: int
+    error_message: str | None
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
+    owner_user_id: int | None
+
+
+class AnalysisJobsListResponse(BaseModel):
+    jobs: list[AnalysisJobStatus]
+
+
+class AnalysisJobEnqueued(BaseModel):
+    job_id: str
+    session_count: int
+
+
+class ImportSourceResultSummary(BaseModel):
+    source: ImportSource
+    imported: int
+    skipped: int
+    failed: int
+    warnings: list[str]
+
+
+class ImportResultSummary(BaseModel):
+    """Trimmed ImportResult excluding imported_session_ids (poll-bandwidth)."""
+
+    total_imported: int
+    total_skipped: int
+    total_failed: int
+    warnings: list[str]
+    sources: list[ImportSourceResultSummary]
+
+
+class LinkedAnalysisSummary(BaseModel):
+    job_id: str
+    state: str
+    progress_completed: int
+    progress_total: int
+    error_message: str | None
+
+
+class PipelineJobStatus(BaseModel):
+    """Stitched view of one import job and its downstream analysis job.
+
+    created_at and finished_at are ISO 8601 UTC datetime strings.
+    """
+
+    job_id: str
+    job_type: str
+    state: str
+    stage: str
+    file_count: int
+    created_at: str
+    finished_at: str | None
+    progress_message: str | None
+    sessions_imported: int | None
+    import_result: ImportResultSummary | None
+    error_message: str | None
+    analysis_job_id: str | None
+    analysis_queued: bool | None
+    linked_analysis: LinkedAnalysisSummary | None
+
+
+class PipelineJobsListResponse(BaseModel):
+    jobs: list[PipelineJobStatus]

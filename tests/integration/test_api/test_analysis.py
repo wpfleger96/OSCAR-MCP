@@ -1,5 +1,23 @@
 from datetime import datetime
 
+import pytest
+
+import snore.api.analysis_jobs as aj_store
+
+# ---------------------------------------------------------------------------
+# Fixture: clean analysis job state between tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def clean_analysis_jobs():
+    """Reset global analysis job state before and after each test."""
+    aj_store._all_jobs.clear()
+    aj_store._queue.clear()
+    yield
+    aj_store._all_jobs.clear()
+    aj_store._queue.clear()
+
 
 class TestAnalysisSessionsRouter:
     def test_list_analysis_sessions_empty(self, api_client):
@@ -86,22 +104,271 @@ class TestBatchAnalysis:
             or "to_date" in response.json()["detail"]
         )
 
-    def test_from_date_only_accepted(self, api_client):
+    def test_from_date_only_not_400(self, api_client):
+        # from_date alone must not cause a 400; 202 (queued) or 422 (no sessions
+        # or invalid mode) are both valid depending on database state.
         response = api_client.post(
             "/api/v1/analysis/batch", json={"from_date": "2025-01-01"}
         )
-        assert response.status_code == 201
+        assert response.status_code != 400
 
-    def test_empty_range_returns_total_zero(self, api_client):
+    def test_from_date_with_sessions_returns_202(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        from snore.database.models import Day
+
+        day = Day(
+            device_id=test_device.id, date=datetime(2025, 1, 10).date(), session_count=1
+        )
+        db_session.add(day)
+        db_session.flush()
+
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2025, 1, 10, 22, 0)
+        )
+        session.day_id = day.id
+        db_session.flush()
+
+        response = api_client.post(
+            "/api/v1/analysis/batch", json={"from_date": "2025-01-01"}
+        )
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert data["session_count"] >= 1
+
+    def test_empty_range_returns_422(self, api_client):
+        # A date range with no sessions returns 422.
         response = api_client.post(
             "/api/v1/analysis/batch",
             json={"from_date": "2099-01-01", "to_date": "2099-01-31"},
         )
-        assert response.status_code == 201
+        assert response.status_code == 422
+        assert "No sessions found" in response.json()["detail"]
+
+    def test_invalid_primary_mode_returns_422(self, api_client):
+        # primary_mode not in modes → 422 at the endpoint before any DB call.
+        response = api_client.post(
+            "/api/v1/analysis/batch",
+            json={
+                "from_date": "2025-01-01",
+                "modes": ["aasm"],
+                "primary_mode": "resmed",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_missing_only_no_dates_returns_202_for_unanalyzed_flow_sessions(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        from snore.database.models import AnalysisResult, Day, Waveform
+
+        # session_a: has flow waveform, no analysis → should be included
+        day_a = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 3, 1).date(),
+            session_count=1,
+        )
+        db_session.add(day_a)
+        db_session.flush()
+        session_a = test_session_factory(
+            test_device.id, start_time=datetime(2025, 3, 1, 22, 0)
+        )
+        session_a.day_id = day_a.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_a.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+
+        # session_b: no flow waveform, no analysis → should be excluded
+        day_b = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 3, 2).date(),
+            session_count=1,
+        )
+        db_session.add(day_b)
+        db_session.flush()
+        session_b = test_session_factory(
+            test_device.id, start_time=datetime(2025, 3, 2, 22, 0)
+        )
+        session_b.day_id = day_b.id
+        db_session.flush()
+
+        # session_c: has flow waveform and an analysis result → should be excluded
+        day_c = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 3, 3).date(),
+            session_count=1,
+        )
+        db_session.add(day_c)
+        db_session.flush()
+        session_c = test_session_factory(
+            test_device.id, start_time=datetime(2025, 3, 3, 22, 0)
+        )
+        session_c.day_id = day_c.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_c.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+        db_session.add(
+            AnalysisResult(
+                session_id=session_c.id,
+                timestamp_start=datetime(2025, 3, 3, 22, 0),
+                timestamp_end=datetime(2025, 3, 4, 6, 0),
+                programmatic_result_json={},
+            )
+        )
+        db_session.flush()
+
+        response = api_client.post(
+            "/api/v1/analysis/batch", json={"missing_only": True}
+        )
+        assert response.status_code == 202
         data = response.json()
-        assert data["total"] == 0
-        assert data["successful"] == 0
-        assert data["failed"] == 0
+        assert "job_id" in data
+        assert data["session_count"] == 1
+
+    def test_no_dates_and_no_missing_only_returns_400(self, api_client):
+        response = api_client.post(
+            "/api/v1/analysis/batch", json={"missing_only": False}
+        )
+        assert response.status_code == 400
+        assert (
+            "from_date" in response.json()["detail"]
+            or "to_date" in response.json()["detail"]
+        )
+
+    def test_missing_only_with_date_range_filters_compose(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        from snore.database.models import Day, Waveform
+
+        # session_in_range: flow waveform, no analysis, within date range → included
+        day_in = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 4, 10).date(),
+            session_count=1,
+        )
+        db_session.add(day_in)
+        db_session.flush()
+        session_in = test_session_factory(
+            test_device.id, start_time=datetime(2025, 4, 10, 22, 0)
+        )
+        session_in.day_id = day_in.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_in.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+
+        # session_out_of_range: flow waveform, no analysis, outside date range → excluded
+        day_out = Day(
+            device_id=test_device.id,
+            date=datetime(2025, 5, 1).date(),
+            session_count=1,
+        )
+        db_session.add(day_out)
+        db_session.flush()
+        session_out = test_session_factory(
+            test_device.id, start_time=datetime(2025, 5, 1, 22, 0)
+        )
+        session_out.day_id = day_out.id
+        db_session.flush()
+        db_session.add(
+            Waveform(
+                session_id=session_out.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                data_blob=b"",
+            )
+        )
+        db_session.flush()
+
+        response = api_client.post(
+            "/api/v1/analysis/batch",
+            json={
+                "missing_only": True,
+                "from_date": "2025-04-01",
+                "to_date": "2025-04-30",
+            },
+        )
+        assert response.status_code == 202
+        data = response.json()
+        assert data["session_count"] == 1
+
+
+class TestAnalysisJobsAPI:
+    def test_list_jobs_returns_empty_initially(self, api_client):
+        response = api_client.get("/api/v1/analysis/jobs")
+        assert response.status_code == 200
+        data = response.json()
+        assert "jobs" in data
+        assert isinstance(data["jobs"], list)
+        assert data["jobs"] == []
+
+    def test_delete_unknown_job_returns_404(self, api_client):
+        response = api_client.delete("/api/v1/analysis/jobs/does-not-exist")
+        assert response.status_code == 404
+
+    def test_delete_queued_job_returns_204_and_cancels(self, api_client):
+        # Enqueue a job directly via the module so we control its state.
+        job = aj_store.enqueue(
+            profile_id=1,
+            session_ids=[1, 2],
+            source=aj_store.AnalysisJobSource.BATCH,
+            owner_user_id=None,  # Matches local-mode actor (user_id may be None)
+        )
+        assert job is not None
+
+        response = api_client.delete(f"/api/v1/analysis/jobs/{job.job_id}")
+        assert response.status_code == 204
+        assert job.state == aj_store.AnalysisJobState.CANCELLED
+
+    def test_delete_terminal_job_returns_409(self, api_client):
+        """DELETE /analysis/jobs/{job_id} for a job already in CANCELLED state returns 409."""
+        job = aj_store.enqueue(
+            profile_id=1,
+            session_ids=[1, 2],
+            source=aj_store.AnalysisJobSource.BATCH,
+            owner_user_id=None,
+        )
+        assert job is not None
+        # Drive the job to a terminal state by cancelling it directly.
+        aj_store.cancel_job(job.job_id)
+        assert job.state == aj_store.AnalysisJobState.CANCELLED
+
+        response = api_client.delete(f"/api/v1/analysis/jobs/{job.job_id}")
+        assert response.status_code == 409
+        assert "cannot be cancelled" in response.json()["detail"]
+
+    def test_list_jobs_includes_enqueued_job(self, api_client):
+        job = aj_store.enqueue(
+            profile_id=1,
+            session_ids=[10],
+            source=aj_store.AnalysisJobSource.BATCH,
+            owner_user_id=None,
+        )
+        assert job is not None
+
+        response = api_client.get("/api/v1/analysis/jobs")
+        assert response.status_code == 200
+        data = response.json()
+        ids = [j["job_id"] for j in data["jobs"]]
+        assert job.job_id in ids
 
 
 # ---------------------------------------------------------------------------

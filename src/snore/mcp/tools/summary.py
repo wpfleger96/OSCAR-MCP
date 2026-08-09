@@ -13,11 +13,17 @@ prevent cross-profile data leaks.
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
+
 from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import (
     ComplianceFields,
@@ -25,9 +31,16 @@ from snore.mcp.schemas import (
     NightlySummaryResponse,
 )
 from snore.mcp.tools._capabilities import _has_analysis, build_device_capabilities
+from snore.mcp.tools._helpers import str_or_none
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
+from snore.mcp.tools._service_errors import (
+    MAPPED_SERVICE_ERRORS,
+    raise_mapped_service_error,
+)
 
 _DEFAULT_PAGE_SIZE = 30
 _DEFAULT_COMPLIANCE_THRESHOLD_HOURS = 4.0
+MAX_NIGHTLY_RANGE = 90
 
 
 async def get_nightly_summary(
@@ -52,8 +65,6 @@ async def get_nightly_summary(
     """
     from snore.services.breath_service import (  # noqa: PLC0415
         BreathService,
-        DeviceAmbiguityError,
-        DeviceNotOwnedError,
         NightlyAnalysisSummary,
         NightlyRangeSummary,
     )
@@ -70,12 +81,8 @@ async def get_nightly_summary(
             device_id=device_id,
             compliance_threshold_hours=compliance_threshold_hours,
         )
-    except DeviceNotOwnedError as exc:
-        raise ValidationError(
-            f"device_id={exc.device_id} is not available in this session"
-        ) from exc
-    except DeviceAmbiguityError as exc:
-        raise ValidationError(str(exc)) from exc
+    except MAPPED_SERVICE_ERRORS as exc:
+        raise_mapped_service_error(exc)
 
     # Index per-night analysis summaries by therapy_date for O(1) lookup.
     bs_by_date: dict[date, NightlyAnalysisSummary] = {}
@@ -219,22 +226,17 @@ async def get_nightly_summary(
 
             # rera_index and rdi mapped straight through from service DTO
             rera_index = bs_night.rera_index
-            rera_index_reason = (
-                str(bs_night.rera_index_reason)
-                if bs_night.rera_index_reason is not None
-                else None
-            )
+            rera_index_reason = str_or_none(bs_night.rera_index_reason)
             rdi = bs_night.rdi
-            rdi_reason = (
-                str(bs_night.rdi_reason) if bs_night.rdi_reason is not None else None
-            )
+            rdi_reason = str_or_none(bs_night.rdi_reason)
 
             if bs_night.fl_median is not None:
                 fl_median = round(bs_night.fl_median, 4)
             if bs_night.fl_reason is not None:
-                fl_median_reason = str(bs_night.fl_reason)
-                fl_p95_reason = str(bs_night.fl_reason)
-                fl_max_reason = str(bs_night.fl_reason)
+                reason_str = str_or_none(bs_night.fl_reason)
+                fl_median_reason = reason_str
+                fl_p95_reason = reason_str
+                fl_max_reason = reason_str
             if bs_night.fl_95th is not None:
                 fl_p95 = round(bs_night.fl_95th, 4)
             if bs_night.fl_max is not None:
@@ -243,12 +245,10 @@ async def get_nightly_summary(
             # Ti and I:E from BreathService
             if bs_night.ti_median_s is not None:
                 ti_median_s = round(bs_night.ti_median_s, 3)
-            if bs_night.ti_median_reason is not None:
-                ti_median_reason = str(bs_night.ti_median_reason)
+            ti_median_reason = str_or_none(bs_night.ti_median_reason)
             if bs_night.ie_ratio_median is not None:
                 ie_ratio = round(bs_night.ie_ratio_median, 3)
-            if bs_night.ie_ratio_reason is not None:
-                ie_ratio_reason = str(bs_night.ie_ratio_reason)
+            ie_ratio_reason = str_or_none(bs_night.ie_ratio_reason)
         else:
             rera_index_reason = "analysis_not_run"
             rdi_reason = "analysis_not_run"
@@ -291,7 +291,8 @@ async def get_nightly_summary(
                 epap_median_cmh2o=day.epap_median,
                 leak_median_lpm=day.leak_median,
                 leak_95th_lpm=day.leak_95th,
-                leak_above_24_pct=None,  # requires waveform time-above; Phase 4
+                leak_above_24_pct=None,
+                leak_above_24_pct_reason="not_available",
                 rr_mean_bpm=stats.respiratory_rate_mean if stats else None,
                 tv_mean_ml=(
                     round(stats.tidal_volume_mean * 1000, 1)
@@ -337,3 +338,73 @@ async def get_nightly_summary(
         compliance=compliance,
         device_capabilities=dev_caps,
     )
+
+
+def register(mcp: FastMCP) -> None:
+    from snore.mcp.validation import (  # noqa: PLC0415
+        parse_date_range,
+        validate_compliance_threshold,
+        validate_page_args,
+    )
+
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_nightly_summary(
+        ctx: Context,
+        start: str,
+        end: str,
+        device_id: int | None = None,
+        page: int = 1,
+        page_size: int = 30,
+        compliance_threshold_hours: float = _DEFAULT_COMPLIANCE_THRESHOLD_HOURS,
+    ) -> dict[str, Any]:
+        """Return per-night therapy summary for a date range.
+
+        Paginated at 30 nights/call (adjustable). Analysis-derived fields (RERA
+        index, RDI) are null + reason "analysis_not_run" when analysis has not
+        been run. Compliance fields are included in the response.
+
+        The ``compliance`` block is present whenever ``start != end`` (range
+        mode), even when the range contains no night data rows; it is ``null``
+        only for single-date requests. ``days_total`` counts CALENDAR nights in
+        the requested range — nights without data count as non-compliant.
+
+        ``rera_index_reason`` may be ``"duration_zero"`` when a RERA count
+        exists but therapy hours for the night is zero, making the per-hour
+        rate undefined.
+
+        Args:
+            start: Start date in YYYY-MM-DD format.
+            end: End date in YYYY-MM-DD format.
+            device_id: Optional device ID filter.
+            page: Page number (1-based). Default 1.
+            page_size: Nights per page (must be between 1 and 90). Default 30.
+            compliance_threshold_hours: Hours to count as compliant (default 4.0).
+
+        Returns:
+            NightlySummaryResponse with nights list, pagination, and compliance block.
+        """
+        from snore.mcp.tools.summary import (
+            get_nightly_summary as _impl,  # noqa: PLC0415
+        )
+
+        start_d, end_d = parse_date_range(start, end)
+        n_calendar = (end_d - start_d).days + 1
+        if n_calendar > MAX_NIGHTLY_RANGE:
+            raise ValidationError(
+                f"Date range spans {n_calendar} nights; maximum per call is {MAX_NIGHTLY_RANGE}. "
+                "Use multiple calls to page over longer ranges."
+            )
+        capped_page_size = validate_page_args(page, page_size)
+        validate_compliance_threshold(compliance_threshold_hours)
+        return await _scope_and_run(
+            ctx,
+            _impl,
+            tool_name="get_nightly_summary",
+            start=start_d,
+            end=end_d,
+            device_id=device_id,
+            page=page,
+            page_size=capped_page_size,
+            compliance_threshold_hours=compliance_threshold_hours,
+        )

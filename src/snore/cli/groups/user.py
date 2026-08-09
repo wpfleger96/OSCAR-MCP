@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import secrets
 
 from datetime import UTC, datetime, timedelta
 
 import click
 
+from snore.auth.emails import normalize_email
 from snore.cli.decorators import db_option, db_session
 from snore.cli.display import console, print_error, print_success
 
@@ -67,7 +67,7 @@ def user_create(
         async with db_session(db) as session:
             from snore.database.models import Profile, User  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
             u = User(
                 canonical_email=canonical,
                 display_name=display_name or canonical.split("@")[0],
@@ -99,7 +99,7 @@ def user_disable(email: str, db: str | None) -> None:
 
             from snore.database.models import User  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
             u = (
                 (
                     await session.execute(
@@ -116,6 +116,41 @@ def user_disable(email: str, db: str | None) -> None:
             u.session_version += 1  # Invalidate all existing sessions.
 
         print_success(f"Disabled user {canonical}")
+
+    asyncio.run(_run())
+
+
+@user.command("enable")
+@click.argument("email")
+@db_option
+def user_enable(email: str, db: str | None) -> None:
+    """Re-enable a previously disabled user account."""
+
+    async def _run() -> None:
+        async with db_session(db) as session:
+            from sqlalchemy import select  # noqa: PLC0415
+
+            from snore.database.models import User  # noqa: PLC0415
+
+            canonical = normalize_email(email)
+            u = (
+                (
+                    await session.execute(
+                        select(User).where(User.canonical_email == canonical)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if u is None:
+                print_error(f"User {canonical!r} not found")
+                return
+            if u.disabled_at is None:
+                console.print(f"User {canonical} is already enabled")
+                return
+            u.disabled_at = None
+
+        print_success(f"Enabled user {canonical}")
 
     asyncio.run(_run())
 
@@ -152,13 +187,15 @@ def user_invite(
     """
 
     async def _run() -> None:
+        from snore.auth.invite_tokens import hash_invite_token  # noqa: PLC0415
+
         raw_token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        token_hash = hash_invite_token(raw_token)
 
         async with db_session(db) as session:
             from snore.database.models import Invite  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
             inv = Invite(
                 email=canonical,
                 token_hash=token_hash,
@@ -196,7 +233,9 @@ def invite_revoke(email: str, db: str | None) -> None:
 
             from snore.database.models import Invite  # noqa: PLC0415
 
-            canonical = email.strip().lower()
+            canonical = normalize_email(email)
+            # Deliberately NOT invite_valid_clauses: expired-but-pending
+            # invites must remain revocable.
             stmt = select(Invite).where(
                 Invite.email == canonical,
                 Invite.redeemed_at.is_(None),

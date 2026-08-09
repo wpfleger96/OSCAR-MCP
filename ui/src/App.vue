@@ -1,5 +1,5 @@
 <template>
-    <div class="app-layout">
+    <div v-if="!route.meta.authFree" class="app-layout">
         <AppSidebar class="hidden md:flex" />
         <main class="app-main">
             <button
@@ -8,10 +8,13 @@
             >
                 <Menu class="h-5 w-5" />
             </button>
-            <RouterView />
+            <RouterView :key="profileKey" />
         </main>
     </div>
-    <Sheet v-model:open="mobileMenuOpen">
+    <main v-else class="auth-layout">
+        <RouterView :key="profileKey" />
+    </main>
+    <Sheet v-if="!route.meta.authFree" v-model:open="mobileMenuOpen">
         <SheetContent side="left" class="w-[220px] p-0">
             <SheetTitle class="sr-only">Navigation</SheetTitle>
             <AppSidebar />
@@ -25,9 +28,11 @@ import { useRoute } from 'vue-router'
 import { Menu } from '@lucide/vue'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
 import AppSidebar from '@/components/AppSidebar.vue'
+import { useAuth } from '@/composables/useAuth'
 
 const mobileMenuOpen = ref(false)
 const route = useRoute()
+const { profileKey } = useAuth()
 
 watch(
     () => route.path,
@@ -51,6 +56,10 @@ watch(
     padding: 1.5rem;
     overflow-y: auto;
     min-width: 0;
+}
+
+.auth-layout {
+    min-height: 100vh;
 }
 
 @media (max-width: 767px) {

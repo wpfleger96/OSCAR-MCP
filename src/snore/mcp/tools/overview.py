@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.mcp.schemas import DataOverviewResponse, DeviceInfo
 from snore.mcp.tools._capabilities import build_device_capabilities
+from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.services.device_service import DeviceService
 
 
@@ -197,3 +203,21 @@ async def get_data_overview(
         analysis_run=analysis_run,
         analysis_session_count=analysis_session_count,
     )
+
+
+def register(mcp: FastMCP) -> None:
+    @mcp.tool()
+    @tool_error_boundary
+    async def get_data_overview(ctx: Context) -> dict[str, Any]:
+        """Orient to the imported dataset: devices, date ranges, channels, analysis status.
+
+        Call this first before any other tool. Returns everything needed to understand
+        what data is available and which tools are applicable.
+
+        Returns:
+            DataOverviewResponse with devices, date ranges, waveform channels,
+            event types, and analysis status.
+        """
+        from snore.mcp.tools.overview import get_data_overview as _impl  # noqa: PLC0415
+
+        return await _scope_and_run(ctx, _impl, tool_name="get_data_overview")

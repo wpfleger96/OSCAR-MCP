@@ -5,6 +5,13 @@ import type { components } from './generated'
 
 type Schemas = components['schemas']
 
+// Auth
+export type AuthStatusResponse = Schemas['AuthStatusResponse']
+export type UserInfo = Schemas['UserInfo']
+export type ProfileInfo = Schemas['ProfileInfo']
+
+export type ProfileResponse = Schemas['ProfileResponse']
+
 // Pagination — generic over the concrete instantiations FastAPI generates
 // (PaginatedResponse_SessionListItem_ etc.), so the envelope shape cannot drift.
 export type PaginatedResponse<T> = Omit<Schemas['PaginatedResponse_SessionListItem_'], 'items'> & {
@@ -64,8 +71,11 @@ export type RERAEvent = Schemas['RERAEvent']
 
 // Import
 export type ImportSource = Schemas['ImportSource']
-export type DetectRequest = Schemas['DetectRequest']
-export type ImportPathRequest = Schemas['ImportPathRequest']
+export type PipelineJobStatus = Schemas['PipelineJobStatus']
+export type PipelineJobsListResponse = Schemas['PipelineJobsListResponse']
+export type LinkedAnalysisSummary = Schemas['LinkedAnalysisSummary']
+export type ImportResultSummary = Schemas['ImportResultSummary']
+export type ImportSourceResultSummary = Schemas['ImportSourceResultSummary']
 
 // ImportSourceResult and ImportResult are returned as SSE event data (not HTTP
 // response models), so they are absent from the OpenAPI spec and hand-written here.
@@ -89,16 +99,15 @@ export interface ImportResult {
 export type DatabaseStatsPublic = Schemas['DatabaseStatsPublic']
 export type VacuumResult = Schemas['VacuumResult']
 export type ResetResult = Schemas['ResetResult']
+export type DeleteDataResult = Schemas['DeleteDataResult']
 
 // Validation
 export type ValidationReport = Schemas['ValidationReport']
 export type AggregateMetrics = Schemas['AggregateMetrics']
 export type SessionValidation = Schemas['SessionValidation']
 
-// Batch analysis
-export type BatchAnalysisRequest = Schemas['BatchAnalysisRequest']
-export type BatchAnalysisResult = Schemas['BatchAnalysisResult']
-export type BatchSessionResult = Schemas['BatchSessionResult']
+// Analysis jobs (background queue — not in OpenAPI spec)
+export type { AnalysisJobInfo } from '@/api/analysis'
 
 // Waveform compare
 export type EventComparisonResult = Schemas['EventComparisonResult']
@@ -172,4 +181,15 @@ export const EVENT_COLORS: Record<string, string> = {
     H: 'rgba(234, 179, 8, 0.25)', // yellow — Hypopnea
     RE: 'rgba(34, 197, 94, 0.25)', // green — RERA
     FL: 'rgba(249, 115, 22, 0.2)', // orange — Flow Limitation
+}
+
+// About / build provenance (excluded from OpenAPI schema)
+export interface AboutInfo {
+    version: string
+    git_sha: string
+    build_time: string
+    uptime_seconds: number
+    auth_mode: string
+    python_version: string
+    sqlite_version: string
 }

@@ -1,6 +1,7 @@
 """Unit tests for AnalysisFacade."""
 
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -299,8 +300,31 @@ class TestDeleteAnalysis:
         assert remaining == 0
 
 
+def _make_session_scope_patcher(async_db_session: AsyncSession) -> Any:
+    """Return an async context manager factory that yields *async_db_session*.
+
+    Used to patch ``snore.database.session.session_scope`` in tests that call
+    ``run_batch_analysis``, which now opens its own short-lived scope for the
+    id-list query instead of using the caller-provided session.
+    """
+    from contextlib import asynccontextmanager  # noqa: PLC0415
+
+    @asynccontextmanager
+    async def _fake_scope(*args, **kwargs):
+        yield async_db_session
+
+    return _fake_scope
+
+
 class TestRunBatchAnalysis:
-    async def test_no_sessions_returns_empty_result(self, async_db_session):
+    async def test_no_sessions_returns_empty_result(
+        self, async_db_session, monkeypatch
+    ):
+        """No sessions in range returns BatchAnalysisResult with all zeros."""
+        monkeypatch.setattr(
+            "snore.database.session.session_scope",
+            _make_session_scope_patcher(async_db_session),
+        )
         facade = AnalysisFacade(async_db_session, profile_id=1)
         result = await facade.run_batch_analysis(
             from_date=datetime(2099, 1, 1), to_date=datetime(2099, 12, 31)
@@ -338,6 +362,10 @@ class TestRunBatchAnalysis:
         coord_mock.submit = AsyncMock(return_value=mock_result)
         coord_mock.progress = (1, 1)
 
+        monkeypatch.setattr(
+            "snore.database.session.session_scope",
+            _make_session_scope_patcher(async_db_session),
+        )
         monkeypatch.setattr(
             "snore.services.analysis_facade.BatchAnalysisCoordinator",
             lambda: coord_mock,
@@ -381,6 +409,10 @@ class TestRunBatchAnalysis:
         coord_mock.submit = AsyncMock(return_value=mock_result)
         coord_mock.progress = (1, 1)
 
+        monkeypatch.setattr(
+            "snore.database.session.session_scope",
+            _make_session_scope_patcher(async_db_session),
+        )
         monkeypatch.setattr(
             "snore.services.analysis_facade.BatchAnalysisCoordinator",
             lambda: coord_mock,
@@ -429,6 +461,10 @@ class TestRunBatchAnalysis:
         coord_mock.progress = (1, 1)
 
         monkeypatch.setattr(
+            "snore.database.session.session_scope",
+            _make_session_scope_patcher(async_db_session),
+        )
+        monkeypatch.setattr(
             "snore.services.analysis_facade.BatchAnalysisCoordinator",
             lambda: coord_mock,
         )
@@ -440,3 +476,167 @@ class TestRunBatchAnalysis:
         )
         assert len(calls) == 1
         assert calls[0] == (1, None)  # total is None until exhausted (unknown)
+
+
+class TestBatchCoordinatorCancellationAccounting:
+    """Tests for BatchAnalysisCoordinator.submit() cancellation and totals."""
+
+    async def test_all_pairs_cancelled_when_predicate_fires_before_dispatch(self):
+        """If cancel_predicate returns True from the start, all pairs land as cancelled.
+
+        The coordinator checks the predicate in _fill_window before creating any
+        tasks.  All unstarted pairs are drained and counted as cancelled so the
+        total stays honest.
+        """
+        from snore.services.analysis_facade import BatchAnalysisCoordinator
+
+        pairs = [
+            (1, date(2025, 1, 1)),
+            (2, date(2025, 1, 2)),
+            (3, date(2025, 1, 3)),
+        ]
+        coord = BatchAnalysisCoordinator()
+        result = await coord.submit(
+            session_pairs=pairs,
+            profile_id=1,
+            cancel_predicate=lambda: True,  # fires immediately
+            max_workers=4,
+            store_results=False,
+        )
+
+        assert result.total == 3
+        assert result.cancelled == 3
+        assert result.successful == 0
+        assert result.failed == 0
+        assert len(result.results) == 3
+        assert all(r.cancelled for r in result.results)
+
+    async def test_empty_pairs_list_returns_zero_total(self):
+        """Empty session_pairs list returns all-zero BatchAnalysisResult."""
+        from snore.services.analysis_facade import BatchAnalysisCoordinator
+
+        coord = BatchAnalysisCoordinator()
+        result = await coord.submit(
+            session_pairs=[],
+            profile_id=1,
+            store_results=False,
+        )
+
+        assert result.total == 0
+        assert result.successful == 0
+        assert result.failed == 0
+        assert result.cancelled == 0
+        assert result.results == []
+
+
+class TestStoreWithRetry:
+    """Tests for the _store_with_retry helper."""
+
+    def _make_patches(
+        self, monkeypatch: pytest.MonkeyPatch, store_side_effects: list[Any]
+    ) -> Any:
+        """Set up all mocks needed to exercise _store_with_retry in isolation.
+
+        Args:
+            store_side_effects: List of side effects for write_svc.store_result.
+                Each entry is either an exception to raise or None to succeed.
+        """
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        @asynccontextmanager
+        async def _fake_write_gate():
+            yield
+
+        @asynccontextmanager
+        async def _fake_scope(*args, **kwargs):
+            yield MagicMock()
+
+        call_iter = iter(store_side_effects)
+
+        async def _fake_store(computation, processing_time_ms):
+            effect = next(call_iter, None)
+            if isinstance(effect, BaseException):
+                raise effect
+            if isinstance(effect, type) and issubclass(effect, BaseException):
+                raise effect()
+
+        write_svc_mock = AsyncMock()
+        write_svc_mock.store_result = _fake_store
+
+        monkeypatch.setattr("snore.database.write_gate.write_gate", _fake_write_gate)
+        monkeypatch.setattr("snore.database.session.session_scope", _fake_scope)
+        monkeypatch.setattr(
+            "snore.database.txn.is_sqlite_contention",
+            lambda exc: "database is locked" in str(exc).lower(),
+        )
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+        analysis_svc_patcher = patch(
+            "snore.analysis.service.AnalysisService", return_value=write_svc_mock
+        )
+
+        return analysis_svc_patcher
+
+    async def test_one_transient_lock_then_success_ends_as_success(self, monkeypatch):
+        """A store that raises 'database is locked' once then succeeds is retried."""
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy.exc import OperationalError
+
+        from snore.services.analysis_facade import _store_with_retry
+
+        lock_err = OperationalError("database is locked", None, None)
+        patcher = self._make_patches(monkeypatch, [lock_err, None])
+
+        # Override the sleep mock with one we can inspect — proves a retry happened.
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr("asyncio.sleep", sleep_mock)
+
+        with patcher:
+            await _store_with_retry(
+                profile_id=1, computation=object(), processing_time_ms=100
+            )
+
+        # Exactly one retry sleep: first attempt failed (transient), second succeeded.
+        sleep_mock.assert_called_once()
+
+    async def test_persistent_lock_fails_after_bounded_attempts(self, monkeypatch):
+        """A store that always raises 'database is locked' fails after MAX_ATTEMPTS."""
+        from sqlalchemy.exc import OperationalError
+
+        from snore.database.txn import MAX_ATTEMPTS
+        from snore.services.analysis_facade import _store_with_retry
+
+        lock_err = OperationalError("database is locked", None, None)
+        # Enough errors to exhaust all attempts
+        patcher = self._make_patches(monkeypatch, [lock_err] * (MAX_ATTEMPTS + 1))
+
+        with patcher, pytest.raises(OperationalError):
+            await _store_with_retry(
+                profile_id=1, computation=object(), processing_time_ms=100
+            )
+
+    async def test_non_contention_error_propagates_immediately(self, monkeypatch):
+        """A non-lock error propagates on the first attempt without retrying."""
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy.exc import OperationalError
+
+        from snore.services.analysis_facade import _store_with_retry
+
+        boom = OperationalError("disk I/O error", None, None)
+        # Only one error in the list; retry would need more but shouldn't happen
+        patcher = self._make_patches(monkeypatch, [boom])
+
+        # Replace the sleep mock set inside _make_patches with a fresh one we can inspect.
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr("asyncio.sleep", sleep_mock)
+
+        with patcher, pytest.raises(OperationalError, match="disk I/O error"):
+            await _store_with_retry(
+                profile_id=1, computation=object(), processing_time_ms=100
+            )
+
+        # sleep must not have been called — no retry happened
+        sleep_mock.assert_not_called()

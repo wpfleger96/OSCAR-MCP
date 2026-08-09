@@ -3,7 +3,15 @@
 from datetime import datetime, timedelta
 from typing import Any
 
-from snore.database.models import Device, Session, Statistics
+from snore.database.models import (
+    AnalysisResult,
+    Device,
+    Profile,
+    Session,
+    Statistics,
+    User,
+    Waveform,
+)
 from snore.services.database_service import DatabaseService
 from snore.services.device_service import DeviceService
 
@@ -26,6 +34,8 @@ class TestDatabaseService:
         assert stats.pattern_count == 0
         assert stats.sessions_with_waveforms == 0
         assert stats.sessions_with_events == 0
+        assert stats.sessions_with_analysis == 0
+        assert stats.analyzable_session_count == 0
         assert stats.waveform_coverage_pct == 0
         assert stats.event_coverage_pct == 0
         assert stats.analysis_coverage_pct == 0
@@ -69,6 +79,8 @@ class TestDatabaseService:
         assert stats.session_count == 2
         assert stats.sessions_with_waveforms == 1
         assert stats.sessions_with_events == 2
+        assert stats.sessions_with_analysis == 0
+        assert stats.analyzable_session_count == 0
         assert stats.waveform_coverage_pct == 50.0
         assert stats.event_coverage_pct == 100.0
         assert stats.analysis_coverage_pct == 0.0
@@ -101,6 +113,8 @@ class TestDatabaseService:
         assert stats.session_count == 10
         assert stats.sessions_with_waveforms == 3
         assert stats.sessions_with_events == 7
+        assert stats.sessions_with_analysis == 0
+        assert stats.analyzable_session_count == 0
         assert stats.waveform_coverage_pct == 30.0
         assert stats.event_coverage_pct == 70.0
         assert stats.analysis_coverage_pct == 0.0
@@ -123,6 +137,220 @@ class TestDatabaseService:
 
         assert stats.size_mb == 0
         assert stats.db_path == fake_path
+
+    async def test_analyzed_twice_counts_once_coverage_below_100(
+        self, async_db_session, async_test_device, async_test_profile, temp_db
+    ):
+        """A session re-analyzed twice counts as one analyzed session; coverage stays ≤ 100%."""
+        now = datetime.now()
+        session = Session(
+            device_id=async_test_device.id,
+            device_session_id="reanalyzed",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        async_db_session.add(session)
+        await async_db_session.flush()
+
+        waveform = Waveform(
+            session_id=session.id,
+            waveform_type="flow",
+            sample_rate=25.0,
+            data_blob=b"\x00",
+        )
+        async_db_session.add(waveform)
+        await async_db_session.flush()
+
+        # Two analysis results for the same session (re-analysis scenario).
+        for _ in range(2):
+            result = AnalysisResult(
+                session_id=session.id,
+                timestamp_start=now,
+                timestamp_end=now + timedelta(hours=8),
+            )
+            async_db_session.add(result)
+        await async_db_session.commit()
+
+        service = DatabaseService(async_db_session, profile_id=async_test_profile.id)
+        stats = await service.get_stats(str(temp_db))
+
+        assert stats.sessions_with_analysis == 1
+        assert stats.analyzable_session_count == 1
+        assert stats.analysis_coverage_pct == 100.0
+
+    async def test_non_flow_session_excluded_from_denominator_shows_full_coverage(
+        self, async_db_session, async_test_device, async_test_profile, temp_db
+    ):
+        """Session with no flow waveform is excluded from the analyzable denominator."""
+        now = datetime.now()
+        # session1 has a flow waveform and an analysis result.
+        session1 = Session(
+            device_id=async_test_device.id,
+            device_session_id="with_flow",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        # session2 has only a pressure waveform — not analyzable.
+        session2 = Session(
+            device_id=async_test_device.id,
+            device_session_id="pressure_only",
+            start_time=now + timedelta(days=1),
+            end_time=now + timedelta(days=1, hours=8),
+            duration_seconds=28800,
+        )
+        async_db_session.add_all([session1, session2])
+        await async_db_session.flush()
+
+        flow_waveform = Waveform(
+            session_id=session1.id,
+            waveform_type="flow",
+            sample_rate=25.0,
+            data_blob=b"\x00",
+        )
+        pressure_waveform = Waveform(
+            session_id=session2.id,
+            waveform_type="pressure",
+            sample_rate=2.0,
+            data_blob=b"\x00",
+        )
+        async_db_session.add_all([flow_waveform, pressure_waveform])
+        await async_db_session.flush()
+
+        analysis = AnalysisResult(
+            session_id=session1.id,
+            timestamp_start=now,
+            timestamp_end=now + timedelta(hours=8),
+        )
+        async_db_session.add(analysis)
+        await async_db_session.commit()
+
+        service = DatabaseService(async_db_session, profile_id=async_test_profile.id)
+        stats = await service.get_stats(str(temp_db))
+
+        assert stats.session_count == 2
+        assert stats.sessions_with_analysis == 1
+        # Only session1 is analyzable; session2 (pressure waveform only) is excluded.
+        assert stats.analyzable_session_count == 1
+        assert stats.analysis_coverage_pct == 100.0
+
+    async def test_zero_analyzable_sessions_coverage_is_zero(
+        self, async_db_session, async_test_device, async_test_profile, temp_db
+    ):
+        """Zero analyzable sessions produces coverage of 0, not a division error."""
+        now = datetime.now()
+        # Sessions exist but none have a flow waveform.
+        session = Session(
+            device_id=async_test_device.id,
+            device_session_id="no_flow",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        async_db_session.add(session)
+        await async_db_session.commit()
+
+        service = DatabaseService(async_db_session, profile_id=async_test_profile.id)
+        stats = await service.get_stats(str(temp_db))
+
+        assert stats.session_count == 1
+        assert stats.analyzable_session_count == 0
+        assert stats.sessions_with_analysis == 0
+        assert stats.analysis_coverage_pct == 0
+
+    async def test_profile_isolation_new_fields(
+        self, async_db_session, async_test_device, async_test_profile, temp_db
+    ):
+        """sessions_with_analysis and analyzable_session_count are scoped to the active profile."""
+        import uuid
+
+        now = datetime.now()
+
+        # Profile 1 session: has flow waveform + analysis result.
+        session1 = Session(
+            device_id=async_test_device.id,
+            device_session_id="profile1_session",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        async_db_session.add(session1)
+        await async_db_session.flush()
+
+        waveform1 = Waveform(
+            session_id=session1.id,
+            waveform_type="flow",
+            sample_rate=25.0,
+            data_blob=b"\x00",
+        )
+        async_db_session.add(waveform1)
+        await async_db_session.flush()
+
+        analysis1 = AnalysisResult(
+            session_id=session1.id,
+            timestamp_start=now,
+            timestamp_end=now + timedelta(hours=8),
+        )
+        async_db_session.add(analysis1)
+        await async_db_session.flush()
+
+        # Profile 2: separate user, profile, device, session with its own waveform/result.
+        user2 = User(
+            canonical_email=f"other_{uuid.uuid4().hex[:8]}@example.com",
+            role="member",
+        )
+        async_db_session.add(user2)
+        await async_db_session.flush()
+
+        profile2 = Profile(user_id=user2.id, name="Other Profile")
+        async_db_session.add(profile2)
+        await async_db_session.flush()
+
+        device2 = Device(
+            profile_id=profile2.id,
+            manufacturer="Other",
+            model="Other Model",
+            serial_number=f"OTHER_{uuid.uuid4().hex[:8]}",
+        )
+        async_db_session.add(device2)
+        await async_db_session.flush()
+
+        session2 = Session(
+            device_id=device2.id,
+            device_session_id="profile2_session",
+            start_time=now,
+            end_time=now + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        async_db_session.add(session2)
+        await async_db_session.flush()
+
+        waveform2 = Waveform(
+            session_id=session2.id,
+            waveform_type="flow",
+            sample_rate=25.0,
+            data_blob=b"\x00",
+        )
+        async_db_session.add(waveform2)
+        await async_db_session.flush()
+
+        analysis2 = AnalysisResult(
+            session_id=session2.id,
+            timestamp_start=now,
+            timestamp_end=now + timedelta(hours=8),
+        )
+        async_db_session.add(analysis2)
+        await async_db_session.commit()
+
+        service = DatabaseService(async_db_session, profile_id=async_test_profile.id)
+        stats = await service.get_stats(str(temp_db))
+
+        # Only profile 1's session is counted.
+        assert stats.session_count == 1
+        assert stats.sessions_with_analysis == 1
+        assert stats.analyzable_session_count == 1
+        assert stats.analysis_coverage_pct == 100.0
 
 
 class TestDeviceServiceListDevices:

@@ -51,6 +51,8 @@ __all__ = [
     "VacuumResult",
     # Reset schema
     "ResetResult",
+    # Per-user data deletion schema
+    "DeleteDataResult",
 ]
 
 
@@ -159,11 +161,22 @@ class DatabaseStats(BaseModel):
     pattern_count: int = Field(description="Number of detected patterns")
     sessions_with_waveforms: int = Field(description="Sessions that have waveform data")
     sessions_with_events: int = Field(description="Sessions that have event data")
+    sessions_with_analysis: int = Field(
+        description="Distinct sessions having at least one analysis result"
+    )
+    analyzable_session_count: int = Field(
+        description="Sessions having a flow waveform (prerequisite for analysis)"
+    )
     waveform_coverage_pct: float = Field(
         description="Percentage of sessions with waveforms"
     )
     event_coverage_pct: float = Field(description="Percentage of sessions with events")
-    analysis_coverage_pct: float = Field(description="Percentage of sessions analyzed")
+    analysis_coverage_pct: float = Field(
+        description=(
+            "Percentage of analyzable sessions (those with a flow waveform) that have "
+            "been analyzed: sessions_with_analysis / analyzable_session_count * 100"
+        )
+    )
     first_session: datetime | None = Field(
         default=None, description="Earliest session date"
     )
@@ -648,4 +661,54 @@ class ResetResult(BaseModel):
     )
     total_rows_deleted: int = Field(description="Total rows deleted across all tables")
     size_before_mb: float = Field(description="Database size before reset in MB")
-    size_after_mb: float = Field(description="Database size after reset + vacuum in MB")
+    size_after_mb: float | None = Field(
+        default=None,
+        description=(
+            "Database size after vacuum in MB. Null when vacuum_scheduled=true — the"
+            " vacuum is still running as a post-response background task."
+        ),
+    )
+    vacuum_scheduled: bool = Field(
+        default=False,
+        description=(
+            "True when VACUUM has been queued as a post-response background task."
+            " size_after_mb will be null in this case."
+        ),
+    )
+    bootstrap_invite_url: str | None = Field(
+        default=None,
+        description=(
+            "Admin invite redemption URL (only present after include_accounts=true reset)."
+            " The caller's account was deleted; redeem this URL to create a new admin account."
+        ),
+    )
+
+
+class DeleteDataResult(BaseModel):
+    """Result of a per-user delete-all-data operation."""
+
+    status: str = Field(description="Operation status ('success')")
+    devices_deleted: int = Field(
+        description="Device rows deleted (cascades removed all sleep data)"
+    )
+    import_jobs_deleted: int = Field(
+        description="Import job records deleted for this user"
+    )
+    profiles_processed: int = Field(
+        description="Profiles whose raw backup dirs were purged"
+    )
+    size_before_mb: float = Field(description="Database size before deletion in MB")
+    size_after_mb: float | None = Field(
+        default=None,
+        description=(
+            "Database size after vacuum in MB. Null when vacuum_scheduled=true — the"
+            " vacuum is still running as a post-response background task."
+        ),
+    )
+    vacuum_scheduled: bool = Field(
+        default=False,
+        description=(
+            "True when VACUUM has been queued as a post-response background task."
+            " size_after_mb will be null in this case."
+        ),
+    )

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from snore.auth.emails import normalize_email
 from snore.cli.decorators import db_option, db_session
 from snore.cli.display import console, print_error, print_success
 
@@ -238,7 +239,7 @@ async def _resolve_user(session: Any, user_email: str | None) -> User | None:
     from snore.database.models import User as _User  # noqa: PLC0415
 
     if user_email is not None:
-        canonical = user_email.strip().lower()
+        canonical = normalize_email(user_email)
         u = cast(
             "_User | None",
             (

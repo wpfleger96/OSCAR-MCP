@@ -28,17 +28,36 @@ logger = logging.getLogger(__name__)
 class AnalysisFacade:
     """Facade for analysis listing and deletion operations."""
 
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
+    def __init__(self, db_session: AsyncSession | None, profile_id: int) -> None:
         """
         Initialize analysis facade.
 
         Args:
-            db_session: SQLAlchemy database session
+            db_session: SQLAlchemy database session.  May be ``None`` **only**
+                when the facade is used exclusively for batch analysis via
+                ``run_batch_analysis``, which opens its own short-lived scopes
+                for all I/O.  All other methods (list, delete, get, etc.) require
+                a live session and will fail at runtime if ``None`` is passed.
             profile_id: Active profile — all queries are scoped to this profile.
         """
         self.db_session = db_session
         self.profile_id = profile_id
         self._batch_coordinator: BatchAnalysisCoordinator | None = None
+
+    @property
+    def _db(self) -> AsyncSession:
+        """Return the live session.
+
+        Raises ``RuntimeError`` when the facade was constructed with
+        ``db_session=None`` (batch-only mode) and a method that requires a
+        live session is called.
+        """
+        if self.db_session is None:
+            raise RuntimeError(
+                "AnalysisFacade requires a live db_session for this method. "
+                "Pass a session to __init__ or use run_batch_analysis instead."
+            )
+        return self.db_session
 
     def _profile_filter(self) -> ColumnElement[bool]:
         """WHERE predicate: limit sessions to this profile via device ownership."""
@@ -105,7 +124,7 @@ class AnalysisFacade:
             .subquery()
         )
         rows = (
-            await self.db_session.execute(
+            await self._db.execute(
                 select(ranked.c.session_id, ranked.c.id).where(
                     ranked.c.recency_rank == 1
                 )
@@ -157,7 +176,7 @@ class AnalysisFacade:
         from sqlalchemy.orm import joinedload as _joinedload
 
         stmt = stmt.options(_joinedload(models.Session.day))
-        sessions = (await self.db_session.execute(stmt)).unique().scalars().all()
+        sessions = (await self._db.execute(stmt)).unique().scalars().all()
 
         latest_analysis = await self._latest_analysis_ids([s.id for s in sessions])
 
@@ -199,7 +218,7 @@ class AnalysisFacade:
         count_stmt = select(func.count()).select_from(
             self._status_select(start, end, analyzed_only).subquery()
         )
-        return (await self.db_session.execute(count_stmt)).scalar() or 0
+        return (await self._db.execute(count_stmt)).scalar() or 0
 
     async def get_delete_preview(
         self,
@@ -258,7 +277,7 @@ class AnalysisFacade:
 
         query = query.order_by(models.Session.start_time.desc())
 
-        sessions_with_analysis = (await self.db_session.execute(query)).fetchall()
+        sessions_with_analysis = (await self._db.execute(query)).fetchall()
 
         if not sessions_with_analysis:
             return AnalysisDeletePreview(
@@ -272,7 +291,7 @@ class AnalysisFacade:
         session_ids_list = [s.id for s in sessions_with_analysis]
 
         analysis_counts = (
-            await self.db_session.execute(
+            await self._db.execute(
                 select(models.AnalysisResult.session_id, func.count())
                 .where(models.AnalysisResult.session_id.in_(session_ids_list))
                 .group_by(models.AnalysisResult.session_id)
@@ -287,7 +306,7 @@ class AnalysisFacade:
         )
 
         patterns_count = (
-            await self.db_session.execute(
+            await self._db.execute(
                 select(func.count())
                 .select_from(models.DetectedPattern)
                 .where(
@@ -353,7 +372,7 @@ class AnalysisFacade:
 
         if all_versions:
             # Delete all analysis results for owned sessions.
-            result = await self.db_session.execute(
+            result = await self._db.execute(
                 delete(models.AnalysisResult).where(
                     models.AnalysisResult.session_id.in_(
                         select(owned_sessions_subq.c.id)
@@ -384,17 +403,13 @@ class AnalysisFacade:
                 .subquery()
             )
             latest_ids = (
-                (
-                    await self.db_session.execute(
-                        select(ranked.c.id).where(ranked.c.rn == 1)
-                    )
-                )
+                (await self._db.execute(select(ranked.c.id).where(ranked.c.rn == 1)))
                 .scalars()
                 .all()
             )
             if not latest_ids:
                 return 0
-            result = await self.db_session.execute(
+            result = await self._db.execute(
                 delete(models.AnalysisResult).where(
                     models.AnalysisResult.id.in_(latest_ids)
                 )
@@ -411,7 +426,7 @@ class AnalysisFacade:
             return set()
         rows = (
             (
-                await self.db_session.execute(
+                await self._db.execute(
                     select(models.Session.id)
                     .join(models.Device, models.Session.device_id == models.Device.id)
                     .where(
@@ -488,10 +503,8 @@ class AnalysisFacade:
         processing_time_ms = int((time.monotonic() - t_start) * 1000)
 
         if store_results:
-            # Write phase: short INSERT-only scope.
-            async with session_scope() as write_db:
-                write_svc = AnalysisService(write_db, profile_id=self.profile_id)
-                await write_svc.store_result(computation, processing_time_ms)
+            # Write phase: gated INSERT-only scope, retried on SQLite lock contention.
+            await _store_with_retry(self.profile_id, computation, processing_time_ms)
 
         return computation.summary
 
@@ -503,7 +516,7 @@ class AnalysisFacade:
         """
         # Ownership check: confirm session belongs to this profile.
         owned = (
-            await self.db_session.execute(
+            await self._db.execute(
                 select(models.Session.id)
                 .join(models.Device, models.Session.device_id == models.Device.id)
                 .where(
@@ -517,7 +530,7 @@ class AnalysisFacade:
 
         analysis_row = (
             (
-                await self.db_session.execute(
+                await self._db.execute(
                     select(models.AnalysisResult)
                     .filter_by(session_id=session_id)
                     .order_by(
@@ -534,6 +547,47 @@ class AnalysisFacade:
             return None
         return AnalysisResult.model_validate(analysis_row.programmatic_result_json)
 
+    async def list_session_ids(
+        self,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        missing_only: bool = False,
+    ) -> list[int]:
+        """Return session IDs for this profile, optionally filtered by date range.
+
+        Cheaper than ``list_sessions_with_status``: selects only the ID column,
+        no ORM object hydration, no artificial row cap.
+
+        When ``missing_only`` is true, restrict to sessions that have a flow
+        waveform (sessions without flow data cannot be analyzed) but have no
+        existing analysis result.  Composable with date filters.
+        """
+        stmt = (
+            select(models.Session.id)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(self._profile_filter())
+        )
+        if from_date:
+            stmt = stmt.where(models.Day.date >= from_date.date())
+        if to_date:
+            stmt = stmt.where(models.Day.date <= to_date.date())
+        if missing_only:
+            stmt = stmt.where(
+                select(models.Waveform.id)
+                .where(models.Waveform.session_id == models.Session.id)
+                .where(models.Waveform.waveform_type == "flow")
+                .exists()
+            )
+            stmt = stmt.where(
+                ~select(models.AnalysisResult.id)
+                .where(models.AnalysisResult.session_id == models.Session.id)
+                .exists()
+            )
+        stmt = stmt.order_by(models.Day.date)
+        result = await self._db.execute(stmt)
+        return list(result.scalars())
+
     async def run_batch_analysis(
         self,
         from_date: datetime | None = None,
@@ -544,6 +598,7 @@ class AnalysisFacade:
         store_results: bool = True,
         max_workers: int = 4,
         progress_callback: Callable[[int, int | None], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> BatchAnalysisResult:
         """Run analysis on multiple sessions in parallel.
 
@@ -560,10 +615,13 @@ class AnalysisFacade:
             store_results: Whether to store results in the database
             max_workers: Max parallel threads (capped to session count)
             progress_callback: Called with (completed, total) after each session
+            cancel_predicate: Optional callable; returns True when cancellation is requested
 
         Returns:
             BatchAnalysisResult with per-session outcomes and aggregate counts
         """
+        from snore.database.session import session_scope  # noqa: PLC0415
+
         stmt = (
             select(
                 models.Session.id.label("session_id"),
@@ -582,30 +640,87 @@ class AnalysisFacade:
                 stmt = stmt.where(models.Day.date <= to_date.date())
         stmt = stmt.order_by(models.Day.date)
 
-        # Count matched sessions up front without materializing rows so
-        # `total` reflects matched, not started (honest cancellation accounting).
-        count_stmt = select(func.count()).select_from(stmt.subquery())
-        matched_total: int = (await self.db_session.execute(count_stmt)).scalar_one()
+        # Materialize the full list in a short-lived scope that closes before any
+        # workers run.  No DB transaction may remain open across the batch loop —
+        # a batch-long read snapshot pins the WAL and starves checkpoints.
+        # Two scalars per row (session_id, day_date) stay tiny even at 10k sessions.
+        async with session_scope() as _db:
+            rows = (await _db.execute(stmt)).all()
+
+        matched_total = len(rows)  # COUNT from len(), no separate query needed
         if matched_total == 0:
             return BatchAnalysisResult(
                 total=0, successful=0, failed=0, cancelled=0, results=[]
             )
 
-        # Stream rows lazily — never materialize a full 10k list.
-        async_result = await self.db_session.stream(stmt)
+        session_pairs: list[tuple[int, date | None]] = [
+            (row.session_id, row.day_date) for row in rows
+        ]
 
         coordinator = BatchAnalysisCoordinator()
         self._batch_coordinator = coordinator
         return await coordinator.submit(
-            matched_total=matched_total,
-            session_stream=async_result,
+            session_pairs=session_pairs,
             profile_id=self.profile_id,
             modes=modes,
             primary_mode=primary_mode,
             store_results=store_results,
             max_workers=max_workers,
             progress_callback=progress_callback,
+            cancel_predicate=cancel_predicate,
         )
+
+
+# ---------------------------------------------------------------------------
+# Analysis store helper
+# ---------------------------------------------------------------------------
+
+
+async def _store_with_retry(
+    profile_id: int,
+    computation: Any,
+    processing_time_ms: int,
+) -> None:
+    """Write one analysis result to the database, retrying on SQLite contention.
+
+    Re-acquires ``write_gate``, opens a fresh ``session_scope(immediate=True)``,
+    and calls ``store_result`` on each attempt.  Safe to retry because a failed
+    commit rolls back — nothing was persisted.  Non-contention exceptions
+    propagate on first occurrence.
+
+    Args:
+        profile_id: Profile that owns the analysis.
+        computation: Completed computation result to store.
+        processing_time_ms: Processing time in milliseconds.
+    """
+    from snore.analysis.service import AnalysisService  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+    from snore.database.txn import (  # noqa: PLC0415
+        MAX_ATTEMPTS,
+        backoff_delay,
+        is_sqlite_contention,
+    )
+    from snore.database.write_gate import write_gate  # noqa: PLC0415
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            async with write_gate():
+                async with session_scope(immediate=True) as write_session:
+                    write_svc = AnalysisService(write_session, profile_id=profile_id)
+                    await write_svc.store_result(computation, processing_time_ms)
+            return
+        except Exception as exc:
+            if not is_sqlite_contention(exc) or attempt >= MAX_ATTEMPTS:
+                raise
+            delay = backoff_delay(attempt)
+            logger.warning(
+                "_store_with_retry: attempt %d/%d hit contention (%s); retrying in %.3fs",
+                attempt,
+                MAX_ATTEMPTS,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +740,7 @@ class BatchAnalysisCoordinator:
 
     def __init__(self) -> None:
         self._cancel_requested = False
+        self._cancel_predicate: Callable[[], bool] | None = None
         self._completed = 0
         self._total = 0
         self.session_dates: dict[int, Any] = {}  # sid → day_date; window-bounded
@@ -632,6 +748,12 @@ class BatchAnalysisCoordinator:
     def cancel(self) -> None:
         """Request cooperative cancellation.  Checked between sessions."""
         self._cancel_requested = True
+
+    def _is_cancelled(self) -> bool:
+        """True if cancellation was requested via cancel() or the predicate fires."""
+        return self._cancel_requested or (
+            self._cancel_predicate is not None and self._cancel_predicate()
+        )
 
     @property
     def progress(self) -> tuple[int, int]:
@@ -641,14 +763,14 @@ class BatchAnalysisCoordinator:
     async def submit(
         self,
         *,
-        matched_total: int,
-        session_stream: Any,  # AsyncResult from session.stream(); yields rows lazily
+        session_pairs: Sequence[tuple[int, date | None]],
         profile_id: int,
         modes: Sequence[str] | None = None,
         primary_mode: str | None = None,
         store_results: bool = True,
         max_workers: int = 4,
         progress_callback: Callable[[int, int | None], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> BatchAnalysisResult:
         """Execute batch analysis and return aggregated results.
 
@@ -660,10 +782,10 @@ class BatchAnalysisCoordinator:
         loop via ``AsyncSession``.
 
         Args:
-            matched_total: Count of matched sessions (from COUNT query); defines
-                ``total`` in the result so cancelled sessions are never silently dropped.
-            session_stream: Async stream from ``session.stream(stmt)``; yields rows lazily.
-                Scalars only — no ORM objects passed to workers.
+            session_pairs: Materialized list of ``(session_id, day_date)`` tuples
+                to process.  The list is built by the caller in a short-lived
+                scope that closes before this method runs, so no DB transaction
+                is held for the duration of the batch.
             profile_id: Profile that owns the sessions — threaded into each
                 ``AnalysisService`` read/write scope so all I/O is scoped.
             modes: Detection modes to run (``None`` = default).
@@ -672,106 +794,95 @@ class BatchAnalysisCoordinator:
             store_results: If True, write each result to the DB.
             max_workers: Concurrency cap (number of simultaneous coroutines).
             progress_callback: Called with (completed, total) after each session.
+            cancel_predicate: Optional callable queried before each session is
+                dispatched; when it returns ``True`` no new sessions are started
+                and all remaining pairs are drained as cancelled.  A
+                ``cancel()`` call made before ``submit()`` is also honoured —
+                the pre-set flag is never cleared on entry.
 
         Returns:
             Aggregated ``BatchAnalysisResult``.
         """
         import time  # noqa: PLC0415
 
-        from snore.analysis.service import AnalysisService  # noqa: PLC0415
+        from snore.analysis.service import (  # noqa: PLC0415
+            AnalysisService,
+            _compute_session_in_process,
+        )
         from snore.database.session import session_scope  # noqa: PLC0415
+        from snore.utils.process_pool import get_pool  # noqa: PLC0415
 
+        matched_total = len(session_pairs)
         self._total = matched_total
         self._completed = 0
+        self._cancel_predicate = cancel_predicate
         # Do NOT reset _cancel_requested if cancel() was called before submit().
 
         modes_list: list[str] | None = list(modes) if modes is not None else None
 
-        def _compute_only(raw: Any) -> Any:
-            """Pure-compute phase — NumPy/scipy only, zero DB access."""
-            inputs = AnalysisService.prepare_inputs(raw)
-            return AnalysisService().compute_analysis(inputs)
-
-        # Build a lazy async iterator from the stream — never materialize all rows.
-        # The sliding window pulls pairs one at a time; at most max_workers jobs
-        # are in flight simultaneously.  session_dates is pruned as tasks complete
-        # so retained metadata stays window-bounded.
-        stream_iter = session_stream.__aiter__()
-        stream_exhausted = False
+        # Plain iterator over the materialized list.  The sliding window enqueues
+        # pairs up to max_workers; session_dates is pruned as tasks complete so
+        # retained metadata stays window-bounded.
+        pair_iter = iter(session_pairs)
+        pairs_exhausted = False
 
         batch_results: list[BatchSessionResult] = []
         pending: dict[asyncio.Task[str], int] = {}  # task → sid
         session_dates = self.session_dates  # instance attribute for observability
         session_dates.clear()
-        sem = asyncio.Semaphore(max_workers)
 
         async def _run_one(sid: int) -> str:
-            """Read → thread-compute → write, all async; semaphore caps concurrency."""
-            async with sem:
-                if self._cancel_requested:
-                    return "cancelled"
-                try:
-                    t_start = time.monotonic()
-
-                    # --- I/O read phase: fetch raw blobs on the event loop ---
-                    async with session_scope() as read_session:
-                        svc = AnalysisService(
-                            read_session,
-                            profile_id=profile_id,
-                        )
-                        raw = await svc.load_session_inputs_raw(
-                            sid,
-                            modes=modes_list,
-                            primary_mode=primary_mode,
-                        )
-
-                    # --- Compute phase: NumPy only in a thread, no session held ---
-                    computation = await asyncio.to_thread(_compute_only, raw)
-                    processing_time_ms = int((time.monotonic() - t_start) * 1000)
-
-                    # --- Write phase: persist result on the event loop ---
-                    if store_results and computation is not None:
-                        async with session_scope() as write_session:
-                            write_svc = AnalysisService(
-                                write_session, profile_id=profile_id
-                            )
-                            await write_svc.store_result(
-                                computation, processing_time_ms
-                            )
-
-                    return "success"
-                except Exception as e:
-                    logger.warning(
-                        "Failed to analyze session %d: %s", sid, e, exc_info=True
-                    )
-                    return "error"
-
-        async def _next_pair() -> tuple[int, date | None] | None:
-            """Pull one row from the stream; return None when exhausted."""
-            nonlocal stream_exhausted
-            if stream_exhausted:
-                return None
+            """Read → process-compute → write, all async."""
+            if self._is_cancelled():
+                return "cancelled"
             try:
-                row = await stream_iter.__anext__()
-                return (row.session_id, row.day_date)
-            except StopAsyncIteration:
-                stream_exhausted = True
-                return None
+                t_start = time.monotonic()
 
-        async def _fill_window() -> None:
-            """Enqueue pairs until max_workers tasks are in flight or stream exhausted."""
-            while len(pending) < max_workers:
-                if self._cancel_requested:
+                # --- I/O read phase: fetch raw blobs on the event loop ---
+                async with session_scope() as read_session:
+                    svc = AnalysisService(
+                        read_session,
+                        profile_id=profile_id,
+                    )
+                    raw = await svc.load_session_inputs_raw(
+                        sid,
+                        modes=modes_list,
+                        primary_mode=primary_mode,
+                    )
+
+                # --- Compute phase: NumPy only in a subprocess, no session held ---
+                computation = await asyncio.get_running_loop().run_in_executor(
+                    get_pool(), _compute_session_in_process, raw
+                )
+                processing_time_ms = int((time.monotonic() - t_start) * 1000)
+
+                # --- Write phase: persist result on the event loop, with retry ---
+                if store_results and computation is not None:
+                    await _store_with_retry(profile_id, computation, processing_time_ms)
+
+                return "success"
+            except Exception as e:
+                logger.warning(
+                    "Failed to analyze session %d: %s", sid, e, exc_info=True
+                )
+                return "error"
+
+        def _fill_window() -> None:
+            """Enqueue pairs until max_workers tasks are in flight or list exhausted."""
+            nonlocal pairs_exhausted
+            while len(pending) < max_workers and not pairs_exhausted:
+                if self._is_cancelled():
                     break
-                pair = await _next_pair()
-                if pair is None:
+                try:
+                    sid, day_date = next(pair_iter)
+                except StopIteration:
+                    pairs_exhausted = True
                     break
-                sid, day_date = pair
                 session_dates[sid] = day_date
                 task: asyncio.Task[str] = asyncio.create_task(_run_one(sid))
                 pending[task] = sid
 
-        await _fill_window()
+        _fill_window()
         while pending:
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -795,16 +906,12 @@ class BatchAnalysisCoordinator:
                 if progress_callback:
                     progress_callback(self._completed, matched_total)
             # Refill the window after each completion.
-            await _fill_window()
+            _fill_window()
 
-        # Drain any rows remaining in the stream after cancellation.
-        # Each unconsumed row is counted as cancelled so `total` stays honest.
-        if self._cancel_requested:
-            while True:
-                pair = await _next_pair()
-                if pair is None:
-                    break
-                sid, day_date = pair
+        # Drain any pairs remaining in the list after cancellation.
+        # Each unconsumed pair is counted as cancelled so `total` stays honest.
+        if self._is_cancelled():
+            for sid, day_date in pair_iter:
                 batch_results.append(
                     BatchSessionResult(
                         session_id=sid,

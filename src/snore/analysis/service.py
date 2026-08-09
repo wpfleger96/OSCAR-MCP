@@ -545,6 +545,7 @@ class AnalysisService:
             raise ValueError(f"No breaths segmented for session {session_id}")
 
         breath_features = []
+        breath_shape_by_number: dict[int, Any] = {}
         for breath in breaths:
             breath_start_idx = np.searchsorted(timestamps, breath.start_time)
             breath_end_idx = np.searchsorted(timestamps, breath.end_time)
@@ -560,6 +561,7 @@ class AnalysisService:
                     insp_flow, sample_rate
                 )
                 breath_features.append((breath.breath_number, shape, peaks))
+                breath_shape_by_number[breath.breath_number] = shape
 
         flow_analysis = self.flow_classifier.analyze_session(breath_features)
         logger.info(f"Flow limitation index: {flow_analysis.flow_limitation_index:.3f}")
@@ -665,6 +667,7 @@ class AnalysisService:
             timestamps=timestamps,
             flow_values=flow_values,
             flow_pattern_by_number=flow_pattern_by_number,
+            breath_shape_by_number=breath_shape_by_number,
             recovery_breath_indices=recovery_breath_indices,
             leak_timestamps=inputs.leak_timestamps,
             leak_values=inputs.leak_values,
@@ -937,6 +940,7 @@ def _build_computed_breaths(
     timestamps: Any,
     flow_values: Any,
     flow_pattern_by_number: dict[int, Any],
+    breath_shape_by_number: dict[int, Any],
     recovery_breath_indices: set[int],
     leak_timestamps: Any | None,
     leak_values: Any | None,
@@ -946,9 +950,12 @@ def _build_computed_breaths(
 
     Args:
         breaths: List of BreathMetrics from the segmenter.
-        timestamps: Flow timestamps array (unused here; kept for signature symmetry).
+        timestamps: Flow timestamps array — used to extract per-breath insp flow.
         flow_values: Full session flow array — used to extract per-breath insp flow.
         flow_pattern_by_number: Maps breath_number → FlowPattern (from classifier).
+        breath_shape_by_number: Pre-computed ShapeFeatures keyed by breath_number.
+            Only present for breaths where len(insp_flow) > 10; absent entries
+            produce None flatness_index (same as the prior per-breath extraction).
         recovery_breath_indices: Set of breath_numbers identified as recovery breaths.
         leak_timestamps: Leak waveform timestamps (may be None).
         leak_values: Leak waveform values (may be None).
@@ -960,7 +967,6 @@ def _build_computed_breaths(
         list of ComputedBreath (same length as breaths).
     """
     from snore.analysis.shared.feature_extractors import (  # noqa: PLC0415
-        WaveformFeatureExtractor,
         compute_mid_insp_flattening,
     )
     from snore.analysis.shared.trigger_cycle import (  # noqa: PLC0415
@@ -969,10 +975,6 @@ def _build_computed_breaths(
         infer_trigger_cycle,
     )
 
-    extractor = WaveformFeatureExtractor()
-    sample_rate: float = (
-        25.0  # default; the exact rate doesn't affect per-breath slicing
-    )
     # Gate vendor-specific heuristic: trigger/cycle inference is tuned on ResMed
     # flow waveforms only.  Other vendors get confidence=null + unvalidated_device.
     tc_vendor_applicability = (
@@ -983,7 +985,7 @@ def _build_computed_breaths(
 
     computed: list[ComputedBreath] = []
     for idx, breath in enumerate(breaths):
-        # Slice the inspiratory flow for shape features.
+        # Slice the inspiratory flow for mid-insp flattening and trigger inference.
         b_start = np.searchsorted(timestamps, breath.start_time)
         b_end = np.searchsorted(timestamps, breath.end_time)
         breath_flow = flow_values[b_start:b_end]
@@ -992,8 +994,8 @@ def _build_computed_breaths(
         flatness_idx: float | None = None
         mid_insp: float | None = None
         if len(insp_flow) > 10:
-            shape = extractor.extract_shape_features(insp_flow, sample_rate)
-            flatness_idx = shape.flatness_index
+            shape = breath_shape_by_number.get(breath.breath_number)
+            flatness_idx = shape.flatness_index if shape is not None else None
             mid_insp = compute_mid_insp_flattening(insp_flow)
 
         fl = flow_pattern_by_number.get(breath.breath_number)
@@ -1110,3 +1112,22 @@ def _compute_leak_valid(
         return leak_sample < LEAK_VALID_THRESHOLD_LPM, None
 
     return None, "channel_unaligned"
+
+
+def _compute_session_in_process(raw: RawSessionBlobs) -> AnalysisComputation:
+    """Pure-compute phase suitable for a subprocess worker.
+
+    Replicates the closure body from ``BatchAnalysisCoordinator._run_one``
+    at module level so it can be pickled and dispatched to the shared
+    ``ProcessPoolExecutor``.  No DB access — all inputs arrive as
+    ``RawSessionBlobs`` (bytes + plain Python); all outputs are plain
+    Python / NumPy (``AnalysisComputation`` is a picklable dataclass).
+
+    Args:
+        raw: DB-fetched blobs from the I/O phase.
+
+    Returns:
+        ``AnalysisComputation`` envelope ready for the write phase.
+    """
+    inputs = AnalysisService.prepare_inputs(raw)
+    return AnalysisService().compute_analysis(inputs)

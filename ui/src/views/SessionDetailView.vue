@@ -519,8 +519,7 @@ import StatCard from '@/components/StatCard.vue'
 import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { useWaveformData } from '@/composables/useWaveformData'
-import { ahiClass } from '@/utils/format'
-import { formatDateWithWeekday } from '@/utils/formatting'
+import { ahiClass, formatDateWithWeekday } from '@/utils/formatting'
 import type { SessionDetail, EventItem } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()

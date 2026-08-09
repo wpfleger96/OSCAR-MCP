@@ -246,6 +246,45 @@ class TestGetBreathTableRoundtrip:
         assert bin_wire["tidal_volume_median_ml"] == pytest.approx(440.0)
         assert bin_wire["analysis_status"] == "ok"
 
+    async def test_binned_page_size_echoes_requested_value(
+        self, mock_db_session: object, mcp_client_factory: object
+    ) -> None:
+        """Binned responses echo the requested page_size, not the bin count."""
+        mock_bin = _make_breath_bin()
+        mock_page = _make_mock_breath_page(
+            bins=[mock_bin],
+            is_binned=True,
+            total_breaths=5,
+            page_size=500,
+        )
+
+        async with mcp_client_factory(
+            mock_db_session,
+            extra_patches=[
+                patch(
+                    "snore.services.breath_service.BreathService.get_breath_table",
+                    new_callable=AsyncMock,
+                    return_value=mock_page,
+                ),
+            ],
+        ) as client:
+            result = await client.call_tool(
+                "get_breath_table",
+                {
+                    "date": "2024-01-01",
+                    "offset_start": 0.0,
+                    "offset_end": 300.0,
+                    "bin_minutes": 5.0,
+                    "page_size": 500,
+                },
+            )
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert payload["is_binned"] is True
+        assert len(payload["bins"]) == 1
+        assert payload["page_size"] == 500
+
     async def test_not_run_returns_success_with_zero_breaths(
         self, mock_db_session: object, mcp_client_factory: object
     ) -> None:
@@ -447,6 +486,41 @@ class TestGetBreathTableRoundtrip:
         # Must contain the generic sanitized message
         assert "database error" in message.lower()
 
+    async def test_no_sessions_in_range_produces_polished_error(
+        self, mock_db_session: object, mcp_client_factory: object
+    ) -> None:
+        """NoSessionsInRangeError from service → ToolError with polished date message.
+
+        The error must say 'No therapy data found for date <date>' and include
+        the get_data_overview hint. The raw internal message must not appear.
+        """
+        from snore.services.breath_service import (
+            NoSessionsInRangeError,  # noqa: PLC0415
+        )
+
+        exc = NoSessionsInRangeError(date(2024, 1, 1), date(2024, 1, 1))
+
+        async with mcp_client_factory(
+            mock_db_session,
+            extra_patches=[
+                patch(
+                    "snore.services.breath_service.BreathService.get_breath_table",
+                    new_callable=AsyncMock,
+                    side_effect=exc,
+                ),
+            ],
+        ) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.call_tool(
+                    "get_breath_table",
+                    {"date": "2024-01-01", "offset_start": 0.0, "offset_end": 300.0},
+                )
+
+        msg = str(exc_info.value)
+        assert "No therapy data found for date 2024-01-01" in msg
+        assert "get_data_overview" in msg
+        assert "No sessions found in range" not in msg
+
     async def test_oversize_response_advises_narrowing_query(
         self, mock_db_session: object, mcp_client_factory: object
     ) -> None:
@@ -462,7 +536,7 @@ class TestGetBreathTableRoundtrip:
                     new_callable=AsyncMock,
                     return_value=mock_page,
                 ),
-                patch("snore.mcp.server.RESPONSE_SIZE_LIMIT", new=1),
+                patch("snore.mcp.tools._scaffold.RESPONSE_SIZE_LIMIT", new=1),
             ],
         ) as client:
             with pytest.raises(ToolError, match="Narrow your query"):

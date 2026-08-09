@@ -1,36 +1,45 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
 import shutil
 import tempfile
-import threading
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
+from datetime import datetime
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from snore.api.deps import ActorDep
-from snore.api.guards import RequireWritable
+from snore.api.deps import ActorDep, get_db
+from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
-    JobPhase,
-    JobType,
+    JobState,
     cancel_job,
-    create_job,
+    enqueue_for_execution,
     get_job,
+    list_jobs,
     remove_job,
     reserve_slot,
 )
-from snore.services.import_service import ImportService, safe_relative_path
-from snore.services.schemas import ImportSource
+from snore.api.schemas import (
+    ImportResultSummary,
+    ImportSourceResultSummary,
+    LinkedAnalysisSummary,
+    PipelineJobsListResponse,
+    PipelineJobStatus,
+)
+from snore.auth.actor import ActorContext
+from snore.database import models
+from snore.services.import_service import safe_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +79,8 @@ class _ByteCeilingReceive:
 
 router = APIRouter()
 
-# Routes that accept server-local filesystem paths.  These are registered
-# ONLY in local auth mode — in multiuser the loopback-peer check is
-# worthless behind Cloudflare, so we structurally exclude them.
+# Kept as an empty router for app.py backward compatibility (conditionally included in non-multiuser mode).
 local_only_router = APIRouter()
-
-# Default file-count ceiling — read at import time, overridden via SNORE config.
-_DEFAULT_MAX_UPLOAD_FILES = 500
 
 # Chunk size for the off-event-loop file copy.
 _COPY_CHUNK = 65536  # 64 KiB
@@ -108,219 +112,55 @@ def _copy_chunked(src_file: IO[bytes], dest: Path, max_bytes: int) -> None:
         raise
 
 
-class DetectRequest(BaseModel):
-    path: str
-
-
-class ImportPathRequest(BaseModel):
-    sources: list[ImportSource]
-
-
 class JobResponse(BaseModel):
     job_id: str
 
 
 def _get_upload_limits() -> tuple[int, int, int]:
-    """Return (max_upload_bytes, max_upload_files, max_file_bytes) from config with safe fallbacks."""
+    """Return (max_upload_bytes, max_upload_files, max_file_bytes) from config.
+
+    Falls back to the config.py env-var defaults (SNORE_MAX_UPLOAD_BYTES=2 GiB,
+    SNORE_MAX_UPLOAD_FILES=10 000, SNORE_MAX_FILE_BYTES=256 MiB) when config is
+    not yet initialised — e.g. unit tests that exercise routes without a lifespan.
+    """
     try:
         from snore.api.config import get_config  # noqa: PLC0415
 
         cfg = get_config()
-        return cfg.max_upload_bytes, _DEFAULT_MAX_UPLOAD_FILES, cfg.max_file_bytes
+        return cfg.max_upload_bytes, cfg.max_upload_files, cfg.max_file_bytes
     except Exception:
-        return 512 * 1024 * 1024, _DEFAULT_MAX_UPLOAD_FILES, 256 * 1024 * 1024
+        return 2 * 1024 * 1024 * 1024, 10_000, 256 * 1024 * 1024
 
 
-def _require_localhost(request: Request) -> None:
-    # is_loopback covers 127.0.0.0/8, ::1, and IPv4-mapped ::ffff:127.0.0.1
-    # (seen when uvicorn binds dual-stack).
-    client_host = request.client.host if request.client else None
-    try:
-        is_local = (
-            client_host is not None and ipaddress.ip_address(client_host).is_loopback
-        )
-    except ValueError:
-        is_local = False
-    if not is_local:
-        raise HTTPException(
-            status_code=403, detail="Filesystem access restricted to localhost"
-        )
+async def _resolve_profile_id(
+    db: AsyncSession,
+    actor: ActorContext,
+    requested_id: int | None,
+) -> int:
+    """Return the resolved profile ID, validating ownership when *requested_id* is given.
 
-
-@local_only_router.post("/detect", response_model=list[ImportSource])
-def detect_sources(body: DetectRequest, request: Request) -> list[ImportSource]:
-    _require_localhost(request)
-    service = ImportService()
-    return service.detect_sources(Path(body.path))
-
-
-def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
-    """Worker function — runs in a background thread. Must be started exactly once.
-
-    Ordering contract:
-        1. Do the import work.
-        2. Call phase_complete(IMPORT) — non-terminal milestone for observers.
-        3. Run analysis phase (session IDs from import result).
-        4. Publish terminal state (always carries import_committed + import_result
-           when data was committed, even on analysis failure or cancellation).
-        5. Clean parser spool + job temp.
-        6. Release capacity (slot owns the disk it admitted).
+    Raises HTTP 403 when the requested profile does not belong to the actor or
+    is being deleted.  Falls back to the actor's active profile when *requested_id*
+    is None.
     """
-    import asyncio  # noqa: PLC0415
-
-    def _make_terminal(
-        event: str,
-        *,
-        message: str | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build a terminal payload, injecting import_committed + import_result
-        when the import phase already committed."""
-        data: dict[str, Any] = {}
-        if message is not None:
-            data["message"] = message
-        if extra:
-            data.update(extra)
-        with job._lock:
-            committed = job._import_committed
-            import_result = job._import_result
-        if committed:
-            data["import_committed"] = True
-            data["import_result"] = import_result
-        return {"event": event, "data": data}
-
-    try:
-        service = ImportService()
-        # Consume the snapshotted target_profile_id so DB writes land in the
-        # correct profile even if the default profile changes between job creation
-        # and worker execution.
-        target_profile_id = job.target_profile_id
-        if target_profile_id is None:
-            raise ValueError("Import job has no target profile — cannot proceed")
-        if job.job_type == JobType.UPLOAD and job.temp_dir is not None:
-            job.report_progress("Detecting data sources...")
-            if job.cancel_requested:
-                job._finish_cancelled()
-                return
-            sources = service.detect_sources(job.temp_dir)
-            job.report_progress(f"Detected {len(sources)} source(s)")
-            if job.cancel_requested:
-                job._finish_cancelled()
-                return
-            result = asyncio.run(
-                service.import_sources(
-                    sources,
-                    backup=True,
-                    backup_root=profile_raw_root,
-                    profile_id=target_profile_id,
-                    progress_callback=lambda msg: job.report_progress(msg),
-                    cancel_predicate=lambda: job.cancel_requested,
+    if requested_id is not None:
+        owned = (
+            (
+                await db.execute(
+                    select(models.Profile).where(
+                        models.Profile.id == requested_id,
+                        models.Profile.user_id == actor.user_id,
+                        models.Profile.deleting_at.is_(None),
+                    )
                 )
             )
-        elif job.job_type == JobType.PATH and job.sources is not None:
-            result = asyncio.run(
-                service.import_sources(
-                    job.sources,
-                    backup=True,
-                    backup_root=profile_raw_root,
-                    profile_id=target_profile_id,
-                    progress_callback=lambda msg: job.report_progress(msg),
-                    cancel_predicate=lambda: job.cancel_requested,
-                )
-            )
-        else:
-            raise ValueError("Invalid job configuration")
-
-        # --- Phase 1 complete: import committed ---
-        import_result_dict = result.model_dump()
-        job.phase_complete(JobPhase.IMPORT, import_result_dict)
-
-        if job.cancel_requested:
-            job._finish(
-                succeeded=False,
-                terminal_msg=_make_terminal("error", message="Cancelled"),
-            )
-            return
-
-        # --- Phase 2: analysis ---
-        imported_ids = result.imported_session_ids
-        if imported_ids:
-            job.report_progress(f"Analyzing {len(imported_ids)} imported session(s)...")
-            try:
-                from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
-                from snore.database.session import session_scope  # noqa: PLC0415
-                from snore.services.analysis_facade import (
-                    AnalysisFacade,  # noqa: PLC0415
-                )
-
-                async def _run_analysis() -> None:
-                    async with session_scope() as db:
-                        facade = AnalysisFacade(db, profile_id=target_profile_id)
-                        await facade.run_batch_analysis(
-                            session_ids=imported_ids,
-                            primary_mode=DEFAULT_MODE,
-                            progress_callback=lambda done, total: job.report_progress(
-                                f"Analyzed {done}/{total or '?'} sessions"
-                            ),
-                            # SQLite tolerates only one concurrent writer; keep sequential.
-                            max_workers=1,
-                        )
-
-                asyncio.run(_run_analysis())
-            except Exception as analysis_exc:
-                logger.warning(
-                    "Import job %s: analysis phase failed: %s",
-                    job.job_id,
-                    analysis_exc,
-                )
-                # Analysis failure does NOT roll back committed import data.
-                # Terminal payload includes import_committed so the client knows
-                # the data landed even though analysis failed.
-                job._finish(
-                    succeeded=False,
-                    terminal_msg=_make_terminal(
-                        "error",
-                        message=f"Analysis failed: {analysis_exc}",
-                    ),
-                )
-                return
-
-        terminal_msg = _make_terminal("complete", extra={"result": import_result_dict})
-        job._finish(succeeded=True, terminal_msg=terminal_msg)
-    except Exception as e:
-        logger.exception("Import job %s failed", job.job_id)
-        job._finish(
-            succeeded=False,
-            terminal_msg=_make_terminal("error", message=str(e)),
+            .scalars()
+            .first()
         )
-    finally:
-        # Ordering: publish terminal (done above), then clean, then release capacity.
-        job.cleanup_files()
-        job.release_capacity()
-
-
-def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
-    """Attempt to start the worker thread for *job* (start-once guarantee)."""
-    from snore.api.import_jobs import remove_job  # noqa: PLC0415
-
-    if not job.try_start():
-        return
-    try:
-        t = threading.Thread(
-            target=_run_import,
-            args=(job, profile_raw_root),
-            daemon=True,
-            name=f"import-{job.job_id}",
-        )
-        with job._lock:
-            job._worker_thread = t
-        t.start()
-    except Exception:
-        job._finish_cancelled()
-        remove_job(job.job_id)
-        job.cleanup_files()
-        job.release_capacity()
-        raise
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Profile not owned by user")
+        return requested_id
+    return actor.profile_id
 
 
 @router.post(
@@ -339,7 +179,11 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                             "files": {
                                 "type": "array",
                                 "items": {"type": "string", "format": "binary"},
-                            }
+                            },
+                            "profile_id": {
+                                "type": "integer",
+                                "description": "Target profile ID (defaults to actor's active profile)",
+                            },
                         },
                     }
                 }
@@ -347,16 +191,12 @@ def _start_worker(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         }
     },
 )
-async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
+async def import_files(
+    request: Request,
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JobResponse:
     max_upload_bytes, max_upload_files, max_file_bytes = _get_upload_limits()
-
-    # Step 1: Reserve admission slot BEFORE reading any body bytes.
-    job = reserve_slot(actor.user_id)
-    if job is None:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many active imports. Please wait for existing imports to complete.",
-        )
 
     # Wrap the ASGI receive callable with the ingress byte ceiling.
     # This raises 413 as soon as the cumulative chunk stream exceeds the
@@ -371,10 +211,63 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
     # _job_cleanup: True until the job is handed to the worker.  The finally
     # block uses this flag to decide whether to clean up the job.
     _job_cleanup = True
+    # _is_continuation: True when appending to an existing batch job.
+    # Cleanup must NOT release capacity or remove the job on error — the
+    # original reservation still owns that.
+    _is_continuation = False
     tmp: str | None = None
+    _requested_profile_id: int | None = None
+    job: ImportJob | None = None
 
     try:
         async with request.form(max_files=max_upload_files) as form:
+            # ── batch fields ──────────────────────────────────────────
+            _batch_id_raw = form.get("batch_id")
+            batch_id: str | None = (
+                str(_batch_id_raw) if isinstance(_batch_id_raw, str) else None
+            )
+            _batch_final_raw = form.get("batch_final")
+            batch_final: bool = (
+                str(_batch_final_raw).lower() != "false"
+                if isinstance(_batch_final_raw, str)
+                else True
+            )
+
+            _profile_id_raw = form.get("profile_id")
+            if isinstance(_profile_id_raw, str):
+                try:
+                    _requested_profile_id = int(_profile_id_raw)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=422, detail="profile_id must be an integer"
+                    ) from None
+
+            # ── job acquisition ───────────────────────────────────────
+            if batch_id is not None:
+                # Continuation of an existing batch upload.
+                job = get_job(batch_id)
+                if job is None:
+                    raise HTTPException(status_code=404, detail="Batch not found")
+                if job.owner_user_id != actor.user_id:
+                    raise HTTPException(status_code=404, detail="Batch not found")
+                if job.state != JobState.PENDING_UPLOAD:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Batch already committed",
+                    )
+                _is_continuation = True
+                # Update activity timestamp so the stale-upload reaper doesn't
+                # reclaim this job while a slow continuation chunk is in flight.
+                job.touch()
+            else:
+                # New upload — reserve an admission slot.
+                job = reserve_slot(actor.user_id)
+                if job is None:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Too many active imports. Please wait for existing imports to complete.",
+                    )
+
             uploads = [
                 f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)
             ]
@@ -398,8 +291,16 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                     detail=f"Total upload size exceeds {max_upload_bytes // (1024**2)} MiB limit",
                 )
 
-            tmp = tempfile.mkdtemp(prefix="snore-upload-")
-            tmp_path = Path(tmp)
+            # ── staging directory ─────────────────────────────────────
+            if _is_continuation:
+                assert job.temp_dir is not None
+                tmp_path = job.temp_dir
+            else:
+                tmp = tempfile.mkdtemp(prefix="snore-upload-")
+                tmp_path = Path(tmp)
+                job.temp_dir = tmp_path
+                tmp = None  # job owns the directory from creation
+
             tmp_root = tmp_path.resolve()
             for upload in uploads:
                 filename = upload.filename or "unknown"
@@ -438,56 +339,238 @@ async def import_files(request: Request, actor: RequireWritable) -> JobResponse:
                             f"{max_file_bytes // (1024**2)} MiB per-file limit"
                         ),
                     ) from None
+                await upload.close()
+                # Refresh activity so the stale-upload reaper sees a live upload.
+                job.touch()
 
-        # Transfer ownership to the job; the worker will clean up on completion.
-        job.temp_dir = tmp_path
-        tmp = None  # Job owns the directory now.
+        if not batch_final:
+            # More chunks coming — keep the job in PENDING_UPLOAD.
+            _job_cleanup = False
+            return JobResponse(job_id=job.job_id)
+
+        # ── final chunk: resolve profile, enqueue ─────────────────
+        resolved_profile_id = await _resolve_profile_id(
+            db, actor, _requested_profile_id
+        )
+
+        job.set_file_count(sum(1 for _ in tmp_path.rglob("*") if _.is_file()))
         job.convert_to_pending()
-        job.target_profile_id = actor.profile_id
+        job.target_profile_id = resolved_profile_id
         _job_cleanup = False  # Worker owns the job from here.
 
     finally:
         # Runs on every exit: normal (no-op), HTTPException, Exception,
-        # CancelledError.  _job_cleanup is False only when the worker started.
+        # CancelledError.  _job_cleanup is False only when the worker started
+        # or when a non-final batch chunk succeeded.
         if _job_cleanup:
             if tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)
-            job.try_cancel()
-            remove_job(job.job_id)
-            job.cleanup_files()
-            job.release_capacity()
+            if not _is_continuation and job is not None:
+                job.try_cancel()
+                remove_job(job.job_id)
+                job.cleanup_files()
+                job.release_capacity()
 
-    # Derive profile-scoped backup root from actor.
+    # Derive profile-scoped backup root from the resolved target profile.
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
-    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(job.target_profile_id)
 
-    # Start worker immediately — /progress is observer-only.
-    _start_worker(job, profile_raw_root)
-    return JobResponse(job_id=job.job_id)
-
-
-@local_only_router.post("/path", response_model=JobResponse, status_code=202)
-async def import_from_path(
-    body: ImportPathRequest, request: Request, actor: RequireWritable
-) -> JobResponse:
-    _require_localhost(request)
-
+    # Persist PENDING state BEFORE enqueuing so startup recovery always sees the
+    # row, even if the server crashes between the write and the worker picking it
+    # up.  Writing first also prevents the worker's RUNNING upsert from racing
+    # ahead of this PENDING write and leaving the DB in a stale state.
     try:
-        job = create_job(
-            JobType.PATH, owner_user_id=actor.user_id, sources=body.sources
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=429, detail="Too many active imports.") from exc
+        from snore.api.import_worker import _upsert_job_record  # noqa: PLC0415
 
-    job.target_profile_id = actor.profile_id
-
-    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
-
-    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(actor.profile_id)
-
-    _start_worker(job, profile_raw_root)
+        await _upsert_job_record(job)
+    except Exception:
+        logger.exception("Failed to persist PENDING state for job %s", job.job_id)
+    # Enqueue for serial execution — /progress is observer-only.
+    enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
+
+
+def _derive_stage(
+    import_state: JobState,
+    analysis_job_id: str | None,
+    analysis_queued: bool | None,
+    linked: LinkedAnalysisSummary | None,
+) -> str:
+    """Map import + analysis state to a human-readable pipeline stage string.
+
+    ``linked`` is a LinkedAnalysisSummary instance or None (reaped / not yet set).
+    """
+    if import_state == JobState.PENDING_UPLOAD:
+        return "uploading"
+    if import_state == JobState.PENDING:
+        return "queued"
+    if import_state == JobState.RUNNING:
+        return "importing"
+    if import_state == JobState.FAILED:
+        return "failed"
+    if import_state == JobState.CANCELLED:
+        return "cancelled"
+    # SUCCEEDED — determine analysis stage.
+    if analysis_job_id is None and analysis_queued is False:
+        return "analysis_skipped"
+    if analysis_job_id is None:
+        return "done"
+    if linked is None:
+        # Analysis job was reaped after the import job stored the link.
+        return "done"
+    _state_map = {
+        "queued": "analysis_queued",
+        "running": "analyzing",
+        "succeeded": "done",
+        "failed": "analysis_failed",
+        "cancelled": "analysis_cancelled",
+    }
+    return _state_map.get(linked.state, "unknown")
+
+
+def _to_import_result_summary(result_dict: dict[str, Any]) -> ImportResultSummary:
+    """Build an ImportResultSummary from a raw import-result dict, stripping session IDs."""
+    sources = [
+        ImportSourceResultSummary(
+            source=s.get("source", {}),
+            imported=s.get("imported", 0),
+            skipped=s.get("skipped", 0),
+            failed=s.get("failed", 0),
+            warnings=s.get("warnings", []),
+        )
+        for s in result_dict.get("sources", [])
+    ]
+    return ImportResultSummary(
+        total_imported=result_dict.get("total_imported", 0),
+        total_skipped=result_dict.get("total_skipped", 0),
+        total_failed=result_dict.get("total_failed", 0),
+        warnings=result_dict.get("warnings", []),
+        sources=sources,
+    )
+
+
+@router.get("/jobs", response_model=PipelineJobsListResponse)
+async def list_pipeline_jobs(
+    actor: RequireAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PipelineJobsListResponse:
+    """List all pipeline (import) jobs visible to the authenticated actor.
+
+    Merges in-memory active/recent jobs with persisted historical records from
+    the database.  In-memory jobs take precedence when both exist for the same
+    job_id (deduplication).
+
+    Ownership: jobs with owner_user_id=None are visible to any authenticated
+    user (local-mode parity); jobs with a set owner are visible only to that owner.
+    """
+    from snore.api import analysis_jobs as aj_module  # noqa: PLC0415
+
+    result: list[PipelineJobStatus] = []
+    in_memory_ids: set[str] = set()
+
+    for job in list_jobs(owner_user_id=actor.user_id):
+        in_memory_ids.add(job.job_id)
+        analysis_id = job.analysis_job_id
+        linked: LinkedAnalysisSummary | None = None
+        if analysis_id is not None:
+            aj = aj_module.get_job(analysis_id)
+            if aj is not None:
+                # Defensive: analysis jobs always inherit import job owner.
+                if aj.owner_user_id is not None and aj.owner_user_id != actor.user_id:
+                    aj = None
+            if aj is not None:
+                linked = LinkedAnalysisSummary(
+                    job_id=aj.job_id,
+                    state=aj.state.value,
+                    progress_completed=aj.progress_completed,
+                    progress_total=aj.progress_total,
+                    error_message=aj.error_message,
+                )
+
+        import_state = job.state
+        stage = _derive_stage(import_state, analysis_id, job.analysis_queued, linked)
+
+        import_result_summary: ImportResultSummary | None = None
+        snapshot = job.import_result_snapshot
+        if snapshot is not None:
+            import_result_summary = _to_import_result_summary(snapshot)
+
+        result.append(
+            PipelineJobStatus(
+                job_id=job.job_id,
+                job_type=job.job_type.value,
+                state=import_state.value,
+                stage=stage,
+                file_count=job.file_count,
+                created_at=job.created_at_wall.isoformat(),
+                finished_at=job.finished_at_wall.isoformat()
+                if job.finished_at_wall
+                else None,
+                progress_message=job.latest_progress_message,
+                sessions_imported=job.sessions_imported,
+                import_result=import_result_summary,
+                error_message=job.error_message,
+                analysis_job_id=analysis_id,
+                analysis_queued=job.analysis_queued,
+                linked_analysis=linked,
+            )
+        )
+
+    # Historical records from the database — terminal states only.  Non-terminal
+    # rows (pending_upload, pending, running) represent in-flight jobs whose
+    # live state lives in memory; if they appear here without an in-memory
+    # counterpart they are orphans that startup recovery should have cleared.
+    # Filtering to terminal states keeps phantom "forever running" rows out of
+    # the UI when recovery is skipped or encounters a locked DB at boot.
+    stmt = (
+        select(models.ImportJobRecord)
+        .where(
+            or_(
+                models.ImportJobRecord.owner_user_id == actor.user_id,
+                models.ImportJobRecord.owner_user_id.is_(None),
+            ),
+            models.ImportJobRecord.state.in_(["succeeded", "failed", "cancelled"]),
+        )
+        .order_by(models.ImportJobRecord.created_at.desc())
+        .limit(50)
+    )
+    db_records = (await db.execute(stmt)).scalars().all()
+
+    for rec in db_records:
+        if rec.job_id in in_memory_ids:
+            continue
+
+        rec_state = JobState(rec.state)
+        stage = _derive_stage(rec_state, None, rec.analysis_queued, None)
+
+        import_result_summary = None
+        if rec.import_result_json:
+            import_result_summary = _to_import_result_summary(rec.import_result_json)
+
+        result.append(
+            PipelineJobStatus(
+                job_id=rec.job_id,
+                job_type=rec.job_type,
+                state=rec.state,
+                stage=stage,
+                file_count=rec.file_count,
+                created_at=rec.created_at.isoformat(),
+                finished_at=rec.finished_at.isoformat()
+                if rec.finished_at is not None
+                else None,
+                progress_message=None,
+                sessions_imported=rec.sessions_imported,
+                import_result=import_result_summary,
+                error_message=rec.error_message,
+                analysis_job_id=None,
+                analysis_queued=rec.analysis_queued,
+                linked_analysis=None,
+            )
+        )
+
+    result.sort(key=lambda j: datetime.fromisoformat(j.created_at), reverse=True)
+    return PipelineJobsListResponse(jobs=result)
 
 
 @router.delete("/{job_id}", status_code=204)
@@ -505,7 +588,11 @@ def cancel_import(job_id: str, actor: RequireWritable) -> None:
     ):
         # 404 instead of 403 — no information about foreign job IDs.
         raise HTTPException(status_code=404, detail="Import job not found")
-    cancel_job(job_id)
+    if not cancel_job(job_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Import job is already finished and cannot be cancelled",
+        )
 
 
 _SSE_TIMEOUT = object()

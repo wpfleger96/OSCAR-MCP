@@ -67,17 +67,20 @@ def parse_date_range(
     return start_date, end_date
 
 
+_PAGE_SIZE_CAP = 90
+
+
 def validate_page_args(page: int, page_size: int) -> int:
-    """Validate pagination args; return the capped page_size.
+    """Validate pagination args; return the validated page_size.
 
     Raises:
-        ValidationError: If ``page < 1`` or ``page_size < 1``.
+        ValidationError: If ``page < 1`` or ``page_size`` is outside [1, _PAGE_SIZE_CAP].
     """
     if page < 1:
         raise ValidationError("page must be >= 1")
-    if page_size < 1:
-        raise ValidationError("page_size must be >= 1")
-    return min(page_size, 90)
+    if page_size < 1 or page_size > _PAGE_SIZE_CAP:
+        raise ValidationError(f"page_size must be between 1 and {_PAGE_SIZE_CAP}")
+    return page_size
 
 
 def validate_compliance_threshold(hours: float) -> None:

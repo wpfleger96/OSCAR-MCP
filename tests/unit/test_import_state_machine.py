@@ -21,6 +21,7 @@ import shutil
 import threading
 import time
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -35,8 +36,10 @@ from snore.api.import_jobs import (
     ObserverChannel,
     _reap_terminal,
     create_job,
+    enqueue_for_execution,
     get_job,
     shutdown,
+    start_import_worker,
 )
 
 # ---------------------------------------------------------------------------
@@ -58,27 +61,6 @@ def _complete_job(job: ImportJob) -> None:
         succeeded=True,
         terminal_msg={"event": "complete", "data": {"result": {}}},
     )
-
-
-# ---------------------------------------------------------------------------
-# Fixture: clean job store between tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def clean_job_store():
-    """Reset the job store before and after each test.
-
-    Clears both the jobs dict AND the admission counters so successive
-    create_job() calls within the same xdist worker don't overflow caps.
-    """
-    job_store._jobs.clear()
-    job_store._per_user_count.clear()
-    job_store._global_count = 0
-    yield
-    job_store._jobs.clear()
-    job_store._per_user_count.clear()
-    job_store._global_count = 0
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +165,15 @@ class TestImportJobStateMachine:
         job.try_start()
         result = job.try_start()
         assert result is False
+
+    def test_touch_updates_last_activity(self, tmp_path):
+        """touch() advances _last_activity_wall to the current time."""
+        job = _make_upload_job(tmp_path)
+        # Backdate the activity timestamp to an hour ago.
+        old_activity = datetime.now(UTC) - timedelta(hours=1)
+        job._last_activity_wall = old_activity
+        job.touch()
+        assert job._last_activity_wall > old_activity
 
     def test_finish_running_transitions_to_succeeded(self, tmp_path):
         """_finish(succeeded=True) moves a RUNNING job to SUCCEEDED."""
@@ -405,70 +396,32 @@ class TestRegistrationFailure:
                 "No orphan job may reference the failed temp dir"
             )
 
-    def test_thread_start_failure_via_start_worker_cancels_and_removes_job(
-        self, tmp_path, monkeypatch
-    ):
-        """_start_worker: Thread.start() failure cancels job, removes it, cleans dir.
+    def test_enqueue_for_execution_is_safe_without_worker(self, tmp_path):
+        """enqueue_for_execution() succeeds even when no worker thread is running.
 
-        Calls the real _start_worker function so the test covers the actual
-        production code path, not a private-state simulation.
+        Jobs wait in the FIFO until a worker is started — they are never lost.
+        This replaces the former thread-spawn-failure tests: with a persistent
+        FIFO, enqueue (deque.append) cannot fail, so there is no spawn-failure
+        path to exercise.
         """
-        import threading  # noqa: PLC0415
-
-        from snore.api.routers.import_data import _start_worker  # noqa: PLC0415
-
-        d = tmp_path / "worker_fail"
+        d = tmp_path / "no_worker"
         d.mkdir()
         job = create_job(JobType.UPLOAD, temp_dir=d)
 
-        original_start = threading.Thread.start  # noqa: F841
+        # Enqueue without starting a worker — must not raise.
+        enqueue_for_execution(job, None)
 
-        def _raise_on_start(self):
-            raise OSError("Simulated Thread.start() failure")
+        # Job stays PENDING (no worker to transition it).
+        assert job.state == JobState.PENDING
 
-        monkeypatch.setattr(threading.Thread, "start", _raise_on_start)
+        # The queue has exactly one entry.
+        with job_store._import_condition:
+            assert len(job_store._import_queue) == 1
 
-        with pytest.raises(OSError):
-            _start_worker(job)
-
-        # Job must be terminal (CANCELLED) and removed from the store.
-        assert job.is_terminal, "Job must be terminal after start failure"
-        assert job.state == JobState.CANCELLED, "Job must be CANCELLED, not RUNNING"
-        assert get_job(job.job_id) is None, "Job must be removed from the store"
-        assert not d.exists(), "Upload directory must be cleaned up after start failure"
-
-    def test_thread_construction_failure_via_start_worker_cancels_and_removes_job(
-        self, tmp_path, monkeypatch
-    ):
-        """_start_worker: Thread() construction failure cancels job, removes it, cleans dir.
-
-        Thread construction happens inside the try block in _start_worker, so a
-        constructor failure must produce the same cleanup as a start failure.
-        """
-        import threading  # noqa: PLC0415
-
-        from snore.api.routers.import_data import _start_worker  # noqa: PLC0415
-
-        d = tmp_path / "ctor_fail"
-        d.mkdir()
-        job = create_job(JobType.UPLOAD, temp_dir=d)
-
-        original_init = threading.Thread.__init__  # noqa: F841
-
-        def _raise_on_init(self, *args, **kwargs):
-            raise OSError("Simulated Thread.__init__() failure")
-
-        monkeypatch.setattr(threading.Thread, "__init__", _raise_on_init)
-
-        with pytest.raises(OSError):
-            _start_worker(job)
-
-        assert job.is_terminal, "Job must be terminal after construction failure"
-        assert job.state == JobState.CANCELLED, "Job must be CANCELLED"
-        assert get_job(job.job_id) is None, "Job must be removed from the store"
-        assert not d.exists(), (
-            "Upload directory must be cleaned up after constructor failure"
-        )
+        # Manual cleanup (no worker will do it).
+        job.try_cancel()
+        job.cleanup_files()
+        job.release_capacity()
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +435,7 @@ class TestShutdown:
     def test_shutdown_cancels_pending_jobs(self, tmp_path):
         """shutdown() cancels PENDING jobs and clears them cleanly."""
         job1 = _make_upload_job(tmp_path)
-        job2 = create_job(JobType.PATH, sources=[])
+        job2 = create_job(JobType.PATH)
 
         shutdown(timeout=1.0)
 
@@ -490,10 +443,11 @@ class TestShutdown:
         assert job2.is_terminal
 
     def test_shutdown_with_live_worker_cancels_and_warns(self, tmp_path, caplog):
-        """shutdown() returns the still-alive job ID when a worker outlives the timeout.
+        """shutdown() returns the still-alive job ID when the import worker outlives the timeout.
 
-        This test starts a real background thread that blocks on a threading.Event,
-        calls shutdown() with a very short timeout, then verifies:
+        Starts the single persistent import worker with a blocking callback,
+        enqueues a job, waits for it to reach RUNNING, then calls shutdown()
+        with a very short timeout.  Verifies:
         1. shutdown() returns the job's ID in the still-alive list.
         2. The cancel flag is set on the running job.
         3. After unblocking, the worker reaches a terminal state.
@@ -503,45 +457,42 @@ class TestShutdown:
         d = tmp_path / "live_worker"
         d.mkdir()
         job = create_job(JobType.UPLOAD, temp_dir=d)
+        job.target_profile_id = 1
 
-        # Gate that the worker thread blocks on so we can control its lifetime.
+        # Gate that blocks the run_callback so we can control the worker's lifetime.
         gate = threading.Event()
 
-        def _blocked_worker():
-            job.try_start()
+        def blocking_callback(j: ImportJob, root: object) -> None:
             gate.wait(timeout=10.0)
-            job._finish(succeeded=True, terminal_msg={"event": "complete", "data": {}})
+            j._finish(succeeded=True, terminal_msg={"event": "complete", "data": {}})
+            j.cleanup_files()
+            j.release_capacity()
 
-        t = threading.Thread(target=_blocked_worker, daemon=True)
-        with job._lock:
-            job._worker_thread = t
-        t.start()
+        # Start the import worker and enqueue the job.
+        start_import_worker(blocking_callback)
+        enqueue_for_execution(job, None)
 
-        # Wait until the worker has called try_start() and is truly RUNNING.
-        for _ in range(50):
+        # Wait until the worker has picked up the job and it is truly RUNNING.
+        for _ in range(100):
             if job.state == JobState.RUNNING:
                 break
             time.sleep(0.01)
         assert job.state == JobState.RUNNING, "Worker must be RUNNING before shutdown"
 
-        # Shutdown with a very short per-worker timeout.
+        # Shutdown with a very short timeout.
         with caplog.at_level(logging.WARNING, logger="snore.api.import_jobs"):
             still_alive = shutdown(timeout=0.05)
 
-        # shutdown() must return the list of still-alive job IDs.
         assert isinstance(still_alive, list), (
             "shutdown() must return a list of still-alive job IDs"
         )
         assert job.job_id in still_alive, (
             f"Job {job.job_id} still alive; expected it in still_alive={still_alive}"
         )
-
-        # The cancel flag must be set (shutdown called try_cancel).
         assert job._cancel_flag is True, (
             "Shutdown must set the cancel flag on running jobs"
         )
 
-        # A warning must have been logged because the thread is still alive.
         warning_msgs = [
             r.message for r in caplog.records if r.levelno == logging.WARNING
         ]
@@ -550,12 +501,8 @@ class TestShutdown:
             f"got: {warning_msgs}"
         )
 
-        # Unblock the worker thread so it can exit cleanly.
+        # Unblock the worker so it exits cleanly (clean_job_store will join it).
         gate.set()
-        t.join(timeout=2.0)
-
-        # After the worker exits, it must be terminal (cancelled because flag was set).
-        assert job.is_terminal, "Worker must be terminal after it exits"
 
     def test_lifespan_raises_when_workers_alive_after_shutdown(self, tmp_path):
         """Lifespan raises RuntimeError when shutdown() returns live workers.
@@ -586,6 +533,7 @@ class TestShutdown:
                     "snore.api.app._start_import_reaper",
                     return_value=(_dummy_thread, _dummy_stop),
                 ),
+                patch("snore.api.app._start_import_worker"),
                 patch("snore.api.app._shutdown_import_jobs", _fake_shutdown),
             ):
                 async with app.router.lifespan_context(app):
@@ -655,7 +603,7 @@ class TestWorkerTerminalState:
 
     The cancel/finish race tests below exercise the exact lock-held transitions
     that _run_import makes.  Tests that need to verify the state machine in
-    isolation call _finish/_finish_cancelled directly (the same methods the real
+    isolation call _finish directly (the same method the real
     worker calls); route-level worker behavior is covered in TestRouteWorkerBehavior.
     """
 
@@ -664,8 +612,12 @@ class TestWorkerTerminalState:
         job = _make_upload_job(tmp_path)
         job.try_start()
 
-        # Simulate the worker noticing cancellation and calling _finish_cancelled().
-        job._finish_cancelled()
+        # Simulate the worker noticing cancellation: flag is set, then _finish is called.
+        job._cancel_flag = True
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
 
         assert job.state == JobState.CANCELLED
         assert job._terminal_msg is not None
@@ -673,13 +625,16 @@ class TestWorkerTerminalState:
         assert "Cancelled" in job._terminal_msg["data"]["message"]
 
     def test_cancel_wins_race_before_finish(self, tmp_path):
-        """If the worker calls _finish_cancelled before _finish, state is CANCELLED."""
+        """If the worker cancels before _finish, state is CANCELLED."""
         job = _make_upload_job(tmp_path)
         job.try_start()
 
-        # Simulate: worker sees the cancel flag and calls _finish_cancelled (wins the race).
+        # Simulate: worker sees the cancel flag and calls _finish (wins the race).
         job._cancel_flag = True
-        job._finish_cancelled()
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
         assert job.state == JobState.CANCELLED
 
         # Worker's normal completion path fires afterward — must be a no-op.
@@ -709,13 +664,16 @@ class TestWorkerTerminalState:
         assert job.state == JobState.SUCCEEDED  # Unchanged.
 
     def test_early_upload_cancel_terminates_as_cancelled(self, tmp_path):
-        """An early-upload-check cancel calls _finish_cancelled, not just return."""
+        """An early-upload-check cancel in _run_import produces CANCELLED."""
         job = _make_upload_job(tmp_path)
         job.try_start()
         # Simulate the early check in _run_import:
-        # if job.cancel_requested: job._finish_cancelled(); return
+        # if job.cancel_requested: job._finish(succeeded=False, ...); return
         job._cancel_flag = True
-        job._finish_cancelled()
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
 
         assert job.state == JobState.CANCELLED
         assert job.is_terminal
@@ -726,7 +684,11 @@ class TestWorkerTerminalState:
         job.try_start()
         ch = job.attach_observer()
 
-        job._finish_cancelled()
+        job._cancel_flag = True
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
 
         msg = ch.get(timeout=0.5)
         assert msg is not None
@@ -739,7 +701,11 @@ class TestWorkerTerminalState:
         job.try_start()
         assert not job.is_terminal
 
-        job._finish_cancelled()
+        job._cancel_flag = True
+        job._finish(
+            succeeded=False,
+            terminal_msg={"event": "error", "data": {"message": "Cancelled"}},
+        )
         assert job.is_terminal
         assert job.state == JobState.CANCELLED
 
@@ -789,26 +755,35 @@ class TestSSEQuietConnection:
 # ---------------------------------------------------------------------------
 
 
+def _wait_terminal(job: ImportJob, timeout: float = 5.0) -> None:
+    """Poll until job reaches a terminal state or timeout expires."""
+    deadline = time.monotonic() + timeout
+    while not job.is_terminal and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def _wait_state(job: ImportJob, state: JobState, timeout: float = 5.0) -> None:
+    """Poll until job reaches *state* or timeout expires."""
+    deadline = time.monotonic() + timeout
+    while job.state != state and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 class TestRouteWorkerBehavior:
     """Route/worker/public-boundary tests for the import lifecycle.
 
-    These tests exercise _run_import through the real router functions
-    (create_job + _start_worker) rather than calling private state-machine
-    methods directly.  They pin the behavior contracts that matter for
-    production correctness: cancellation honesty, SSE stream lifetime,
+    These tests exercise _run_import through the real queue + persistent worker
+    (create_job + enqueue_for_execution + start_import_worker) rather than calling
+    private state-machine methods directly.  They pin the behavior contracts that
+    matter for production correctness: cancellation honesty, SSE stream lifetime,
     and in-flight cancel while worker runs.
     """
 
     def test_run_import_completes_as_succeeded(self, tmp_path):
-        """A job that runs _run_import to completion ends SUCCEEDED.
-
-        Uses a real background thread started by _start_worker.
-        """
+        """A job that runs _run_import to completion ends SUCCEEDED."""
         from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
-        from snore.api.routers.import_data import (  # noqa: PLC0415
-            _start_worker,
-        )
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
         from snore.services.schemas import ImportResult  # noqa: PLC0415
 
         d = tmp_path / "complete_job"
@@ -820,39 +795,34 @@ class TestRouteWorkerBehavior:
         )
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
-        job.target_profile_id = 1  # satisfy the profile_id requirement
+        job.target_profile_id = 1
 
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 return_value=[],
             ),
             patch(
-                "snore.api.routers.import_data.ImportService.import_sources",
+                "snore.api.import_worker.ImportService.import_sources",
                 new_callable=AsyncMock,
                 return_value=fake_result,
             ),
         ):
-            _start_worker(job)
-            # Wait for the worker thread to finish (max 5 s).
-            job.wait_for_worker(timeout=5.0)
+            start_import_worker(_run_import)
+            enqueue_for_execution(job, None)
+            _wait_terminal(job, timeout=5.0)
 
         assert job.state == JobState.SUCCEEDED, f"Expected SUCCEEDED, got {job.state}"
 
     def test_run_import_cancel_before_detect_produces_cancelled(self, tmp_path):
-        """Cancelling a job before import_sources returns CANCELLED (not SUCCEEDED/FAILED).
-
-        Injects a slow detect_sources so cancel() can be called while the
-        worker is in-flight.  The worker must exit as CANCELLED.
-        """
+        """Cancelling a job before import_sources returns CANCELLED (not SUCCEEDED/FAILED)."""
         from unittest.mock import patch  # noqa: PLC0415
 
-        from snore.api.routers.import_data import _start_worker  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         d = tmp_path / "cancel_job"
         d.mkdir()
 
-        # Gate that blocks detect_sources until we're ready to cancel.
         detect_gate = threading.Event()
 
         def _slow_detect(path):
@@ -860,45 +830,38 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
-        job.target_profile_id = 1  # satisfy the profile_id requirement
+        job.target_profile_id = 1
 
         with patch(
-            "snore.api.routers.import_data.ImportService.detect_sources",
+            "snore.api.import_worker.ImportService.detect_sources",
             side_effect=_slow_detect,
         ):
-            _start_worker(job)
+            start_import_worker(_run_import)
+            enqueue_for_execution(job, None)
 
-            # Wait until the worker is RUNNING.
             for _ in range(100):
                 if job.state == JobState.RUNNING:
                     break
                 time.sleep(0.01)
             assert job.state == JobState.RUNNING, "Worker must be RUNNING before cancel"
 
-            # Cancel, then unblock detect_sources.
             job.try_cancel()
             detect_gate.set()
-            job.wait_for_worker(timeout=5.0)
+            _wait_terminal(job, timeout=5.0)
 
         assert job.state == JobState.CANCELLED, (  # type: ignore[comparison-overlap]
             f"Expected CANCELLED after in-flight cancel, got {job.state}"
         )
 
     def test_sse_route_stream_emits_keepalive_while_running(self, tmp_path):
-        """The /progress SSE route emits a keepalive while the job is running.
-
-        Starts a real job, opens the SSE stream in a thread, and confirms
-        the stream emits a keepalive comment without the job having completed.
-        This exercises the real route (not ObserverChannel._closed inspection).
-        """
+        """The /progress SSE channel is open while the job is running."""
         from unittest.mock import patch  # noqa: PLC0415
 
-        from snore.api.routers.import_data import _start_worker  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         d = tmp_path / "sse_job"
         d.mkdir()
 
-        # Block the worker so the SSE stream stays open long enough to emit a keepalive.
         worker_gate = threading.Event()
 
         def _blocking_detect(path):
@@ -906,32 +869,28 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
-        job.target_profile_id = 1  # satisfy the profile_id requirement
+        job.target_profile_id = 1
         ch = job.attach_observer()
 
-        # Start the worker but don't let it progress past detect_sources.
         with patch(
-            "snore.api.routers.import_data.ImportService.detect_sources",
+            "snore.api.import_worker.ImportService.detect_sources",
             side_effect=_blocking_detect,
         ):
-            _start_worker(job)
+            start_import_worker(_run_import)
+            enqueue_for_execution(job, None)
 
-            # Wait until the worker is RUNNING.
             for _ in range(100):
                 if job.state == JobState.RUNNING:
                     break
                 time.sleep(0.01)
             assert job.state == JobState.RUNNING
 
-            # Confirm the channel is open and not closed (no terminal event yet).
             assert not ch._closed, "Observer channel must be open while job is RUNNING"
 
-            # Cancel, unblock, and clean up.
             job.try_cancel()
             worker_gate.set()
-            job.wait_for_worker(timeout=5.0)
+            _wait_terminal(job, timeout=5.0)
 
-        # The channel must receive an error/cancel event.
         msg = ch.get(timeout=2.0)
         assert msg is not None, "Observer must receive a terminal event"
         assert msg.get("event") in ("error", "complete"), (
@@ -940,15 +899,11 @@ class TestRouteWorkerBehavior:
         job.detach_observer(ch)
 
     def test_route_cancel_delete_transitions_running_to_cancelled(self, tmp_path):
-        """DELETE /import/{job_id} while running transitions the job to CANCELLED.
-
-        This pins the route-level cancellation path through cancel_job() and
-        job.try_cancel(), not a private-method call.
-        """
+        """cancel_job() while running transitions the job to CANCELLED."""
         from unittest.mock import patch  # noqa: PLC0415
 
         from snore.api.import_jobs import cancel_job  # noqa: PLC0415
-        from snore.api.routers.import_data import _start_worker  # noqa: PLC0415
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         d = tmp_path / "route_cancel_job"
         d.mkdir()
@@ -960,13 +915,14 @@ class TestRouteWorkerBehavior:
             return []
 
         job = create_job(JobType.UPLOAD, temp_dir=d)
-        job.target_profile_id = 1  # satisfy the profile_id requirement
+        job.target_profile_id = 1
 
         with patch(
-            "snore.api.routers.import_data.ImportService.detect_sources",
+            "snore.api.import_worker.ImportService.detect_sources",
             side_effect=_slow_detect,
         ):
-            _start_worker(job)
+            start_import_worker(_run_import)
+            enqueue_for_execution(job, None)
 
             for _ in range(100):
                 if job.state == JobState.RUNNING:
@@ -974,12 +930,11 @@ class TestRouteWorkerBehavior:
                 time.sleep(0.01)
             assert job.state == JobState.RUNNING
 
-            # Simulate what DELETE /import/{job_id} does.
             cancelled = cancel_job(job.job_id)
             assert cancelled is True, "cancel_job must return True for a running job"
 
             gate.set()
-            job.wait_for_worker(timeout=5.0)
+            _wait_terminal(job, timeout=5.0)
 
         assert job.is_terminal
         assert job.state == JobState.CANCELLED, (  # type: ignore[comparison-overlap]
@@ -1008,9 +963,11 @@ class TestRouteHTTPBoundary:
         real database.  The stub actor's user_id matches the owner_user_id used by
         ``_upload_and_get_job`` when seeding jobs.
         """
+        from unittest.mock import AsyncMock  # noqa: PLC0415
+
         from fastapi import FastAPI  # noqa: PLC0415
 
-        from snore.api.deps import get_actor  # noqa: PLC0415
+        from snore.api.deps import get_actor, get_db  # noqa: PLC0415
         from snore.api.routers import import_data  # noqa: PLC0415
         from snore.auth.actor import ActorContext, AuthMode, Role  # noqa: PLC0415
 
@@ -1021,8 +978,14 @@ class TestRouteHTTPBoundary:
         async def _override_get_actor() -> ActorContext:
             return _test_actor
 
+        async def _override_get_db():
+            # Minimal DB stub — profile-ownership validation never runs in these
+            # tests because no profile_id is passed in requests.
+            yield AsyncMock()
+
         app = FastAPI()
         app.dependency_overrides[get_actor] = _override_get_actor
+        app.dependency_overrides[get_db] = _override_get_db
         app.include_router(import_data.router, prefix="/api/v1/import")
         return app
 
@@ -1045,11 +1008,11 @@ class TestRouteHTTPBoundary:
             )
             with (
                 patch(
-                    "snore.api.routers.import_data.ImportService.detect_sources",
+                    "snore.api.import_worker.ImportService.detect_sources",
                     return_value=[],
                 ),
                 patch(
-                    "snore.api.routers.import_data.ImportService.import_sources",
+                    "snore.api.import_worker.ImportService.import_sources",
                     new_callable=AsyncMock,
                     return_value=fake_result,
                 ),
@@ -1135,12 +1098,14 @@ class TestRouteHTTPBoundary:
     def test_delete_import_cancels_running_job_via_route(self, tmp_path):
         """DELETE /import/{job_id} cancels a running job through the real ASGI route.
 
-        Uses TestClient to POST an upload (starting the worker), then sends
-        DELETE through the same client — no direct cancel_job() call.
+        Uses TestClient to POST an upload (enqueuing the job via the persistent worker),
+        then sends DELETE through the same client — no direct cancel_job() call.
         """
         from unittest.mock import patch  # noqa: PLC0415
 
         from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
 
         app = self._make_app()
         gate = threading.Event()
@@ -1151,11 +1116,14 @@ class TestRouteHTTPBoundary:
 
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 side_effect=_slow_detect,
             ),
             TestClient(app, raise_server_exceptions=True) as client,
         ):
+            # Start the import worker before the upload so it can pick up the job.
+            start_import_worker(_run_import)
+
             resp = client.post(
                 "/api/v1/import/",
                 files=[("files", ("test.edf", b"fake", "application/octet-stream"))],
@@ -1178,7 +1146,7 @@ class TestRouteHTTPBoundary:
             assert del_resp.status_code == 204
 
             gate.set()
-            job.wait_for_worker(timeout=5.0)
+            _wait_terminal(job, timeout=5.0)
 
         assert job.is_terminal
         assert job.state == JobState.CANCELLED, (  # type: ignore[comparison-overlap]
@@ -1195,6 +1163,8 @@ class TestRouteHTTPBoundary:
 
         from fastapi.testclient import TestClient  # noqa: PLC0415
 
+        from snore.api.import_worker import _run_import  # noqa: PLC0415
+
         app = self._make_app()
         gate = threading.Event()
 
@@ -1204,11 +1174,14 @@ class TestRouteHTTPBoundary:
 
         with (
             patch(
-                "snore.api.routers.import_data.ImportService.detect_sources",
+                "snore.api.import_worker.ImportService.detect_sources",
                 side_effect=_slow_detect,
             ),
             TestClient(app, raise_server_exceptions=True) as client,
         ):
+            # Start the import worker before the upload so it can pick up the job.
+            start_import_worker(_run_import)
+
             resp = client.post(
                 "/api/v1/import/",
                 files=[("files", ("test.edf", b"fake", "application/octet-stream"))],
@@ -1224,8 +1197,6 @@ class TestRouteHTTPBoundary:
                 time.sleep(0.01)
             assert job.state == JobState.RUNNING
 
-            # Collect the SSE stream while the job is still running.
-            # We read the stream in a thread, wait for a keepalive, then cancel.
             sse_body: list[str] = []
             got_keepalive = threading.Event()
 
@@ -1241,18 +1212,204 @@ class TestRouteHTTPBoundary:
             sse_thread = threading.Thread(target=_read_sse, daemon=True)
             sse_thread.start()
 
-            # Wait up to 3 s for a keepalive (SSE timeout = 1 s).
-            got_keepalive.wait(
-                timeout=3.0
-            )  # wait for quick detection, check body below
-            # Cancel + unblock regardless of outcome.
+            got_keepalive.wait(timeout=3.0)
             job.try_cancel()
             gate.set()
             sse_thread.join(timeout=3.0)
 
-        # Check the full body even if got_keepalive didn't fire in time.
         full = "".join(sse_body)
         assert ": keepalive" in full, (
             "SSE /progress route must emit ': keepalive' while job is running. "
             f"Got: {sse_body!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Serial execution + cancellation + resilience tests (new — FIFO worker queue)
+# ---------------------------------------------------------------------------
+
+
+class TestSerialWorkerQueue:
+    """Behavioural tests for the single persistent FIFO worker.
+
+    These tests inject a fake run_callback so they exercise the worker loop
+    contract without touching the database or the real import service.
+    """
+
+    def _fake_run(
+        self,
+        job: ImportJob,
+        root: object,
+        gate: threading.Event,
+        order: list[str],
+    ) -> None:
+        """Fake run callback: records start, blocks on gate, then records end."""
+        order.append(f"start:{job.job_id}")
+        gate.wait(timeout=5.0)
+        order.append(f"end:{job.job_id}")
+        job._finish(succeeded=True, terminal_msg={"event": "complete", "data": {}})
+        job.cleanup_files()
+        job.release_capacity()
+
+    def test_two_jobs_execute_strictly_serially(self, tmp_path):
+        """Second job stays PENDING until the first reaches a terminal state.
+
+        Uses a gate-blocked callback: job1 blocks; we verify job2 is still
+        PENDING; then unblock job1 and verify job2 runs next.
+        """
+        gate1 = threading.Event()
+        order: list[str] = []
+
+        def callback1(job: ImportJob, root: object) -> None:
+            self._fake_run(job, root, gate1, order)
+
+        job1 = create_job(JobType.PATH)
+        job1.target_profile_id = 1
+        job2 = create_job(JobType.PATH)
+        job2.target_profile_id = 1
+
+        start_import_worker(callback1)
+        enqueue_for_execution(job1, None)
+        enqueue_for_execution(job2, None)
+
+        # Wait until job1 is RUNNING.  Read the state property into locals so
+        # mypy does not narrow across the out-of-band worker mutations.
+        _wait_state(job1, JobState.RUNNING)
+        job1_state = job1.state
+        assert job1_state == JobState.RUNNING, "job1 must be RUNNING"
+
+        # job2 must still be PENDING while job1 occupies the worker.
+        job2_state = job2.state
+        assert job2_state == JobState.PENDING, (
+            f"job2 must stay PENDING while job1 is RUNNING; got {job2_state}"
+        )
+
+        # Unblock job1 and wait for both to finish.
+        gate1.set()
+        _wait_terminal(job1, timeout=5.0)
+        _wait_terminal(job2, timeout=5.0)
+
+        job1_state = job1.state
+        job2_state = job2.state
+        assert job1_state == JobState.SUCCEEDED
+        assert job2_state == JobState.SUCCEEDED
+
+        # Execution order must be strictly serial: job1 completes before job2 starts.
+        assert order.index(f"end:{job1.job_id}") < order.index(
+            f"start:{job2.job_id}"
+        ), f"job1 must complete before job2 starts; order={order}"
+
+    def test_cancel_queued_job_is_skipped_by_worker(self, tmp_path):
+        """Cancelling a PENDING queued job before the worker reaches it results in
+        CANCELLED state, files cleaned, and capacity released without executing
+        run_callback for that job.
+        """
+        gate1 = threading.Event()
+        callback_called_for: list[str] = []
+
+        def recording_callback(job: ImportJob, root: object) -> None:
+            callback_called_for.append(job.job_id)
+            gate1.wait(timeout=5.0)
+            job._finish(succeeded=True, terminal_msg={"event": "complete", "data": {}})
+            job.cleanup_files()
+            job.release_capacity()
+
+        d1 = tmp_path / "job1"
+        d1.mkdir()
+        d2 = tmp_path / "job2"
+        d2.mkdir()
+
+        job1 = create_job(JobType.UPLOAD, temp_dir=d1)
+        job1.target_profile_id = 1
+        job2 = create_job(JobType.UPLOAD, temp_dir=d2)
+        job2.target_profile_id = 1
+
+        start_import_worker(recording_callback)
+        enqueue_for_execution(job1, None)
+        enqueue_for_execution(job2, None)
+
+        # Wait for job1 to be running (worker is busy).
+        _wait_state(job1, JobState.RUNNING)
+        assert job1.state == JobState.RUNNING
+
+        # Cancel job2 while it is still queued (PENDING).  Read the state
+        # property into locals so mypy does not narrow across the mutation.
+        state_before = job2.state
+        assert state_before == JobState.PENDING, "job2 must be PENDING before cancel"
+        job2.try_cancel()
+        state_after = job2.state
+        assert state_after == JobState.CANCELLED
+
+        # Unblock job1 so the worker moves on to job2.
+        gate1.set()
+        _wait_terminal(job1, timeout=5.0)
+
+        # Wait for the worker to finish processing the (now-cancelled) job2 slot:
+        # it will delete d2 and release capacity after seeing try_start() return False.
+        deadline = time.monotonic() + 5.0
+        while (d2.exists() or job2._capacity_held) and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        # The callback must NOT have been called for job2.
+        assert job2.job_id not in callback_called_for, (
+            "run_callback must not be invoked for a cancelled queued job"
+        )
+        # Files for job2 must be cleaned and capacity released.
+        # (try_cancel on PENDING clears state; cleanup is worker's responsibility
+        #  when it pops and sees try_start returns False.)
+        assert not d2.exists(), "Upload dir for cancelled job must be cleaned up"
+        assert not job2._capacity_held, "Capacity must be released for cancelled job"
+
+    def test_worker_survives_run_callback_exception(self, tmp_path):
+        """Worker stays alive and processes subsequent jobs when run_callback raises.
+
+        The raising job is recorded as non-terminal (or FAILED via worker's handler),
+        and the second job — which uses a normal callback — reaches SUCCEEDED.
+        """
+        raising_called = threading.Event()
+        gate_normal = threading.Event()
+        normal_result: list[JobState] = []
+
+        def raising_callback(job: ImportJob, root: object) -> None:
+            raising_called.set()
+            job.cleanup_files()
+            job.release_capacity()
+            raise RuntimeError("deliberate test error in run_callback")
+
+        job1 = create_job(JobType.PATH)
+        job1.target_profile_id = 1
+        job2 = create_job(JobType.PATH)
+        job2.target_profile_id = 1
+
+        # We need two different behaviors, so swap callback via a counter.
+        call_count = [0]
+
+        def switching_callback(job: ImportJob, root: object) -> None:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raising_callback(job, root)
+            else:
+                gate_normal.wait(timeout=5.0)
+                job._finish(
+                    succeeded=True, terminal_msg={"event": "complete", "data": {}}
+                )
+                job.cleanup_files()
+                job.release_capacity()
+                normal_result.append(job.state)
+
+        start_import_worker(switching_callback)
+        enqueue_for_execution(job1, None)
+        enqueue_for_execution(job2, None)
+
+        # Wait for the raising callback to fire.
+        raising_called.wait(timeout=5.0)
+        assert raising_called.is_set(), "raising callback must have been called"
+
+        # Unblock the normal job.
+        gate_normal.set()
+        _wait_terminal(job2, timeout=5.0)
+
+        # job2 must have SUCCEEDED — the worker survived job1's exception.
+        assert job2.state == JobState.SUCCEEDED, (
+            f"Worker must survive a raising callback; job2 got {job2.state}"
         )

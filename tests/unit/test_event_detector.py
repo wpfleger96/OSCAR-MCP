@@ -2195,3 +2195,137 @@ class TestValidateAgainstMachineEvents:
         reras = aasm_detector._detect_reras(breaths, apneas, hypopneas)
 
         assert len(reras) >= 2
+
+
+# =============================================================================
+# Vectorized near-zero-flow oracle tests
+# =============================================================================
+
+
+def _near_zero_flow_scalar_oracle(
+    flow_signal: np.ndarray,
+    timestamps: np.ndarray,
+    zero_threshold: float = 2.0,
+    min_duration: float = 10.0,
+) -> list[tuple[float, float]]:
+    """Verbatim copy of the original scalar loop; returns (start_time, end_time) pairs."""
+    total_duration = timestamps[-1] - timestamps[0]
+    sample_rate = len(timestamps) / total_duration
+    min_samples = int(min_duration * sample_rate)
+    near_zero_mask = np.abs(flow_signal) < zero_threshold
+
+    results: list[tuple[float, float]] = []
+    in_event = False
+    event_start = 0
+    for i, is_near_zero in enumerate(near_zero_mask):
+        if is_near_zero and not in_event:
+            in_event = True
+            event_start = i
+        elif not is_near_zero and in_event:
+            in_event = False
+            event_length = i - event_start
+            if event_length >= min_samples:
+                results.append(
+                    (float(timestamps[event_start]), float(timestamps[i - 1]))
+                )
+    if in_event:
+        event_length = len(near_zero_mask) - event_start
+        if event_length >= min_samples:
+            results.append((float(timestamps[event_start]), float(timestamps[-1])))
+    return results
+
+
+class TestDetectNearZeroFlowVectorized:
+    """Oracle-comparison and edge-case tests for the vectorized _detect_near_zero_flow()."""
+
+    @pytest.mark.parametrize("seed", [0, 1, 42, 123, 999])
+    def test_near_zero_matches_oracle_random_signals(self, resmed_detector, seed):
+        """Vectorized result matches scalar oracle across random background signals."""
+        rng = np.random.default_rng(seed)
+        n = 2500  # 100 seconds at 25 Hz
+        timestamps = np.linspace(0.0, 100.0, n)
+        flow_values = rng.uniform(5.0, 20.0, n)
+
+        # Short run below min_samples (75 < 250): not detected
+        flow_values[200:275] = 0.5
+        # Long interior run above min_samples (375 > 250): detected
+        flow_values[400:775] = 0.5
+        # Another short run below threshold: not detected
+        flow_values[900:950] = 0.5
+        # Trailing run reaching end of signal (400 > 250): detected
+        flow_values[2100:] = 0.5
+
+        oracle_runs = _near_zero_flow_scalar_oracle(
+            flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+        )
+        actual_events = resmed_detector._detect_near_zero_flow(
+            flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+        )
+
+        assert len(actual_events) == len(oracle_runs)
+        for event, (oracle_start, oracle_end) in zip(
+            actual_events, oracle_runs, strict=True
+        ):
+            assert event.start_time == pytest.approx(oracle_start, abs=1e-9)
+            assert event.end_time == pytest.approx(oracle_end, abs=1e-9)
+
+    def test_near_zero_leading_run_at_index_zero_matches_oracle(self, resmed_detector):
+        """Run starting at index 0 is handled identically to oracle."""
+        timestamps = np.arange(0.0, 100.0, 0.04)  # 2500 samples, 25 Hz
+        flow_values = np.ones_like(timestamps) * 10.0
+        flow_values[:500] = 0.5  # Leading run: 500 samples = 20 s > 10 s minimum
+
+        oracle_runs = _near_zero_flow_scalar_oracle(
+            flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+        )
+        actual_events = resmed_detector._detect_near_zero_flow(
+            flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+        )
+
+        assert len(actual_events) == len(oracle_runs)
+        for event, (oracle_start, oracle_end) in zip(
+            actual_events, oracle_runs, strict=True
+        ):
+            assert event.start_time == pytest.approx(oracle_start, abs=1e-9)
+            assert event.end_time == pytest.approx(oracle_end, abs=1e-9)
+
+    def test_near_zero_trailing_run_end_time_equals_last_timestamp(
+        self, resmed_detector
+    ):
+        """Trailing run that reaches end of signal closes at timestamps[-1]."""
+        timestamps = np.arange(0.0, 100.0, 0.04)
+        flow_values = np.ones_like(timestamps) * 10.0
+        flow_values[2000:] = 0.5  # 500 trailing samples = 20 s
+
+        events = resmed_detector._detect_near_zero_flow(
+            flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+        )
+
+        assert len(events) == 1
+        assert events[0].end_time == pytest.approx(float(timestamps[-1]), abs=1e-9)
+
+    def test_near_zero_no_near_zero_samples_returns_no_events(self, resmed_detector):
+        """Signal entirely above threshold produces no events."""
+        timestamps = np.arange(0.0, 100.0, 0.04)
+        flow_values = np.ones_like(timestamps) * 10.0  # All well above 2.0
+
+        events = resmed_detector._detect_near_zero_flow(
+            flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+        )
+
+        assert len(events) == 0
+
+    def test_near_zero_entire_signal_near_zero_produces_one_spanning_event(
+        self, resmed_detector
+    ):
+        """Signal entirely below threshold yields one event spanning the full signal."""
+        timestamps = np.arange(0.0, 100.0, 0.04)
+        flow_values = np.ones_like(timestamps) * 0.5  # All below threshold
+
+        events = resmed_detector._detect_near_zero_flow(
+            flow_values, timestamps, zero_threshold=2.0, min_duration=10.0
+        )
+
+        assert len(events) == 1
+        assert events[0].start_time == pytest.approx(float(timestamps[0]), abs=1e-9)
+        assert events[0].end_time == pytest.approx(float(timestamps[-1]), abs=1e-9)

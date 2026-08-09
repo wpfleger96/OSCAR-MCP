@@ -239,7 +239,7 @@ class TestDependencyRollbackOnError:
 
         The real lifespan runs ``init_database`` → ``asyncio.to_thread(
         _apply_migrations_sync, ...)`` before yielding.  A GET to a read
-        endpoint must return 200 (schema exists), not 500 (missing tables).
+        endpoint must return 200 (schema creation complete), not 500 (missing tables).
         """
         client, _app = real_app
         response = await client.get("/api/v1/devices/")

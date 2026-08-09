@@ -50,13 +50,15 @@ from typing import Any
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import inspect
+from sqlalchemy import Engine, MetaData, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.schema import CreateColumn
 
 from snore.constants import DEFAULT_DATABASE_PATH
 from snore.database.models import Base
@@ -66,6 +68,38 @@ logger = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _AsyncSessionFactory: async_sessionmaker[AsyncSession] | None = None
 _db_path: str | None = None
+
+# Staleness-detection globals — set/cleared alongside the engine globals above.
+#
+# _db_identity: (st_dev, st_ino) of the DB file recorded at engine-init time.
+#   A changed identity means the file was atomically replaced on disk (e.g. by
+#   SNORE's import pipeline, which does an atomic rename(2) to a new inode).
+#   None disables detection (in-memory DB, OSError during stat, or not inited).
+#
+# _sync_url / _async_url: cached at init so check_db_staleness can reinitialize
+#   the engine without re-resolving URLs from the path alone.
+#
+# _engine_generation: monotonically increments on every successful _do_init call.
+#   NEVER reset by cleanup_database or initialization failure.  External callers
+#   snapshot this value to detect that the engine was rebuilt (e.g. after a
+#   swap-triggered reinit in check_db_staleness).
+#
+# _pending_reinit: (sync_url, async_url, db_path) of a swap-triggered reinit
+#   that has not yet completed.  Written in check_db_staleness before teardown
+#   starts; cleared inside _do_init's success publish block.  NOT cleared by
+#   _do_cleanup — it must survive cleanup so the reinit can be retried.  When
+#   _pending_reinit is not None and _db_path is None, check_db_staleness retries
+#   the reinit instead of silently returning with a broken/None engine.
+#   Because _pending_reinit survives cleanup_database, a request slipping in
+#   after lifespan teardown (with a failed swap-reinit pending) would
+#   re-initialize the swap target instead of raising "not initialized" —
+#   acceptable in the current server lifecycle where connection acceptance stops
+#   before teardown.
+_db_identity: tuple[int, int] | None = None
+_sync_url: str | None = None
+_async_url: str | None = None
+_engine_generation: int = 0
+_pending_reinit: tuple[str, str, str] | None = None
 
 # Shared state machine: three linearized states under one stable lock.
 #
@@ -81,6 +115,22 @@ _db_path: str | None = None
 _init_lock: asyncio.Lock | None = None  # Created lazily inside an event loop.
 _init_task: asyncio.Task[None] | None = None  # The in-flight once-init-task.
 _cleanup_task: asyncio.Task[None] | None = None  # The in-flight once-cleanup-task.
+
+# Execution-option key/value for BEGIN IMMEDIATE transactions.
+# Used by session_scope(immediate=True) at connection checkout and by the
+# "begin" event listener that reads them to choose the BEGIN variant.
+# Module-level constants prevent a typo from silently downgrading
+# BEGIN IMMEDIATE to plain BEGIN at either site.
+_TXN_OPT_KEY = "sqlite_txn_mode"
+_TXN_OPT_IMMEDIATE = "IMMEDIATE"
+
+# Public mapping for callers that need to escalate a session to IMMEDIATE mode
+# by calling ``await session.connection(execution_options=TXN_OPT_IMMEDIATE)``
+# at the start of a handler body before any SQL is issued.  The ``begin``
+# event listener reads this option and issues ``BEGIN IMMEDIATE`` instead of
+# a plain ``BEGIN``, preventing SQLITE_BUSY on the first write in a deferred
+# transaction when another writer has committed since the transaction opened.
+TXN_OPT_IMMEDIATE: dict[str, str] = {_TXN_OPT_KEY: _TXN_OPT_IMMEDIATE}
 
 
 def _get_init_lock() -> asyncio.Lock:
@@ -103,27 +153,246 @@ def _build_alembic_config(database_url: str) -> AlembicConfig:
     return cfg
 
 
+def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
+    """Additively sync columns and indexes from *metadata* onto an existing database.
+
+    Called in empty-chain mode immediately after ``create_all``, which is a
+    no-op for tables that already exist.  The work here is for tables that
+    pre-dated this startup — i.e., rows already in the file when the process
+    started:
+
+    - For each table in *metadata* that exists in the database, compute the
+      model columns absent from the live table and emit
+      ``ALTER TABLE … ADD COLUMN`` for each one.  Column DDL is compiled from
+      the SQLAlchemy column object via ``CreateColumn`` so type strings and
+      defaults are always correct for the engine's dialect.
+    - Guard: a missing column that is ``NOT NULL`` with no ``server_default``
+      raises ``RuntimeError`` with an actionable message.  SQLite cannot
+      ``ADD COLUMN NOT NULL`` without a default — every new non-nullable column
+      must carry a ``server_default`` in its model definition.  A non-constant
+      ``server_default`` (e.g. ``text("CURRENT_TIMESTAMP")``) passes this guard
+      but SQLite rejects ``ADD COLUMN`` with a non-constant default on populated
+      tables ("Cannot add a column with non-constant default") — new columns on
+      existing tables need constant server defaults.
+    - For each such table, compare model indexes against live indexes and call
+      ``Index.create(engine)`` for each missing one.
+
+    Idempotent: a second call on an already-synced database is a no-op.
+    Also a no-op on a fresh database (``create_all`` has built everything).
+
+    Out of scope: dropped columns, renamed columns, changed types, dropped
+    indexes — those require Alembic migration files once post-1.0 is in use.
+    Two additional silent gaps: (a) foreign-key clauses on new columns —
+    SQLite ``ADD COLUMN`` cannot carry ``REFERENCES``, so a new FK column is
+    added without its constraint; (b) new ``UniqueConstraint``s and
+    ``unique=True`` backing indexes — ``table.indexes`` excludes them, so
+    they are never created on existing tables by this helper.
+    """
+    # The inspector caches per-table reflection results; each get_columns /
+    # get_indexes call is issued exactly once per table per run.
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    preparer = engine.dialect.identifier_preparer
+
+    for table in metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+
+        live_col_names = {col["name"] for col in inspector.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in live_col_names:
+                continue
+            if not col.nullable and col.server_default is None:
+                raise RuntimeError(
+                    f"Cannot add column '{col.name}' to table '{table.name}': "
+                    f"the column is NOT NULL with no server_default.  "
+                    f"SQLite cannot ADD COLUMN NOT NULL without a default — "
+                    f"add a server_default= to the column definition."
+                )
+            col_ddl = str(CreateColumn(col).compile(dialect=engine.dialect))
+            table_id = preparer.quote_identifier(table.name)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table_id} ADD COLUMN {col_ddl}"))
+            except OperationalError as exc:
+                # Guard: another process added this column concurrently (rolling
+                # restart).  SQLite (and MySQL, lowercased) emit "duplicate column
+                # name"; the repo is SQLite-only.
+                if "duplicate column name" in str(exc).lower():
+                    logger.info(
+                        "Column %s.%s added concurrently; skipping",
+                        table.name,
+                        col.name,
+                    )
+                else:
+                    raise
+            else:
+                logger.info(
+                    "Added column %s.%s to existing table", table.name, col.name
+                )
+
+        live_index_names = {i["name"] for i in inspector.get_indexes(table.name)}
+        for idx in table.indexes:
+            if idx.name in live_index_names:
+                continue
+            try:
+                idx.create(engine, checkfirst=True)
+            except OperationalError as exc:
+                # Guard: checkfirst=True emits a PRAGMA check then plain CREATE
+                # INDEX (not IF NOT EXISTS); two racing processes can both pass
+                # the check.  The loser gets "already exists".
+                if "already exists" in str(exc).lower():
+                    logger.info("Index %s created concurrently; skipping", idx.name)
+                else:
+                    raise
+            else:
+                logger.info(
+                    "Created index %s on existing table %s", idx.name, table.name
+                )
+
+
 def _apply_migrations_sync(sync_url: str) -> None:
-    """Run Alembic migrations synchronously.
+    """Apply pending migrations, or skip when the schema is already at head.
 
     Called from within ``asyncio.to_thread`` so it never blocks the event loop.
-    Uses the sync pysqlite URL for Alembic — identical to PR-1.
-    """
-    from sqlalchemy import create_engine  # noqa: PLC0415
+    Uses the sync pysqlite URL for Alembic.
 
-    engine = create_engine(sync_url, connect_args={"check_same_thread": False})
-    table_names = set(inspect(engine).get_table_names())
+    **Empty-chain mode (pre-1.0):** When ``versions/`` contains zero migration
+    files, ``ScriptDirectory.get_heads()`` returns ``[]``.  In this mode the
+    function skips all Alembic machinery and ensures the schema in two steps:
+
+    1. ``Base.metadata.create_all(checkfirst=True)`` — creates any tables that
+       do not yet exist.  Idempotent; never alters existing tables.
+    2. ``_sync_additive_schema(Base.metadata, engine)`` — for each table that
+       already existed before step 1, adds any model columns or indexes absent
+       from the live table.  New ``NOT NULL`` columns must carry a
+       ``server_default`` in the model definition; without one a ``RuntimeError``
+       is raised with an actionable message (SQLite cannot ``ADD COLUMN NOT NULL``
+       without a default value).
+
+    No ``alembic_version`` table is created on this path.  Stale
+    ``alembic_version`` rows left by a pre-flatten DB are silently ignored
+    (the owner drops incompatible DBs manually).
+
+    **Fast-path skip:** The database stamp is read first (before computing heads)
+    via a read-only connection.  When the stamp matches the current head, all
+    Alembic machinery is skipped.  Reading the stamp first means a new migration
+    file landing between the two reads can only force the slow path, never
+    accidentally skip a brand-new migration.  Any failure of the stamp read
+    (missing file, missing table, OperationalError) falls through safely.
+
+    **Unstamped-existing-DB path:** When the database has application tables but
+    no ``alembic_version`` table (created in zero-migration mode before this
+    migration chain existed), the DB is stamped at the no-op ``001_baseline``
+    revision and upgraded to head, then ``_sync_additive_schema`` runs to add
+    any model columns/indexes the pre-chain database is missing — migrations
+    only cover schema changes made after the chain was introduced, so the
+    additive sync is what restores earlier drift (e.g. a pre-#200 database
+    missing ``users.google_link_disabled``).
+    """
+    import sqlite3 as _sqlite3  # noqa: PLC0415
+
+    from urllib.parse import quote as _quote  # noqa: PLC0415
+
+    from alembic.script import ScriptDirectory  # noqa: PLC0415
+    from sqlalchemy import create_engine  # noqa: PLC0415
+    from sqlalchemy.engine import make_url as _make_url  # noqa: PLC0415
+
+    url_obj = _make_url(sync_url)
+    # Build the Alembic config once; reused by both the fast-path head check
+    # and the slow-path upgrade/stamp call below.
     alembic_cfg = _build_alembic_config(sync_url)
 
-    if "sessions" not in table_names:
-        Base.metadata.create_all(engine)
-        alembic_command.stamp(alembic_cfg, "head")
-        logger.info("Fresh database created and stamped at head")
-    else:
-        alembic_command.upgrade(alembic_cfg, "head")
-        logger.info("Database migrations applied (upgrade to head)")
+    # Step 1: Read the stamped version first, before computing heads.
+    # The read-only open avoids acquiring any write lock.
+    stored_version: str | None = None
+    if url_obj.get_backend_name() == "sqlite":
+        db_file = url_obj.database
+        if db_file and db_file != ":memory:":
+            try:
+                # Percent-encode the path so spaces and special characters in
+                # directory names do not corrupt the URI query string.
+                encoded_path = _quote(db_file, safe="/")
+                ro_conn = _sqlite3.connect(f"file:{encoded_path}?mode=ro", uri=True)
+                try:
+                    row = ro_conn.execute(
+                        "SELECT version_num FROM alembic_version"
+                    ).fetchone()
+                    stored_version = row[0] if row else None
+                finally:
+                    ro_conn.close()
+            except Exception as exc:
+                # Any failure (missing file, missing alembic_version table,
+                # OperationalError) → fall through to the normal migration path
+                # so startup is always correct.
+                logger.debug(
+                    "Migration fast-path check failed; falling through to full"
+                    " migration: %s",
+                    exc,
+                )
 
-    engine.dispose()
+    # Step 2: Compute heads once, after reading the stamp.
+    # Reading the stamp before computing heads means a migration file landing
+    # between the two reads can only make the comparison fail (falling through
+    # to upgrade), never fast-path-skip a brand-new migration.
+    heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+
+    # Fast-path: skip migrations when the database is already at the current
+    # Alembic head.
+    if stored_version is not None and {stored_version} == heads:
+        logger.debug(
+            "Schema already at head %s; skipping migrations",
+            stored_version,
+        )
+        return
+
+    # Empty-chain mode: no migration files → manage schema via create_all then
+    # additive sync.  No alembic_version table is written; stale rows from
+    # pre-flatten DBs are ignored — the owner drops incompatible DBs manually.
+    # New NOT NULL columns must carry a server_default or _sync_additive_schema
+    # raises RuntimeError; SQLite cannot ADD COLUMN NOT NULL without a default.
+    if not heads:
+        engine = create_engine(sync_url, connect_args={"check_same_thread": False})
+        try:
+            Base.metadata.create_all(engine, checkfirst=True)
+            _sync_additive_schema(Base.metadata, engine)
+        finally:
+            engine.dispose()
+        logger.info(
+            "Empty migration chain: schema ensured via create_all + additive sync"
+        )
+        return
+
+    # Slow path: apply migrations. Wrap the entire block in try/finally so
+    # the engine is always disposed even if alembic_command.upgrade raises.
+    engine = create_engine(sync_url, connect_args={"check_same_thread": False})
+    try:
+        table_names = set(inspect(engine).get_table_names())
+
+        if "sessions" not in table_names:
+            Base.metadata.create_all(engine)
+            alembic_command.stamp(alembic_cfg, "head")
+            logger.info("Fresh database created and stamped at head")
+        elif "alembic_version" not in table_names:
+            # Existing DB from before the migration chain existed (created in
+            # zero-migration mode via create_all with no Alembic stamp).  Stamp
+            # at the no-op baseline so the subsequent upgrade applies only the
+            # schema changes that are genuinely missing, rather than replaying
+            # the full chain onto already-existing tables.  Migrations only
+            # cover post-chain schema changes, so additive sync must run once
+            # here to restore pre-chain drift (missing columns/indexes).
+            alembic_command.stamp(alembic_cfg, "001_baseline")
+            alembic_command.upgrade(alembic_cfg, "head")
+            _sync_additive_schema(Base.metadata, engine)
+            logger.info(
+                "Stamped existing DB at 001_baseline, upgraded to head, and"
+                " synced pre-chain schema drift"
+            )
+        else:
+            alembic_command.upgrade(alembic_cfg, "head")
+            logger.info("Database migrations applied (upgrade to head)")
+    finally:
+        engine.dispose()
 
 
 def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
@@ -139,17 +408,25 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
     SQLAlchemy's logical transaction control is the sole source of truth.
     The connection is left in autocommit mode after the event returns.
 
-    **"begin" — explicit BEGIN:**
+    **"begin" — explicit BEGIN or BEGIN IMMEDIATE:**
     With the DBAPI in autocommit mode, SQLAlchemy's logical transaction does
     not emit a real ``BEGIN`` to SQLite.  Without an explicit ``BEGIN``, a
     released savepoint (``RELEASE SAVEPOINT sp``) writes directly to the
     database file and cannot be undone by a later outer rollback.
 
-    The ``"begin"`` listener executes ``BEGIN`` via a raw cursor whenever
-    SQLAlchemy opens a new logical transaction.  This re-establishes the
-    two-layer semantics: SQLite's outer ``BEGIN`` contains all
-    ``SAVEPOINT`` / ``RELEASE`` / ``ROLLBACK TO`` operations, so an outer
+    The ``"begin"`` listener executes ``BEGIN`` (or ``BEGIN IMMEDIATE`` when
+    the ``"sqlite_txn_mode"`` execution option is ``"IMMEDIATE"``) via a raw
+    cursor whenever SQLAlchemy opens a new logical transaction.  This
+    re-establishes the two-layer semantics: SQLite's outer ``BEGIN`` contains
+    all ``SAVEPOINT`` / ``RELEASE`` / ``ROLLBACK TO`` operations, so an outer
     rollback undoes every released savepoint within it.
+
+    ``BEGIN IMMEDIATE`` acquires the write lock at transaction open rather
+    than at first write, so contending writers queue on ``busy_timeout``
+    instead of failing instantly on a WAL snapshot-upgrade conflict.  Pass
+    ``execution_options={"sqlite_txn_mode": "IMMEDIATE"}`` to the connection
+    before SQL is issued (via ``session_scope(immediate=True)``) to activate
+    this mode.
     """
     from sqlalchemy import event  # noqa: PLC0415
 
@@ -173,6 +450,9 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
             cursor.execute("PRAGMA temp_store=MEMORY")
+            # Cap WAL file growth so checkpoints shrink an oversized WAL back
+            # down to this limit after each checkpoint completes.
+            cursor.execute("PRAGMA journal_size_limit=67108864")  # 64 MB
         finally:
             cursor.close()
 
@@ -180,7 +460,16 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
     def emit_begin(conn: Any) -> None:
         # With DBAPI in autocommit mode, emit an explicit BEGIN so that SQLite's
         # outer transaction wraps all SAVEPOINTs and outer ROLLBACK works correctly.
-        conn.exec_driver_sql("BEGIN")
+        # When session_scope(immediate=True) is used, emit BEGIN IMMEDIATE instead:
+        # this acquires the write lock at transaction open so contending writers
+        # queue on busy_timeout rather than failing instantly on a WAL snapshot
+        # upgrade (SQLite returns SQLITE_BUSY immediately on a deferred→write
+        # upgrade when another connection has committed, bypassing busy_timeout).
+        txn_mode = conn.get_execution_options().get(_TXN_OPT_KEY)
+        if txn_mode == _TXN_OPT_IMMEDIATE:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+        else:
+            conn.exec_driver_sql("BEGIN")
 
 
 async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
@@ -193,7 +482,15 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
     ``CancelledError`` is caught as ``BaseException`` so a cancelled driver
     tears down cleanly and lets the next caller retry rather than hanging.
     """
-    global _engine, _AsyncSessionFactory, _db_path
+    global \
+        _engine, \
+        _AsyncSessionFactory, \
+        _db_path, \
+        _db_identity, \
+        _sync_url, \
+        _async_url, \
+        _engine_generation, \
+        _pending_reinit
 
     engine: AsyncEngine | None = None
     try:
@@ -231,6 +528,25 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
             expire_on_commit=False,
             class_=AsyncSession,
         )
+
+        # Record the file identity (dev, inode) for atomic-swap detection.
+        # Statting after migrations is safe — the pool is lazy, so if the file
+        # was replaced mid-init, both this stat and the first connection observe
+        # the new file consistently.
+        if db_path and db_path != ":memory:":
+            try:
+                st = os.stat(db_path)
+                _db_identity = (st.st_dev, st.st_ino)
+            except OSError:
+                # File absent between directory creation and stat (e.g. racing
+                # test teardown).  Swap detection is disabled until next init.
+                _db_identity = None
+        else:
+            _db_identity = None
+        _sync_url = sync_url
+        _async_url = async_url
+        _pending_reinit = None  # Reinit completed successfully.
+        _engine_generation += 1
     except BaseException:
         # Atomic teardown on any failure including CancelledError.
         # Use synchronous disposal only — awaiting inside an except-BaseException
@@ -244,6 +560,10 @@ async def _do_init(sync_url: str, async_url: str, db_path: str | None) -> None:
         _engine = None
         _AsyncSessionFactory = None
         _db_path = None
+        _db_identity = None
+        _sync_url = None
+        _async_url = None
+        # _engine_generation deliberately survives — see module-level comment.
         raise
 
 
@@ -434,23 +754,186 @@ def get_session() -> AsyncSession:
     return _AsyncSessionFactory()
 
 
+async def _reinit_after_swap(sync_url: str, async_url: str, db_path: str) -> None:
+    """Tear down the stale engine and reinitialize from the given URLs.
+
+    Called by ``check_db_staleness`` via ``asyncio.shield`` when an atomic
+    DB-file swap is detected.  Using shield ensures this coroutine runs to
+    completion even if the triggering request is cancelled mid-swap.
+
+    On success, ``_do_init``'s publish block clears ``_pending_reinit``.
+    On failure or post-teardown cancellation, ``_pending_reinit`` is NOT
+    cleared by ``_do_cleanup``, so subsequent calls to ``check_db_staleness``
+    find it set and retry the reinit via the recovery path at the top of that
+    function.
+    """
+    await cleanup_database()
+    await _init_with_once_task(sync_url, async_url, db_path)
+
+
+async def check_db_staleness() -> None:
+    """Detect an atomic DB-file swap and transparently reinitialize the engine.
+
+    SNORE's import pipeline atomically replaces the SQLite file with a
+    ``rename(2)`` to a new inode.  The singleton async engine would otherwise
+    keep serving the old unlinked inode forever.  This function compares the
+    engine's recorded ``(st_dev, st_ino)`` against the live filesystem on every
+    session open and triggers a transparent reinit when they differ.
+
+    Hot path: one ``os.stat`` call, no lock.  On mismatch (cold path), the
+    function sets ``_pending_reinit`` to record the intended reinit URLs before
+    any await, then calls ``asyncio.shield(_reinit_after_swap(...))`` so the
+    teardown and rebuild run to completion even if the calling request is
+    cancelled.  On success ``_do_init`` clears ``_pending_reinit``; on failure
+    or post-teardown cancellation it remains set.
+
+    Recovery path: if ``_pending_reinit`` is set and ``_db_path`` is None, a
+    previous swap-reinit was interrupted after teardown.  The recorded URLs are
+    used to retry the reinit immediately via ``asyncio.shield``, so the engine
+    is always restored regardless of which request first detects the failure.
+
+    Concurrency safety:
+    - Concurrent detections are harmless — both converge on the same
+      once-cleanup-task and once-init-task so the engine is replaced exactly
+      once regardless of how many callers detect the mismatch simultaneously.
+    - No deadlock is possible: ``_init_lock`` is never held across an ``await``
+      and ``session_scope`` never runs under it.
+    - Module globals are captured into locals before the first ``await`` so a
+      concurrent ``cleanup_database()`` cannot race between the mismatch check
+      and the reinit call to produce a ``None`` dereference.
+
+    Write-loss at swap time:
+    Sessions already open when a swap occurs keep their connection to the OLD
+    unlinked inode — reads succeed against the old data and any writes they
+    commit land on the unlinked inode and are lost when its last file descriptor
+    closes.  Detection happens at scope/session open only.
+
+    Backend-agnostic contract:
+    Detection applies ONLY to file-backed SQLite targets; for ``:memory:`` and
+    non-SQLite backends (e.g. a future PostgreSQL target, where ``_db_path`` is
+    ``None``) the function is a no-op costing one ``is None`` comparison — the
+    storage layer stays dialect-agnostic.
+
+    WAL/SHM note:
+    After a swap, stale ``-wal``/``-shm`` files from the old inode may remain
+    beside the new file; SQLite validates the WAL header salt on open and
+    silently ignores an incompatible WAL, so this is safe — noted here so
+    operators do not chase it.
+    """
+    global _pending_reinit
+
+    # Recovery path: a previous swap-reinit was cancelled or failed after
+    # teardown — _db_path is None but _pending_reinit carries the URLs needed
+    # to complete the rebuild.  asyncio.shield ensures the reinit runs to
+    # completion even if this caller is also cancelled.
+    if _pending_reinit is not None and _db_path is None:
+        pending = _pending_reinit
+        await asyncio.shield(_reinit_after_swap(*pending))
+        return
+
+    # Fast exits: not a real on-disk file, or identity not recorded.
+    if _db_path is None or _db_path == ":memory:" or _db_identity is None:
+        return
+
+    # Capture _db_path into a local so the stat and all subsequent reads use
+    # the same value — a concurrent cleanup_database() cannot null it mid-function.
+    db_path = _db_path
+
+    try:
+        st = os.stat(db_path)
+    except FileNotFoundError:
+        # File momentarily absent mid-swap — recheck on the next call.
+        return
+    except OSError as exc:
+        logger.warning(
+            "Unexpected error stat-ing database path %s; staleness detection "
+            "skipped this call: %s",
+            db_path,
+            exc,
+            exc_info=True,
+        )
+        return
+
+    if (st.st_dev, st.st_ino) == _db_identity:
+        return  # Hot path: identity unchanged.
+
+    # Cold path: inode mismatch detected.  Capture remaining globals into locals
+    # before the first await so a concurrent cleanup_database() cannot race
+    # between the mismatch check and the reinit call.
+    captured_sync_url = _sync_url
+    captured_async_url = _async_url
+    captured_identity = _db_identity
+
+    if captured_sync_url is None or captured_async_url is None:
+        # A concurrent cleanup cleared the URLs between our stat and here.
+        # The engine is already being torn down; nothing left to do.
+        return
+
+    logger.warning(
+        "Database file replaced on disk (inode %s -> %s) at path %s; "
+        "disposing stale engine and reconnecting.",
+        captured_identity,
+        (st.st_dev, st.st_ino),
+        db_path,
+    )
+    # Record the pending reinit BEFORE the first await so cancellation or a
+    # failed reinit leaves _pending_reinit set — enabling the recovery path
+    # above to retry on the next call.  _do_init clears it on success.
+    _pending_reinit = (captured_sync_url, captured_async_url, db_path)
+    await asyncio.shield(
+        _reinit_after_swap(captured_sync_url, captured_async_url, db_path)
+    )
+
+
 @asynccontextmanager
-async def session_scope() -> AsyncGenerator[AsyncSession]:
+async def session_scope(*, immediate: bool = False) -> AsyncGenerator[AsyncSession]:
     """Provide a transactional scope for async database operations.
+
+    Args:
+        immediate: When ``True``, emit ``BEGIN IMMEDIATE`` instead of plain
+            ``BEGIN``.  Gated and bulk write scopes should pass
+            ``immediate=True`` so contending writers queue on
+            ``busy_timeout`` rather than failing instantly on a WAL snapshot
+            upgrade conflict.  SQLite returns ``SQLITE_BUSY`` immediately
+            (bypassing ``busy_timeout``) when a deferred transaction attempts
+            its first write and another connection has committed since the
+            deferred ``BEGIN`` — ``BEGIN IMMEDIATE`` avoids this by acquiring
+            the write lock upfront.
 
     Usage::
 
-        async with session_scope() as session:
+        async with session_scope() as session:              # read or best-effort write
+            result = await session.execute(...)
+
+        async with session_scope(immediate=True) as session:  # write with lock queuing
             session.add(obj)
+
+    Calls ``check_db_staleness()`` before opening the session and may
+    transparently rebuild the engine if the database file was replaced on disk
+    since the last initialization.  Sessions already open when a swap occurs
+    keep their connection to the OLD unlinked inode; any writes they commit are
+    lost when the inode's last file descriptor closes.
 
     Commits on success; rolls back on any exception.
 
     Yields:
         An async database session.
     """
+    await check_db_staleness()
     session = get_session()
     try:
         async with session.begin():
+            if immediate:
+                # Force connection checkout with the IMMEDIATE option before any
+                # SQL is executed.  The "begin" event listener reads this option
+                # and emits BEGIN IMMEDIATE, so contending writers queue on
+                # busy_timeout rather than fail instantly on a WAL snapshot
+                # upgrade.  SQLAlchemy applies execution options at checkout
+                # before conn.begin() fires the "begin" event, so the option
+                # is visible to the listener when it runs.
+                await session.connection(
+                    execution_options={_TXN_OPT_KEY: _TXN_OPT_IMMEDIATE}
+                )
             yield session
     except Exception:
         # begin() rolls back automatically on __aexit__ with an exception.
@@ -473,6 +956,18 @@ def get_db_path() -> str:
     return _db_path
 
 
+def get_engine_generation() -> int:
+    """Return the current engine generation counter.
+
+    Increments on every successful ``_do_init`` and is never reset by
+    ``cleanup_database`` or initialization failure.  Callers can snapshot this
+    value before an operation and compare it afterwards to detect that the engine
+    was rebuilt — for example after a swap-triggered reinit in
+    ``check_db_staleness``.
+    """
+    return _engine_generation
+
+
 async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
     """Owned teardown coroutine — runs as the shared ``_cleanup_task``.
 
@@ -489,7 +984,14 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
       (normal, exception, or cancellation) — state machine exits cleanup-in-flight
       with no stuck-barrier.
     """
-    global _engine, _AsyncSessionFactory, _db_path, _cleanup_task
+    global \
+        _engine, \
+        _AsyncSessionFactory, \
+        _db_path, \
+        _cleanup_task, \
+        _db_identity, \
+        _sync_url, \
+        _async_url
 
     lock = _get_init_lock()
 
@@ -514,6 +1016,12 @@ async def _do_cleanup(owned_init_task: asyncio.Task[None] | None) -> None:
                 _engine = None
                 _AsyncSessionFactory = None
                 _db_path = None
+                _db_identity = None
+                _sync_url = None
+                _async_url = None
+                # _engine_generation deliberately survives — see module-level comment.
+                # _pending_reinit also deliberately survives cleanup — the
+                # swap-recovery path in check_db_staleness depends on it.
     finally:
         # Terminal state transition: always exit cleanup-in-flight,
         # whether we completed normally, raised, or were cancelled.
@@ -529,7 +1037,8 @@ async def cleanup_database() -> None:
     task continues to completion so state is always left clean.
 
     After this coroutine returns, ``_engine``, ``_AsyncSessionFactory``,
-    ``_db_path``, ``_init_task``, and ``_cleanup_task`` are all ``None``.
+    ``_db_path``, ``_db_identity``, ``_sync_url``, ``_async_url``,
+    ``_init_task``, and ``_cleanup_task`` are all ``None``.
     Subsequent ``init_database()`` calls create a fresh engine.
 
     This function should be called during test teardown or application shutdown.

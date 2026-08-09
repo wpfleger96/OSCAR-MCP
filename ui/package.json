@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.17.0",
+  "packageManager": "pnpm@11.18.0",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --build && vite build",
@@ -14,7 +14,8 @@
     "format-check": "prettier --check 'src/**/*.{ts,vue,json,css}' 'tests/**/*.ts' '*.spec.ts'",
     "format": "prettier --write 'src/**/*.{ts,vue,json,css}' 'tests/**/*.ts' '*.spec.ts'",
     "generate:types": "openapi-typescript openapi.json --output src/types/generated.ts && prettier --write src/types/generated.ts",
-    "test:screenshot": "playwright test screenshot.spec.ts"
+    "test:screenshot": "playwright test screenshot.spec.ts",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "@internationalized/date": "^3.12.2",
@@ -40,14 +41,17 @@
     "@vitejs/plugin-vue": "^6.0.6",
     "@vue/eslint-config-prettier": "^10.2.0",
     "@vue/eslint-config-typescript": "^14.7.0",
+    "@vue/test-utils": "^2.4.6",
     "@vue/tsconfig": "^0.9.1",
     "eslint": "^10.3.0",
     "eslint-plugin-vue": "^10.9.1",
+    "jsdom": "^30.0.1",
     "openapi-typescript": "^7.13.0",
     "prettier": "^3.8.3",
     "tailwindcss": "^4.3.1",
     "typescript": "catalog:",
     "vite": "^8.0.11",
+    "vitest": "^4.0.0",
     "vue-tsc": "^3.2.8"
   }
 }

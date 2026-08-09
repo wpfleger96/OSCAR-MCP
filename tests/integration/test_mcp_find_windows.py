@@ -33,76 +33,19 @@ from snore.database.models import (
     Day,
     Device,
     Event,
-    Profile,
     Session,
-    User,
 )
 from snore.mcp.errors import ValidationError
+from tests.integration.conftest import (
+    _make_day_session,
+    _make_device,
+    _make_profile,
+)
 
 # ---------------------------------------------------------------------------
-# Seed helpers (self-contained — do not import from sibling test modules)
+# _make_analysis_result is defined locally: it accepts a ``segmenter`` override
+# for mixed-version tests, which the shared conftest version does not support.
 # ---------------------------------------------------------------------------
-
-
-async def _make_profile(db: AsyncSession) -> Any:
-    user = User(
-        canonical_email=f"fw_{uuid.uuid4().hex[:8]}@example.com",
-        role="member",
-    )
-    db.add(user)
-    await db.flush()
-    profile = Profile(user_id=user.id, name="FW Test Profile")
-    db.add(profile)
-    await db.flush()
-    return profile
-
-
-async def _make_device(
-    db: AsyncSession,
-    profile_id: int,
-    manufacturer: str = "FWMfr",
-    serial_number: str | None = None,
-) -> Device:
-    device = Device(
-        profile_id=profile_id,
-        manufacturer=manufacturer,
-        model="FWModel",
-        serial_number=serial_number or f"SN_{uuid.uuid4().hex[:8]}",
-    )
-    db.add(device)
-    await db.flush()
-    return device
-
-
-async def _make_day_session(
-    db: AsyncSession,
-    device: Device,
-    day_date: date,
-    duration_hours: float = 8.0,
-    **day_kwargs: Any,
-) -> tuple[Day, Session]:
-    day = Day(
-        device_id=device.id,
-        date=day_date,
-        total_therapy_hours=duration_hours,
-        **day_kwargs,
-    )
-    db.add(day)
-    await db.flush()
-
-    start_dt = datetime(day_date.year, day_date.month, day_date.day, 22, 0, 0)
-    sess = Session(
-        device_id=device.id,
-        day_id=day.id,
-        device_session_id=f"fw_{day_date.isoformat()}_{uuid.uuid4().hex[:6]}",
-        start_time=start_dt,
-        end_time=start_dt + timedelta(hours=duration_hours),
-        duration_seconds=duration_hours * 3600,
-        enabled=True,
-    )
-    db.add(sess)
-    await db.flush()
-    return day, sess
 
 
 async def _add_session_to_day(

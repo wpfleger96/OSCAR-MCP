@@ -41,19 +41,31 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    MetaData,
     String,
     Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from snore.database.types import UTCDateTime, ValidatedJSONWithDefault
+from snore.database.types import UTCDateTime, ValidatedJSON, ValidatedJSONWithDefault
+
+# Constraint naming convention — must live here on Base.metadata (not env.py)
+# so that Base.metadata.create_all emits the same deterministic constraint
+# names that Alembic autogenerate produces from the migration chain.
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
 
 
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
 
-    pass
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 def utc_now() -> datetime:
@@ -81,6 +93,7 @@ class User(Base):
     # Bumped on password-change/disable/role-change; invalidates all cookies.
     session_version: Mapped[int] = mapped_column(Integer, default=0)
     disabled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # FK to profiles — set after the first profile is created.
     default_profile_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -94,6 +107,16 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utc_now, onupdate=utc_now
+    )
+    preferences: Mapped[dict[str, Any]] = mapped_column(
+        ValidatedJSONWithDefault, nullable=True, default=dict
+    )
+    # Set to True when the user explicitly unlinks Google; blocks the email
+    # auto-link path in resolve_login so the next "Sign in with Google" cannot
+    # silently re-establish a severed identity.  Cleared to False when the user
+    # deliberately re-links via the invite-signup flow.
+    google_link_disabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
     )
 
     profiles = relationship(
@@ -143,6 +166,8 @@ class AuthIdentity(Base):
         UniqueConstraint(
             "provider", "subject", name="uq_auth_identity_provider_subject"
         ),
+        # Covers the (user_id, provider) predicate used by get_me and unlink_google.
+        Index("ix_auth_identities_user_provider", "user_id", "provider"),
     )
 
     def __repr__(self) -> str:
@@ -256,10 +281,6 @@ class Profile(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_profile_user_name"),
         CheckConstraint("length(name) > 0", name="chk_profile_name"),
-        CheckConstraint(
-            "deleting_at IS NULL OR deleting_at IS NOT NULL",
-            name="chk_profile_deleting",
-        ),
     )
 
     def __repr__(self) -> str:
@@ -781,6 +802,50 @@ class Breath(Base):
         return (
             f"<Breath(id={self.id}, analysis_result_id={self.analysis_result_id}, "
             f"breath_number={self.breath_number})>"
+        )
+
+
+class ImportJobRecord(Base):
+    """Persisted record of an import job, updated at each state transition.
+
+    Written at PENDING, RUNNING, and terminal states so the job survives server
+    restarts.  Orphaned non-terminal rows are marked failed at startup by
+    ``_recover_orphaned_import_jobs``.
+    """
+
+    __tablename__ = "import_job_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    job_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # No FK: records must survive user/profile deletion.
+    owner_user_id: Mapped[int | None] = mapped_column(Integer)
+    target_profile_id: Mapped[int | None] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sessions_imported: Mapped[int | None] = mapped_column(Integer)
+    import_result_json: Mapped[dict[str, Any] | None] = mapped_column(
+        ValidatedJSON, nullable=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    analysis_queued: Mapped[bool | None] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    # None for non-terminal states; set when the job reaches terminal state.
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_import_job_records_owner_user_id", "owner_user_id"),
+        Index("ix_import_job_records_user_created", "owner_user_id", "created_at"),
+        CheckConstraint(
+            "state IN ('pending_upload','pending','running','succeeded','failed','cancelled')",
+            name="chk_import_job_record_state",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ImportJobRecord(id={self.id}, job_id={self.job_id}, state={self.state})>"
         )
 
 

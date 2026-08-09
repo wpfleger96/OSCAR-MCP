@@ -32,6 +32,7 @@ from snore.api.config import load_config, set_config
 from snore.api.deps import get_actor, get_db
 from snore.auth.actor import ActorContext, AuthMode
 from snore.auth.factory import ActorContextFactory
+from tests.helpers.api_client import make_test_client
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -49,20 +50,7 @@ def _multiuser_config(
 
 
 def _make_client(async_db_session: AsyncSession) -> TestClient:
-    app = create_app()
-
-    async def _override_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    async def _override_actor(
-        db: Annotated[AsyncSession, Depends(get_db)],
-    ) -> ActorContext:
-        return await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
-
-    app.dependency_overrides[get_db] = _override_db
-    app.dependency_overrides[get_actor] = _override_actor
-    return TestClient(app, raise_server_exceptions=True)
+    return make_test_client(async_db_session)
 
 
 # ---------------------------------------------------------------------------
@@ -405,8 +393,8 @@ class TestImportant1UploadChunkedCopy:
         monkeypatch.setattr(
             import_mod, "_get_upload_limits", lambda: (512 * 1024 * 1024, 500, 10)
         )
-        # Patch _start_worker to a no-op so cleanup doesn't race.
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        # Patch enqueue_for_execution to a no-op so the worker never runs.
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
         # Record global count before the upload.
         count_before = jobs_mod._global_count
@@ -829,7 +817,7 @@ class TestP2UploadLifecycle:
             "_get_upload_limits",
             lambda: (512 * 1024 * 1024, 500, 256 * 1024 * 1024),
         )
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
         # Redirect snore-upload-* dirs to test-private tmp_path (xdist-safe).
         created_dirs: list[Path] = []
@@ -887,7 +875,7 @@ class TestP2UploadLifecycle:
         monkeypatch.setattr(
             import_mod, "_get_upload_limits", lambda: (512 * 1024 * 1024, 500, 10)
         )
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
         count_before = jobs_mod._global_count
 
@@ -903,7 +891,7 @@ class TestP2UploadLifecycle:
 
     @pytest.mark.asyncio
     async def test_upload_cancel_drives_real_handler(
-        self, async_db_session, db_session, monkeypatch
+        self, async_db_session, db_session, monkeypatch, tmp_path
     ):
         """Cancel a real POST /api/v1/import mid-copy via httpx.AsyncClient.
 
@@ -948,10 +936,24 @@ class TestP2UploadLifecycle:
             # Return without error so the copy "succeeds" after unblocking.
 
         monkeypatch.setattr(import_mod, "_copy_chunked", blocking_copy)
-        monkeypatch.setattr(import_mod, "_start_worker", lambda *a, **kw: None)
+        monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
+
+        # Redirect snore-upload-* dirs to test-private tmp_path (xdist-safe):
+        # asserting on the shared global tempdir races with upload tests running
+        # concurrently in other workers.
+        original_mkdtemp = tempfile.mkdtemp
+
+        def redirected_mkdtemp(
+            prefix: str = "tmp", suffix: str = "", dir: str | None = None
+        ) -> str:
+            if prefix == "snore-upload-":
+                return original_mkdtemp(prefix=prefix, suffix=suffix, dir=str(tmp_path))
+            return original_mkdtemp(prefix=prefix, suffix=suffix, dir=dir)
+
+        monkeypatch.setattr(tempfile, "mkdtemp", redirected_mkdtemp)
 
         count_before = jobs_mod._global_count
-        tmpdir_before = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+        tmpdir_before = set(glob.glob(f"{tmp_path}/snore-upload-*"))
 
         app = create_app()
 
@@ -1038,14 +1040,14 @@ class TestP2UploadLifecycle:
 
             # Poll until finally-cleanup finishes (max 2s, 20 × 0.1s).
             for _ in range(20):
-                remaining = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+                remaining = set(glob.glob(f"{tmp_path}/snore-upload-*"))
                 if not (remaining - tmpdir_before):
                     break
                 await asyncio.sleep(0.1)
 
         app.dependency_overrides.clear()
 
-        tmpdir_after = set(glob.glob(f"{tempfile.gettempdir()}/snore-upload-*"))
+        tmpdir_after = set(glob.glob(f"{tmp_path}/snore-upload-*"))
         leaked = tmpdir_after - tmpdir_before
         assert not leaked, (
             f"snore-upload-* leaked after CancelledError: {leaked}\n"
@@ -1423,12 +1425,13 @@ class TestP2InviteTokenNotInUrl:
         )
 
     def test_invite_token_absent_from_server_access_log(self, tmp_path):
-        """POST to /auth/invites/lookup with token in body must not log the token.
+        """POST to /auth/invites/lookup and /auth/invites/google with token in body
+        must not log the token.
 
-        Starts a real snore serve process, sends a request with a known token
-        in the request body (not URL), then asserts the raw token string is
+        Starts a real snore serve process, sends requests with known tokens in
+        the request bodies (not URLs), then asserts the raw token strings are
         absent from all server output.  Uvicorn's access log only records the
-        path; with body-based tokens the path is always '/api/v1/auth/invites/lookup'.
+        path; with body-based tokens the paths are always fixed strings.
         SNORE_MULTIUSER_PLAN.md:233.
         """
         import json
@@ -1437,12 +1440,15 @@ class TestP2InviteTokenNotInUrl:
         import urllib.request
 
         token = uuid.uuid4().hex
+        google_token = uuid.uuid4().hex
         port = 18772
 
         env = os.environ.copy()
         env["SNORE_AUTH_MODE"] = "multiuser"
         env["SNORE_SESSION_SECRET"] = "test-secret-at-least-32-chars-long-abcdef"
         env["SNORE_PUBLIC_BASE_URL"] = f"http://127.0.0.1:{port}"
+        env["GOOGLE_CLIENT_ID"] = "test-client-id.apps.googleusercontent.com"
+        env["GOOGLE_CLIENT_SECRET"] = "test-client-secret"
         env["SNORE_BIND_HOST"] = "127.0.0.1"
         env["SNORE_DB_PATH"] = str(tmp_path / "test.db")
 
@@ -1469,19 +1475,36 @@ class TestP2InviteTokenNotInUrl:
             else:
                 pytest.fail("Server did not start within timeout")
 
-            # Send POST with known token in request body (not URL).
+            base_url = f"http://127.0.0.1:{port}"
+
+            # Test 1: POST /auth/invites/lookup — token in body (not URL).
             req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/api/v1/auth/invites/lookup",
+                f"{base_url}/api/v1/auth/invites/lookup",
                 data=json.dumps({"token": token}).encode(),
                 headers={
                     "Content-Type": "application/json",
-                    "Origin": f"http://127.0.0.1:{port}",
+                    "Origin": base_url,
                 },
             )
             try:
                 urllib.request.urlopen(req, timeout=5)
             except urllib.error.HTTPError:
                 pass  # valid=false → 200 is fine; any 4xx is also acceptable
+
+            # Test 2: POST /auth/invites/google — token in body (not URL).
+            # Uses a different token so any leak is unambiguous.
+            req2 = urllib.request.Request(
+                f"{base_url}/api/v1/auth/invites/google",
+                data=json.dumps({"token": google_token}).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": base_url,
+                },
+            )
+            try:
+                urllib.request.urlopen(req2, timeout=5)
+            except urllib.error.HTTPError:
+                pass  # 400 (invalid invite) is expected; just checking logs
 
         finally:
             proc.terminate()
@@ -1491,10 +1514,15 @@ class TestP2InviteTokenNotInUrl:
                 proc.kill()
                 output, _ = proc.communicate()
 
-        # The raw token must NOT appear anywhere in the server output.
+        # The raw tokens must NOT appear anywhere in the server output.
         assert token not in output, (
             f"Raw invite token found in server access log output.\n"
             f"SNORE_MULTIUSER_PLAN.md:233 — tokens must never appear in logs.\n"
+            f"Output snippet: {output[:500]!r}"
+        )
+        assert google_token not in output, (
+            f"Raw Google invite token found in server access log output.\n"
+            f"POST /auth/invites/google token must stay in request body only.\n"
             f"Output snippet: {output[:500]!r}"
         )
 
@@ -1551,7 +1579,7 @@ class TestP2PasswordValidatorInvariant:
 
 
 class TestP2CsrfFailsClosedOnNoneOrigin:
-    """CsrfMiddleware must return 403 (not pass) when public_origin is None."""
+    """AuthPathMiddleware must return 403 (not pass) when public_origin is None."""
 
     def test_csrf_fails_closed_with_no_public_origin(self, monkeypatch):
         """If AppConfig.public_origin is somehow None in multiuser, CSRF fails closed.
@@ -1573,10 +1601,16 @@ class TestP2CsrfFailsClosedOnNoneOrigin:
             trusted_proxies=frozenset(),
             dev_origins=frozenset(),
             cors_origins=["http://localhost:5173"],
+            google_client_id="",
+            google_client_secret="",
+            oauth_attempt_ttl_seconds=600,
+            pre_auth_cookie_ttl_seconds=600,
             max_upload_bytes=512 * 1024 * 1024,
             max_file_bytes=256 * 1024 * 1024,
+            max_upload_files=10_000,
             max_jobs_per_user=3,
             max_jobs_global=10,
+            analysis_max_workers=4,
         )
         set_config(broken_cfg)
 
@@ -1875,7 +1909,7 @@ class TestP3DevOriginStrictValidation:
 class TestP3AuthBodyCeiling413:
     """The 16 KiB auth-body ceiling must return 413 regardless of encoding.
 
-    The pre-read buffer in CsrfMiddleware.dispatch consumes the full ASGI
+    The pre-read buffer in AuthPathMiddleware.dispatch consumes the full ASGI
     stream before call_next, making Content-Length presence, accuracy, and
     chunked encoding irrelevant.  Tests use httpx.AsyncClient + ASGITransport
     for chunked/generator bodies that TestClient cannot model.
@@ -2091,7 +2125,7 @@ class TestP3AuthBodyCeiling413:
 
         from snore.api.middleware import (  # noqa: PLC0415
             _AUTH_BODY_LIMIT,
-            CsrfMiddleware,
+            AuthPathMiddleware,
         )
 
         # Two frames that cross the limit; any further receive call is a drain bug.
@@ -2136,7 +2170,7 @@ class TestP3AuthBodyCeiling413:
         async def _noop_app(scope, receive, send):
             pass
 
-        csrf_mw = CsrfMiddleware(app=_noop_app)
+        csrf_mw = AuthPathMiddleware(app=_noop_app)
         call_next_invoked = [False]
 
         async def fake_call_next(req: Request) -> StarletteResponse:
@@ -2161,7 +2195,7 @@ class TestP3AuthBodyCeiling413:
         """
         from starlette.requests import Request  # noqa: PLC0415
 
-        from snore.api.middleware import CsrfMiddleware  # noqa: PLC0415
+        from snore.api.middleware import AuthPathMiddleware  # noqa: PLC0415
 
         frames_iter = iter(
             [
@@ -2199,7 +2233,7 @@ class TestP3AuthBodyCeiling413:
         async def _noop_app2(scope, receive, send):
             pass
 
-        csrf_mw = CsrfMiddleware(app=_noop_app2)
+        csrf_mw = AuthPathMiddleware(app=_noop_app2)
         call_next_invoked = [False]
 
         async def fake_call_next(req: Request) -> StarletteResponse:
@@ -2228,7 +2262,7 @@ class TestP3AuthBodyCeiling413:
         from starlette.requests import Request  # noqa: PLC0415
         from starlette.responses import Response as StarletteResponse  # noqa: PLC0415
 
-        from snore.api.middleware import CsrfMiddleware  # noqa: PLC0415
+        from snore.api.middleware import AuthPathMiddleware  # noqa: PLC0415
 
         body_bytes = b'{"email":"test@example.com","password":"pw"}'
         sentinel_msg = {"type": "http.disconnect", "body": b"SENTINEL"}
@@ -2288,7 +2322,7 @@ class TestP3AuthBodyCeiling413:
         async def _noop_app3(scope, receive, send):
             pass
 
-        csrf_mw = CsrfMiddleware(app=_noop_app3)
+        csrf_mw = AuthPathMiddleware(app=_noop_app3)
 
         received_in_handler: list[dict] = []
 

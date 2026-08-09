@@ -18,10 +18,6 @@ Scenarios:
 
 from __future__ import annotations
 
-import pytest
-
-import snore.api.import_jobs as job_store
-
 from snore.api.import_jobs import (
     ImportJob,
     JobPhase,
@@ -32,29 +28,12 @@ from snore.api.import_jobs import (
 )
 
 # ---------------------------------------------------------------------------
-# Fixture: clean job store between tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def clean_job_store():
-    """Reset the job store before and after each test."""
-    job_store._jobs.clear()
-    job_store._per_user_count.clear()
-    job_store._global_count = 0
-    yield
-    job_store._jobs.clear()
-    job_store._per_user_count.clear()
-    job_store._global_count = 0
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
 def _make_job() -> ImportJob:
-    return create_job(JobType.PATH, sources=[])
+    return create_job(JobType.PATH)
 
 
 def _drain(ch: ObserverChannel, *, timeout: float = 0.1) -> list[dict]:
@@ -212,81 +191,80 @@ def test_late_observer_sees_import_committed_and_import_result():
 
 
 # ---------------------------------------------------------------------------
-# Test 5: analysis failure after committed import
+# Test 5: successful import enqueues analysis — terminal carries analysis_job_id
 # ---------------------------------------------------------------------------
 
 
-def test_analysis_failure_after_committed_import_carries_import_committed():
-    """When import commits but analysis raises, the terminal 'error' event
-    must include import_committed=True and the import_result so the client
-    knows the data is safe even though analysis failed."""
+def test_successful_import_terminal_carries_analysis_job_id():
+    """After import commits and analysis is enqueued, the terminal 'complete'
+    event includes analysis_job_id so the client can track the background job."""
     job = _make_job()
     job.try_start()
 
     import_result = _fake_import_result()
     job.phase_complete(JobPhase.IMPORT, import_result)
 
-    # Simulate analysis failure: job lands in FAILED state.
+    # Simulate: analysis enqueue succeeded — worker builds terminal with job id.
     terminal_msg = {
-        "event": "error",
+        "event": "complete",
         "data": {
-            "message": "Analysis failed: something broke",
+            "result": import_result,
             "import_committed": True,
             "import_result": import_result,
+            "analysis_job_id": "abc123deadbeef",
         },
     }
-    job._finish(succeeded=False, terminal_msg=terminal_msg)
+    job._finish(succeeded=True, terminal_msg=terminal_msg)
 
-    assert job.state == JobState.FAILED
+    assert job.state == JobState.SUCCEEDED
 
     # Late observer receives the full payload.
     ch = job.attach_observer()
     msg = ch.get(timeout=0.1)
     assert msg is not None
-    assert msg["event"] == "error"
+    assert msg["event"] == "complete"
     assert msg["data"].get("import_committed") is True
     assert msg["data"].get("import_result") is not None
-    assert "Analysis failed" in msg["data"]["message"]
+    assert msg["data"].get("analysis_job_id") == "abc123deadbeef"
+    assert "analysis_queued" not in msg["data"]
 
 
 # ---------------------------------------------------------------------------
-# Test 6: cancel during analysis delivers import_committed in terminal
+# Test 6: analysis queue full — terminal carries analysis_queued: False
 # ---------------------------------------------------------------------------
 
 
-def test_cancel_during_analysis_late_observer_sees_import_committed():
-    """When cancel is requested during the analysis phase (after import committed),
-    the late observer's terminal payload still carries import_committed=True
-    and import_result."""
+def test_queue_full_terminal_carries_analysis_queued_false():
+    """When the analysis queue is full at import time, the terminal 'complete'
+    event carries analysis_queued=False so the client can distinguish queue-full
+    from 'nothing was imported'."""
     job = _make_job()
     job.try_start()
 
     import_result = _fake_import_result()
     job.phase_complete(JobPhase.IMPORT, import_result)
 
-    # Worker detected cancel after commit — builds terminal with import info.
+    # Simulate: queue was full — worker sets analysis_queued: False.
     terminal_msg = {
-        "event": "error",
+        "event": "complete",
         "data": {
-            "message": "Cancelled",
+            "result": import_result,
             "import_committed": True,
             "import_result": import_result,
+            "analysis_queued": False,
         },
     }
-    # _finish respects cancel_flag, but here we simulate the worker calling
-    # _finish directly with the already-prepared terminal including import info.
-    with job._lock:
-        job._cancel_flag = True
-    job._finish(succeeded=False, terminal_msg=terminal_msg)
+    job._finish(succeeded=True, terminal_msg=terminal_msg)
 
-    assert job.state == JobState.CANCELLED
+    assert job.state == JobState.SUCCEEDED
 
     ch = job.attach_observer()
     msg = ch.get(timeout=0.1)
     assert msg is not None
-    assert msg["event"] == "error"
+    assert msg["event"] == "complete"
     assert msg["data"].get("import_committed") is True
-    assert msg["data"].get("import_result") is not None
+    assert msg["data"].get("analysis_queued") is False
+    assert "analysis_job_id" not in msg["data"]
 
 
 # ---------------------------------------------------------------------------

@@ -31,39 +31,8 @@ from snore.auth.actor import ActorContext, AuthMode
 from snore.auth.factory import ActorContextFactory
 from snore.auth.lockout import LockoutStore, get_lockout_store
 from snore.database import models
-
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
-
-
-def _multiuser_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set env vars required for a minimal multiuser config."""
-    monkeypatch.setenv("SNORE_AUTH_MODE", "multiuser")
-    monkeypatch.setenv(
-        "SNORE_SESSION_SECRET",
-        "test-secret-at-least-32-chars-long-abcdef",
-    )
-    monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "http://127.0.0.1:8000")
-
-
-def _make_multiuser_client(async_db_session: AsyncSession) -> TestClient:
-    """Build a TestClient in multiuser mode with get_db/get_actor overridden."""
-    app = create_app()
-
-    async def override_get_db():
-        async with async_db_session.begin():
-            yield async_db_session
-
-    async def override_get_actor(
-        db: Annotated[AsyncSession, Depends(get_db)],
-    ) -> ActorContext:
-        return await ActorContextFactory(db).make_local(mode=AuthMode.LOCAL)
-
-    app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_actor] = override_get_actor
-    return TestClient(app, raise_server_exceptions=True)
-
+from tests.helpers.api_client import make_test_client
+from tests.integration.test_api.conftest import _multiuser_env  # noqa: PLC0415
 
 # ---------------------------------------------------------------------------
 # Config / startup tests
@@ -171,7 +140,7 @@ class TestLockout:
             for _ in range(15):
                 store.record_failure(email, ip)
 
-            client = _make_multiuser_client(async_db_session)
+            client = make_test_client(async_db_session)
             resp = client.post(
                 "/api/v1/auth/login",
                 json={"email": email, "password": "whatever"},
@@ -435,7 +404,7 @@ class TestCSRFOriginCheck:
 
     def test_login_wrong_origin_rejected(self, async_db_session):
         """POST /auth/login with a wrong Origin → 403."""
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/auth/login",
             json={"email": "x@example.com", "password": "pw"},
@@ -446,7 +415,7 @@ class TestCSRFOriginCheck:
 
     def test_login_no_origin_rejected(self, async_db_session):
         """POST /auth/login with no Origin/Referer → 403."""
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/auth/login",
             json={"email": "x@example.com", "password": "pw"},
@@ -456,7 +425,7 @@ class TestCSRFOriginCheck:
     def test_login_correct_origin_passes_csrf_check(self, async_db_session):
         """POST /auth/login with the correct configured origin passes the CSRF check
         (may still fail auth — but not with 403)."""
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/auth/login",
             json={"email": "nonexistent@example.com", "password": "pw"},
@@ -467,7 +436,7 @@ class TestCSRFOriginCheck:
 
     def test_logout_wrong_origin_rejected(self, async_db_session):
         """POST /auth/logout with wrong Origin → 403."""
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/auth/logout",
             headers={"origin": "https://attacker.example.com"},
@@ -476,7 +445,7 @@ class TestCSRFOriginCheck:
 
     def test_logout_correct_origin_succeeds(self, async_db_session):
         """POST /auth/logout with correct Origin → 200."""
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/auth/logout",
             headers={"origin": "http://127.0.0.1:8000"},
@@ -485,7 +454,7 @@ class TestCSRFOriginCheck:
 
     def test_redeem_invite_wrong_origin_rejected(self, async_db_session):
         """POST /auth/invites/redeem with wrong Origin → 403."""
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/auth/invites/redeem",
             json={"token": "sometoken", "password": "password123"},
@@ -518,7 +487,7 @@ class TestPathImportAbsenceInMultiuser:
         A 403 would mean CSRF blocked the request before routing — that proves
         nothing about structural absence and masks a misconfigured route.
         """
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/import/detect",
             json={"path": "/some/path"},
@@ -530,7 +499,7 @@ class TestPathImportAbsenceInMultiuser:
 
     def test_import_path_not_reachable_in_multiuser(self, async_db_session):
         """/import/path is not registered in multiuser mode."""
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/import/path",
             json={"sources": []},
@@ -546,7 +515,7 @@ class TestPathImportAbsenceInMultiuser:
 
         cfg = load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
         set_config(cfg)
-        client = _make_multiuser_client(async_db_session)
+        client = make_test_client(async_db_session)
         resp = client.post(
             "/api/v1/import/detect",
             json={"path": "/nonexistent/path"},
@@ -916,7 +885,7 @@ class TestInviteLifecycle:
         """
         _multiuser_env(monkeypatch)
 
-        from snore.auth.invite import InviteRedemptionError, redeem_invite
+        from snore.auth.invite import InviteRedemptionError
         from snore.database.session import (
             cleanup_database,
             init_database,
@@ -948,12 +917,14 @@ class TestInviteLifecycle:
             await db.flush()
             invite_id = inv.id
 
+        from tests.helpers.invites import redeem_invite_once
+
         # First redemption: must succeed.
-        await redeem_invite(invite_id)
+        await redeem_invite_once(invite_id)
 
         # Second redemption of the same invite_id: must raise.
         with pytest.raises(InviteRedemptionError, match="already been redeemed"):
-            await redeem_invite(invite_id)
+            await redeem_invite_once(invite_id)
 
         # Exactly one redeemed_at timestamp.
         from sqlalchemy import select  # noqa
