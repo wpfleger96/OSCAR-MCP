@@ -401,6 +401,54 @@ class TestDeleteStaleVersions:
         ).scalar()
         assert remaining == 0
 
+    async def test_malformed_nested_engine_json_classified_stale(
+        self, async_db_session, async_test_device
+    ):
+        """A row with 'identity' key but unparseable nested content is classified stale.
+
+        Exercises AlgoVersions.from_stored robustness: the ValidationError path
+        must not propagate — the row must be treated as stale without crashing
+        get_delete_preview or delete_analysis.
+        """
+        today = date.today()
+        day = Day(device_id=async_test_device.id, date=today, total_therapy_hours=8.0)
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        sess = Session(
+            device_id=async_test_device.id,
+            day_id=day.id,
+            device_session_id=f"malformed_{today.isoformat()}",
+            start_time=datetime.combine(today, datetime.min.time()),
+            end_time=datetime.combine(today, datetime.min.time()) + timedelta(hours=8),
+            duration_seconds=28800,
+        )
+        async_db_session.add(sess)
+        await async_db_session.flush()
+
+        # "identity" key present but the nested content is unparseable — this
+        # used to raise ValidationError in from_stored; after the fix it returns None.
+        malformed_ar = AnalysisResult(
+            session_id=sess.id,
+            timestamp_start=sess.start_time,
+            timestamp_end=sess.end_time,
+            engine_versions_json={"identity": "not_a_dict", "run": "also_invalid"},
+            created_at=datetime.now(UTC),
+        )
+        async_db_session.add(malformed_ar)
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+
+        # Must not raise; malformed row must be classified stale.
+        preview = await service.get_delete_preview(delete_all=True, stale_versions=True)
+        assert preview.sessions_with_analysis == 1
+        assert preview.records_to_delete == 1
+
+        # Delete must also succeed without crash.
+        deleted = await service.delete_analysis([sess.id], stale_versions=True)
+        assert deleted == 1
+
     async def test_delete_stale_versions_with_all_scope(
         self, async_db_session, async_test_device
     ):

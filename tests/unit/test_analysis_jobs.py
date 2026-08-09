@@ -536,7 +536,7 @@ def test_get_job_concurrency_falls_back_to_default_when_config_raises(monkeypatc
 
 
 def test_two_jobs_run_concurrently():
-    """Under the default concurrency (MAX_QUEUED), both jobs reach RUNNING before either finishes."""
+    """Under the default concurrency (4 workers >= 2 jobs), both jobs reach RUNNING before either finishes."""
     import threading
 
     from unittest.mock import patch
@@ -558,8 +558,8 @@ def test_two_jobs_run_concurrently():
         release.wait(timeout=5.0)
         job.finish(succeeded=True)
 
-    # No _get_job_concurrency patch: the default (MAX_QUEUED) allows all admitted
-    # jobs to start immediately, so 2 jobs trivially run concurrently.
+    # No _get_job_concurrency patch: the default (4 workers) is >= 2 jobs, so
+    # both run concurrently without waiting for one another.
     with patch("snore.api.analysis_jobs._execute_job", side_effect=fake_execute):
         job1 = enqueue(profile_id=1, session_ids=[1], source=AnalysisJobSource.BATCH)
         job2 = enqueue(profile_id=1, session_ids=[2], source=AnalysisJobSource.BATCH)
@@ -573,7 +573,7 @@ def test_two_jobs_run_concurrently():
                 "job2 never reached RUNNING concurrently with job1"
             )
         finally:
-            release.set()
+            release.set()  # unblock any blocked fake_execute before stopping
             stop_event.set()
             with jobs._condition:
                 jobs._condition.notify_all()
@@ -633,6 +633,7 @@ def test_serial_when_concurrency_one():
                 "job2 never started after job1 finished"
             )
         finally:
+            release_job1.set()  # unblock fake_execute if the test body failed early
             stop_event.set()
             with jobs._condition:
                 jobs._condition.notify_all()
@@ -647,8 +648,6 @@ def test_serial_when_concurrency_one():
 
 def test_shutdown_joins_all_worker_threads():
     """shutdown() waits for all analysis-job-worker-* threads to exit."""
-    import threading
-
     from unittest.mock import patch
 
     with patch("snore.api.analysis_jobs._get_job_concurrency", return_value=3):
@@ -659,11 +658,10 @@ def test_shutdown_joins_all_worker_threads():
 
     shutdown(timeout=5.0)
 
-    alive = [
-        t for t in threading.enumerate() if t.name.startswith("analysis-job-worker")
-    ]
-    assert not alive, (
-        f"Worker threads still alive after shutdown: {[t.name for t in alive]}"
+    # Assert that the threads this test started are all dead — not a global scan,
+    # which would be flaky if a prior test leaked a thread.
+    assert not any(t.is_alive() for t in threads), (
+        f"Worker threads still alive after shutdown: {[t.name for t in threads if t.is_alive()]}"
     )
 
 
@@ -715,3 +713,17 @@ def test_to_dict_eta_seconds_none_after_completion():
     d = job.to_dict()
     assert d["state"] == "succeeded"
     assert d["eta_seconds"] is None
+
+
+def test_to_dict_eta_seconds_zero_when_overcompleted():
+    """eta_seconds is 0, not negative, when progress_completed exceeds progress_total."""
+    job = _enqueue_one(session_ids=list(range(10)))
+    job.try_start()
+    # Simulate a race where completed overshoots total.
+    with job._lock:
+        job._started_at = time.monotonic() - 5.0
+    job.update_progress(done=12, total=10)
+
+    d = job.to_dict()
+    assert d["state"] == "running"
+    assert d["eta_seconds"] == 0

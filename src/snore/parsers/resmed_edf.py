@@ -716,7 +716,7 @@ class ResmedEDFParser(DeviceParser):
             except BrokenProcessPool as exc:
                 raise RuntimeError(
                     f"Parser worker process crashed: {exc}. "
-                    "Reduce SNORE_COMPUTE_MAX_WORKERS if memory is constrained."
+                    "Reduce SNORE_PARSE_MAX_WORKERS if memory is constrained."
                 ) from exc
             finally:
                 cancel_pending(futures)

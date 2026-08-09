@@ -32,8 +32,10 @@ import multiprocessing
 import os
 import threading
 
-from collections.abc import Iterable
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+
+from snore.utils.process_pool import _is_broken
+from snore.utils.process_pool import cancel_pending as cancel_pending  # re-export
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +51,6 @@ def _read_max_workers() -> int:
         return get_config().parse_max_workers
     except Exception:
         return max(1, (os.cpu_count() or 2) // 2)
-
-
-def _is_broken(pool: ProcessPoolExecutor) -> bool:
-    """Return True when *pool* has been marked broken by a worker crash.
-
-    Relies on the CPython-private ``_broken`` attribute of
-    ``ProcessPoolExecutor``.  If a future CPython version renames this
-    attribute, ``test_broken_sentinel_exists`` in ``tests/unit/test_parse_pool.py``
-    will fail in CI before the regression reaches production.
-    """
-    return bool(getattr(pool, "_broken", False))
 
 
 def get_pool() -> ProcessPoolExecutor:
@@ -114,19 +105,3 @@ def shutdown_pool(*, wait: bool = False) -> None:
             pool.shutdown(wait=wait, cancel_futures=True)
         except Exception:
             logger.warning("Error shutting down parse process pool", exc_info=True)
-
-
-def cancel_pending(futures: Iterable[Future]) -> None:  # type: ignore[type-arg]
-    """Cancel all not-yet-started futures.
-
-    Intended for cancelling the remaining work of an import job without
-    touching the parse pool.  Callers MUST NOT shut down the pool on job
-    cancel.
-
-    Args:
-        futures: Iterable of ``Future`` objects.  Already-done futures are
-            silently skipped.
-    """
-    for f in futures:
-        if not f.done():
-            f.cancel()

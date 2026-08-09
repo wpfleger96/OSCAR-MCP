@@ -114,12 +114,14 @@ def test_default_max_workers_at_least_one(monkeypatch):
 def test_default_max_workers_half_cpu(monkeypatch):
     """Default parse pool size is cpu_count // 2 when cpu_count >= 2."""
     monkeypatch.setattr("os.cpu_count", lambda: 8)
-    # Patch get_config to raise so the fallback path is exercised.
-    monkeypatch.setattr(
-        "snore.utils.parse_pool._read_max_workers",
-        lambda: max(1, (8 or 2) // 2),
-    )
-    assert _pp_module._read_max_workers() == 4
+
+    # Force the config-read fallback so the real max(1, cpu//2) formula executes.
+    def _no_config() -> None:
+        raise RuntimeError("no config in test environment")
+
+    monkeypatch.setattr("snore.api.config.get_config", _no_config)
+    size = _pp_module._read_max_workers()
+    assert size == 4
 
 
 # ---------------------------------------------------------------------------

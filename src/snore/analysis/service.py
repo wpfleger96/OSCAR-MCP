@@ -77,6 +77,8 @@ __all__ = [
     "AnalysisResult",
 ]
 
+_RAMP_KEYS: frozenset[str] = frozenset({"ramp_enabled", "ramp_time", "smart_ramp"})
+
 
 @dataclass
 class RawSessionBlobs:
@@ -235,28 +237,21 @@ class AnalysisService:
             duration_threshold=PCC.DURATION_THRESHOLD,
         )
 
-    async def _load_machine_events(self, session_id: int) -> list[AnalysisEvent]:
-        """
-        Load machine-flagged events from database.
+    async def _load_machine_events(
+        self, session_id: int, session_start_ts: float
+    ) -> list[AnalysisEvent]:
+        """Load machine-flagged events from database.
 
         Args:
             session_id: Database session ID
+            session_start_ts: Session start Unix timestamp, supplied by the caller
+                (already fetched in load_session_inputs_raw) to avoid a redundant
+                Session + Device query.
 
         Returns:
             List of respiratory events with session-relative timestamps
         """
         assert self.db_session is not None, "_load_machine_events requires a DB session"
-        # Scope session lookup to this profile — consistent with load_session_inputs_raw.
-        stmt = select(models.Session).where(models.Session.id == session_id)
-        if self.profile_id is not None:
-            stmt = stmt.join(
-                models.Device, models.Session.device_id == models.Device.id
-            ).where(models.Device.profile_id == self.profile_id)
-        session = (await self.db_session.execute(stmt)).scalars().first()
-        if not session:
-            return []
-
-        session_start_ts = session.start_time.timestamp()
 
         events = (
             (
@@ -349,13 +344,12 @@ class AnalysisService:
         # out to one row per matching Setting; the Device/Session columns are
         # identical across all rows.  When no Setting rows match, the outer join
         # produces one row with Setting.key/value = NULL.
-        _RAMP_KEYS = ("ramp_enabled", "ramp_time", "smart_ramp")
         stmt = (
             select(
                 models.Session,
-                models.Device.manufacturer,
-                models.Setting.key,
-                models.Setting.value,
+                models.Device.manufacturer.label("manufacturer"),
+                models.Setting.key.label("setting_key"),
+                models.Setting.value.label("setting_value"),
             )
             .join(models.Device, models.Session.device_id == models.Device.id)
             .outerjoin(
@@ -364,18 +358,21 @@ class AnalysisService:
                 & models.Setting.key.in_(_RAMP_KEYS),
             )
             .where(models.Session.id == session_id)
+            .where(models.Device.profile_id == self.profile_id)
         )
-        if self.profile_id is not None:
-            stmt = stmt.where(models.Device.profile_id == self.profile_id)
 
         rows = (await self.db_session.execute(stmt)).all()
         if not rows:
             raise ValueError(f"Session {session_id} not found")
 
-        session = rows[0][0]
-        device_manufacturer: str = rows[0][1] if rows[0][1] is not None else "unknown"
+        session = rows[0].Session
+        device_manufacturer: str = (
+            rows[0].manufacturer if rows[0].manufacturer is not None else "unknown"
+        )
         settings_by_key: dict[str, str | None] = {
-            row[2]: row[3] for row in rows if row[2] is not None
+            row.setting_key: row.setting_value
+            for row in rows
+            if row.setting_key is not None
         }
 
         # Validity-flag inputs: persisted mask-on segments + ramp settings.
@@ -403,7 +400,9 @@ class AnalysisService:
         if flow_sample_count == 0:
             raise ValueError(f"Empty flow waveform data for session {session_id}")
 
-        machine_events = await self._load_machine_events(session_id)
+        machine_events = await self._load_machine_events(
+            session_id, session.start_time.timestamp()
+        )
 
         spo2_blob: bytes | None = None
         spo2_sample_count = 0

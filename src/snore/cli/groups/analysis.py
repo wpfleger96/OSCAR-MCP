@@ -373,6 +373,9 @@ def analysis_delete(
             )
             facade = AnalysisFacade(session, profile_id)
 
+            if stale_versions and all_versions:
+                print_warning("--all-versions is ignored when --stale-versions is set")
+
             try:
                 preview = await facade.get_delete_preview(
                     session_ids=id_list,

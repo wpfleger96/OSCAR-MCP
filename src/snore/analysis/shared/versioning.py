@@ -167,10 +167,13 @@ class AlgoVersions(BaseModel):
 
     @classmethod
     def from_stored(cls, raw: dict[str, Any]) -> AlgoVersions | None:
-        """Parse stored engine_versions_json.  Returns None for legacy flat rows."""
-        if "identity" not in raw:
-            return None  # legacy flat row → STALE_VERSION
-        return cls.model_validate(raw)
+        """Parse stored engine_versions_json.  Returns None for legacy/malformed rows."""
+        if not isinstance(raw, dict) or "identity" not in raw:
+            return None  # legacy flat row or None/non-dict input → STALE_VERSION
+        try:
+            return cls.model_validate(raw)
+        except Exception:
+            return None  # nested but unparseable → classify as stale
 
 
 # ---------------------------------------------------------------------------

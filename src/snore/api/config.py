@@ -80,6 +80,11 @@ Environment variables
     pool so large imports do not starve analysis jobs.  Default:
     ``max(1, cpu_count // 2)``.
 
+    **Combined footprint:** total worker processes = compute (default
+    ``cpu_count - 1``) + parse (default ``cpu_count // 2``), each ~75-150 MB
+    RSS.  Operators tuning memory should consider both ``SNORE_COMPUTE_MAX_WORKERS``
+    and ``SNORE_PARSE_MAX_WORKERS`` together.
+
 ``SNORE_BOOTSTRAP_ADMIN_EMAIL``
     Optional.  Multiuser mode only.  When no active admin user exists at
     startup, automatically creates a 7-day admin invite for this address and

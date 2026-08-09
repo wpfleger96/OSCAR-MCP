@@ -211,6 +211,13 @@ class AnalysisJob:
             self._progress_total = total or 0
 
     def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serialisable snapshot of this job's state.
+
+        eta_seconds is a linear extrapolation: (elapsed / done) * remaining.
+        Early estimates can be imprecise; the value is clamped to zero so a
+        race where progress_completed momentarily exceeds progress_total never
+        produces a negative ETA.
+        """
         with self._lock:
             eta: int | None = None
             if (
@@ -220,7 +227,7 @@ class AnalysisJob:
                 and self._progress_total > 0
             ):
                 elapsed = time.monotonic() - self._started_at
-                remaining = self._progress_total - self._progress_completed
+                remaining = max(0, self._progress_total - self._progress_completed)
                 eta = round((elapsed / self._progress_completed) * remaining)
             return {
                 "job_id": self.job_id,

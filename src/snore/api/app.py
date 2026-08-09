@@ -160,27 +160,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         reaper_stop.set()
         reaper_thread.join(timeout=5.0)
+        _still_alive_error: RuntimeError | None = None
         try:
             still_alive = _shutdown_import_jobs()
             if still_alive:
-                raise RuntimeError(
+                _still_alive_error = RuntimeError(
                     f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
                     f"after timeout: {still_alive}. Active import writes may be interrupted."
                 )
+        finally:
             # Stop analysis jobs first — they may have futures in the shared process
             # pool, so the pool must still be alive while they drain.
-            _shutdown_analysis_jobs()
-            from snore.utils.parse_pool import (  # noqa: PLC0415
-                shutdown_pool as shutdown_parse_pool,
-            )
-            from snore.utils.process_pool import shutdown_pool  # noqa: PLC0415
+            try:
+                _shutdown_analysis_jobs()
+            except Exception:
+                logger.warning("Error shutting down analysis jobs", exc_info=True)
+            try:
+                from snore.utils.process_pool import shutdown_pool  # noqa: PLC0415
 
-            shutdown_pool(wait=False)
-            shutdown_parse_pool(wait=False)
-        finally:
+                shutdown_pool(wait=False)
+            except Exception:
+                logger.warning(
+                    "Error shutting down compute process pool", exc_info=True
+                )
+            try:
+                from snore.utils.parse_pool import (  # noqa: PLC0415
+                    shutdown_pool as shutdown_parse_pool,
+                )
+
+                shutdown_parse_pool(wait=False)
+            except Exception:
+                logger.warning("Error shutting down parse process pool", exc_info=True)
             # Release the shared writer lease unconditionally — even if import-job
             # shutdown raises the still-alive RuntimeError above.
             lease.release()
+        if _still_alive_error is not None:
+            raise _still_alive_error
 
 
 async def _startup_purge_expired_oauth_attempts() -> None:
