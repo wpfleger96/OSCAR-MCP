@@ -1,6 +1,7 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
 import type { components } from '@/types/generated'
 
+type McpStatus = components['schemas']['McpStatus']
 type UserItem = components['schemas']['UserItem']
 type PatchUserRequest = components['schemas']['PatchUserRequest']
 type InviteItem = components['schemas']['InviteItem']
@@ -33,3 +34,5 @@ export const createInvite = apiPost<InviteCreatedResponse, [body: CreateInviteRe
 export const revokeInvite = apiDelete<MessageResponse, [inviteId: number]>(
     (inviteId) => `/admin/invites/${inviteId}`,
 )
+
+export const getMcpStatus = apiGet<McpStatus>('/admin/mcp/status')

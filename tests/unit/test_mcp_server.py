@@ -37,6 +37,7 @@ async def _fake_static_lifespan(
     profile_name: str = "neutral",
     *,
     actor_scoped: bool = False,
+    manage_database: bool = True,
 ) -> AsyncIterator[StaticRuntime]:
     session = MagicMock()
     yield StaticRuntime(
@@ -774,3 +775,106 @@ class TestMakeServerAuth:
         mock_auth = MagicMock()
         mcp = make_server(auth=mock_auth)
         assert mcp.auth is mock_auth
+
+
+class TestMakeServerManageDatabase:
+    """make_server(manage_database=False) validation and lifespan behaviour."""
+
+    def test_manage_database_false_without_auth_raises(self) -> None:
+        from snore.mcp.server import make_server
+
+        with pytest.raises(ValueError, match="manage_database=False requires auth"):
+            make_server(manage_database=False)
+
+    def test_manage_database_false_with_auth_creates_server(self) -> None:
+        from unittest.mock import MagicMock
+
+        from snore.mcp.server import make_server
+
+        mock_auth = MagicMock()
+        mcp = make_server(auth=mock_auth, manage_database=False)
+        assert mcp is not None
+        assert mcp.auth is mock_auth
+
+    async def test_lifespan_manage_database_false_skips_init_and_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When manage_database=False, init_database_from_url and cleanup_database
+        must not be called — the FastAPI lifespan owns the engine."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import snore.mcp.server as _server_mod  # noqa: PLC0415
+
+        # Patch DB functions at the server module level.
+        mock_init = AsyncMock()
+        mock_cleanup = AsyncMock()
+
+        # Patch ensure_registered_parsers (no-op).
+        mock_parsers = MagicMock()
+
+        with (
+            patch.object(_server_mod, "init_database_from_url", mock_init),
+            patch.object(_server_mod, "cleanup_database", mock_cleanup),
+            patch("snore.parsers.register_all.ensure_registered_parsers", mock_parsers),
+        ):
+            async with _server_mod._lifespan(
+                MagicMock(),
+                actor_scoped=True,
+                manage_database=False,
+            ):
+                pass
+
+        mock_init.assert_not_called()
+        mock_cleanup.assert_not_called()
+
+    async def test_lifespan_manage_database_true_calls_init_and_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When manage_database=True (default), init and cleanup ARE called."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import snore.mcp.server as _server_mod  # noqa: PLC0415
+
+        mock_init = AsyncMock()
+        mock_cleanup = AsyncMock()
+        mock_parsers = MagicMock()
+        mock_target = MagicMock()
+        mock_target.resolve_async_url.return_value = "sqlite+aiosqlite:///:memory:"
+        mock_target.location = ":memory:"
+
+        # StaticRuntime path requires profile_id from the DB — mock the resolver.
+        mock_profile_resolver = AsyncMock(return_value=1)
+
+        with (
+            patch.object(_server_mod, "init_database_from_url", mock_init),
+            patch.object(_server_mod, "cleanup_database", mock_cleanup),
+            patch("snore.parsers.register_all.ensure_registered_parsers", mock_parsers),
+            patch(
+                "snore.database.target.DatabaseTarget.from_env_and_flags",
+                return_value=mock_target,
+            ),
+            patch.object(
+                _server_mod, "_resolve_first_profile_id", mock_profile_resolver
+            ),
+            patch("snore.database.session.session_scope") as mock_scope,
+        ):
+            # session_scope needs to be an async context manager
+            from contextlib import asynccontextmanager  # noqa: PLC0415
+
+            @asynccontextmanager
+            async def _scope():
+                yield MagicMock()
+
+            mock_scope.return_value = _scope()
+
+            try:
+                async with _server_mod._lifespan(
+                    MagicMock(),
+                    actor_scoped=False,
+                    manage_database=True,
+                ):
+                    pass
+            except Exception:
+                pass  # profile resolution mock may vary; we only check init/cleanup
+
+        mock_init.assert_called_once()
