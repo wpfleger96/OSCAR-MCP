@@ -88,7 +88,7 @@ class TestWriteGateWiring:
     """Import service and analysis facade enter the gate for their write paths."""
 
     async def test_import_service_cleanup_enters_gate(self) -> None:
-        """cleanup_orphaned_records is executed inside write_gate."""
+        """cleanup_orphaned_records is executed inside write_gate when force_cleanup=True."""
         gate_calls: list[str] = []
 
         @asynccontextmanager
@@ -107,7 +107,7 @@ class TestWriteGateWiring:
             patch("snore.services.import_service.session_scope", mock_session_scope),
             patch(
                 "snore.services.import_service.SessionImporter.cleanup_orphaned_records",
-                new=AsyncMock(return_value=0),
+                new=AsyncMock(return_value={}),
             ),
             patch("snore.services.import_service.register_all_parsers"),
             patch(
@@ -118,7 +118,9 @@ class TestWriteGateWiring:
             from snore.services.import_service import ImportService
 
             service = ImportService()
-            await service.import_sources(sources=[], dry_run=False, profile_id=1)
+            await service.import_sources(
+                sources=[], dry_run=False, profile_id=1, force_cleanup=True
+            )
 
         assert gate_calls == ["enter", "exit"], (
             f"Expected write_gate entered once for orphan cleanup, got {gate_calls}"

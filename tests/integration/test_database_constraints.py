@@ -314,7 +314,7 @@ class TestOrphanedRecordCleanup:
             assert orphaned_before == 1
 
             cleaned = await SessionImporter.cleanup_orphaned_records(session)
-            assert cleaned >= 1
+            assert sum(cleaned.values()) >= 1
 
         async with session_scope() as session:
             orphaned_after = (
@@ -349,7 +349,7 @@ class TestOrphanedRecordCleanup:
             assert orphaned_before == 1
 
             cleaned = await SessionImporter.cleanup_orphaned_records(session)
-            assert cleaned >= 1
+            assert sum(cleaned.values()) >= 1
 
         async with session_scope() as session:
             orphaned_after = (
@@ -382,7 +382,7 @@ class TestOrphanedRecordCleanup:
             assert orphaned_before == 1
 
             cleaned = await SessionImporter.cleanup_orphaned_records(session)
-            assert cleaned >= 1
+            assert sum(cleaned.values()) >= 1
 
         async with session_scope() as session:
             orphaned_after = (
@@ -416,7 +416,7 @@ class TestOrphanedRecordCleanup:
             assert orphaned_before == 1
 
             cleaned = await SessionImporter.cleanup_orphaned_records(session)
-            assert cleaned >= 1
+            assert sum(cleaned.values()) >= 1
 
         async with session_scope() as session:
             orphaned_after = (
@@ -451,7 +451,7 @@ class TestOrphanedRecordCleanup:
 
         async with session_scope() as session:
             cleaned = await SessionImporter.cleanup_orphaned_records(session)
-            assert cleaned == 3
+            assert sum(cleaned.values()) == 3
 
         async with session_scope() as session:
             total_orphaned = (
@@ -478,7 +478,7 @@ class TestOrphanedRecordCleanup:
 
         async with session_scope() as session:
             cleaned = await SessionImporter.cleanup_orphaned_records(session)
-            assert cleaned == 0
+            assert sum(cleaned.values()) == 0
 
 
 class TestDataIntegrity:

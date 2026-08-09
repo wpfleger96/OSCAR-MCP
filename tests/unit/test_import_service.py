@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from snore.database.importers import SessionImporter
 from snore.services.import_service import ImportService, safe_relative_path
 from snore.services.schemas import ImportSource
 
@@ -203,3 +204,113 @@ class TestSafeRelativePath:
 
     def test_only_nul_bytes_returns_none(self):
         assert safe_relative_path("\x00") is None
+
+
+class TestCleanupGating:
+    """import_sources only calls cleanup_orphaned_records when force_cleanup=True."""
+
+    async def test_default_does_not_call_cleanup(self, tmp_path):
+        """force_cleanup=False (default) skips cleanup_orphaned_records entirely."""
+        cleanup_mock = AsyncMock(return_value={})
+        mock_parser = MagicMock()
+        mock_parser.parser_id = "oscar_binary"
+        mock_parser.parse_sessions.return_value = iter([])
+
+        fake_db = MagicMock()
+        fake_db.get = AsyncMock(return_value=None)
+
+        @asynccontextmanager
+        async def fake_scope(**kwargs):
+            yield fake_db
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        service = ImportService()
+
+        with (
+            patch("snore.services.import_service.session_scope", fake_scope),
+            patch(
+                "snore.services.import_service.parser_registry.list_parsers",
+                return_value=[mock_parser],
+            ),
+            patch.object(SessionImporter, "cleanup_orphaned_records", cleanup_mock),
+        ):
+            await service.import_sources(
+                [source], profile_id=42, dry_run=False, backup=False
+            )
+
+        cleanup_mock.assert_not_called()
+
+    async def test_force_cleanup_calls_cleanup_once(self, tmp_path):
+        """force_cleanup=True triggers exactly one call to cleanup_orphaned_records."""
+        cleanup_mock = AsyncMock(return_value={})
+        mock_parser = MagicMock()
+        mock_parser.parser_id = "oscar_binary"
+        mock_parser.parse_sessions.return_value = iter([])
+
+        fake_db = MagicMock()
+        fake_db.get = AsyncMock(return_value=None)
+
+        @asynccontextmanager
+        async def fake_scope(**kwargs):
+            yield fake_db
+
+        @asynccontextmanager
+        async def fake_write_gate():
+            yield
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        service = ImportService()
+
+        with (
+            patch("snore.services.import_service.session_scope", fake_scope),
+            patch(
+                "snore.services.import_service.parser_registry.list_parsers",
+                return_value=[mock_parser],
+            ),
+            patch.object(SessionImporter, "cleanup_orphaned_records", cleanup_mock),
+            patch("snore.services.import_service.write_gate", fake_write_gate),
+        ):
+            await service.import_sources(
+                [source],
+                profile_id=42,
+                dry_run=False,
+                backup=False,
+                force_cleanup=True,
+            )
+
+        cleanup_mock.assert_called_once_with(ANY)
+
+    async def test_dry_run_skips_cleanup_even_with_force(self, tmp_path):
+        """dry_run=True skips cleanup regardless of force_cleanup."""
+        cleanup_mock = AsyncMock(return_value={})
+        mock_parser = MagicMock()
+        mock_parser.parser_id = "oscar_binary"
+        mock_parser.parse_sessions.return_value = iter([])
+
+        fake_db = MagicMock()
+        fake_db.get = AsyncMock(return_value=None)
+
+        @asynccontextmanager
+        async def fake_scope(**kwargs):
+            yield fake_db
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        service = ImportService()
+
+        with (
+            patch("snore.services.import_service.session_scope", fake_scope),
+            patch(
+                "snore.services.import_service.parser_registry.list_parsers",
+                return_value=[mock_parser],
+            ),
+            patch.object(SessionImporter, "cleanup_orphaned_records", cleanup_mock),
+        ):
+            await service.import_sources(
+                [source],
+                profile_id=42,
+                dry_run=True,
+                backup=False,
+                force_cleanup=True,
+            )
+
+        cleanup_mock.assert_not_called()
