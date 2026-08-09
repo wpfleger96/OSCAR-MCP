@@ -113,6 +113,9 @@ class ImportService:
             cancel_predicate: Optional callable that returns True when the caller
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
+            force_cleanup: If True (and not dry_run), remove orphaned child-table
+                records before importing.  Defaults to False; on-demand cleanup is
+                available via ``snore db cleanup-orphans``.
             profile_id:  Resolved profile ID — required.  All devices and sessions
                          created during this import are owned by this profile.
         """
@@ -162,6 +165,8 @@ class ImportService:
                     "<ZONE>' and re-run the import."
                 ) from exc
 
+        # force_cleanup is retained for programmatic callers and tests; the
+        # intended user-facing path is `snore db cleanup-orphans`.
         if not dry_run and force_cleanup:
             async with write_gate():
                 async with session_scope(immediate=True) as db_session:

@@ -442,16 +442,16 @@ class TestSliceStrCache:
         d = date(2025, 1, 1)
         other = date(2025, 1, 2)
         cache = {d: {"pressure_min": 4.0}, other: {"pressure_min": 6.0}}
-        result = _slice_str_cache(cache, "20250101")
+        result = _slice_str_cache(cache, d)
         assert result == {d: {"pressure_min": 4.0}}
 
     def test_returns_none_when_entry_absent(self):
         cache = {date(2025, 1, 2): {"pressure_min": 6.0}}
-        result = _slice_str_cache(cache, "20250101")
+        result = _slice_str_cache(cache, date(2025, 1, 1))
         assert result is None
 
     def test_returns_none_for_none_cache(self):
-        assert _slice_str_cache(None, "20250101") is None
+        assert _slice_str_cache(None, date(2025, 1, 1)) is None
 
     def test_result_does_not_include_other_dates(self):
         d = date(2025, 6, 15)
@@ -460,6 +460,6 @@ class TestSliceStrCache:
             d: {"pressure_min": 8.0},
             date(2025, 6, 16): {"pressure_min": 5.0},
         }
-        result = _slice_str_cache(cache, "20250615")
+        result = _slice_str_cache(cache, d)
         assert result is not None
         assert list(result.keys()) == [d]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -278,7 +278,7 @@ class TestCleanupGating:
                 force_cleanup=True,
             )
 
-        cleanup_mock.assert_called_once()
+        cleanup_mock.assert_called_once_with(ANY)
 
     async def test_dry_run_skips_cleanup_even_with_force(self, tmp_path):
         """dry_run=True skips cleanup regardless of force_cleanup."""

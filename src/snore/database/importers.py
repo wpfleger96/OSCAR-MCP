@@ -97,6 +97,9 @@ class SessionImporter:
 
         Returns:
             Mapping of table name to the number of orphaned records removed from it.
+            All four table keys (``settings``, ``events``, ``waveforms``,
+            ``statistics``) are always present; values are 0 for tables with no
+            orphaned rows.
         """
         orphan_tables = [
             models.Setting,
@@ -113,7 +116,7 @@ class SessionImporter:
                 )
             )
             result = await db.execute(stmt)
-            count = result.rowcount if hasattr(result, "rowcount") else 0
+            count = max(result.rowcount, 0)  # type: ignore[attr-defined]
             if count > 0:
                 logger.debug(
                     f"Cleaned {count} orphaned records from {model_cls.__tablename__}"

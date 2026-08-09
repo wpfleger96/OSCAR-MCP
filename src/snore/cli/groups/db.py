@@ -142,8 +142,10 @@ def cleanup_orphans(db: str | None) -> None:
     """Remove orphaned child records not linked to any session.
 
     Orphaned rows can accumulate when CASCADE delete is not enforced or after
-    a database corruption event.  Running this command is safe at any time;
-    it only removes rows whose ``session_id`` references no existing session.
+    a database corruption event.  This command only removes rows whose
+    ``session_id`` references no existing session.  Concurrent imports from
+    another process may briefly block this command; rerun if it reports the
+    database is locked.
 
     Suggest running 'snore db vacuum' afterwards to reclaim freed disk space.
     """

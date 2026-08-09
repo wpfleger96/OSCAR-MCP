@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 def _slice_str_cache(
     cache: "dict[date, dict[str, float]] | None",
-    night_date: str,
+    night_key: date,
 ) -> "dict[date, dict[str, float]] | None":
     """Return a single-entry slice of a STR cache for the given night.
 
@@ -71,12 +71,15 @@ def _slice_str_cache(
     ``night_date`` key (both implement the same noon-to-noon boundary).
     Passing a full multi-night cache to every future causes O(nights²)
     pickle overhead; this reduces each future's payload to one entry.
+
+    Returns None (never an empty dict) when the night has no entry, because
+    downstream ``_parse_session_group`` uses truthiness (``if str_settings_cache:``)
+    to detect a cache miss.
     """
     if cache is None:
         return None
-    key = datetime.strptime(night_date, "%Y%m%d").date()
-    entry = cache.get(key)
-    return {key: entry} if entry is not None else None
+    entry = cache.get(night_key)
+    return {night_key: entry} if entry is not None else None
 
 
 def _resmed_parse_bundle_worker(
@@ -686,13 +689,14 @@ class ResmedEDFParser(DeviceParser):
                         segments,
                         device_info,
                         path,
-                        _slice_str_cache(str_settings_cache, night_date),
-                        _slice_str_cache(str_summaries_cache, night_date),
+                        _slice_str_cache(str_settings_cache, night_key),
+                        _slice_str_cache(str_summaries_cache, night_key),
                         date_from,
                         date_to,
                         self._str_series11,
                     ): night_date
                     for night_date, segments in night_items
+                    for night_key in (datetime.strptime(night_date, "%Y%m%d").date(),)
                 }
 
                 completed = 0

@@ -106,8 +106,7 @@ def test_resmed_broken_pool_raises_runtime_error():
         patch.object(
             parser, "_filter_night_items", side_effect=lambda items, *a: items
         ),
-        patch.object(parser, "_preload_str_settings", return_value={}),
-        patch.object(parser, "_preload_str_summaries", return_value={}),
+        patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.resmed_edf.get_pool", return_value=broken_pool),
     ):
@@ -179,8 +178,7 @@ def test_resmed_generator_close_cancels_pending():
         patch.object(
             parser, "_filter_night_items", side_effect=lambda items, *a: items
         ),
-        patch.object(parser, "_preload_str_settings", return_value={}),
-        patch.object(parser, "_preload_str_summaries", return_value={}),
+        patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
     ):
@@ -247,8 +245,7 @@ def test_resmed_broken_pool_from_future_result_raises_runtime_error():
         patch.object(
             parser, "_filter_night_items", side_effect=lambda items, *a: items
         ),
-        patch.object(parser, "_preload_str_settings", return_value={}),
-        patch.object(parser, "_preload_str_summaries", return_value={}),
+        patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
     ):

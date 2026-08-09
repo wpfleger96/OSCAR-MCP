@@ -1763,6 +1763,10 @@ class TestDbCleanupOrphansCommand:
         assert events_after == 0
         assert settings_after == 0
         assert "vacuum" in result.output.lower()
+        # Per-table counts must appear in output for the seeded tables.
+        # print_kv("events", "1") renders as "  events: 1" (Rich strips markup).
+        assert "events: 1" in result.output
+        assert "settings: 1" in result.output
 
     def test_cleanup_reports_clean_when_no_orphans(self, cli_runner, temp_db):
         """When no orphaned records exist, command reports a clean database."""
