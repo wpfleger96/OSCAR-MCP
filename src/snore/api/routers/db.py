@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import os
 import secrets
 
 from datetime import UTC, datetime, timedelta
@@ -13,13 +13,18 @@ from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.constants import NO_STORE
-from snore.api.deps import ImmediateDbDep, service_dep
+from snore.api.deps import ImmediateDbDep, ResetLockDep, service_dep
+from snore.api.errors import db_busy_maps_to_409
 from snore.api.guards import RequireAdmin
 from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
 from snore.database.models import Base
 from snore.database.target import DatabaseTarget
-from snore.services.database_service import DatabaseService, _vacuum_background
+from snore.services.database_service import (
+    DatabaseService,
+    _vacuum_background,
+    file_size_mb,
+)
 from snore.services.profile_service import purge_profile_raw_dir
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 
@@ -120,10 +125,11 @@ def vacuum_db(
 
 @router.post("/reset", response_model=ResetResult)
 async def reset_db(
-    service: DatabaseServiceDep,
     target: Annotated[DatabaseTarget, Depends(_get_target)],
-    db: ImmediateDbDep,
     actor: RequireAdmin,
+    # _lock must precede db — see require_reset_lock docstring.
+    _lock: ResetLockDep,
+    db: ImmediateDbDep,
     background_tasks: BackgroundTasks,
     body: Annotated[ResetRequest | None, Body()] = None,
 ) -> JSONResponse:
@@ -140,8 +146,8 @@ async def reset_db(
         and can re-import data afterward.
 
     ``include_accounts=true``:
-        Full factory reset via ``reset_rows()`` (every row in every table) plus
-        raw-dir purge and vacuum.  A fresh bootstrap admin invite is created for
+        Full factory reset (every row in every table) plus raw-dir purge and
+        vacuum.  A fresh bootstrap admin invite is created for
         the calling admin's email and returned in ``bootstrap_invite_url``.  The
         caller's session is immediately dead; they must redeem that URL to regain
         access.
@@ -151,6 +157,10 @@ async def reset_db(
 
     VACUUM runs as a post-response background task.  ``size_after_mb`` is null
     and ``vacuum_scheduled`` is true in the response when VACUUM is queued.
+
+    Note: this handler holds the SQLite write lock for the entire delete+commit,
+    so on large databases concurrent import/analysis writers may hit their 5 s
+    busy timeout — operators should quiesce imports before a factory reset.
     """
     from snore.api.config import get_config  # noqa: PLC0415
 
@@ -163,79 +173,83 @@ async def reset_db(
     )
     db_path = target.sqlite_path if is_sqlite_file else ""
 
-    size_before = (
-        os.path.getsize(db_path) / (1024 * 1024)
-        if db_path and os.path.exists(db_path)
-        else 0.0
-    )
+    size_before = await asyncio.to_thread(file_size_mb, db_path)
 
     raw_root = _raw_root()
+    caller_email = ""
 
-    if req.include_accounts:
-        # Full factory reset.
-        #
-        # Fetch caller email BEFORE any deletes — this is a hard precondition.
-        # If the calling user's row can't be found, abort rather than wiping
-        # the database and leaving the system with no admin and no invite.
-        row = (
-            await db.execute(
-                select(models.User.canonical_email).where(
-                    models.User.id == actor.user_id
+    async with db_busy_maps_to_409():
+        if req.include_accounts:
+            # Full factory reset.
+            #
+            # Fetch caller email BEFORE any deletes — this is a hard precondition.
+            # If the calling user's row can't be found, abort rather than wiping
+            # the database and leaving the system with no admin and no invite.
+            row = (
+                await db.execute(
+                    select(models.User.canonical_email).where(
+                        models.User.id == actor.user_id
+                    )
                 )
-            )
-        ).first()
-        caller_email = row[0] if row else None
+            ).first()
+            caller_email = str(row[0]) if row and row[0] else ""
 
-        if not caller_email:
-            raise HTTPException(
-                status_code=500,
-                detail="Could not resolve caller email; reset aborted to prevent data loss.",
-            )
+            if not caller_email:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not resolve caller email; reset aborted to prevent data loss.",
+                )
 
         # Collect all profile IDs for raw-dir purge (Core SQL, avoids ORM
         # identity-map conflicts with the bulk delete that follows).
         profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
 
-        tables_cleared = await service.reset_rows()
-        total = sum(tables_cleared.values())
-
-        # After bulk deletes, expunge stale ORM state (e.g. the acting user's
-        # row, which was deleted) before inserting the invite so the subsequent
-        # commit does not try to flush stale ORM objects.
-        db.expunge_all()
-
-        # Insert the bootstrap invite in the same transaction as the deletion.
-        base_url = cfg.public_base_url or ""
-        bootstrap_invite_url: str | None = await _mint_admin_invite(
-            db, caller_email, base_url
-        )
-
-        logger.warning(
-            "Full factory reset committed for caller %s; bootstrap invite URL "
-            "is only in the response body and will not be recoverable afterward.",
-            caller_email,
-        )
-        await db.commit()
-
-    else:
-        # Data-only reset — delete sleep data, preserve accounts/profiles.
-        profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
-
+        skip = frozenset() if req.include_accounts else _DATA_RESET_SKIP
         tables_cleared = {}
         for table in reversed(Base.metadata.sorted_tables):
-            if table.name in _DATA_RESET_SKIP:
+            if table.name in skip:
                 continue
             cursor = await db.execute(table.delete())
             tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
-
         total = sum(tables_cleared.values())
-        bootstrap_invite_url = None
+
+        if req.include_accounts:
+            # After bulk deletes, expunge stale ORM state (e.g. the acting user's
+            # row, which was deleted) before inserting the invite so the subsequent
+            # commit does not try to flush stale ORM objects.
+            db.expunge_all()
+
+            # Insert the bootstrap invite in the same transaction as the deletion.
+            base_url = cfg.public_base_url or ""
+            bootstrap_invite_url: str | None = await _mint_admin_invite(
+                db, caller_email, base_url
+            )
+        else:
+            bootstrap_invite_url = None
 
         await db.commit()
 
+        if req.include_accounts:
+            logger.warning(
+                "Full factory reset committed for caller %s; bootstrap invite URL "
+                "is only in the response body and will not be recoverable afterward.",
+                caller_email,
+            )
+
     # Purge raw backup dirs after commit (idempotent quarantine-rename pattern).
-    for pid in profile_ids:
-        purge_profile_raw_dir(pid, raw_root)
+    def _purge_all() -> None:
+        for pid in profile_ids:
+            purge_profile_raw_dir(pid, raw_root)
+
+    try:
+        await asyncio.to_thread(_purge_all)
+    except Exception:
+        # The reset is committed; a cleanup failure must not withhold the
+        # response (for factory resets the one-time bootstrap invite URL
+        # exists nowhere else). Leftover raw dirs are logged for operators.
+        logger.exception(
+            "Raw-dir purge failed after reset commit; leftover directories remain"
+        )
 
     # Schedule VACUUM as a post-response background task.  FastAPI runs sync
     # background tasks in a thread pool so the event loop is never blocked.

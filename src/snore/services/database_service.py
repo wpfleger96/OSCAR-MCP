@@ -10,12 +10,18 @@ from sqlalchemy import ColumnElement, create_engine, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
-from snore.database.models import Base
 from snore.services.schemas import DatabaseStats, VacuumResult
 
-__all__ = ["DatabaseService", "_vacuum_background"]
+__all__ = ["DatabaseService", "_vacuum_background", "file_size_mb"]
 
 logger = logging.getLogger(__name__)
+
+
+def file_size_mb(path: str) -> float:
+    """Size of *path* in MiB; 0.0 when *path* is empty or missing."""
+    if not path or not os.path.exists(path):
+        return 0.0
+    return os.path.getsize(path) / (1024 * 1024)
 
 
 def _vacuum_background(db_path: str) -> None:
@@ -281,23 +287,6 @@ class DatabaseService:
             last_session=last_session,
         )
 
-    async def reset_rows(self) -> dict[str, int]:
-        """Delete all rows from all data tables.  Caller-transaction-owned.
-
-        Performs generic typed ``table.delete()`` statements in FK-safe order.
-        Does NOT commit — the caller owns the transaction.
-        Does NOT VACUUM — call ``vacuum_sqlite()`` separately if needed.
-
-        Returns:
-            Mapping of table name → rows deleted.
-        """
-        tables_cleared: dict[str, int] = {}
-        for table in reversed(Base.metadata.sorted_tables):
-            cursor = await self.db_session.execute(table.delete())
-            count = cursor.rowcount or 0  # type: ignore[attr-defined]
-            tables_cleared[table.name] = count
-        return tables_cleared
-
     def vacuum_sqlite(self, db_path: str) -> VacuumResult:
         """Run VACUUM on a SQLite file-backed database.
 
@@ -336,6 +325,10 @@ class DatabaseService:
         raw_root: Path,
     ) -> tuple[int, int, int]:
         """Delete all sleep data owned by *user_id*; commit; purge raw dirs.
+
+        The raw-dir purge runs synchronously on the calling thread/event loop
+        (unlike ``reset_db``, which offloads via ``asyncio.to_thread``) —
+        acceptable for the typical 1-2 profiles per user.
 
         Deletes Device rows for every live profile owned by the user — the DB
         cascades (Device → Session/Day/Waveform/Event/Statistics/Setting/

@@ -35,8 +35,8 @@ Security controls
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 
 from typing import Annotated, Literal
 
@@ -49,7 +49,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
 from snore.api.constants import NO_STORE
-from snore.api.deps import get_db
+from snore.api.deps import ImmediateDbDep, ResetLockDep, get_db
+from snore.api.errors import db_busy_maps_to_409
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
 from snore.auth.lockout import get_lockout_store
@@ -61,8 +62,11 @@ from snore.auth.passwords import (
 from snore.auth.session_cookie import clear_session_cookie, set_session_cookie
 from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.database import models
-from snore.database.session import TXN_OPT_IMMEDIATE
-from snore.services.database_service import DatabaseService, _vacuum_background
+from snore.services.database_service import (
+    DatabaseService,
+    _vacuum_background,
+    file_size_mb,
+)
 from snore.services.schemas import DeleteDataResult
 
 logger = logging.getLogger(__name__)
@@ -357,7 +361,9 @@ async def update_preferences(
 @router.post("/delete-data", response_model=DeleteDataResult)
 async def delete_my_data(
     actor: RequireWritable,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    # _lock must precede db — see require_reset_lock docstring.
+    _lock: ResetLockDep,
+    db: ImmediateDbDep,
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
     """Delete all sleep data owned by the authenticated user.
@@ -381,16 +387,14 @@ async def delete_my_data(
     Demo accounts are blocked by ``RequireWritable`` (403) before reaching
     this handler — fixture data is never at risk.
 
-    Write-lock note: ``await db.connection(execution_options=TXN_OPT_IMMEDIATE)``
-    is called before any SQL to request ``BEGIN IMMEDIATE``, acquiring the SQLite
-    write lock upfront.  This prevents SQLITE_BUSY on the first write when another
-    writer has committed since the (deferred) session was checked out.  In test
-    environments the session is already in a transaction so the option is a no-op.
+    Write-lock design: two layers protect against concurrent writers.  The
+    app-level reset lock (``_lock: ResetLockDep``) serializes concurrent
+    /db/reset and /auth/me/delete-data requests, returning 409 immediately when
+    held.  ``ImmediateDbDep`` (BEGIN IMMEDIATE) guards against non-serialized
+    writers such as imports or analysis jobs; on write-lock contention the
+    endpoint returns 409 "Database is busy…" rather than a generic 500.
     """
     from snore.database.target import DatabaseTarget  # noqa: PLC0415
-
-    # Acquire the write lock immediately before any reads or writes.
-    await db.connection(execution_options=TXN_OPT_IMMEDIATE)
 
     target = DatabaseTarget.from_env_and_flags(db_flag=None, warn_ignored=False)
     is_sqlite_file = target.dialect == "sqlite" and target.location not in (
@@ -399,19 +403,16 @@ async def delete_my_data(
     )
     db_path = target.sqlite_path if is_sqlite_file else ""
 
-    size_before = (
-        os.path.getsize(db_path) / (1024 * 1024)
-        if db_path and os.path.exists(db_path)
-        else 0.0
-    )
+    size_before = await asyncio.to_thread(file_size_mb, db_path)
 
-    (
-        devices_deleted,
-        import_jobs_deleted,
-        profiles_processed,
-    ) = await DatabaseService.delete_user_data(
-        db, actor.user_id, DEFAULT_RAW_BACKUP_DIR
-    )
+    async with db_busy_maps_to_409():
+        (
+            devices_deleted,
+            import_jobs_deleted,
+            profiles_processed,
+        ) = await DatabaseService.delete_user_data(
+            db, actor.user_id, DEFAULT_RAW_BACKUP_DIR
+        )
 
     # Schedule VACUUM as a post-response background task.  FastAPI runs sync
     # background tasks in a thread pool so the event loop is never blocked.
