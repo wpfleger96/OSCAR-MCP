@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.analysis.shared.versioning import (
     CROSS_VERSION_REFUSAL_KEYS,
     MV_FALLBACK_ALGO_VERSION,
+    RERA_PROXY_ALGO_VERSION,
     AlgorithmIdentity,
     AlgoVersions,
     AnalysisRunMetadata,
@@ -349,6 +350,7 @@ class WindowCriterionOptions(BaseModel):
     context_seconds: float = 120.0
     min_fl_run_length: int = 2
     fl_class_threshold: int = 4
+    recovery_amplitude_margin: float = Field(default=0.20, ge=0.0)
 
 
 class WindowResult(BaseModel):
@@ -438,6 +440,9 @@ class EpochBreathStats(BaseModel):
     ie_ratio: DistributionStats
     rera_proxy_count: int | None
     rera_reason: NullReason | None
+    # Version of the query-time RERA-proxy criterion (not part of
+    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).
+    rera_proxy_version: str = RERA_PROXY_ALGO_VERSION
     rx_settings: dict[str, str]
 
 
@@ -777,6 +782,9 @@ class NightlyAnalysisSummary(BaseModel):
 
     rera_count: int | None
     rera_reason: NullReason | None
+    # Version of the query-time RERA-proxy criterion (not part of
+    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).
+    rera_proxy_version: str = RERA_PROXY_ALGO_VERSION
     primary_mode: str | None
     fl_median: float | None
     fl_95th: float | None
@@ -945,34 +953,82 @@ class RawCaAnalysis(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _iter_fl_run_recoveries(
+    breath_rows: Sequence[Any],
+    *,
+    fl_class_threshold: int = 4,
+    min_fl_run_length: int = 2,
+    recovery_amplitude_margin: float = 0.20,
+) -> Iterator[tuple[int, int, int]]:
+    """Yield (run_start_idx, run_last_idx, recovery_idx) per RERA-proxy event.
+
+    A qualifying event is a run of >= ``min_fl_run_length`` consecutive breaths
+    with ``flow_class >= fl_class_threshold`` whose immediately-next breath
+    (no gap; a ``flow_class is None`` breath ends the run) is a recovery
+    breath.  The follower is a recovery breath when EITHER:
+
+    (a) ``is_recovery_breath is True`` — the analysis-time amplitude detector; OR
+    (b) self-contained (RERA-proxy v2): the follower's ``flow_class`` drops to
+        <= 2 AND its ``peak_flow_lpm`` is >= ``(1 + recovery_amplitude_margin)``
+        times the mean of the run's non-null ``peak_flow_lpm`` values.
+
+    Missing data (null ``flow_class`` or ``peak_flow_lpm`` on the follower, or
+    an all-null-peak run) never satisfies (b).
+    """
+    n = len(breath_rows)
+    i = 0
+    while i < n:
+        b = breath_rows[i]
+        if b.flow_class is None or b.flow_class < fl_class_threshold:
+            i += 1
+            continue
+        run_start = i
+        while (
+            i < n
+            and breath_rows[i].flow_class is not None
+            and breath_rows[i].flow_class >= fl_class_threshold
+        ):
+            i += 1
+        if i - run_start < min_fl_run_length or i >= n:
+            continue
+        follower = breath_rows[i]
+        is_recovery = follower.is_recovery_breath is True
+        if (
+            not is_recovery
+            and follower.flow_class is not None
+            and follower.flow_class <= 2
+            and follower.peak_flow_lpm is not None
+        ):
+            run_peaks = [
+                breath_rows[k].peak_flow_lpm
+                for k in range(run_start, i)
+                if breath_rows[k].peak_flow_lpm is not None
+            ]
+            if run_peaks:
+                run_mean = sum(run_peaks) / len(run_peaks)
+                is_recovery = follower.peak_flow_lpm >= (
+                    (1.0 + recovery_amplitude_margin) * run_mean
+                )
+        if is_recovery:
+            yield (run_start, i - 1, i)
+
+
 def _count_fl_run_reras(
     breath_rows: Sequence[Any],
     fl_class_threshold: int = 4,
     min_fl_run_length: int = 2,
+    recovery_amplitude_margin: float = 0.20,
 ) -> int:
     """Count RERA-proxy events: FL runs ending in a recovery breath."""
-    count = 0
-    i = 0
-    while i < len(breath_rows):
-        b = breath_rows[i]
-        if b.flow_class is not None and b.flow_class >= fl_class_threshold:
-            run_start = i
-            while (
-                i < len(breath_rows)
-                and breath_rows[i].flow_class is not None
-                and breath_rows[i].flow_class >= fl_class_threshold
-            ):
-                i += 1
-            run_len = i - run_start
-            if (
-                run_len >= min_fl_run_length
-                and i < len(breath_rows)
-                and breath_rows[i].is_recovery_breath
-            ):
-                count += 1
-        else:
-            i += 1
-    return count
+    return sum(
+        1
+        for _ in _iter_fl_run_recoveries(
+            breath_rows,
+            fl_class_threshold=fl_class_threshold,
+            min_fl_run_length=min_fl_run_length,
+            recovery_amplitude_margin=recovery_amplitude_margin,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1521,7 +1577,12 @@ class BreathService:
         if criterion == WindowCriterion.WORST_FLATTENING_LEAK_VALID:
             bad = [
                 f
-                for f in ("context_seconds", "min_fl_run_length", "fl_class_threshold")
+                for f in (
+                    "context_seconds",
+                    "min_fl_run_length",
+                    "fl_class_threshold",
+                    "recovery_amplitude_margin",
+                )
                 if getattr(opts, f) != getattr(defaults, f)
             ]
             if bad:
@@ -1539,6 +1600,7 @@ class BreathService:
                     "context_breaths_after",
                     "min_fl_run_length",
                     "fl_class_threshold",
+                    "recovery_amplitude_margin",
                 )
                 if getattr(opts, f) != getattr(defaults, f)
             ]
@@ -1885,7 +1947,8 @@ class BreathService:
         opts: WindowCriterionOptions,
     ) -> list[WindowResult]:
         """Build FL_RUN_ENDING_IN_RECOVERY windows — RERA-proxy: runs of ≥N consecutive
-        FL breaths ending with is_recovery_breath=True."""
+        FL breaths ending in a recovery breath (analysis-time flag OR the
+        self-contained v2 criterion; see _iter_fl_run_recoveries)."""
         from sqlalchemy import select  # noqa: PLC0415
 
         from snore.database import models  # noqa: PLC0415
@@ -1912,56 +1975,43 @@ class BreathService:
                 continue
 
             session_start = session_starts[sid]
-            # Scan for FL runs ending in recovery breath
-            i = 0
-            while i < len(breath_rows):
-                b = breath_rows[i]
-                if b.flow_class is not None and b.flow_class >= opts.fl_class_threshold:
-                    # Start of a potential FL run
-                    run_start = i
-                    j = i
-                    while j < len(breath_rows) and (
-                        breath_rows[j].flow_class is not None
-                        and (breath_rows[j].flow_class or 0) >= opts.fl_class_threshold
-                    ):
-                        j += 1
-                    fl_run = breath_rows[run_start:j]
-                    # Check if followed by a recovery breath
-                    if j < len(breath_rows) and breath_rows[j].is_recovery_breath:
-                        run_end_idx = j  # recovery breath
-                        full_run = breath_rows[run_start : run_end_idx + 1]
-                        fl_length = len(fl_run)
-                        if fl_length >= opts.min_fl_run_length:
-                            candidates.append(
-                                WindowResult(
-                                    criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
-                                    session_id=sid,
-                                    session_start_wall_clock=session_start,
-                                    window_start_offset=full_run[0].start_offset_s,
-                                    window_end_offset=full_run[-1].end_offset_s,
-                                    reason_summary=(
-                                        f"fl_run={fl_length} breaths, ends in recovery"
-                                    ),
-                                    worst_mid_insp_flattening=max(
-                                        (
-                                            b.mid_insp_flattening
-                                            for b in fl_run
-                                            if b.mid_insp_flattening is not None
-                                        ),
-                                        default=None,
-                                    ),
-                                    fl_run_length=fl_length,
-                                    anchor_event_offset=None,
-                                    analysis_result_id=ar_id,
-                                    analysis_status=ar_status,
-                                    analysis_reason=None,
-                                )
-                            )
-                        i = run_end_idx + 1
-                        continue
-                    i = j
-                else:
-                    i += 1
+            # Scan for FL runs ending in recovery breath — the same iterator
+            # backs _count_fl_run_reras, so windows and counts identify
+            # exactly the same events.
+            for run_start, run_last, recovery_idx in _iter_fl_run_recoveries(
+                breath_rows,
+                fl_class_threshold=opts.fl_class_threshold,
+                min_fl_run_length=opts.min_fl_run_length,
+                recovery_amplitude_margin=opts.recovery_amplitude_margin,
+            ):
+                fl_run = breath_rows[run_start : run_last + 1]
+                full_run = breath_rows[run_start : recovery_idx + 1]
+                fl_length = len(fl_run)
+                candidates.append(
+                    WindowResult(
+                        criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
+                        session_id=sid,
+                        session_start_wall_clock=session_start,
+                        window_start_offset=full_run[0].start_offset_s,
+                        window_end_offset=full_run[-1].end_offset_s,
+                        reason_summary=(
+                            f"fl_run={fl_length} breaths, ends in recovery"
+                        ),
+                        worst_mid_insp_flattening=max(
+                            (
+                                b.mid_insp_flattening
+                                for b in fl_run
+                                if b.mid_insp_flattening is not None
+                            ),
+                            default=None,
+                        ),
+                        fl_run_length=fl_length,
+                        anchor_event_offset=None,
+                        analysis_result_id=ar_id,
+                        analysis_status=ar_status,
+                        analysis_reason=None,
+                    )
+                )
 
         return self._dedup_and_top_n(candidates, n, key=lambda w: w.fl_run_length or 0)
 
@@ -2923,7 +2973,7 @@ class BreathService:
                 status, algo = self._classify_analysis_row(ar_row)
                 ar_classification[sid] = (status, algo, ar_row.id)
 
-        # Bulk Breath query for all OK ar_ids (8 columns only)
+        # Bulk Breath query for all OK ar_ids (9 columns only)
         ok_ar_ids = [
             ar_id
             for (_status, _algo, ar_id) in ar_classification.values()
@@ -2941,6 +2991,7 @@ class BreathService:
                 models.Breath.i_e_ratio,
                 models.Breath.flow_class,
                 models.Breath.is_recovery_breath,
+                models.Breath.peak_flow_lpm,
             )
             breath_result = await self._db.execute(
                 select(*breath_cols)

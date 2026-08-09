@@ -216,6 +216,7 @@ async def get_nightly_summary(
         fl_class_ge4_pct_reason: str | None = None
         rera_proxy_count: int | None = None
         rera_proxy_reason: str | None = None
+        rera_proxy_version: str | None = None
         ti_median_s: float | None = None
         ti_median_reason: str | None = None
         ie_ratio: float | None = None
@@ -227,6 +228,7 @@ async def get_nightly_summary(
                 rera_proxy_count = bs_night.rera_count
             elif bs_night.rera_reason is not None:
                 rera_proxy_reason = str(bs_night.rera_reason)
+            rera_proxy_version = bs_night.rera_proxy_version
 
             # rera_index and rdi mapped straight through from service DTO
             rera_index = bs_night.rera_index
@@ -294,6 +296,7 @@ async def get_nightly_summary(
                 fl_class_ge4_pct_reason=fl_class_ge4_pct_reason,
                 rera_proxy_count=rera_proxy_count,
                 rera_proxy_reason=rera_proxy_reason,
+                rera_proxy_version=rera_proxy_version,
                 ti_median_s=ti_median_s,
                 ti_median_reason=ti_median_reason,
                 ie_ratio=ie_ratio,

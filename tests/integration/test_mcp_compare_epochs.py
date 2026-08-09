@@ -194,6 +194,7 @@ class TestCompareEpochsTwoHomogeneousEpochs:
         assert epoch_a.null_reason is None
         assert epoch_a.nights_with_data == 2
         assert epoch_a.nights_missing_analysis == 0
+        assert epoch_a.rera_proxy_version == "v2"
         # mid_insp_flattening median of [0.6, 0.4, 0.5] = 0.5
         assert epoch_a.mid_insp_flattening.median == pytest.approx(0.5, abs=0.01)
         assert epoch_a.mid_insp_flattening.n_breaths == 3

@@ -4468,7 +4468,8 @@ async def _store_night_with_breath_specs(
 
     Each dict in ``breath_specs`` may set any ``ComputedBreath`` field;
     unset keys fall back to sensible defaults.  Supported overrides:
-    ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``, ``flow_class``.
+    ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``, ``flow_class``,
+    ``peak_flow_lpm``, ``is_recovery_breath``.
     """
     from snore.analysis.types import ComputedBreath  # noqa: PLC0415
 
@@ -4488,7 +4489,7 @@ async def _store_night_with_breath_specs(
                 total_time_s=3.0,
                 i_e_ratio=spec.get("i_e_ratio", 0.67),
                 duty_cycle=0.4,
-                peak_flow_lpm=30.0,
+                peak_flow_lpm=spec.get("peak_flow_lpm", 30.0),
                 peak_exp_flow_lpm=20.0,
                 tidal_volume_ml=400.0,
                 respiratory_rate_rolling=15.0,
@@ -4496,7 +4497,7 @@ async def _store_night_with_breath_specs(
                 mid_insp_flattening=0.35,
                 flow_class=spec.get("flow_class", 1),
                 flow_confidence=0.9,
-                is_recovery_breath=False,
+                is_recovery_breath=spec.get("is_recovery_breath", False),
                 inferred_trigger_type="normal",
                 trigger_confidence=0.8,
                 inferred_cycle_type="normal",
@@ -4936,6 +4937,7 @@ class TestNightlySummaryReraRdi:
             assert bulk.eligible_session_count == per_night.eligible_session_count
             assert bulk.rera_count == per_night.rera_count
             assert bulk.rera_reason == per_night.rera_reason
+            assert bulk.rera_proxy_version == per_night.rera_proxy_version == "v2"
             assert bulk.fl_median == per_night.fl_median
             assert bulk.fl_95th == per_night.fl_95th
             assert bulk.fl_max == per_night.fl_max
@@ -4975,8 +4977,196 @@ class TestNightlySummaryReraRdi:
 
 
 # ---------------------------------------------------------------------------
-# Flow-derived MV fallback (derive_mv_from_flow + CA wiring + provenance)
+# RERA-proxy v2 — _iter_fl_run_recoveries / _count_fl_run_reras
 # ---------------------------------------------------------------------------
+
+
+def _fl_row(
+    flow_class: int | None,
+    peak_flow_lpm: float | None = None,
+    is_recovery_breath: bool = False,
+) -> Any:
+    """Minimal breath-row stub for the module-level FL-run scanner."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    return SimpleNamespace(
+        flow_class=flow_class,
+        peak_flow_lpm=peak_flow_lpm,
+        is_recovery_breath=is_recovery_breath,
+    )
+
+
+@pytest.mark.unit
+class TestReraProxyV2Scanner:
+    """Self-contained recovery criterion (b) + analysis-flag criterion (a)."""
+
+    def test_amplitude_recovery_without_flag_counted(self):
+        """Class-1 follower 30% above the run's mean peak flow counts without the flag."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=26.0, is_recovery_breath=False),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_follower_only_10pct_above_mean_not_counted(self):
+        """Follower amplitude below the 20% margin does not count."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=22.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+
+    def test_follower_at_exact_margin_boundary_counted(self):
+        """Follower at exactly (1 + margin) * run mean counts (>= comparison)."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=(1.0 + 0.20) * 20.0),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_custom_margin_kwarg_respected(self):
+        """A smaller recovery_amplitude_margin admits a smaller amplitude rise."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=22.0),
+        ]
+        assert _count_fl_run_reras(rows, recovery_amplitude_margin=0.05) == 1
+
+    def test_follower_class_3_high_amplitude_not_counted(self):
+        """Class must drop to <= 2; a class-3 follower never satisfies criterion (b)."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(3, peak_flow_lpm=40.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+
+    def test_run_at_end_of_rows_not_counted(self):
+        """A qualifying run with no follower cannot end in recovery."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+
+    def test_fl_class_follower_extends_run_no_double_count(self):
+        """A class >= threshold breath extends the run; the event counts once."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(4, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=26.0),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_null_follower_peak_flow_skips_criterion_b(self):
+        """Follower with null peak_flow_lpm can only count via the recovery flag."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=None),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+        rows[-1].is_recovery_breath = True
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_all_null_run_peaks_skip_criterion_b(self):
+        """A run with no non-null peak_flow_lpm can only count via the recovery flag."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=None),
+            _fl_row(5, peak_flow_lpm=None),
+            _fl_row(1, peak_flow_lpm=100.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+        rows[-1].is_recovery_breath = True
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_recovery_flag_still_counts_without_amplitude(self):
+        """Criterion (a): the analysis-time flag counts regardless of amplitude."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=10.0, is_recovery_breath=True),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_iterator_yields_run_and_recovery_indices(self):
+        """The scanner yields (run_start_idx, run_last_idx, recovery_idx)."""
+        from snore.services.breath_service import (  # noqa: PLC0415
+            _iter_fl_run_recoveries,
+        )
+
+        rows = [
+            _fl_row(1, peak_flow_lpm=30.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=26.0),
+        ]
+        assert list(_iter_fl_run_recoveries(rows)) == [(1, 2, 3)]
+
+    async def test_windows_and_count_identify_same_events(self, async_db_session):
+        """_find_fl_run_windows and _count_fl_run_reras agree on the same rows."""
+        therapy_date = date(2025, 9, 1)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                # Run 1 (amplitude recovery, no flag)
+                {"flow_class": 5, "peak_flow_lpm": 20.0},
+                {"flow_class": 5, "peak_flow_lpm": 20.0},
+                {"flow_class": 1, "peak_flow_lpm": 26.0},
+                # Separator
+                {"flow_class": 1, "peak_flow_lpm": 20.0},
+                # Run 2 (flagged recovery, low amplitude)
+                {"flow_class": 4, "peak_flow_lpm": 20.0},
+                {"flow_class": 4, "peak_flow_lpm": 20.0},
+                {"flow_class": 4, "peak_flow_lpm": 20.0},
+                {
+                    "flow_class": 1,
+                    "peak_flow_lpm": 10.0,
+                    "is_recovery_breath": True,
+                },
+                # Run 3 — too short (length 1), never counts
+                {"flow_class": 5, "peak_flow_lpm": 20.0},
+                {"flow_class": 1, "peak_flow_lpm": 26.0},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+
+        windows_result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
+            n=50,
+            device_id=device_id,
+        )
+        summary = await svc.get_nightly_summary(therapy_date, device_id=device_id)
+
+        assert summary.rera_count == 2
+        assert len(windows_result.windows) == summary.rera_count
 
 
 @pytest.mark.unit

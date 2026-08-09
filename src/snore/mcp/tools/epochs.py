@@ -132,6 +132,7 @@ async def compare_epochs(
             ie_ratio=_map_distribution(s.ie_ratio),
             rera_proxy_count=s.rera_proxy_count,
             rera_reason=str_or_none(s.rera_reason),
+            rera_proxy_version=s.rera_proxy_version,
             rx_settings=s.rx_settings,
         )
         for s in result.epochs

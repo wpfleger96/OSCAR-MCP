@@ -147,6 +147,9 @@ class NightlyRow(BaseModel):
     fl_class_ge4_pct_reason: str | None = None
     rera_proxy_count: int | None = None
     rera_proxy_reason: str | None = None
+    # Version of the query-time RERA-proxy criterion (independent of the
+    # persisted AlgorithmIdentity); null when analysis has not been run.
+    rera_proxy_version: str | None = None
 
     # Breath timing aggregates — from breath-level analysis; null + reason when analysis hasn't run
     ti_median_s: float | None = None
@@ -458,6 +461,9 @@ class EpochStats(BaseModel):
     ie_ratio: EpochDistribution
     rera_proxy_count: int | None = None
     rera_reason: str | None = None
+    # Version of the query-time RERA-proxy criterion (independent of the
+    # persisted AlgorithmIdentity).
+    rera_proxy_version: str | None = None
     rx_settings: dict[str, str] = {}
 
 

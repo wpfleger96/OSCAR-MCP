@@ -40,6 +40,12 @@ RECOVERY_DETECTOR_ALGO_VERSION: str = "v1"
 # exists. NOT part of AlgorithmIdentity — it labels query-time derivation only.
 MV_FALLBACK_ALGO_VERSION: str = "v1"
 
+# Query-time RERA-proxy criterion (FL runs ending in recovery). NOT part of
+# AlgorithmIdentity — it labels query-time derivation only. v2 adds the
+# self-contained recovery criterion (class drop to <=2 + peak-flow margin over
+# the run mean) alongside the analysis-time recovery flag.
+RERA_PROXY_ALGO_VERSION: str = "v2"
+
 # Threshold used by leak_valid derivation (v1).
 LEAK_VALID_THRESHOLD_LPM: float = 24.0
 

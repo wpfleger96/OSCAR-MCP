@@ -499,8 +499,14 @@ class WindowCriterion(StrEnum):
 
     FL_RUN_ENDING_IN_RECOVERY = "fl_run_ending_in_recovery"
     # RERA-proxy: runs of ≥min_fl_run_length consecutive flow-limited breaths
-    # (flow_class >= fl_class_threshold) ending with is_recovery_breath=True.
+    # (flow_class >= fl_class_threshold) ending in a recovery breath.
     # Window spans first FL breath → recovery breath end.
+    # rera_proxy is a query-time derived metric versioned by
+    # RERA_PROXY_ALGO_VERSION, independent of AlgorithmIdentity. v2 accepts a
+    # recovery breath by EITHER the analysis-time recovery flag
+    # (is_recovery_breath=True) OR the self-contained criterion: the follower's
+    # flow class drops to <=2 and its peak flow is >=
+    # (1 + recovery_amplitude_margin) x the run's mean peak flow.
 
 
 class WindowCriterionOptions(BaseModel):

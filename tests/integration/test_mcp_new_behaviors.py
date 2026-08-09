@@ -127,6 +127,7 @@ class TestDurationZeroReason:
         assert night.rera_index_reason is None
         assert night.rdi is not None
         assert night.rdi_reason is None
+        assert night.rera_proxy_version == "v2"
 
 
 # ---------------------------------------------------------------------------
