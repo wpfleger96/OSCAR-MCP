@@ -1,4 +1,4 @@
-import inspect
+import typing
 import uuid
 
 from datetime import datetime
@@ -6,11 +6,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fastapi import HTTPException
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 
 from snore.auth.actor import ActorContext, AuthMode, Role
 from snore.database import models
+from snore.database.models import Base
 from tests.helpers.api_client import make_test_client
 from tests.integration.test_api.conftest import _multiuser_env
 
@@ -293,10 +296,17 @@ class TestDbResetMultiuser:
             "Exactly one bootstrap admin invite should exist after full reset"
         )
 
+        # Every table in the schema must appear in tables_cleared.
+        assert set(data["tables_cleared"].keys()) == set(Base.metadata.tables.keys()), (
+            "tables_cleared must include every table for a full factory reset"
+        )
+
     def test_data_only_reset_with_zero_data_succeeds(
         self, async_db_session, db_session, monkeypatch, temp_db
     ):
         """Data-only reset on a database with no sleep data succeeds (no-op for data tables)."""
+        from snore.api.routers.db import _DATA_RESET_SKIP  # noqa: PLC0415
+
         client, _, _ = self._make_admin_client(
             async_db_session, db_session, monkeypatch
         )
@@ -305,7 +315,14 @@ class TestDbResetMultiuser:
             response = client.post("/api/v1/db/reset", json={"include_accounts": False})
 
         assert response.status_code == 200
-        assert response.json()["status"] == "success"
+        data = response.json()
+        assert data["status"] == "success"
+
+        # Data-only reset must clear exactly the non-skipped tables.
+        expected_keys = set(Base.metadata.tables.keys()) - _DATA_RESET_SKIP
+        assert set(data["tables_cleared"].keys()) == expected_keys, (
+            "tables_cleared must cover every non-skipped table for a data-only reset"
+        )
 
     def test_data_only_reset_purges_raw_dirs(
         self,
@@ -372,13 +389,78 @@ class TestDbResetConcurrency:
         blocks on the write lock held by the immediate session, producing
         OperationalError("database is locked") after busy_timeout=5000ms.
         This structural regression test guards against reintroducing that bug.
+
+        Resolves annotations via typing.get_type_hints so deferred string
+        annotations (PEP 563 / from __future__ import annotations) are
+        evaluated correctly before the check.
         """
         from snore.api.routers.db import reset_db  # noqa: PLC0415
+        from snore.services.database_service import DatabaseService  # noqa: PLC0415
 
-        sig = inspect.signature(reset_db)
-        for name, param in sig.parameters.items():
-            annotation_str = str(param.annotation)
-            assert "DatabaseService" not in annotation_str, (
-                f"reset_db parameter '{name}' references DatabaseService — "
+        hints = typing.get_type_hints(reset_db, include_extras=True)
+
+        def _references_db_service(annotation: object) -> bool:
+            if annotation is DatabaseService:
+                return True
+            return any(
+                _references_db_service(arg) for arg in typing.get_args(annotation)
+            )
+
+        for name, hint in hints.items():
+            assert not _references_db_service(hint), (
+                f"reset_db parameter '{name}' annotation resolves to DatabaseService — "
                 "this would reintroduce the dual-session deadlock"
             )
+
+    def test_sequential_resets_both_succeed(self, api_client, temp_db):
+        """Two consecutive data-only resets both return 200, proving the lock is released."""
+        with _patch_target(temp_db):
+            first = api_client.post("/api/v1/db/reset")
+            second = api_client.post("/api/v1/db/reset")
+
+        assert first.status_code == 200, first.json()
+        assert second.status_code == 200, second.json()
+
+
+# ---------------------------------------------------------------------------
+# db_busy_maps_to_409 unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestDbBusyMapsTo409:
+    """Unit tests for the db_busy_maps_to_409 context manager."""
+
+    async def test_locked_database_raises_409(self):
+        """OperationalError with 'database is locked' maps to HTTPException 409."""
+        from snore.api.deps import db_busy_maps_to_409  # noqa: PLC0415
+
+        locked_exc = OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            async with db_busy_maps_to_409():
+                raise locked_exc
+
+        assert exc_info.value.status_code == 409
+        assert "busy" in exc_info.value.detail.lower()
+
+    async def test_other_operational_error_propagates_unchanged(self):
+        """OperationalError with a different message propagates without conversion."""
+        from snore.api.deps import db_busy_maps_to_409  # noqa: PLC0415
+
+        other_exc = OperationalError("SELECT 1", {}, Exception("disk I/O error"))
+
+        with pytest.raises(OperationalError) as exc_info:
+            async with db_busy_maps_to_409():
+                raise other_exc
+
+        assert exc_info.value is other_exc
+
+    async def test_no_exception_passes_through(self):
+        """Body that raises no exception completes normally."""
+        from snore.api.deps import db_busy_maps_to_409  # noqa: PLC0415
+
+        result: list[int] = []
+        async with db_busy_maps_to_409():
+            result.append(42)
+
+        assert result == [42]

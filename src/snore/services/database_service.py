@@ -12,9 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.database import models
 from snore.services.schemas import DatabaseStats, VacuumResult
 
-__all__ = ["DatabaseService", "_vacuum_background"]
+__all__ = ["DatabaseService", "_vacuum_background", "file_size_mb"]
 
 logger = logging.getLogger(__name__)
+
+
+def file_size_mb(path: str) -> float:
+    """Size of *path* in MiB; 0.0 when *path* is empty or missing."""
+    if not path or not os.path.exists(path):
+        return 0.0
+    return os.path.getsize(path) / (1024 * 1024)
 
 
 def _vacuum_background(db_path: str) -> None:

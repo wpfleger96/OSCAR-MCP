@@ -1,14 +1,19 @@
 import asyncio
+import logging
 
 from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.auth.actor import ActorContext, AuthMode
 from snore.database.session import check_db_staleness, get_session, session_scope
+
+logger = logging.getLogger(__name__)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
@@ -31,27 +36,6 @@ async def get_db_immediate() -> AsyncGenerator[AsyncSession]:
 
 
 ImmediateDbDep = Annotated[AsyncSession, Depends(get_db_immediate)]
-
-
-_reset_lock = asyncio.Lock()
-
-
-async def require_reset_lock() -> AsyncGenerator[None]:
-    """Serialize destructive DB operations (admin reset, per-user delete-all).
-
-    Non-blocking: a request arriving while another reset holds the lock gets
-    409 immediately instead of queueing on the SQLite write lock.
-    """
-    if _reset_lock.locked():
-        raise HTTPException(
-            status_code=409,
-            detail="A database reset or data deletion is already in progress",
-        )
-    async with _reset_lock:
-        yield
-
-
-ResetLockDep = Annotated[None, Depends(require_reset_lock)]
 
 
 async def get_raw_session() -> AsyncGenerator[AsyncSession]:
@@ -111,6 +95,50 @@ async def get_actor(
 
 
 ActorDep = Annotated[ActorContext, Depends(get_actor)]
+
+
+@asynccontextmanager
+async def db_busy_maps_to_409() -> AsyncGenerator[None]:
+    """Map SQLite write-lock contention to 409 instead of a generic 500.
+
+    Covers writers the reset lock intentionally does not serialize
+    (imports, analysis jobs).
+    """
+    try:
+        yield
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            logger.warning("SQLite write-lock contention mapped to 409: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail="Database is busy (an import or analysis may be running) — try again shortly",
+            ) from None
+        raise
+
+
+_reset_lock = asyncio.Lock()
+
+
+async def require_reset_lock(_actor: ActorDep) -> AsyncGenerator[None]:
+    """Serialize destructive DB operations (admin reset, per-user delete-all).
+
+    Authentication is enforced structurally via the ``_actor: ActorDep``
+    sub-dependency — unauthenticated requests are rejected before the lock is
+    checked (enforced by the dependency graph, not parameter order).
+
+    Non-blocking: a request arriving while another reset holds the lock gets
+    409 immediately instead of queueing on the SQLite write lock.
+    """
+    if _reset_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="A database reset or data deletion is already in progress",
+        )
+    async with _reset_lock:
+        yield
+
+
+ResetLockDep = Annotated[None, Depends(require_reset_lock)]
 
 
 def service_dep[T](cls: Callable[[AsyncSession, int], T]) -> Callable[..., T]:

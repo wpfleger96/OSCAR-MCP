@@ -19,6 +19,7 @@ import http.cookies
 import uuid
 
 from datetime import datetime
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -1059,8 +1060,6 @@ class TestDeleteData:
         snore.api.deps, so a concurrent reset (or delete-data) blocks
         the other without queueing on the SQLite write lock.
         """
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         import snore.api.deps as deps  # noqa: PLC0415
 
         user, profile = _seed_user(db_session, role="member")

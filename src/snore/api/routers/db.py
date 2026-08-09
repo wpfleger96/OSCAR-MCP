@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import os
 import secrets
 
 from datetime import UTC, datetime, timedelta
@@ -10,17 +10,25 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import insert, select
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.constants import NO_STORE
-from snore.api.deps import ImmediateDbDep, ResetLockDep, service_dep
+from snore.api.deps import (
+    ImmediateDbDep,
+    ResetLockDep,
+    db_busy_maps_to_409,
+    service_dep,
+)
 from snore.api.guards import RequireAdmin
 from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
 from snore.database.models import Base
 from snore.database.target import DatabaseTarget
-from snore.services.database_service import DatabaseService, _vacuum_background
+from snore.services.database_service import (
+    DatabaseService,
+    _vacuum_background,
+    file_size_mb,
+)
 from snore.services.profile_service import purge_profile_raw_dir
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 
@@ -123,9 +131,10 @@ def vacuum_db(
 async def reset_db(
     target: Annotated[DatabaseTarget, Depends(_get_target)],
     actor: RequireAdmin,
-    # Ordering is load-bearing: auth resolves first (unauthenticated requests
-    # never touch the lock), lock acquired before BEGIN IMMEDIATE is attempted,
-    # lock released only after the DB session closes.
+    # Lock-before-DB ordering is load-bearing: BEGIN IMMEDIATE must be acquired
+    # after the app-level reset lock so concurrent requests fail fast with 409
+    # rather than queuing on the SQLite write lock. Authentication is enforced
+    # structurally via _lock's ActorDep sub-dependency.
     _lock: ResetLockDep,
     db: ImmediateDbDep,
     background_tasks: BackgroundTasks,
@@ -155,6 +164,10 @@ async def reset_db(
 
     VACUUM runs as a post-response background task.  ``size_after_mb`` is null
     and ``vacuum_scheduled`` is true in the response when VACUUM is queued.
+
+    Note: this handler holds the SQLite write lock for the entire delete+commit,
+    so on large databases concurrent import/analysis writers may hit their 5 s
+    busy timeout — operators should quiesce imports before a factory reset.
     """
     from snore.api.config import get_config  # noqa: PLC0415
 
@@ -167,15 +180,12 @@ async def reset_db(
     )
     db_path = target.sqlite_path if is_sqlite_file else ""
 
-    size_before = (
-        os.path.getsize(db_path) / (1024 * 1024)
-        if db_path and os.path.exists(db_path)
-        else 0.0
-    )
+    size_before = await asyncio.to_thread(file_size_mb, db_path)
 
     raw_root = _raw_root()
+    caller_email: str | None = None
 
-    try:
+    async with db_busy_maps_to_409():
         if req.include_accounts:
             # Full factory reset.
             #
@@ -189,7 +199,7 @@ async def reset_db(
                     )
                 )
             ).first()
-            caller_email = row[0] if row else None
+            caller_email = str(row[0]) if row and row[0] else None
 
             if not caller_email:
                 raise HTTPException(
@@ -197,60 +207,50 @@ async def reset_db(
                     detail="Could not resolve caller email; reset aborted to prevent data loss.",
                 )
 
-            # Collect all profile IDs for raw-dir purge (Core SQL, avoids ORM
-            # identity-map conflicts with the bulk delete that follows).
-            profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
+        # Collect all profile IDs for raw-dir purge (Core SQL, avoids ORM
+        # identity-map conflicts with the bulk delete that follows).
+        profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
 
-            tables_cleared = {}
-            for table in reversed(Base.metadata.sorted_tables):
-                cursor = await db.execute(table.delete())
-                tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
-            total = sum(tables_cleared.values())
+        skip = frozenset() if req.include_accounts else _DATA_RESET_SKIP
+        tables_cleared = {}
+        for table in reversed(Base.metadata.sorted_tables):
+            if table.name in skip:
+                continue
+            cursor = await db.execute(table.delete())
+            tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
+        total = sum(tables_cleared.values())
 
+        if req.include_accounts:
             # After bulk deletes, expunge stale ORM state (e.g. the acting user's
             # row, which was deleted) before inserting the invite so the subsequent
             # commit does not try to flush stale ORM objects.
             db.expunge_all()
 
             # Insert the bootstrap invite in the same transaction as the deletion.
+            # caller_email is guaranteed str here: the None/empty check above raises.
+            assert caller_email is not None
             base_url = cfg.public_base_url or ""
             bootstrap_invite_url: str | None = await _mint_admin_invite(
                 db, caller_email, base_url
             )
+        else:
+            bootstrap_invite_url = None
 
+        await db.commit()
+
+        if req.include_accounts:
             logger.warning(
                 "Full factory reset committed for caller %s; bootstrap invite URL "
                 "is only in the response body and will not be recoverable afterward.",
                 caller_email,
             )
-            await db.commit()
-
-        else:
-            # Data-only reset — delete sleep data, preserve accounts/profiles.
-            profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
-
-            tables_cleared = {}
-            for table in reversed(Base.metadata.sorted_tables):
-                if table.name in _DATA_RESET_SKIP:
-                    continue
-                cursor = await db.execute(table.delete())
-                tables_cleared[table.name] = cursor.rowcount or 0  # type: ignore[attr-defined]
-
-            total = sum(tables_cleared.values())
-            bootstrap_invite_url = None
-
-            await db.commit()
-    except OperationalError as exc:
-        if "database is locked" in str(exc).lower():
-            raise HTTPException(
-                status_code=409,
-                detail="Database is busy (an import or analysis may be running) — try again shortly",
-            ) from None
-        raise
 
     # Purge raw backup dirs after commit (idempotent quarantine-rename pattern).
-    for pid in profile_ids:
-        purge_profile_raw_dir(pid, raw_root)
+    def _purge_all() -> None:
+        for pid in profile_ids:
+            purge_profile_raw_dir(pid, raw_root)
+
+    await asyncio.to_thread(_purge_all)
 
     # Schedule VACUUM as a post-response background task.  FastAPI runs sync
     # background tasks in a thread pool so the event loop is never blocked.
