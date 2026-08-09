@@ -520,6 +520,8 @@ class CaDetailSchema(BaseModel):
     ps_reason: str | None = None
     stability_index: float | None = None
     stability_reason: str | None = None
+    # MV provenance: "device" | "flow_derived" | null (no MV channel available)
+    mv_source: str | None = None
 
 
 class CaAnalysisResponse(BaseModel):
@@ -539,6 +541,9 @@ class CaAnalysisResponse(BaseModel):
     pb_reason: str | None = None
     mv_rolling_variance: float | None = None
     mv_variance_reason: str | None = None
+    # Night-level MV provenance: "device" | "flow_derived" | "mixed" | null
+    mv_source: str | None = None
+    mv_fallback_version: str | None = None
     device_capabilities: DeviceCapabilities | None = None
 
 

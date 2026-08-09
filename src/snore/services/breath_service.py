@@ -14,13 +14,17 @@ import math
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
+
+if TYPE_CHECKING:
+    import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.shared.versioning import (
     CROSS_VERSION_REFUSAL_KEYS,
+    MV_FALLBACK_ALGO_VERSION,
     AlgorithmIdentity,
     AlgoVersions,
     AnalysisRunMetadata,
@@ -83,6 +87,7 @@ __all__ = [
     "fetch_waveform_window_raw",
     "compute_waveform_window",
     "compute_ca_analysis",
+    "derive_mv_from_flow",
     # Service
     "BreathService",
 ]
@@ -853,6 +858,8 @@ class CaDetail(BaseModel):
     ps_reason: NullReason | None
     stability_index: float | None
     stability_reason: NullReason | None
+    # MV provenance: "device" | "flow_derived" | None (no MV channel available)
+    mv_source: str | None = None
 
 
 class CaAnalysisResult(BaseModel):
@@ -869,6 +876,10 @@ class CaAnalysisResult(BaseModel):
     pb_reason: NullReason | None
     mv_rolling_variance: float | None
     mv_variance_reason: NullReason | None
+    # Night-level MV provenance: "device" | "flow_derived" | "mixed" | None,
+    # aggregated across sessions that contributed an MV channel.
+    mv_source: str | None = None
+    mv_fallback_version: str = MV_FALLBACK_ALGO_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -897,6 +908,9 @@ class RawCaSessionData(BaseModel):
     coverage: SessionCoverage
     is_ok: bool  # analysis_status == OK and algo_versions is not None and ar_id is not None
     pre_waveform: RawWaveformWindow  # MV, THERAPY_PRESSURE, EPAP channels
+    # FLOW blobs, fetched only when the device MV channel is absent; input to
+    # the derive_mv_from_flow fallback in compute_ca_analysis.
+    flow_waveform: RawWaveformWindow | None = None
     ca_events: list[RawCaEvent]
     pb_json: (
         dict[str, Any] | None
@@ -3481,6 +3495,25 @@ class BreathService:
                 session_start,
             )
 
+            # No device MV channel → fetch FLOW blobs for the flow-derived MV
+            # fallback (compute_ca_analysis runs derive_mv_from_flow on them).
+            flow_raw: RawWaveformWindow | None = None
+            if WaveformChannelName.MV in pre_raw.missing_channels:
+                flow_raw = await _fetch_waveform_blobs(
+                    self._db,
+                    WaveformWindowRequest(
+                        therapy_date=therapy_date,
+                        session_id=session_id,
+                        device_id=resolved_device_id,
+                        channels=[WaveformChannelName.FLOW],
+                        offset_start=0.0,
+                        offset_end=session_cap,
+                        window_cap_seconds=session_cap,
+                    ),
+                    session_id,
+                    session_start,
+                )
+
             # Fetch CA events for this session
             ca_rows = (
                 (
@@ -3531,6 +3564,7 @@ class BreathService:
                     coverage=cov_by_session[session_id],
                     is_ok=is_ok,
                     pre_waveform=pre_raw,
+                    flow_waveform=flow_raw,
                     ca_events=raw_events,
                     pb_json=pb_json,
                 )
@@ -3568,6 +3602,45 @@ class BreathService:
 # ---------------------------------------------------------------------------
 # §12 — compute_ca_analysis (module-level pure function)
 # ---------------------------------------------------------------------------
+
+
+def derive_mv_from_flow(
+    offsets: np.ndarray,
+    values: np.ndarray,
+    *,
+    window_s: float = 60.0,
+    out_dt_s: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pure — derive minute ventilation (L/min) from a flow waveform (L/min).
+
+    MV(t) = mean of positive-clipped flow over the trailing window
+    ``[t - window_s, t]``, sampled every ``out_dt_s`` seconds starting at
+    ``offsets[0] + window_s`` up to the last input offset.  Output samples
+    whose window contains zero input samples are omitted — merged sessions
+    have timestamp gaps, so uniform sampling is never assumed.
+
+    Returns ``(out_offsets, out_values)``; empty arrays when the input is too
+    short to cover a single window.  O(n log n): cumsum + searchsorted, no
+    per-window scans.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    if offsets.size == 0 or float(offsets[-1]) - float(offsets[0]) < window_s:
+        return np.array([]), np.array([])
+
+    clipped = np.clip(values, 0.0, None)
+    csum = np.concatenate(([0.0], np.cumsum(clipped, dtype=np.float64)))
+
+    out_times = np.arange(
+        float(offsets[0]) + window_s, float(offsets[-1]) + 1e-9, out_dt_s
+    )
+    # Window [t - window_s, t] inclusive both ends
+    lo = np.searchsorted(offsets, out_times - window_s, side="left")
+    hi = np.searchsorted(offsets, out_times, side="right")
+    counts = hi - lo
+    mask = counts > 0
+    mv = (csum[hi[mask]] - csum[lo[mask]]) / counts[mask]
+    return out_times[mask], mv
 
 
 def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
@@ -3617,11 +3690,15 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
     ca_details: list[CaDetail] = []
     total_pb_s = 0.0
     total_eligible_s = 0.0
-    pb_seen_any = False
+    # True when PB detection ran for ≥1 OK session (pb_json persisted) — zero
+    # episodes on an analyzed night is a real 0.0 %, not "not_available".
+    pb_ran_any = False
     # Combined MV bin means from ALL OK sessions for cross-session variance
     combined_bin_means: list[float] = []
     mv_rolling_var: float | None = None
     mv_var_reason: NullReason | None = NullReason.NOT_AVAILABLE
+    # MV provenance per contributing session ("device" / "flow_derived")
+    mv_sources_seen: set[str] = set()
 
     for sd in raw.session_data:
         session_start_f = sd.session_start.timestamp()
@@ -3637,6 +3714,27 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
             )
             for ch in pre_window.channels
         }
+
+        # MV fallback: no device MV channel → derive MV from the flow waveform
+        # and insert it under the MV key so all downstream code (slope,
+        # stability, rolling variance) works unchanged.
+        mv_source: str | None = None
+        if WaveformChannelName.MV in pre_ch:
+            mv_source = "device"
+        elif sd.flow_waveform is not None:
+            flow_window = compute_waveform_window(sd.flow_waveform)
+            for flow_ch in flow_window.channels:
+                if flow_ch.channel_type == WaveformChannelName.FLOW:
+                    mv_off, mv_val = derive_mv_from_flow(
+                        np.array(flow_ch.offset_seconds),
+                        np.array(flow_ch.values),
+                    )
+                    if mv_off.size > 0:
+                        pre_ch[WaveformChannelName.MV] = (mv_off, mv_val)
+                        mv_source = "flow_derived"
+                    break
+        if mv_source is not None:
+            mv_sources_seen.add(mv_source)
 
         for raw_ev in sd.ca_events:
             ev_start_f = raw_ev.start_time.timestamp()
@@ -3717,6 +3815,7 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                     ps_reason=ps_reason,
                     stability_index=stability_index,
                     stability_reason=stability_reason,
+                    mv_source=mv_source,
                 )
             )
 
@@ -3730,21 +3829,17 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                     AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
                 )
 
+                pb_ran_any = True
                 dto = AnalysisResultDTO.model_validate(sd.pb_json)
-                episodes = dto.periodic_breathing_episodes or []
-                if episodes:
-                    pb_seen_any = True
-                    for ep in episodes:
-                        start_t = float(ep.get("start_time", ep.get("start", 0)))
-                        end_t = float(
-                            ep.get(
-                                "end_time",
-                                ep.get("end", start_t + ep.get("duration", 0)),
-                            )
+                for ep in dto.periodic_breathing_episodes or []:
+                    start_t = float(ep.get("start_time", ep.get("start", 0)))
+                    end_t = float(
+                        ep.get(
+                            "end_time",
+                            ep.get("end", start_t + ep.get("duration", 0)),
                         )
-                        total_pb_s += max(0.0, end_t - start_t)
-                elif dto.periodic_breathing is not None:
-                    pb_seen_any = True
+                    )
+                    total_pb_s += max(0.0, end_t - start_t)
 
             # MV rolling variance: collect bin means across ALL OK sessions
             # (combined; variance computed once after the loop).
@@ -3773,14 +3868,19 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
     if night_level_refused:
         pb_reason = NullReason.ALGO_VERSION_MISMATCH
         mv_var_reason = NullReason.ALGO_VERSION_MISMATCH
-    elif pb_seen_any:
-        if total_eligible_s > 0:
-            pb_pct = total_pb_s / total_eligible_s * 100.0
-            pb_reason = None
-        else:
-            # session.duration_seconds was NULL — cannot compute a meaningful %
-            pb_pct = None
-            pb_reason = NullReason.NOT_AVAILABLE
+    elif pb_ran_any and total_eligible_s > 0:
+        # PB detection ran → zero episodes is a genuine 0.0 %, not null.
+        # total_eligible_s == 0 (NULL session durations) stays null+NOT_AVAILABLE.
+        pb_pct = total_pb_s / total_eligible_s * 100.0
+        pb_reason = None
+
+    # Aggregate MV provenance across contributing sessions
+    if not mv_sources_seen:
+        night_mv_source: str | None = None
+    elif len(mv_sources_seen) == 1:
+        night_mv_source = next(iter(mv_sources_seen))
+    else:
+        night_mv_source = "mixed"
 
     return CaAnalysisResult(
         query_date=raw.therapy_date,
@@ -3794,4 +3894,5 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
         pb_reason=pb_reason,
         mv_rolling_variance=mv_rolling_var,
         mv_variance_reason=mv_var_reason,
+        mv_source=night_mv_source,
     )

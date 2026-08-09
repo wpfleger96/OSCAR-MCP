@@ -55,6 +55,7 @@ from snore.services.breath_service import (
     WaveformWindowRequest,
     WindowCriterion,
     compute_waveform_window,
+    derive_mv_from_flow,
     fetch_waveform_window_raw,
 )
 
@@ -4910,3 +4911,207 @@ class TestNightlySummaryReraRdi:
         assert d1 in night_dates
         assert d3 in night_dates
         assert d2 not in night_dates
+
+
+# ---------------------------------------------------------------------------
+# Flow-derived MV fallback (derive_mv_from_flow + CA wiring + provenance)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDeriveMvFromFlow:
+    """Pure-function tests for the flow-derived MV fallback."""
+
+    def test_constant_positive_flow_yields_constant_mv(self):
+        """Constant 12 L/min flow → every derived MV sample ≈ 12; first output
+        lands exactly at offsets[0] + window_s."""
+        offsets = np.arange(10.0, 310.0, 1.0)
+        values = np.full_like(offsets, 12.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size > 0
+        assert out_t[0] == pytest.approx(10.0 + 60.0)
+        assert out_t[-1] <= offsets[-1]
+        assert np.allclose(out_v, 12.0)
+
+    def test_negative_flow_clipped_to_zero(self):
+        """Flow alternating +10/−10 → negatives clip to 0 → derived MV ≈ 5."""
+        offsets = np.arange(0.0, 200.0, 1.0)
+        values = np.where(offsets % 2 == 0, 10.0, -10.0)
+
+        _, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_v.size > 0
+        assert np.allclose(out_v, 5.0, atol=0.5)
+
+    def test_timestamp_gap_omits_empty_window_samples(self):
+        """Merged-session gap [101, 400) → output samples whose trailing window
+        contains zero input samples are omitted, then resume after the gap."""
+        offsets = np.concatenate([np.arange(0.0, 101.0), np.arange(400.0, 501.0)])
+        values = np.full_like(offsets, 6.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        # Grid is every 2 s from 60; windows [t-60, t] for t in [162, 398]
+        # fall entirely inside the gap and must be omitted.
+        in_gap = (out_t >= 162.0) & (out_t < 400.0)
+        assert not in_gap.any()
+        # Samples resume once the window reaches post-gap data
+        assert (out_t >= 400.0).any()
+        assert np.allclose(out_v, 6.0)
+
+    def test_input_shorter_than_window_returns_empty(self):
+        """Input spanning < window_s seconds cannot fill one window → empty."""
+        offsets = np.arange(0.0, 30.0, 1.0)
+        values = np.full_like(offsets, 12.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size == 0
+        assert out_v.size == 0
+
+    def test_empty_input_returns_empty(self):
+        out_t, out_v = derive_mv_from_flow(np.array([]), np.array([]))
+
+        assert out_t.size == 0
+        assert out_v.size == 0
+
+
+@pytest.mark.unit
+class TestCaMvFlowFallback:
+    """CA analysis derives MV from flow when no device MV channel exists."""
+
+    async def test_flow_only_session_derives_mv_metrics(self, async_db_session):
+        """No mv waveform, flow seeded → slope/stability/variance non-null and
+        mv_source == 'flow_derived' at both event and night level.
+
+        Flow: 5 L/min for [0, 600) s, 15 L/min for [600, 1200) s (all positive,
+        so derived MV mirrors the flow levels) → two 600-s bins with distinct
+        means → mv_rolling_variance > 0.  CA at 300 s: derived MV in the
+        window [240, 300] is constant 5.0 → slope 0.0, CV 0.0 (non-null).
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 1)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1200.0 / 3600.0
+        )
+        # OK analysis → session passes the night-level eligibility gate
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=1
+        )
+
+        n = 1200
+        ts = np.arange(n, dtype=np.float32)
+        vals = np.where(ts < 600.0, 5.0, 15.0).astype(np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(ts, vals),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        # Fetch side: MV absent → FLOW blobs fetched for the fallback
+        assert raw.session_data[0].flow_waveform is not None
+
+        from snore.services.breath_service import compute_ca_analysis  # noqa: PLC0415
+
+        result = compute_ca_analysis(raw)
+
+        assert len(result.ca_events) == 1
+        ev = result.ca_events[0]
+        assert ev.mv_source == "flow_derived"
+        assert ev.preceding_mv_slope is not None
+        assert ev.preceding_mv_reason is None
+        assert ev.stability_index is not None
+        assert ev.stability_reason is None
+
+        assert result.mv_source == "flow_derived"
+        assert result.mv_fallback_version == "v1"
+        assert result.mv_rolling_variance is not None
+        assert result.mv_rolling_variance > 0.0
+        assert result.mv_variance_reason is None
+
+    async def test_device_mv_session_skips_flow_fetch(self, async_db_session):
+        """Device mv waveform present → mv_source == 'device' and the FLOW
+        blob is never fetched (flow_waveform is None on the raw data)."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 2)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        n = 3600
+        ts = np.arange(n, dtype=np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(
+                    ts, np.full(n, 8.0, dtype=np.float32)
+                ),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        # Device MV present → no needless FLOW fetch
+        assert raw.session_data[0].flow_waveform is None
+
+        from snore.services.breath_service import compute_ca_analysis  # noqa: PLC0415
+
+        result = compute_ca_analysis(raw)
+
+        assert len(result.ca_events) == 1
+        assert result.ca_events[0].mv_source == "device"
+        assert result.mv_source == "device"
+
+    async def test_pb_zero_episodes_yields_zero_pct(self, async_db_session):
+        """Analyzed-OK session with pb_json present but zero PB episodes →
+        periodic_breathing_pct == 0.0 with reason None (not null+not_available)."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 3)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+        # store_result persists programmatic_result_json (no PB episodes)
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=1
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert result.periodic_breathing_pct == 0.0
+        assert result.pb_reason is None

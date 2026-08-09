@@ -36,6 +36,10 @@ TRIGGER_CYCLE_ALGO_VERSION: str = "v1"  # trigger/cycle heuristic (new, experime
 LEAK_VALID_ALGO: str = "v1"
 RECOVERY_DETECTOR_ALGO_VERSION: str = "v1"
 
+# Flow-derived MV fallback used by get_ca_analysis when no device MV channel
+# exists. NOT part of AlgorithmIdentity — it labels query-time derivation only.
+MV_FALLBACK_ALGO_VERSION: str = "v1"
+
 # Threshold used by leak_valid derivation (v1).
 LEAK_VALID_THRESHOLD_LPM: float = 24.0
 

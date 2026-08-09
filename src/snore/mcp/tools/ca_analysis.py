@@ -131,6 +131,7 @@ def ca_response_from_raw(
             ps_reason=str_or_none(ev.ps_reason),
             stability_index=ev.stability_index,
             stability_reason=str_or_none(ev.stability_reason),
+            mv_source=ev.mv_source,
         )
         for ev in result.ca_events
     ]
@@ -149,6 +150,8 @@ def ca_response_from_raw(
         pb_reason=str_or_none(result.pb_reason),
         mv_rolling_variance=result.mv_rolling_variance,
         mv_variance_reason=str_or_none(result.mv_variance_reason),
+        mv_source=result.mv_source,
+        mv_fallback_version=result.mv_fallback_version,
         device_capabilities=caps,
     )
 

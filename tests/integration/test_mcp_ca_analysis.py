@@ -102,10 +102,17 @@ class TestGetCaAnalysisSeededEvent:
         assert ev.stability_reason == "not_available"
 
         # Night-level: no waveform → not_available reasons
+        # (periodic_breathing_pct stays null: the seeded AnalysisResult has no
+        # programmatic_result_json, so PB detection never ran for this night)
         assert result.periodic_breathing_pct is None
         assert result.pb_reason == "not_available"
         assert result.mv_rolling_variance is None
         assert result.mv_variance_reason == "not_available"
+
+        # No MV channel (device or flow-derived) → provenance is null
+        assert ev.mv_source is None
+        assert result.mv_source is None
+        assert result.mv_fallback_version == "v1"
 
         # Algorithm identity present and a dict
         assert isinstance(result.algorithm_identity, dict)

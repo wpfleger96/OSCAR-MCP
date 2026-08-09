@@ -1834,6 +1834,18 @@ class ResmedEDFParser(DeviceParser):
                     else:
                         session.add_waveform(result[0])
 
+                # ResMed uses names like "MinVent.2s"; stored in L/min already
+                mv_signal = self._find_signal(edf, ["MinVent", "MV"])
+
+                if mv_signal:
+                    result = self._read_waveform(
+                        edf, mv_signal, WaveformType.MINUTE_VENTILATION, UNIT_FLOW
+                    )
+                    if result is None:
+                        logger.warning(f"No data in minute-vent signal {mv_signal}")
+                    else:
+                        session.add_waveform(result[0])
+
                 logger.debug(f"Parsed pressure/leak from {file_path.name}")
 
         except Exception as e:

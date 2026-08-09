@@ -1053,6 +1053,8 @@ class CaAnalysisResult(BaseModel):
     mv_variance_reason: NullReason | None
 ```
 
+MV-derived metrics (`preceding_mv_slope`, `stability_index`, `mv_rolling_variance`) prefer a device-recorded MV waveform when one exists. When a session has no device MV channel, `get_ca_analysis` derives MV at query time from the flow waveform (trailing 60-s mean of positive-clipped flow, sampled every 2 s) and computes the same metrics from it — labeled, never silent. Provenance is surfaced as `mv_source` (`"device"` / `"flow_derived"` per CA event; `"device"` / `"flow_derived"` / `"mixed"` / null at night level) alongside `mv_fallback_version` (`MV_FALLBACK_ALGO_VERSION`), so consumers can distinguish measured from derived ventilation.
+
 ### 13. `BreathService` — public method signatures
 
 ```python
