@@ -9,7 +9,8 @@ Architecture (plan §9 in-scope/out-of-scope split):
 
 Timestamp contract (A6):
 - Session wall-clock anchor (session_start_wall_clock) uses tier-2
-  (offset-free ISO 8601 + timezone_status="unknown") for absolute times.
+  (offset-free ISO 8601 + timezone_status "unknown" | "user_declared", with
+  timezone_name carrying the profile's declared IANA zone) for absolute times.
 - In-session waveform positions are numeric offsets in seconds (tier-3).
 """
 
@@ -155,6 +156,7 @@ def waveform_response_from_raw(raw: RawWaveformWindow) -> WaveformWindowResponse
         session_id=session_id,
         session_start_wall_clock=session_start_wall_clock,
         timezone_status=str(window.timezone_status),
+        timezone_name=window.timezone_name,
         window_start_offset_s=window.window_start_offset,
         window_end_offset_s=window.window_end_offset,
         channels=channels,
@@ -242,7 +244,8 @@ def register(mcp: FastMCP) -> None:
         "    max_points: LTTB target sample count per channel (1–1000).\n\n"
         "Returns:\n"
         "    WaveformWindowResponse.  ``session_id`` and ``session_start_wall_clock``\n"
-        '    (tier-2 offset-free ISO 8601, ``timezone_status: "unknown"``) are null\n'
+        '    (tier-2 offset-free ISO 8601, ``timezone_status: "unknown" | "user_declared"``,\n'
+        "    with ``timezone_name`` carrying the profile's declared IANA zone) are null\n"
         "    when the date has no session.  Each channel carries ``offset_seconds``\n"
         "    arrays (tier-3 positions from session start) and ``values``.\n"
         "    ``missing_channels`` lists channels the device did not record;\n"

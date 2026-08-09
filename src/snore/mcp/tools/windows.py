@@ -2,9 +2,11 @@
 
 Timestamp contract (A6):
 - Session wall-clock anchors are stored as naive device datetimes.
-- Output uses tier-2 (offset-free ISO 8601 + timezone_status="unknown")
-  for session wall-clock anchors and tier-3 (float offsets from session
-  start) for in-session window positions.  No UTC offsets are fabricated.
+- Output uses tier-2 (offset-free ISO 8601 + timezone_status
+  "unknown" | "user_declared", with timezone_name carrying the profile's
+  declared IANA zone) for session wall-clock anchors and tier-3 (float offsets
+  from session start) for in-session window positions.  No UTC offsets are
+  fabricated.
 """
 
 from __future__ import annotations
@@ -120,7 +122,8 @@ async def find_windows(
             criterion=str(w.criterion),
             session_id=w.session_id,
             session_start_wall_clock=w.session_start_wall_clock.isoformat(),
-            timezone_status="unknown",
+            timezone_status=str(w.timezone_status),
+            timezone_name=w.timezone_name,
             window_start_offset=w.window_start_offset,
             window_end_offset=w.window_end_offset,
             reason_summary=w.reason_summary,

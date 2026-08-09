@@ -257,6 +257,10 @@ class Profile(Base):
     last_name: Mapped[str | None] = mapped_column(String(100))
     date_of_birth: Mapped[date | None] = mapped_column(Date)
     height_cm: Mapped[int | None] = mapped_column(Integer)
+    # User-declared IANA timezone name (e.g. "America/New_York").  Labeling
+    # metadata only (A6): device wall-clock timestamps stay naive — this never
+    # rewrites timestamps or fabricates UTC offsets.
+    timezone: Mapped[str | None] = mapped_column(String(64))
     settings: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, default=dict
     )

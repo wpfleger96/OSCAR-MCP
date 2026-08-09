@@ -200,3 +200,6 @@ class TimezoneStatus(StrEnum):
 
     UTC = "utc"
     UNKNOWN = "unknown"
+    # Profile-level user-declared IANA timezone applies (timestamps stay naive;
+    # the companion timezone_name field carries the declared zone).
+    USER_DECLARED = "user_declared"

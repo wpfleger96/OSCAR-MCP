@@ -529,6 +529,12 @@ class OscarDeviceParser(DeviceParser):
         else:
             raise ValueError(f"No data for session {session_id}")
 
+        # KNOWN A6 INCONSISTENCY: OSCAR stores epoch-ms, so these datetimes are
+        # UTC-derived instants, while ResMed session/event times are device-local
+        # wall-clock.  Both land in naive tier-2 columns, so OSCAR-imported rows
+        # carry UTC-derived values under the same "unknown"/"user_declared"
+        # timezone label.  Documented in docs/mcp-server-plan.md (A6); do not fix
+        # here without a coordinated contract change.
         start_time = datetime.fromtimestamp(first_ts / 1000, tz=UTC)
         end_time = datetime.fromtimestamp(last_ts / 1000, tz=UTC)
 

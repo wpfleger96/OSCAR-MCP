@@ -10,7 +10,8 @@ Architecture (plan §9 in-scope/out-of-scope split):
 
 Timestamp contract (A6):
 - Session wall-clock anchors (session_start_wall_clock) use tier-2
-  (offset-free ISO 8601 + timezone_status="unknown") for absolute times.
+  (offset-free ISO 8601 + timezone_status "unknown" | "user_declared", with
+  timezone_name carrying the profile's declared IANA zone) for absolute times.
 - In-session positions are numeric offset_seconds (tier-3).
 
 CA events are event-anchored (import-time Event rows with event_type='CA')
@@ -123,6 +124,7 @@ def ca_response_from_raw(
             session_id=ev.session_id,
             session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
             timezone_status=str(ev.timezone_status),
+            timezone_name=ev.timezone_name,
             offset_seconds=ev.offset_seconds,
             duration_seconds=ev.duration_seconds,
             preceding_mv_slope_lpm_per_min=ev.preceding_mv_slope,

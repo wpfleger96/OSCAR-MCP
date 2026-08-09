@@ -137,6 +137,7 @@ class SessionSummary(BaseModel):
     session_id: int
     start_wall_clock: datetime  # naive — tier-2 device wall-clock
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     duration_seconds: float
 
 
@@ -248,6 +249,7 @@ class BreathRow(BaseModel):
 
     session_start_wall_clock: datetime  # naive — tier-2
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     start_offset_seconds: float
     end_offset_seconds: float
 
@@ -299,6 +301,7 @@ class BreathBin(BaseModel):
 
     session_start_wall_clock: datetime  # naive — tier-2 anchor
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     bin_start_offset: float
     bin_end_offset: float
     breath_count: int
@@ -360,6 +363,7 @@ class WindowResult(BaseModel):
     session_id: int
     session_start_wall_clock: datetime
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     window_start_offset: float
     window_end_offset: float
     reason_summary: str
@@ -467,6 +471,7 @@ class ContextualEvent(BaseModel):
     event_type: str
     event_start_wall_clock: datetime  # naive — tier-2
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     offset_seconds: float
     duration_seconds: float | None
 
@@ -513,6 +518,9 @@ class RawWaveformWindow(BaseModel):
     request: WaveformWindowRequest
     session_id: int
     session_start_wall_clock: datetime  # naive — tier-2 anchor
+    # Set at fetch time; compute_waveform_window copies these into the output.
+    timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     channels: list[RawWaveformChannel]
     missing_channels: list[WaveformChannelName]
 
@@ -535,6 +543,7 @@ class WaveformWindow(BaseModel):
     session_id: int
     session_start_wall_clock: datetime  # naive — tier-2 anchor
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     window_start_offset: float
     window_end_offset: float
     channels: list[WaveformChannel]
@@ -578,6 +587,29 @@ class WaveformWindowRequest(BaseModel):
         return self
 
 
+async def _resolve_timezone(
+    db: AsyncSession, profile_id: int
+) -> tuple[TimezoneStatus, str | None]:
+    """Resolve the profile's user-declared timezone (A6 labeling metadata).
+
+    Returns ``(USER_DECLARED, iana_name)`` when the profile declares a
+    timezone, else ``(UNKNOWN, None)``.  Timestamps are never rewritten and
+    no UTC offset is ever fabricated — this labels interpretation only.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from snore.database import models  # noqa: PLC0415
+
+    tz_name = (
+        await db.execute(
+            select(models.Profile.timezone).where(models.Profile.id == profile_id)
+        )
+    ).scalar_one_or_none()
+    if tz_name:
+        return TimezoneStatus.USER_DECLARED, tz_name
+    return TimezoneStatus.UNKNOWN, None
+
+
 def _extract_window_mean(
     offsets: list[float],
     values: list[float],
@@ -598,6 +630,8 @@ async def _fetch_waveform_blobs(
     request: WaveformWindowRequest,
     session_id: int,
     session_start: datetime,
+    timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN,
+    timezone_name: str | None = None,
 ) -> RawWaveformWindow:
     """PRIVATE — fetch waveform blobs for a pre-resolved, already-owned session.
 
@@ -639,6 +673,8 @@ async def _fetch_waveform_blobs(
         request=request,
         session_id=session_id,
         session_start_wall_clock=session_start,
+        timezone_status=timezone_status,
+        timezone_name=timezone_name,
         channels=channels,
         missing_channels=missing,
     )
@@ -693,7 +729,15 @@ async def fetch_waveform_window_raw(
         )
 
     session_start: datetime = row[0]
-    return await _fetch_waveform_blobs(db, request, request.session_id, session_start)
+    tz_status, tz_name = await _resolve_timezone(db, profile_id)
+    return await _fetch_waveform_blobs(
+        db,
+        request,
+        request.session_id,
+        session_start,
+        timezone_status=tz_status,
+        timezone_name=tz_name,
+    )
 
 
 def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
@@ -754,6 +798,8 @@ def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
     return WaveformWindow(
         session_id=raw.session_id,
         session_start_wall_clock=raw.session_start_wall_clock,
+        timezone_status=raw.timezone_status,
+        timezone_name=raw.timezone_name,
         window_start_offset=request.offset_start,
         window_end_offset=request.offset_end,
         channels=channels_out,
@@ -863,6 +909,7 @@ class CaDetail(BaseModel):
     session_id: int
     session_start_wall_clock: datetime  # naive — tier-2 anchor
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     offset_seconds: float
     duration_seconds: float | None
     preceding_mv_slope: float | None
@@ -942,6 +989,9 @@ class RawCaAnalysis(BaseModel):
     therapy_date: date
     device_id: int
     session_data: list[RawCaSessionData]
+    # Set at fetch time; compute_ca_analysis copies these into CaDetail outputs.
+    timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     # Pre-reduced day-level state (computed from coverage during fetch; no DB access)
     day_status: DayAnalysisStatus
     algorithm_identity: AlgorithmIdentity | None
@@ -1047,10 +1097,17 @@ class BreathService:
     def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self._db = db_session
         self._profile_id = profile_id
+        self._tz_cache: tuple[TimezoneStatus, str | None] | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def resolve_timezone(self) -> tuple[TimezoneStatus, str | None]:
+        """Profile timezone label (A6), cached per service instance."""
+        if self._tz_cache is None:
+            self._tz_cache = await _resolve_timezone(self._db, self._profile_id)
+        return self._tz_cache
 
     async def _latest_analysis_for_session(
         self, session_id: int
@@ -1271,6 +1328,8 @@ class BreathService:
 
         from snore.database import models  # noqa: PLC0415
 
+        tz_status, tz_name = await self.resolve_timezone()
+
         # Resolve session_id
         if query.session_id is not None:
             session_id = query.session_id
@@ -1314,6 +1373,8 @@ class BreathService:
                     SessionSummary(
                         session_id=s.id,
                         start_wall_clock=s.start_time,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         duration_seconds=s.duration_seconds or 0.0,
                     )
                     for s in day_sessions
@@ -1400,6 +1461,8 @@ class BreathService:
                     session_id=b.session_id,
                     breath_number=b.breath_number,
                     session_start_wall_clock=session_start,
+                    timezone_status=tz_status,
+                    timezone_name=tz_name,
                     start_offset_seconds=b.start_offset_s,
                     end_offset_seconds=b.end_offset_s,
                     ti=b.inspiration_time_s,
@@ -1517,6 +1580,8 @@ class BreathService:
                     bins.append(
                         BreathBin(
                             session_start_wall_clock=session_start,
+                            timezone_status=tz_status,
+                            timezone_name=tz_name,
                             bin_start_offset=bin_start,
                             bin_end_offset=bin_end,
                             breath_count=len(bin_breaths),
@@ -1792,6 +1857,7 @@ class BreathService:
 
         from snore.database import models  # noqa: PLC0415
 
+        tz_status, tz_name = await self.resolve_timezone()
         candidates: list[WindowResult] = []
         for sid in session_ids:
             ar_id = ar_by_session.get(sid)
@@ -1852,6 +1918,8 @@ class BreathService:
                         criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
                         session_id=sid,
                         session_start_wall_clock=session_start,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         window_start_offset=window_breaths[0].start_offset_s,
                         window_end_offset=window_breaths[-1].end_offset_s,
                         reason_summary=(
@@ -1900,6 +1968,7 @@ class BreathService:
         )
         event_rows = (await self._db.execute(stmt)).all()
 
+        tz_status, tz_name = await self.resolve_timezone()
         candidates: list[WindowResult] = []
         for ev_row in event_rows:
             ev = ev_row.Event
@@ -1919,6 +1988,8 @@ class BreathService:
                     criterion=WindowCriterion.CA_CENTERED,
                     session_id=sid,
                     session_start_wall_clock=session_start,
+                    timezone_status=tz_status,
+                    timezone_name=tz_name,
                     window_start_offset=win_start,
                     window_end_offset=win_end,
                     reason_summary=f"CA event at offset {ev_offset:.1f}s",
@@ -1953,6 +2024,7 @@ class BreathService:
 
         from snore.database import models  # noqa: PLC0415
 
+        tz_status, tz_name = await self.resolve_timezone()
         candidates: list[WindowResult] = []
         for sid in session_ids:
             ar_id = ar_by_session.get(sid)
@@ -1992,6 +2064,8 @@ class BreathService:
                         criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
                         session_id=sid,
                         session_start_wall_clock=session_start,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         window_start_offset=full_run[0].start_offset_s,
                         window_end_offset=full_run[-1].end_offset_s,
                         reason_summary=(
@@ -3271,6 +3345,7 @@ class BreathService:
         )
         day_sessions = sessions_by_date.get(therapy_date, [])
 
+        tz_status, tz_name = await self.resolve_timezone()
         results: list[ContextualEvent] = []
         for session_row in day_sessions:
             session_id = session_row.id
@@ -3365,7 +3440,8 @@ class BreathService:
                         session_start_wall_clock=session_start,
                         event_type=ev.event_type,
                         event_start_wall_clock=ev.start_time,
-                        timezone_status=TimezoneStatus.UNKNOWN,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         offset_seconds=offset_s,
                         duration_seconds=ev.duration_seconds,
                         pressure_at_event_cmh2o=pressure_at,
@@ -3401,6 +3477,8 @@ class BreathService:
         )
         day_sessions = sessions_by_date.get(request.therapy_date, [])
 
+        tz_status, tz_name = await self.resolve_timezone()
+
         # Validate explicit session_id BEFORE the empty-day return.
         # An owned device on an empty date with an explicit session_id must raise,
         # not silently return a synthetic empty window (plan §9 lines 822-825).
@@ -3414,6 +3492,8 @@ class BreathService:
                 request=request,
                 session_id=0,
                 session_start_wall_clock=datetime.min,
+                timezone_status=tz_status,
+                timezone_name=tz_name,
                 channels=[],
                 missing_channels=list(request.channels),
             )
@@ -3435,6 +3515,8 @@ class BreathService:
                     SessionSummary(
                         session_id=s.id,
                         start_wall_clock=s.start_time,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         duration_seconds=s.duration_seconds or 0.0,
                     )
                     for s in day_sessions
@@ -3447,7 +3529,12 @@ class BreathService:
             update={"device_id": resolved_device_id, "session_id": session_row.id}
         )
         return await _fetch_waveform_blobs(
-            self._db, resolved_request, session_row.id, session_row.start_time
+            self._db,
+            resolved_request,
+            session_row.id,
+            session_row.start_time,
+            timezone_status=tz_status,
+            timezone_name=tz_name,
         )
 
     async def get_waveform_window(
@@ -3490,11 +3577,15 @@ class BreathService:
         )
         all_day_sessions = sessions_by_date.get(therapy_date, [])
 
+        tz_status, tz_name = await self.resolve_timezone()
+
         if not all_day_sessions:
             return RawCaAnalysis(
                 therapy_date=therapy_date,
                 device_id=resolved_device_id,
                 session_data=[],
+                timezone_status=tz_status,
+                timezone_name=tz_name,
                 day_status=DayAnalysisStatus.NOT_RUN,
                 algorithm_identity=None,
                 null_reason=NullReason.ANALYSIS_NOT_RUN,
@@ -3652,6 +3743,8 @@ class BreathService:
             therapy_date=therapy_date,
             device_id=resolved_device_id,
             session_data=session_data,
+            timezone_status=tz_status,
+            timezone_name=tz_name,
             day_status=ca_day_status,
             algorithm_identity=algo_identity,
             null_reason=ca_null_reason,
@@ -3884,7 +3977,8 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                 CaDetail(
                     session_id=sd.session_id,
                     session_start_wall_clock=sd.session_start,
-                    timezone_status=TimezoneStatus.UNKNOWN,
+                    timezone_status=raw.timezone_status,
+                    timezone_name=raw.timezone_name,
                     offset_seconds=offset_s,
                     duration_seconds=raw_ev.duration_seconds,
                     preceding_mv_slope=preceding_mv_slope,

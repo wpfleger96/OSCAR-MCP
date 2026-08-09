@@ -1484,3 +1484,124 @@ class TestRxCompareCommand:
         assert result.exit_code == 0
         # Short form for bilevel: "<epap>-<ipap>" without units
         assert "6.0-18.0" in result.output
+
+
+class TestProfileTimezoneCommand:
+    """Test profile set-timezone command and timezone display in profile list."""
+
+    @pytest.fixture
+    async def db_with_profile(self, temp_db):
+        """Database with a single user + profile; returns (db_path, profile_id)."""
+        await init_database(str(temp_db))
+        async with session_scope() as session:
+            _profile = await _create_test_user_and_profile(session)
+            profile_id = _profile.id
+        return temp_db, profile_id
+
+    async def _get_timezone(self, db_path: Path, profile_id: int) -> str | None:
+        await init_database(str(db_path))
+        async with session_scope() as session:
+            row = await session.get(models.Profile, profile_id)
+            return row.timezone
+
+    def test_set_timezone_valid_zone_persists(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "America/New_York",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "America/New_York" in result.output
+        assert (
+            asyncio.run(self._get_timezone(db_path, profile_id)) == "America/New_York"
+        )
+
+    def test_clear_timezone_resets_to_null(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "Europe/London",
+                "--db",
+                str(db_path),
+            ],
+        )
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "--clear",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "Cleared" in result.output
+        assert asyncio.run(self._get_timezone(db_path, profile_id)) is None
+
+    def test_invalid_zone_rejected_with_example(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "Not/AZone",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert "America/New_York" in result.output  # friendly example in the error
+        assert asyncio.run(self._get_timezone(db_path, profile_id)) is None
+
+    def test_tz_and_clear_together_rejected(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "Europe/London",
+                "--clear",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert "exactly one" in result.output
+        assert asyncio.run(self._get_timezone(db_path, profile_id)) is None
+
+    def test_profile_list_shows_timezone(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "America/New_York",
+                "--db",
+                str(db_path),
+            ],
+        )
+        result = cli_runner.invoke(cli, ["profile", "list", "--db", str(db_path)])
+
+        assert result.exit_code == 0
+        assert "America/New_York" in result.output

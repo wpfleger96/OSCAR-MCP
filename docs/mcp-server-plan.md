@@ -126,10 +126,12 @@ Unchanged from v3.1 (stdio conversation: overview → worst-FL windows → breat
 ### Timestamp contract (A6 — three tiers, used throughout)
 
 - **Tier 1** absolute audit instants → UTC ISO 8601 with `Z` (e.g. `AnalysisResult.created_at`)
-- **Tier 2** device wall-clock → naive ISO 8601 + `timezone_status: "unknown"` (`Session.start_time`, `Event.start_time`)
+- **Tier 2** device wall-clock → naive ISO 8601 + `timezone_status` (`"unknown"` | `"user_declared"`) (`Session.start_time`, `Event.start_time`). When the profile declares an IANA timezone, `timezone_status` is `"user_declared"` and the companion `timezone_name` field carries the zone (e.g. `"America/New_York"`) — user-supplied interpretation metadata only; timestamps are never rewritten and no offset is ever fabricated.
 - **Tier 3** in-session positions → `offset_seconds: float` from the anchoring session's `start_time`
 
 No tier may fabricate a UTC offset for device wall-clock columns. Every DTO carrying `offset_seconds` also carries its anchoring session's tier-2 wall-clock start (`session_start_wall_clock` + `timezone_status`) so offsets are client-interpretable.
+
+Known inconsistency: the OSCAR binary parser (`src/snore/parsers/oscar_device.py`) derives session/event times from epoch-ms and stores UTC-derived instants in the naive tier-2 columns, whereas ResMed timestamps are device-local wall-clock — documented, not fixed.
 
 ### 1. Shared building blocks
 
