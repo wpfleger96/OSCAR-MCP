@@ -1,10 +1,14 @@
 import logging
 
-from fastapi import Request
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+from fastapi import HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import OperationalError
 
 from snore.api.middleware import _AUTH_PATH_PREFIX
 from snore.exceptions import NotFoundError
@@ -14,9 +18,29 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "NotFoundError",
     "auth_validation_error_handler",
+    "db_busy_maps_to_409",
     "not_found_handler",
     "server_error_handler",
 ]
+
+
+@asynccontextmanager
+async def db_busy_maps_to_409() -> AsyncGenerator[None]:
+    """Map SQLite write-lock contention to 409 instead of a generic 500.
+
+    Covers writers the reset lock intentionally does not serialize
+    (imports, analysis jobs).
+    """
+    try:
+        yield
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            logger.warning("SQLite write-lock contention mapped to 409: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail="Database is busy (an import or analysis may be running) — try again shortly",
+            ) from None
+        raise
 
 
 class ErrorResponse(BaseModel):

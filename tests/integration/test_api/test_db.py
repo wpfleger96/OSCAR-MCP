@@ -432,7 +432,7 @@ class TestDbBusyMapsTo409:
 
     async def test_locked_database_raises_409(self):
         """OperationalError with 'database is locked' maps to HTTPException 409."""
-        from snore.api.deps import db_busy_maps_to_409  # noqa: PLC0415
+        from snore.api.errors import db_busy_maps_to_409  # noqa: PLC0415
 
         locked_exc = OperationalError("SELECT 1", {}, Exception("database is locked"))
 
@@ -445,7 +445,7 @@ class TestDbBusyMapsTo409:
 
     async def test_other_operational_error_propagates_unchanged(self):
         """OperationalError with a different message propagates without conversion."""
-        from snore.api.deps import db_busy_maps_to_409  # noqa: PLC0415
+        from snore.api.errors import db_busy_maps_to_409  # noqa: PLC0415
 
         other_exc = OperationalError("SELECT 1", {}, Exception("disk I/O error"))
 
@@ -457,7 +457,7 @@ class TestDbBusyMapsTo409:
 
     async def test_no_exception_passes_through(self):
         """Body that raises no exception completes normally."""
-        from snore.api.deps import db_busy_maps_to_409  # noqa: PLC0415
+        from snore.api.errors import db_busy_maps_to_409  # noqa: PLC0415
 
         result: list[int] = []
         async with db_busy_maps_to_409():

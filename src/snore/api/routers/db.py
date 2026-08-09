@@ -13,12 +13,8 @@ from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.constants import NO_STORE
-from snore.api.deps import (
-    ImmediateDbDep,
-    ResetLockDep,
-    db_busy_maps_to_409,
-    service_dep,
-)
+from snore.api.deps import ImmediateDbDep, ResetLockDep, service_dep
+from snore.api.errors import db_busy_maps_to_409
 from snore.api.guards import RequireAdmin
 from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
@@ -131,10 +127,7 @@ def vacuum_db(
 async def reset_db(
     target: Annotated[DatabaseTarget, Depends(_get_target)],
     actor: RequireAdmin,
-    # Lock-before-DB ordering is load-bearing: BEGIN IMMEDIATE must be acquired
-    # after the app-level reset lock so concurrent requests fail fast with 409
-    # rather than queuing on the SQLite write lock. Authentication is enforced
-    # structurally via _lock's ActorDep sub-dependency.
+    # _lock must precede db — see require_reset_lock docstring.
     _lock: ResetLockDep,
     db: ImmediateDbDep,
     background_tasks: BackgroundTasks,
@@ -183,7 +176,7 @@ async def reset_db(
     size_before = await asyncio.to_thread(file_size_mb, db_path)
 
     raw_root = _raw_root()
-    caller_email: str | None = None
+    caller_email = ""
 
     async with db_busy_maps_to_409():
         if req.include_accounts:
@@ -199,7 +192,7 @@ async def reset_db(
                     )
                 )
             ).first()
-            caller_email = str(row[0]) if row and row[0] else None
+            caller_email = str(row[0]) if row and row[0] else ""
 
             if not caller_email:
                 raise HTTPException(
@@ -227,8 +220,6 @@ async def reset_db(
             db.expunge_all()
 
             # Insert the bootstrap invite in the same transaction as the deletion.
-            # caller_email is guaranteed str here: the None/empty check above raises.
-            assert caller_email is not None
             base_url = cfg.public_base_url or ""
             bootstrap_invite_url: str | None = await _mint_admin_invite(
                 db, caller_email, base_url
@@ -250,7 +241,15 @@ async def reset_db(
         for pid in profile_ids:
             purge_profile_raw_dir(pid, raw_root)
 
-    await asyncio.to_thread(_purge_all)
+    try:
+        await asyncio.to_thread(_purge_all)
+    except Exception:
+        # The reset is committed; a cleanup failure must not withhold the
+        # response (for factory resets the one-time bootstrap invite URL
+        # exists nowhere else). Leftover raw dirs are logged for operators.
+        logger.exception(
+            "Raw-dir purge failed after reset commit; leftover directories remain"
+        )
 
     # Schedule VACUUM as a post-response background task.  FastAPI runs sync
     # background tasks in a thread pool so the event loop is never blocked.

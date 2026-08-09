@@ -49,7 +49,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.client_ip import get_client_ip
 from snore.api.constants import NO_STORE
-from snore.api.deps import ImmediateDbDep, ResetLockDep, db_busy_maps_to_409, get_db
+from snore.api.deps import ImmediateDbDep, ResetLockDep, get_db
+from snore.api.errors import db_busy_maps_to_409
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
 from snore.auth.lockout import get_lockout_store
@@ -360,10 +361,7 @@ async def update_preferences(
 @router.post("/delete-data", response_model=DeleteDataResult)
 async def delete_my_data(
     actor: RequireWritable,
-    # Lock-before-DB ordering is load-bearing: BEGIN IMMEDIATE must be acquired
-    # after the app-level reset lock so concurrent requests fail fast with 409
-    # rather than queuing on the SQLite write lock. Authentication is enforced
-    # structurally via _lock's ActorDep sub-dependency.
+    # _lock must precede db — see require_reset_lock docstring.
     _lock: ResetLockDep,
     db: ImmediateDbDep,
     background_tasks: BackgroundTasks,

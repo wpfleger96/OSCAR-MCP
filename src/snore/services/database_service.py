@@ -326,6 +326,10 @@ class DatabaseService:
     ) -> tuple[int, int, int]:
         """Delete all sleep data owned by *user_id*; commit; purge raw dirs.
 
+        The raw-dir purge runs synchronously on the calling thread/event loop
+        (unlike ``reset_db``, which offloads via ``asyncio.to_thread``) —
+        acceptable for the typical 1-2 profiles per user.
+
         Deletes Device rows for every live profile owned by the user — the DB
         cascades (Device → Session/Day/Waveform/Event/Statistics/Setting/
         AnalysisResult/Breath/DetectedPattern) handle the rest.  Session has two
