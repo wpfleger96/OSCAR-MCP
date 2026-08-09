@@ -56,7 +56,7 @@ from snore.parsers.unified import (
     WaveformType,
     extract_basic_stats,
 )
-from snore.utils.process_pool import cancel_pending, get_pool
+from snore.utils.parse_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
 

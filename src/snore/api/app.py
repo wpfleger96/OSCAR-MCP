@@ -170,9 +170,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Stop analysis jobs first — they may have futures in the shared process
             # pool, so the pool must still be alive while they drain.
             _shutdown_analysis_jobs()
+            from snore.utils.parse_pool import (  # noqa: PLC0415
+                shutdown_pool as shutdown_parse_pool,
+            )
             from snore.utils.process_pool import shutdown_pool  # noqa: PLC0415
 
             shutdown_pool(wait=False)
+            shutdown_parse_pool(wait=False)
         finally:
             # Release the shared writer lease unconditionally — even if import-job
             # shutdown raises the still-alive RuntimeError above.

@@ -361,6 +361,7 @@ def test_to_dict_fields_and_no_profile_id():
     assert "created_at" in d
     assert d["started_at"] is None
     assert d["finished_at"] is None
+    assert d["eta_seconds"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -450,8 +451,8 @@ def test_get_job_concurrency_returns_configured_value():
         reset_config()
 
 
-def test_get_job_concurrency_returns_max_queued_when_config_value_is_none():
-    """analysis_job_concurrency=None (unset env var) resolves to MAX_QUEUED."""
+def test_default_job_concurrency_resolves_to_four_when_config_value_is_none():
+    """analysis_job_concurrency=None (unset env var) resolves to the module default (4)."""
     from snore.api.config import AppConfig, reset_config, set_config
     from snore.auth.actor import AuthMode
 
@@ -475,6 +476,40 @@ def test_get_job_concurrency_returns_max_queued_when_config_value_is_none():
         max_jobs_global=10,
         analysis_max_workers=4,
         analysis_job_concurrency=None,
+    )
+    set_config(cfg)
+    try:
+        assert _get_job_concurrency() == 4
+        assert _get_job_concurrency() == _DEFAULT_ANALYSIS_JOB_CONCURRENCY
+    finally:
+        reset_config()
+
+
+def test_explicit_job_concurrency_clamps_to_max_queued():
+    """An explicit analysis_job_concurrency value above MAX_QUEUED is clamped."""
+    from snore.api.config import AppConfig, reset_config, set_config
+    from snore.auth.actor import AuthMode
+
+    cfg = AppConfig(
+        auth_mode=AuthMode.LOCAL,
+        session_secret="",
+        public_base_url="",
+        public_origin=None,
+        bind_host="127.0.0.1",
+        trusted_proxies=frozenset(),
+        dev_origins=frozenset(),
+        cors_origins=["http://localhost:5173"],
+        google_client_id="",
+        google_client_secret="",
+        oauth_attempt_ttl_seconds=600,
+        pre_auth_cookie_ttl_seconds=600,
+        max_upload_bytes=512 * 1024 * 1024,
+        max_file_bytes=256 * 1024 * 1024,
+        max_upload_files=10_000,
+        max_jobs_per_user=3,
+        max_jobs_global=10,
+        analysis_max_workers=4,
+        analysis_job_concurrency=MAX_QUEUED + 5,
     )
     set_config(cfg)
     try:
@@ -630,3 +665,53 @@ def test_shutdown_joins_all_worker_threads():
     assert not alive, (
         f"Worker threads still alive after shutdown: {[t.name for t in alive]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 14. to_dict() eta_seconds: None when not started or no progress; positive mid-run
+# ---------------------------------------------------------------------------
+
+
+def test_to_dict_eta_seconds_none_when_not_started():
+    """eta_seconds is None for a job that has not started yet."""
+    job = _enqueue_one()
+    d = job.to_dict()
+    assert d["eta_seconds"] is None
+
+
+def test_to_dict_eta_seconds_none_when_no_progress():
+    """eta_seconds is None while RUNNING but progress_completed is still zero."""
+    job = _enqueue_one()
+    job.try_start()
+    # No update_progress call — completed stays at 0.
+    d = job.to_dict()
+    assert d["state"] == "running"
+    assert d["eta_seconds"] is None
+
+
+def test_to_dict_eta_seconds_positive_mid_run():
+    """eta_seconds is a positive integer when the job is running with measurable progress."""
+    job = _enqueue_one(session_ids=list(range(10)))
+    job.try_start()
+    # Backdate started_at by 5 seconds so the rate estimate is non-trivial.
+    with job._lock:
+        job._started_at = time.monotonic() - 5.0
+    job.update_progress(done=5, total=10)
+
+    d = job.to_dict()
+    assert d["state"] == "running"
+    eta = d["eta_seconds"]
+    assert isinstance(eta, int), f"expected int, got {type(eta)}"
+    assert eta > 0, f"expected positive ETA, got {eta}"
+
+
+def test_to_dict_eta_seconds_none_after_completion():
+    """eta_seconds is None once the job transitions out of RUNNING."""
+    job = _enqueue_one(session_ids=list(range(10)))
+    job.try_start()
+    job.update_progress(done=5, total=10)
+    job.finish(succeeded=True)
+
+    d = job.to_dict()
+    assert d["state"] == "succeeded"
+    assert d["eta_seconds"] is None

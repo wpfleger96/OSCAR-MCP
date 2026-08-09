@@ -321,6 +321,15 @@ def show(
     help="Delete all analysis versions (default: only latest)",
 )
 @click.option(
+    "--stale-versions",
+    is_flag=True,
+    help=(
+        "Delete only analysis rows whose stored algorithm version differs from the "
+        "current engine. Pairs with --all (or session/date filters) to scope which "
+        "sessions to scan."
+    ),
+)
+@click.option(
     "--dry-run", is_flag=True, help="Preview what would be deleted without deleting"
 )
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
@@ -332,6 +341,7 @@ def analysis_delete(
     date_to: datetime | None,
     delete_all: bool,
     all_versions: bool,
+    stale_versions: bool,
     dry_run: bool,
     force: bool,
     db: str | None,
@@ -370,6 +380,7 @@ def analysis_delete(
                     to_date=date_to,
                     delete_all=delete_all,
                     all_versions=all_versions,
+                    stale_versions=stale_versions,
                 )
             except ValueError as e:
                 raise click.ClickException(str(e)) from e
@@ -415,26 +426,35 @@ def analysis_delete(
             )
 
             print_header("Deletion Summary", ICON_STATS, wide=True)
-            console.print(
-                f"Sessions with analysis:          {preview.sessions_with_analysis}"
+            sessions_label = (
+                "Sessions with stale analysis:"
+                if stale_versions
+                else "Sessions with analysis:"
             )
+            console.print(f"{sessions_label:<33}{preview.sessions_with_analysis}")
             console.print(
                 f"Total analysis records:          {preview.total_analysis_records}"
                 + (
                     " (all versions)"
-                    if all_versions
-                    or preview.total_analysis_records == preview.sessions_with_analysis
+                    if not stale_versions
+                    and (
+                        all_versions
+                        or preview.total_analysis_records
+                        == preview.sessions_with_analysis
+                    )
                     else ""
                 )
             )
+            records_suffix = ""
+            if stale_versions:
+                records_suffix = " (stale versions only)"
+            elif (
+                not all_versions
+                and preview.total_analysis_records > preview.sessions_with_analysis
+            ):
+                records_suffix = " (latest only)"
             console.print(
-                f"Analysis records to delete:      {preview.records_to_delete}"
-                + (
-                    " (latest only)"
-                    if not all_versions
-                    and preview.total_analysis_records > preview.sessions_with_analysis
-                    else ""
-                )
+                f"Analysis records to delete:      {preview.records_to_delete}{records_suffix}"
             )
             console.print(
                 f"Detected patterns to delete:     {preview.patterns_count} (cascade delete)"
@@ -458,14 +478,14 @@ def analysis_delete(
 
             session_ids_to_delete = [d.id for d in preview.session_details]
             deleted_count = await facade.delete_analysis(
-                session_ids_to_delete, all_versions
+                session_ids_to_delete, all_versions, stale_versions=stale_versions
             )
 
             print_success(
                 f"Successfully deleted {deleted_count} analysis record(s) for {preview.sessions_with_analysis} session(s)"
             )
 
-            if deleted_count > 10:
+            if stale_versions or deleted_count > 10:
                 print_tip("Run 'snore db vacuum' to reclaim disk space")
 
             return 0

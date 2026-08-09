@@ -198,6 +198,244 @@ class TestGetDeletePreview:
         assert preview.records_to_delete == 2
 
 
+def _stale_engine_json() -> dict:
+    """Legacy flat engine_versions_json (no 'identity' key) → always stale."""
+    return {"format_version": 3, "segmenter": "v1"}
+
+
+def _current_engine_json() -> dict:
+    """engine_versions_json matching the current AlgorithmIdentity."""
+    from snore.analysis.shared.versioning import (  # noqa: PLC0415
+        AlgorithmIdentity,
+        AlgoVersions,
+        AnalysisRunMetadata,
+    )
+
+    return AlgoVersions(
+        identity=AlgorithmIdentity.current(),
+        run=AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"]),
+    ).model_dump()
+
+
+async def _create_session_with_mixed_analyses(
+    db_session: AsyncSession,
+    device: Device,
+    day_date: date,
+) -> tuple[Day, Session, AnalysisResult, AnalysisResult]:
+    """Create a session with one stale and one current AnalysisResult row.
+
+    Returns (day, session, stale_ar, current_ar).
+    """
+    day = Day(device_id=device.id, date=day_date, total_therapy_hours=8.0)
+    db_session.add(day)
+    await db_session.flush()
+    sess = Session(
+        device_id=device.id,
+        day_id=day.id,
+        device_session_id=f"mixed_{day_date.isoformat()}",
+        start_time=datetime.combine(day_date, datetime.min.time()),
+        end_time=datetime.combine(day_date, datetime.min.time()) + timedelta(hours=8),
+        duration_seconds=28800,
+    )
+    db_session.add(sess)
+    await db_session.flush()
+
+    stale_ar = AnalysisResult(
+        session_id=sess.id,
+        timestamp_start=sess.start_time,
+        timestamp_end=sess.end_time,
+        engine_versions_json=_stale_engine_json(),
+        created_at=datetime.now(UTC),
+    )
+    db_session.add(stale_ar)
+
+    current_ar = AnalysisResult(
+        session_id=sess.id,
+        timestamp_start=sess.start_time,
+        timestamp_end=sess.end_time,
+        engine_versions_json=_current_engine_json(),
+        created_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    db_session.add(current_ar)
+
+    await db_session.flush()
+    return day, sess, stale_ar, current_ar
+
+
+class TestDeleteStaleVersions:
+    """Tests for get_delete_preview and delete_analysis with stale_versions=True."""
+
+    async def test_preview_stale_versions_counts_only_stale_rows(
+        self, async_db_session, async_test_device
+    ):
+        """Preview shows only stale rows in records_to_delete; current row survives."""
+        today = date.today()
+        _, sess, stale_ar, current_ar = await _create_session_with_mixed_analyses(
+            async_db_session, async_test_device, today
+        )
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(delete_all=True, stale_versions=True)
+
+        assert preview.sessions_with_analysis == 1
+        assert preview.total_analysis_records == 2  # both rows exist
+        assert preview.records_to_delete == 1  # only the stale one
+        assert len(preview.session_details) == 1
+        assert preview.session_details[0].id == sess.id
+        assert preview.session_details[0].version_count == 1  # 1 stale row
+
+    async def test_preview_stale_versions_no_stale_rows_returns_zero(
+        self, async_db_session, async_test_device
+    ):
+        """When all rows are current, records_to_delete is 0 and sessions empty."""
+        today = date.today()
+        _, sess = await _create_session_with_analysis(
+            async_db_session, async_test_device, today
+        )
+        # Overwrite with a current-version engine_versions_json.
+        from sqlalchemy import select as sa_select  # noqa: PLC0415
+
+        ar = (
+            (
+                await async_db_session.execute(
+                    sa_select(AnalysisResult).filter_by(session_id=sess.id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        ar.engine_versions_json = _current_engine_json()
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(delete_all=True, stale_versions=True)
+
+        assert preview.sessions_with_analysis == 0
+        assert preview.records_to_delete == 0
+
+    async def test_delete_stale_versions_removes_only_stale_rows(
+        self, async_db_session, async_test_device
+    ):
+        """delete_analysis(stale_versions=True) removes stale rows; current row survives."""
+        from sqlalchemy import select as sa_select
+
+        today = date.today()
+        _, sess, stale_ar, current_ar = await _create_session_with_mixed_analyses(
+            async_db_session, async_test_device, today
+        )
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        deleted = await service.delete_analysis([sess.id], stale_versions=True)
+
+        assert deleted == 1
+
+        remaining_ids = (
+            (
+                await async_db_session.execute(
+                    sa_select(AnalysisResult.id).filter_by(session_id=sess.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # Only the current-version row survives.
+        assert remaining_ids == [current_ar.id]
+
+    async def test_delete_stale_versions_dry_run_deletes_nothing(
+        self, async_db_session, async_test_device
+    ):
+        """get_delete_preview with stale_versions=True never mutates the DB."""
+        from sqlalchemy import func  # noqa: PLC0415
+        from sqlalchemy import select as sa_select
+
+        today = date.today()
+        _, sess, stale_ar, current_ar = await _create_session_with_mixed_analyses(
+            async_db_session, async_test_device, today
+        )
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(delete_all=True, stale_versions=True)
+
+        # Preview should identify the stale row…
+        assert preview.records_to_delete == 1
+
+        # …but the DB must be unchanged.
+        count = (
+            await async_db_session.execute(
+                sa_select(func.count())
+                .select_from(AnalysisResult)
+                .filter_by(session_id=sess.id)
+            )
+        ).scalar()
+        assert count == 2
+
+    async def test_delete_stale_versions_with_force_flag(
+        self, async_db_session, async_test_device
+    ):
+        """Deleting stale rows when all rows are stale leaves no analysis for session."""
+        from sqlalchemy import func  # noqa: PLC0415
+        from sqlalchemy import select as sa_select
+
+        today = date.today()
+        _, sess = await _create_session_with_analysis(
+            async_db_session, async_test_device, today, num_analyses=2
+        )
+        # Both rows use the default engine_versions_json={} from the helper,
+        # which lacks an 'identity' key → stale.
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        deleted = await service.delete_analysis([sess.id], stale_versions=True)
+
+        assert deleted == 2
+
+        remaining = (
+            await async_db_session.execute(
+                sa_select(func.count())
+                .select_from(AnalysisResult)
+                .filter_by(session_id=sess.id)
+            )
+        ).scalar()
+        assert remaining == 0
+
+    async def test_delete_stale_versions_with_all_scope(
+        self, async_db_session, async_test_device
+    ):
+        """stale_versions=True scoped across multiple sessions deletes only stale rows."""
+        from sqlalchemy import select as sa_select
+
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        _, sess1, stale1, current1 = await _create_session_with_mixed_analyses(
+            async_db_session, async_test_device, today
+        )
+        _, sess2, stale2, current2 = await _create_session_with_mixed_analyses(
+            async_db_session, async_test_device, yesterday
+        )
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        deleted = await service.delete_analysis(
+            [sess1.id, sess2.id], stale_versions=True
+        )
+
+        assert deleted == 2  # one stale row per session
+
+        surviving_ids = set(
+            (await async_db_session.execute(sa_select(AnalysisResult.id)))
+            .scalars()
+            .all()
+        )
+        assert current1.id in surviving_ids
+        assert current2.id in surviving_ids
+        assert stale1.id not in surviving_ids
+        assert stale2.id not in surviving_ids
+
+
 class TestDeleteAnalysis:
     """Tests for delete_analysis method."""
 

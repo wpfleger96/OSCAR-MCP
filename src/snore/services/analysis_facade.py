@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.analysis.shared.versioning import AlgorithmIdentity, AlgoVersions
 from snore.analysis.types import AnalysisResult
 from snore.database import models
 from snore.services.schemas import (
@@ -23,6 +24,18 @@ from snore.services.schemas import (
 __all__ = ["AnalysisFacade", "BatchAnalysisCoordinator"]
 
 logger = logging.getLogger(__name__)
+
+
+def _is_stale(engine_versions_json: dict[str, Any]) -> bool:
+    """Return True when an AnalysisResult row's engine_versions_json is stale.
+
+    Stale means: legacy flat row (no 'identity' key), unparseable, or the
+    stored AlgorithmIdentity does not match the current identity exactly.
+    """
+    parsed = AlgoVersions.from_stored(engine_versions_json)
+    if parsed is None:
+        return True
+    return parsed.identity.model_dump() != AlgorithmIdentity.current().model_dump()
 
 
 class AnalysisFacade:
@@ -227,6 +240,7 @@ class AnalysisFacade:
         to_date: datetime | None = None,
         delete_all: bool = False,
         all_versions: bool = False,
+        stale_versions: bool = False,
     ) -> AnalysisDeletePreview:
         """Preview analysis data that would be deleted.
 
@@ -235,7 +249,10 @@ class AnalysisFacade:
             from_date: Filter sessions from this datetime
             to_date: Filter sessions to this datetime
             delete_all: Consider all sessions
-            all_versions: Count all analysis versions (affects records_to_delete)
+            all_versions: Count all analysis versions (affects records_to_delete).
+                Ignored when stale_versions=True.
+            stale_versions: When True, only count rows whose stored
+                AlgorithmIdentity differs from the current identity (stale rows).
 
         Returns:
             AnalysisDeletePreview with counts and session details
@@ -290,6 +307,11 @@ class AnalysisFacade:
 
         session_ids_list = [s.id for s in sessions_with_analysis]
 
+        if stale_versions:
+            return await self._get_stale_versions_preview(
+                sessions_with_analysis, session_ids_list
+            )
+
         analysis_counts = (
             await self._db.execute(
                 select(models.AnalysisResult.session_id, func.count())
@@ -338,10 +360,77 @@ class AnalysisFacade:
             session_details=session_details,
         )
 
+    async def _get_stale_versions_preview(
+        self,
+        sessions_with_analysis: Sequence[Any],
+        session_ids_list: list[int],
+    ) -> AnalysisDeletePreview:
+        """Build a delete preview for the --stale-versions mode.
+
+        Fetches all AnalysisResult rows for the scoped sessions, classifies each
+        as stale or current in Python (reusing AlgoVersions.from_stored), and
+        returns counts scoped to stale rows only.
+        """
+        all_rows = (
+            await self._db.execute(
+                select(
+                    models.AnalysisResult.id,
+                    models.AnalysisResult.session_id,
+                    models.AnalysisResult.engine_versions_json,
+                ).where(models.AnalysisResult.session_id.in_(session_ids_list))
+            )
+        ).fetchall()
+
+        total_analysis_records = len(all_rows)
+
+        stale_ids: list[int] = []
+        stale_count_by_session: dict[int, int] = {}
+        for row in all_rows:
+            if _is_stale(row.engine_versions_json):
+                stale_ids.append(row.id)
+                stale_count_by_session[row.session_id] = (
+                    stale_count_by_session.get(row.session_id, 0) + 1
+                )
+
+        sessions_row_map = {s.id: s for s in sessions_with_analysis}
+        session_details = [
+            AnalysisSessionDetail(
+                id=sid,
+                start_time=sessions_row_map[sid].start_time,
+                manufacturer=sessions_row_map[sid].manufacturer,
+                model=sessions_row_map[sid].model,
+                version_count=count,
+            )
+            for sid, count in stale_count_by_session.items()
+            if sid in sessions_row_map
+        ]
+        # Preserve stable ordering (newest first matches the outer query).
+        session_order = {s.id: i for i, s in enumerate(sessions_with_analysis)}
+        session_details.sort(key=lambda d: session_order.get(d.id, 0))
+
+        patterns_count = 0
+        if stale_ids:
+            patterns_count = (
+                await self._db.execute(
+                    select(func.count())
+                    .select_from(models.DetectedPattern)
+                    .where(models.DetectedPattern.analysis_result_id.in_(stale_ids))
+                )
+            ).scalar() or 0
+
+        return AnalysisDeletePreview(
+            sessions_with_analysis=len(stale_count_by_session),
+            total_analysis_records=total_analysis_records,
+            records_to_delete=len(stale_ids),
+            patterns_count=patterns_count,
+            session_details=session_details,
+        )
+
     async def delete_analysis(
         self,
         session_ids: list[int],
         all_versions: bool = False,
+        stale_versions: bool = False,
     ) -> int:
         """Delete analysis results for given sessions.
 
@@ -352,6 +441,10 @@ class AnalysisFacade:
         Args:
             session_ids: Session IDs to delete analysis for
             all_versions: If True, delete all versions. If False, only latest.
+                Ignored when stale_versions=True.
+            stale_versions: If True, delete only rows whose stored
+                AlgorithmIdentity differs from the current identity. Child rows
+                (Breath, DetectedPattern) are removed via DB-level CASCADE.
 
         Returns:
             Number of analysis records deleted
@@ -369,6 +462,30 @@ class AnalysisFacade:
             )
             .subquery()
         )
+
+        if stale_versions:
+            # Classify rows in Python to reuse the AlgoVersions parser.
+            rows = (
+                await self._db.execute(
+                    select(
+                        models.AnalysisResult.id,
+                        models.AnalysisResult.engine_versions_json,
+                    ).where(
+                        models.AnalysisResult.session_id.in_(
+                            select(owned_sessions_subq.c.id)
+                        )
+                    )
+                )
+            ).fetchall()
+            stale_ids = [r.id for r in rows if _is_stale(r.engine_versions_json)]
+            if not stale_ids:
+                return 0
+            result = await self._db.execute(
+                delete(models.AnalysisResult).where(
+                    models.AnalysisResult.id.in_(stale_ids)
+                )
+            )
+            return result.rowcount or 0  # type: ignore[attr-defined]
 
         if all_versions:
             # Delete all analysis results for owned sessions.

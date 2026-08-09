@@ -77,6 +77,10 @@ class AlgorithmIdentity(BaseModel):
     # The bump to 4 is mandatory: pydantic validation back-fills missing fields
     # from defaults, so without it legacy rows lacking validity_flags would
     # compare equal to the current identity and silently stay OK.
+    #
+    # RELEASE NOTE: bumping format_version marks every stored AnalysisResult
+    # STALE_VERSION — the next batch analysis re-processes all sessions.
+    # Call this out explicitly in release notes whenever format_version is bumped.
     format_version: int = 4
     segmenter: str = SEGMENTER_ALGO_VERSION
     fl_classifier: str = FL_CLASSIFIER_ALGO_VERSION

@@ -344,16 +344,39 @@ class AnalysisService:
         modes_list = list(modes) if modes is not None else [DEFAULT_MODE]
         resolved_primary = _resolve_primary_mode(modes_list, primary_mode)
 
-        # Scope the session lookup to this profile so foreign IDs raise ValueError
-        # rather than loading another profile's data.
-        stmt = select(models.Session).where(models.Session.id == session_id)
+        # Single query: Session + Device (inner join — device_id is NOT NULL) +
+        # Setting (outer join — 0-3 rows for ramp keys).  The outer join fans
+        # out to one row per matching Setting; the Device/Session columns are
+        # identical across all rows.  When no Setting rows match, the outer join
+        # produces one row with Setting.key/value = NULL.
+        _RAMP_KEYS = ("ramp_enabled", "ramp_time", "smart_ramp")
+        stmt = (
+            select(
+                models.Session,
+                models.Device.manufacturer,
+                models.Setting.key,
+                models.Setting.value,
+            )
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .outerjoin(
+                models.Setting,
+                (models.Setting.session_id == models.Session.id)
+                & models.Setting.key.in_(_RAMP_KEYS),
+            )
+            .where(models.Session.id == session_id)
+        )
         if self.profile_id is not None:
-            stmt = stmt.join(
-                models.Device, models.Session.device_id == models.Device.id
-            ).where(models.Device.profile_id == self.profile_id)
-        session = (await self.db_session.execute(stmt)).scalars().first()
-        if not session:
+            stmt = stmt.where(models.Device.profile_id == self.profile_id)
+
+        rows = (await self.db_session.execute(stmt)).all()
+        if not rows:
             raise ValueError(f"Session {session_id} not found")
+
+        session = rows[0][0]
+        device_manufacturer: str = rows[0][1] if rows[0][1] is not None else "unknown"
+        settings_by_key: dict[str, str | None] = {
+            row[2]: row[3] for row in rows if row[2] is not None
+        }
 
         # Validity-flag inputs: persisted mask-on segments + ramp settings.
         mask_on_segments = _parse_mask_on_segments(session.mask_on_segments, session_id)
@@ -363,30 +386,9 @@ class AnalysisService:
             else None
         )
 
-        setting_rows = (
-            await self.db_session.execute(
-                select(models.Setting.key, models.Setting.value).where(
-                    models.Setting.session_id == session_id,
-                    models.Setting.key.in_(("ramp_enabled", "ramp_time", "smart_ramp")),
-                )
-            )
-        ).all()
-        settings_by_key: dict[str, str | None] = {k: v for k, v in setting_rows}
         ramp_enabled = _parse_bool_setting(settings_by_key.get("ramp_enabled"))
         ramp_time_minutes = _parse_int_setting(settings_by_key.get("ramp_time"))
         smart_ramp = _parse_bool_setting(settings_by_key.get("smart_ramp")) is True
-
-        # Fetch device manufacturer for vendor-applicability gating.
-        device_row = (
-            (
-                await self.db_session.execute(
-                    select(models.Device).where(models.Device.id == session.device_id)
-                )
-            )
-            .scalars()
-            .first()
-        )
-        device_manufacturer: str = device_row.manufacturer if device_row else "unknown"
 
         try:
             flow_blob, flow_sample_count, flow_metadata = await fetch_waveform_blob(
