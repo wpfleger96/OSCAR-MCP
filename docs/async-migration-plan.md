@@ -248,8 +248,7 @@ code.
 
 ## After PR-2: MCP server
 
-See `docs/mcp-server-plan.md`. Tools are native-async from day one; no async retrofit
-required.
+Tools are native-async from day one; no async retrofit required.
 
 ---
 

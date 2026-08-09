@@ -574,8 +574,8 @@ class OscarDeviceParser(DeviceParser):
         # declared timezone these datetimes fall back to UTC wall-clock, while
         # ResMed session/event times are device-local wall-clock — so
         # OSCAR-imported rows carry UTC-derived values under the "unknown"
-        # timezone label.  Documented in docs/mcp-server-plan.md (A6); declare
-        # a profile timezone (`snore profile set-timezone`) to resolve it.
+        # timezone label.  Declare a profile timezone
+        # (`snore profile set-timezone`) to resolve it.
         start_time = _epoch_to_wall_clock(first_ts / 1000, timezone_name)
         end_time = _epoch_to_wall_clock(last_ts / 1000, timezone_name)
 

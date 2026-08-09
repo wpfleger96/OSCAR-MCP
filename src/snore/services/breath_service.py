@@ -3460,7 +3460,7 @@ class BreathService:
     ) -> RawWaveformWindow:
         """Resolve, validate, and fetch raw waveform blobs for a window request.
 
-        MCP raw/render seam (plan docs/mcp-server-plan.md §9): the fetch step runs
+        MCP raw/render seam: the fetch step runs
         inside the caller's DB scope while ``compute_waveform_window`` (pure, CPU-only)
         runs after the scope closes.  Direct callers that need the raw bytes or want
         to render a PNG call this method, then pass the returned ``RawWaveformWindow``

@@ -228,7 +228,7 @@ See `docs/async-migration-plan.md` for the full spec.
 
 ### Phase 2.3+: MCP Server
 
-**Sequenced behind PR-2.** See `docs/mcp-server-plan.md` for the full spec.
+**Sequenced behind PR-2.**
 
 - [ ] Phase 1: MCP skeleton + `get_settings_timeline`, `get_nightly_summary`, `get_events`
 - [ ] Phase 2: `breaths` table + per-breath feature persistence at import time (parallel with Phase 1)
