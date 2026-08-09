@@ -258,6 +258,7 @@ async def _lifespan(
     profile_name: str = "neutral",
     *,
     actor_scoped: bool = False,
+    manage_database: bool = True,
 ) -> AsyncGenerator[SNORERuntime]:
     """FastMCP lifespan: initialize DB, build runtime, yield to tools.
 
@@ -269,19 +270,24 @@ async def _lifespan(
     When ``actor_scoped=True`` (OAuth HTTP), the per-request actor carries its
     own profile_id and scope; startup skips the first-live-profile query so an
     empty database does not prevent server start.
+
+    When ``manage_database=False`` (embedded into FastAPI), the FastAPI lifespan
+    owns the module-global engine; this lifespan must not initialize or clean up
+    the database — doing so would dispose the shared engine mid-flight.
     """
     from snore.parsers.register_all import ensure_registered_parsers  # noqa: PLC0415
 
-    target = DatabaseTarget.from_env_and_flags(db_flag=db_flag, warn_ignored=True)
-    async_url = target.resolve_async_url()
-
-    await init_database_from_url(async_url)
+    if manage_database:
+        target = DatabaseTarget.from_env_and_flags(db_flag=db_flag, warn_ignored=True)
+        async_url = target.resolve_async_url()
+        await init_database_from_url(async_url)
 
     try:
         # Register vendor parsers once at startup (idempotent; tools must not call
         # ensure_registered_parsers() themselves — this is the single call site).
         ensure_registered_parsers()
 
+        db_location = target.location if manage_database else "embedded"
         runtime: SNORERuntime
         if actor_scoped:
             from snore.mcp.auth import actor_scope  # noqa: PLC0415
@@ -291,7 +297,7 @@ async def _lifespan(
             runtime = ActorRuntime(scope_provider=actor_scope)
             logger.info(
                 "SNORE MCP server started — db=%r profile=actor-scoped (OAuth)",
-                target.location,
+                db_location,
             )
         else:
             # Resolve the active profile — required by BreathService, DeviceService,
@@ -309,18 +315,20 @@ async def _lifespan(
             )
             logger.info(
                 "SNORE MCP server started — db=%r profile=%s profile_id=%d",
-                target.location,
+                db_location,
                 profile_name,
                 runtime.profile_id,
             )
     except Exception:
-        await cleanup_database()
+        if manage_database:
+            await cleanup_database()
         raise
 
     try:
         yield runtime
     finally:
-        await cleanup_database()
+        if manage_database:
+            await cleanup_database()
         logger.info("SNORE MCP server stopped")
 
 
@@ -328,13 +336,29 @@ def make_server(
     db_flag: str | None = None,
     profile_name: str = "neutral",
     auth: AuthProvider | None = None,
+    *,
+    manage_database: bool = True,
 ) -> FastMCP:
     """Construct and return a configured FastMCP instance.
 
     When ``auth`` is provided (OAuth HTTP path), the server uses actor-scoped
     sessions — each request's actor carries its own profile_id, and the
     database startup check requiring at least one profile is skipped.
+
+    When ``manage_database=False`` (embedded into FastAPI via ``mcp_embed``),
+    the FastAPI lifespan owns the module-global engine; this server must not
+    initialize or clean up the database.  ``auth`` must be provided in this
+    case — embedded mode always uses actor-scoped auth.
+
+    Raises:
+        ValueError: If ``manage_database=False`` and ``auth`` is None.
     """
+    if not manage_database and auth is None:
+        raise ValueError(
+            "manage_database=False requires auth — embedded mode requires "
+            "actor-scoped auth so every request resolves its own DB scope"
+        )
+
     profile = get_profile(profile_name)
 
     @asynccontextmanager
@@ -344,6 +368,7 @@ def make_server(
             db_flag=db_flag,
             profile_name=profile_name,
             actor_scoped=auth is not None,
+            manage_database=manage_database,
         ) as rt:
             yield rt
 

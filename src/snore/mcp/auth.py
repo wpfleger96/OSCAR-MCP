@@ -52,7 +52,7 @@ def make_auth_provider(
     """Construct a GoogleProvider for HTTP transport.
 
     Args:
-        base_url:            Public server URL (SNORE_MCP_BASE_URL).  Must be
+        base_url:            Public server URL (SNORE_PUBLIC_BASE_URL).  Must be
                              HTTPS for non-loopback hosts; plain HTTP is allowed
                              for loopback addresses (127.x.x.x, ::1, localhost).
         google_client_id:    OAuth client ID (GOOGLE_CLIENT_ID).
@@ -94,7 +94,7 @@ def make_auth_provider(
         validate_origin_url,
     )
 
-    _require_nonempty(base_url, "base_url", "SNORE_MCP_BASE_URL")
+    _require_nonempty(base_url, "base_url", "SNORE_PUBLIC_BASE_URL")
     _require_nonempty(google_client_id, "google_client_id", "GOOGLE_CLIENT_ID")
     _require_nonempty(
         google_client_secret, "google_client_secret", "GOOGLE_CLIENT_SECRET"
@@ -104,7 +104,7 @@ def make_auth_provider(
         validate_origin_url(base_url, require_http_loopback=True)
     except ConfigError as exc:
         raise ValueError(
-            f"SNORE_MCP_BASE_URL must be a valid HTTPS (or loopback HTTP) URL: {exc}"
+            f"SNORE_PUBLIC_BASE_URL must be a valid HTTPS (or loopback HTTP) URL: {exc}"
         ) from exc
 
     _client = http_client if http_client is not None else httpx.AsyncClient()

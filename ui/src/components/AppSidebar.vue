@@ -61,6 +61,10 @@
                     <Users class="h-4 w-4" />
                     <span>Users</span>
                 </RouterLink>
+                <RouterLink v-if="!isLocal" to="/admin/mcp" class="nav-item">
+                    <Server class="h-4 w-4" />
+                    <span>MCP Server</span>
+                </RouterLink>
             </template>
         </nav>
         <div class="sidebar-footer">
@@ -155,6 +159,7 @@ import {
     LogOut,
     Moon,
     Pill,
+    Server,
     Settings,
     Sun,
     TrendingUp,

@@ -40,6 +40,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from snore.api.mcp_embed import is_mcp_path as _is_mcp_path
 from snore.auth.actor import ActorContext
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     In multiuser mode, unauthenticated requests produce ``request.state.actor = None``.
     Route dependencies enforce auth requirements independently.
+
+    Note: BaseHTTPMiddleware wraps each request in a new Task; for the embedded
+    MCP server's long-lived SSE sessions this adds per-connection overhead.  The
+    cost is accepted — fastmcp handles its own auth on /mcp paths and does not
+    need request.state.actor, so MCP requests are short-circuited below.
     """
 
     async def dispatch(
@@ -70,6 +76,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         from snore.auth.actor import AuthMode  # noqa: PLC0415
 
         cfg = get_config()
+
+        # MCP paths authenticate via bearer token through fastmcp — no cookie actor needed.
+        if cfg.is_mcp_enabled and _is_mcp_path(request.url.path):
+            return await call_next(request)
 
         if cfg.auth_mode is AuthMode.LOCAL:
             try:
@@ -170,6 +180,13 @@ class AuthPathMiddleware(BaseHTTPMiddleware):
         from snore.auth.actor import AuthMode  # noqa: PLC0415
 
         cfg = get_config()
+
+        # MCP paths are CSRF-immune and have no auth-body ceiling — fastmcp
+        # handles them directly.  Bearer-token auth + OAuth flows are cross-origin
+        # by design.  Short-circuit before the body-ceiling and CSRF checks.
+        if cfg.is_mcp_enabled and _is_mcp_path(request.url.path):
+            return await call_next(request)
+
         is_auth_path = request.url.path.startswith(_AUTH_PATH_PREFIX)
 
         # Pre-read auth-endpoint bodies before call_next so the ceiling fires
@@ -325,6 +342,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         from snore.auth.lockout import get_rate_limit_store  # noqa: PLC0415
 
         cfg = get_config()
+
+        # MCP paths are not rate-limited via this middleware — fastmcp manages them.
+        if cfg.is_mcp_enabled and _is_mcp_path(request.url.path):
+            return await call_next(request)
+
         if cfg.auth_mode is AuthMode.MULTIUSER and request.url.path.startswith(
             _AUTH_PATH_PREFIX
         ):
