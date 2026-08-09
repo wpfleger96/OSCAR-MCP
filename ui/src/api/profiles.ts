@@ -22,3 +22,8 @@ export const updateProfile = apiPatch<
 
 export const setDefaultProfile = (profileId: number): Promise<ProfileResponse> =>
     updateProfile(profileId, { default: true })
+
+export const setProfileTimezone = (
+    profileId: number,
+    timezone: string | null,
+): Promise<ProfileResponse> => updateProfile(profileId, { timezone })

@@ -114,6 +114,21 @@ class ProfileService:
             user.default_profile_id = profile.id
         return profile
 
+    async def set_timezone(
+        self, user_id: int, profile_id: int, timezone: str | None
+    ) -> models.Profile:
+        """Set or clear the IANA timezone for a profile."""
+        if timezone is not None:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
+
+            try:
+                ZoneInfo(timezone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError(f"Unknown IANA timezone: {timezone!r}") from exc
+        profile = await self._get_live(user_id, profile_id)
+        profile.timezone = timezone
+        return profile
+
     async def _get_live(self, user_id: int, profile_id: int) -> models.Profile:
         stmt = select(models.Profile).where(
             models.Profile.id == profile_id,

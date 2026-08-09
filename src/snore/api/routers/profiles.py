@@ -31,6 +31,7 @@ class ProfileResponse(BaseModel):
     user_id: int
     created_at: datetime
     is_default: bool
+    timezone: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -42,6 +43,7 @@ class CreateProfileRequest(BaseModel):
 class RenameProfileRequest(BaseModel):
     name: str | None = None
     default: bool | None = None
+    timezone: str | None = None
 
 
 async def _get_default_profile_id(db: AsyncSession, user_id: int) -> int | None:
@@ -67,6 +69,7 @@ async def list_profiles(actor: RequireAuth, db: DbDep) -> list[ProfileResponse]:
             user_id=p.user_id,
             created_at=p.created_at,
             is_default=(p.id == default_id),
+            timezone=p.timezone,
         )
         for p in profiles
     ]
@@ -90,6 +93,7 @@ async def create_profile(
         user_id=profile.user_id,
         created_at=profile.created_at,
         is_default=(profile.id == default_id),
+        timezone=profile.timezone,
     )
 
 
@@ -98,14 +102,17 @@ async def update_profile(
     profile_id: int, body: RenameProfileRequest, actor: RequireWritable, db: DbDep
 ) -> ProfileResponse:
     svc = ProfileService(db)
+    profile = None
     try:
         if body.name is not None:
             profile = await svc.rename_profile(actor.user_id, profile_id, body.name)
-        elif body.default is True:
+        if body.default is True:
             profile = await svc.set_default_profile(actor.user_id, profile_id)
-        else:
+        if "timezone" in body.model_fields_set:
+            profile = await svc.set_timezone(actor.user_id, profile_id, body.timezone)
+        if profile is None:
             raise HTTPException(
-                status_code=422, detail="Provide 'name' or 'default: true'"
+                status_code=422, detail="Provide 'name', 'default: true', or 'timezone'"
             )
     except ProfileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Profile not found") from exc
@@ -114,6 +121,8 @@ async def update_profile(
             status_code=409,
             detail=f"A profile named '{body.name}' already exists",
         ) from err
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err)) from err
     default_id = await _get_default_profile_id(db, actor.user_id)
     return ProfileResponse(
         id=profile.id,
@@ -121,4 +130,5 @@ async def update_profile(
         user_id=profile.user_id,
         created_at=profile.created_at,
         is_default=(profile.id == default_id),
+        timezone=profile.timezone,
     )
