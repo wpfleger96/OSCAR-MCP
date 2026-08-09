@@ -133,6 +133,44 @@ def vacuum(db: str | None) -> None:
     asyncio.run(_run())
 
 
+@db.command("cleanup-orphans")
+@db_option
+@click.confirmation_option(
+    prompt="Remove orphaned records (events, waveforms, statistics, settings) not linked to any session?"
+)
+def cleanup_orphans(db: str | None) -> None:
+    """Remove orphaned child records not linked to any session.
+
+    Orphaned rows can accumulate when CASCADE delete is not enforced or after
+    a database corruption event.  Running this command is safe at any time;
+    it only removes rows whose ``session_id`` references no existing session.
+
+    Suggest running 'snore db vacuum' afterwards to reclaim freed disk space.
+    """
+
+    async def _run() -> None:
+        from snore.database.importers import SessionImporter  # noqa: PLC0415
+        from snore.database.write_gate import write_gate  # noqa: PLC0415
+
+        async with write_gate():
+            async with session_scope(immediate=True) as sess:
+                counts = await SessionImporter.cleanup_orphaned_records(sess)
+
+        total = sum(counts.values())
+        if total == 0:
+            print_success("No orphaned records found — database is clean")
+            return
+
+        print_subsection("Deleted orphaned records")
+        for table, count in counts.items():
+            if count > 0:
+                print_kv(table, str(count))
+        print_success(f"Removed {total} orphaned record(s)")
+        console.print("\nTip: run 'snore db vacuum' to reclaim freed space")
+
+    asyncio.run(_run())
+
+
 @db.command()
 @db_option
 @click.option("--force", is_flag=True, help="Skip confirmation prompt")

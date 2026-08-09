@@ -99,6 +99,7 @@ class ImportService:
         date_to: str | None = None,
         parallel: bool = True,
         dry_run: bool = False,
+        force_cleanup: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
         profile_id: int,
@@ -161,12 +162,13 @@ class ImportService:
                     "<ZONE>' and re-run the import."
                 ) from exc
 
-        if not dry_run:
+        if not dry_run and force_cleanup:
             async with write_gate():
                 async with session_scope(immediate=True) as db_session:
-                    orphaned = await SessionImporter.cleanup_orphaned_records(
+                    cleanup_counts = await SessionImporter.cleanup_orphaned_records(
                         db_session
                     )
+                    orphaned = sum(cleanup_counts.values())
                     if orphaned > 0:
                         emit(f"Cleaned up {orphaned} orphaned records from database")
 

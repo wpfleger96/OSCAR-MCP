@@ -61,6 +61,24 @@ from snore.utils.parse_pool import cancel_pending, get_pool
 logger = logging.getLogger(__name__)
 
 
+def _slice_str_cache(
+    cache: "dict[date, dict[str, float]] | None",
+    night_date: str,
+) -> "dict[date, dict[str, float]] | None":
+    """Return a single-entry slice of a STR cache for the given night.
+
+    Workers look up both caches strictly by ``therapy_day``, which equals the
+    ``night_date`` key (both implement the same noon-to-noon boundary).
+    Passing a full multi-night cache to every future causes O(nights²)
+    pickle overhead; this reduces each future's payload to one entry.
+    """
+    if cache is None:
+        return None
+    key = datetime.strptime(night_date, "%Y%m%d").date()
+    entry = cache.get(key)
+    return {key: entry} if entry is not None else None
+
+
 def _resmed_parse_bundle_worker(
     night_date: str,
     segments: dict[str, dict[str, "Path"]],
@@ -668,8 +686,8 @@ class ResmedEDFParser(DeviceParser):
                         segments,
                         device_info,
                         path,
-                        str_settings_cache,
-                        str_summaries_cache,
+                        _slice_str_cache(str_settings_cache, night_date),
+                        _slice_str_cache(str_summaries_cache, night_date),
                         date_from,
                         date_to,
                         self._str_series11,

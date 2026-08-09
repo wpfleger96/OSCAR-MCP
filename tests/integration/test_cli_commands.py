@@ -1689,3 +1689,107 @@ class TestImportCorruptTimezone:
         # --verbose users get the raw exception for debugging.
         assert result.exit_code != 0
         assert isinstance(result.exception, RuntimeError)
+
+
+class TestDbCleanupOrphansCommand:
+    """Test db cleanup-orphans command."""
+
+    @pytest.fixture
+    async def db_with_orphans(self, temp_db):
+        """Database with orphaned events and settings (session_id 9999 doesn't exist).
+
+        Orphaned rows are inserted via stdlib sqlite3 which does not set
+        PRAGMA foreign_keys=ON by default, bypassing the FK enforcement that
+        the aiosqlite engine applies via its "connect" event.
+        """
+        import sqlite3  # noqa: PLC0415
+
+        await init_database(str(temp_db))
+
+        async with session_scope() as sess:
+            _profile = await _create_test_user_and_profile(sess)
+            device = models.Device(
+                profile_id=_profile.id,
+                manufacturer="Test",
+                model="Test",
+                serial_number="ORPHAN_TEST",
+            )
+            sess.add(device)
+            await sess.flush()
+
+        # Use a stdlib sqlite3 connection (FK enforcement off by default) to
+        # insert rows that reference non-existent session_id 9999.
+        conn = sqlite3.connect(str(temp_db))
+        try:
+            conn.execute(
+                "INSERT INTO events"
+                " (session_id, event_type, start_time, duration_seconds)"
+                " VALUES (9999, 'Apnea', '2025-01-01T00:00:00', 15)"
+            )
+            conn.execute(
+                "INSERT INTO settings (session_id, key, value)"
+                " VALUES (9999, 'mode', 'CPAP')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return temp_db
+
+    def test_cleanup_removes_orphaned_rows_and_reports_counts(
+        self, cli_runner, db_with_orphans, db_session
+    ):
+        """Orphaned records are deleted; output shows per-table counts and vacuum tip."""
+        events_before = db_session.execute(text("SELECT COUNT(*) FROM events")).scalar()
+        settings_before = db_session.execute(
+            text("SELECT COUNT(*) FROM settings")
+        ).scalar()
+        assert events_before == 1
+        assert settings_before == 1
+
+        result = cli_runner.invoke(
+            cli,
+            ["db", "cleanup-orphans", "--db", str(db_with_orphans)],
+            input="y\n",
+        )
+
+        assert result.exit_code == 0, result.output
+
+        db_session.expire_all()
+        events_after = db_session.execute(text("SELECT COUNT(*) FROM events")).scalar()
+        settings_after = db_session.execute(
+            text("SELECT COUNT(*) FROM settings")
+        ).scalar()
+        assert events_after == 0
+        assert settings_after == 0
+        assert "vacuum" in result.output.lower()
+
+    def test_cleanup_reports_clean_when_no_orphans(self, cli_runner, temp_db):
+        """When no orphaned records exist, command reports a clean database."""
+        asyncio.run(init_database(str(temp_db)))
+
+        result = cli_runner.invoke(
+            cli,
+            ["db", "cleanup-orphans", "--db", str(temp_db)],
+            input="y\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "No orphaned" in result.output
+
+    def test_cleanup_cancellation_aborts(self, cli_runner, db_with_orphans, db_session):
+        """Declining the confirmation prompt leaves orphaned records untouched."""
+        events_before = db_session.execute(text("SELECT COUNT(*) FROM events")).scalar()
+        assert events_before == 1
+
+        result = cli_runner.invoke(
+            cli,
+            ["db", "cleanup-orphans", "--db", str(db_with_orphans)],
+            input="N\n",
+        )
+
+        assert result.exit_code != 0
+
+        db_session.expire_all()
+        events_after = db_session.execute(text("SELECT COUNT(*) FROM events")).scalar()
+        assert events_after == 1

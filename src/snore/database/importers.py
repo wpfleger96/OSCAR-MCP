@@ -83,7 +83,7 @@ class SessionImporter:
         self.profile_id = profile_id
 
     @staticmethod
-    async def cleanup_orphaned_records(db: AsyncSession) -> int:
+    async def cleanup_orphaned_records(db: AsyncSession) -> dict[str, int]:
         """
         Remove orphaned records from child tables that reference non-existent sessions.
 
@@ -96,7 +96,7 @@ class SessionImporter:
             db: SQLAlchemy async session (caller owns the transaction)
 
         Returns:
-            Number of orphaned records removed
+            Mapping of table name to the number of orphaned records removed from it.
         """
         orphan_tables = [
             models.Setting,
@@ -104,7 +104,7 @@ class SessionImporter:
             models.Waveform,
             models.Statistics,
         ]
-        total_cleaned = 0
+        counts: dict[str, int] = {}
 
         for model_cls in orphan_tables:
             stmt = delete(model_cls).where(
@@ -118,10 +118,10 @@ class SessionImporter:
                 logger.debug(
                     f"Cleaned {count} orphaned records from {model_cls.__tablename__}"
                 )
-                total_cleaned += count
+            counts[model_cls.__tablename__] = count
 
         # No db.commit() — caller owns the transaction boundary.
-        return total_cleaned
+        return counts
 
     async def _import_single_session(
         self,

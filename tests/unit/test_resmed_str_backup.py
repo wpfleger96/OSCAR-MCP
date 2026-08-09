@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from snore.parsers.resmed_edf import ResmedEDFParser
+from snore.parsers.resmed_edf import ResmedEDFParser, _slice_str_cache
 
 StrCache = dict[date, dict[str, float]]
 
@@ -433,3 +433,33 @@ class TestCorruptWinnerFallback:
         assert settings[start]["pressure_min"] == 7.0
         assert date(2025, 3, 11) in settings
         assert date(2025, 3, 12) in settings
+
+
+class TestSliceStrCache:
+    """Tests for the _slice_str_cache helper used to limit pickle payload per future."""
+
+    def test_returns_single_entry_for_matching_date(self):
+        d = date(2025, 1, 1)
+        other = date(2025, 1, 2)
+        cache = {d: {"pressure_min": 4.0}, other: {"pressure_min": 6.0}}
+        result = _slice_str_cache(cache, "20250101")
+        assert result == {d: {"pressure_min": 4.0}}
+
+    def test_returns_none_when_entry_absent(self):
+        cache = {date(2025, 1, 2): {"pressure_min": 6.0}}
+        result = _slice_str_cache(cache, "20250101")
+        assert result is None
+
+    def test_returns_none_for_none_cache(self):
+        assert _slice_str_cache(None, "20250101") is None
+
+    def test_result_does_not_include_other_dates(self):
+        d = date(2025, 6, 15)
+        cache = {
+            date(2025, 6, 14): {"pressure_min": 4.0},
+            d: {"pressure_min": 8.0},
+            date(2025, 6, 16): {"pressure_min": 5.0},
+        }
+        result = _slice_str_cache(cache, "20250615")
+        assert result is not None
+        assert list(result.keys()) == [d]
