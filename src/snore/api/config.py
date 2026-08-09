@@ -79,6 +79,14 @@ Environment variables
     startup, automatically creates a 7-day admin invite for this address and
     logs the redemption URL.  Empty or whitespace → no-op.  Ignored in local
     mode.
+
+``SNORE_MCP_BASE_URL``
+    Optional.  Public base URL of the embedded MCP endpoint (e.g.
+    ``https://snore.example.com``).  When set in multiuser mode with Google
+    OAuth configured, ``snore serve`` mounts the streamable-HTTP MCP server
+    at ``/mcp`` with OAuth routes at the root.  Empty (default) → MCP
+    disabled.  Validated with the same origin rules as
+    ``SNORE_PUBLIC_BASE_URL`` (loopback HTTP or any HTTPS).
 """
 
 from __future__ import annotations
@@ -161,6 +169,8 @@ class AppConfig:
         1, (os.cpu_count() or 2) - 1
     )  # Shared CPU process pool size.
     bootstrap_admin_email: str | None = None
+    # Embedded MCP endpoint base URL (empty string = MCP disabled).
+    mcp_base_url: str = ""
 
     @property
     def is_multiuser(self) -> bool:
@@ -169,6 +179,17 @@ class AppConfig:
     @property
     def is_google_configured(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
+
+    @property
+    def is_mcp_enabled(self) -> bool:
+        """True when the embedded /mcp endpoint should be served.
+
+        Requires multiuser mode (MCP auth is OAuth-only), a configured
+        ``SNORE_MCP_BASE_URL``, and Google OAuth credentials.
+        """
+        return (
+            self.is_multiuser and bool(self.mcp_base_url) and self.is_google_configured
+        )
 
     @property
     def secure_cookie(self) -> bool:
@@ -279,6 +300,14 @@ def load_config(
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
     google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
+    # Embedded MCP endpoint base URL — optional; empty = MCP disabled.
+    mcp_base_url = os.environ.get("SNORE_MCP_BASE_URL", "").strip()
+    if mcp_base_url:
+        try:
+            validate_origin_url(mcp_base_url, require_http_loopback=True)
+        except ConfigError as exc:
+            raise ConfigError(f"SNORE_MCP_BASE_URL {exc}") from exc
+
     oauth_attempt_ttl_seconds = _parse_positive_int(
         "SNORE_OAUTH_ATTEMPT_TTL_SECONDS", 600, "(seconds)"
     )
@@ -382,6 +411,7 @@ def load_config(
         analysis_job_concurrency=analysis_job_concurrency,
         compute_max_workers=compute_max_workers,
         bootstrap_admin_email=bootstrap_admin_email,
+        mcp_base_url=mcp_base_url,
     )
 
 

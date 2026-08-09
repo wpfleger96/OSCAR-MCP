@@ -11,7 +11,9 @@
     Comparison is on canonical ``(scheme, host, effective_port)`` tuples —
     ``startswith`` matching is explicitly NOT used.  A ``"null"`` origin is
     always rejected.  When ``public_origin`` is ``None`` in multiuser mode the
-    check fails closed (403) rather than open.
+    check fails closed (403) rather than open.  MCP paths (``is_mcp_path``)
+    are exempt — they are bearer-token/OAuth-protocol authenticated, never
+    cookie-authenticated.
 
     Also:
     - Applies a 16 KiB body ceiling to all ``/api/v1/auth/`` requests via a
@@ -244,7 +246,17 @@ class AuthPathMiddleware(BaseHTTPMiddleware):
 
             request._receive = _replay_receive  # noqa: SLF001
 
-        if cfg.auth_mode is AuthMode.MULTIUSER and request.method in _UNSAFE_METHODS:
+        # MCP paths are exempt from the CSRF origin check: they are
+        # bearer-token/OAuth-protocol authenticated, never cookie-authenticated,
+        # and FastMCP's /consent form posts from the MCP origin — which never
+        # equals public_origin.
+        from snore.api.mcp_embed import is_mcp_path  # noqa: PLC0415
+
+        if (
+            cfg.auth_mode is AuthMode.MULTIUSER
+            and request.method in _UNSAFE_METHODS
+            and not is_mcp_path(request.url.path)
+        ):
             error = self._check_origin(request, cfg)
             if error is not None:
                 from starlette.responses import JSONResponse  # noqa: PLC0415

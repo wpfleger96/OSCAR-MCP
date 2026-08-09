@@ -23,7 +23,11 @@ logger = logging.getLogger(__name__)
     default="stdio",
     show_default=True,
     type=click.Choice(["stdio", "http"]),
-    help="Transport mode: stdio (default, for Claude Desktop/Code) or http (OAuth, for Claude iOS remote).",
+    help=(
+        "Transport mode: stdio (default, for Claude Desktop/Code) or http "
+        "(DEPRECATED — 'snore serve' now embeds the HTTP MCP endpoint at /mcp; "
+        "standalone http transport will be removed in a future release)."
+    ),
 )
 @click.option(
     "--host",
@@ -44,10 +48,13 @@ def mcp(db: str | None, profile: str, transport: str, host: str, port: int) -> N
     STDIO transport (default): Start the FastMCP server using stdio, suitable
     for Claude Desktop / Claude Code integration.
 
-    HTTP transport: Start the FastMCP server over streamable-HTTP with Google
-    OAuth, suitable for Claude iOS (remote MCP) integration.  Note: every
-    authenticated request performs a live Google tokeninfo call; outages or
-    rate-limits will affect all requests.  Requires three environment variables:
+    HTTP transport (DEPRECATED): Start the FastMCP server over streamable-HTTP
+    with Google OAuth, suitable for Claude iOS (remote MCP) integration.
+    'snore serve' now embeds this endpoint at /mcp when SNORE_MCP_BASE_URL is
+    set; the standalone http transport will be removed in a future release.
+    Note: every authenticated request performs a live Google tokeninfo call;
+    outages or rate-limits will affect all requests.  Requires three
+    environment variables:
 
     \b
         SNORE_MCP_BASE_URL     — public base URL of this server (e.g.

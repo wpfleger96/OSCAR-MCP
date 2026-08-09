@@ -9,6 +9,7 @@ POST   /users/{user_id}/enable
 POST   /invites
 GET    /invites
 DELETE /invites/{invite_id}
+GET    /mcp/status
 
 All routes require admin role.  Registered at prefix /api/v1/admin by app.py.
 This prefix is intentionally outside the /api/v1/auth rate-limit scope;
@@ -116,6 +117,17 @@ class InviteItem(BaseModel):
     created_at: datetime
     expires_at: datetime
     created_by_id: int | None
+
+
+class McpStatus(BaseModel):
+    """Read-only status of the embedded MCP endpoint."""
+
+    enabled: bool
+    endpoint_url: str | None
+    transport: str | None
+    auth_provider: str | None
+    disabled_reason: str | None
+    linked_google_identities: int
 
 
 # ---------------------------------------------------------------------------
@@ -389,3 +401,57 @@ async def revoke_invite(
 
     invite.revoked_at = now
     return MessageResponse(message="Invite revoked")
+
+
+# ---------------------------------------------------------------------------
+# MCP status route
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mcp/status", response_model=McpStatus)
+async def mcp_status(
+    actor: RequireAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> McpStatus:
+    """Return the embedded MCP endpoint's configuration status.
+
+    Read-only: reports whether /mcp is being served, why not when disabled,
+    and how many users have a linked Google identity (the prerequisite for
+    authenticating against the MCP endpoint).
+    """
+    from snore.api.config import get_config  # noqa: PLC0415
+
+    cfg = get_config()
+
+    linked = (
+        await db.execute(
+            select(func.count()).where(models.AuthIdentity.provider == "google")
+        )
+    ).scalar() or 0
+
+    if cfg.is_mcp_enabled:
+        return McpStatus(
+            enabled=True,
+            endpoint_url=f"{cfg.mcp_base_url.rstrip('/')}/mcp",
+            transport="streamable-http",
+            auth_provider="google",
+            disabled_reason=None,
+            linked_google_identities=linked,
+        )
+
+    # Report the first unmet prerequisite, mirroring build_mcp_app's checks.
+    if not cfg.is_multiuser:
+        reason = "local mode"
+    elif not cfg.mcp_base_url:
+        reason = "SNORE_MCP_BASE_URL not set"
+    else:
+        reason = "Google OAuth not configured"
+
+    return McpStatus(
+        enabled=False,
+        endpoint_url=None,
+        transport=None,
+        auth_provider=None,
+        disabled_reason=reason,
+        linked_google_identities=linked,
+    )

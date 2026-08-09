@@ -55,6 +55,30 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/admin/mcp/status': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Mcp Status
+         * @description Return the embedded MCP endpoint's configuration status.
+         *
+         *     Read-only: reports whether /mcp is being served, why not when disabled,
+         *     and how many users have a linked Google identity (the prerequisite for
+         *     authenticating against the MCP endpoint).
+         */
+        get: operations['mcp_status_api_v1_admin_mcp_status_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/admin/users': {
         parameters: {
             query?: never
@@ -2529,6 +2553,24 @@ export interface components {
             /** Password */
             password: string
         }
+        /**
+         * McpStatus
+         * @description Read-only status of the embedded MCP endpoint.
+         */
+        McpStatus: {
+            /** Auth Provider */
+            auth_provider: string | null
+            /** Disabled Reason */
+            disabled_reason: string | null
+            /** Enabled */
+            enabled: boolean
+            /** Endpoint Url */
+            endpoint_url: string | null
+            /** Linked Google Identities */
+            linked_google_identities: number
+            /** Transport */
+            transport: string | null
+        }
         /** MeResponse */
         MeResponse: {
             /** Display Name */
@@ -3659,6 +3701,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    mcp_status_api_v1_admin_mcp_status_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['McpStatus']
                 }
             }
         }

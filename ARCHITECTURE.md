@@ -534,10 +534,10 @@ JSON Response → Vue Frontend (ui/)
 
 ### Transports
 
-Two transports are supported, selected at startup:
+Two transports are supported:
 
-- **stdio** (`snore mcp stdio`): local tool use; no authentication. A `StaticRuntime` resolves the active profile at startup from the first live profile row and watches for database file replacement (inode change → auto-refresh).
-- **streamable-HTTP** (`snore mcp serve`): multi-user, OAuth 2.1 via FastMCP's `GoogleProvider`. Each request carries a per-user `ActorRuntime` that reads `profile_id` from the request context var rather than a startup-time lookup.
+- **stdio** (`snore mcp --transport stdio`, the default): local tool use; no authentication. A `StaticRuntime` resolves the active profile at startup from the first live profile row and watches for database file replacement (inode change → auto-refresh).
+- **streamable-HTTP** (embedded in `snore serve` at `/mcp`): multi-user, OAuth 2.1 via FastMCP's `GoogleProvider`. Enabled when `SNORE_MCP_BASE_URL` is set in multiuser mode with Google OAuth configured (`AppConfig.is_mcp_enabled`). `api/mcp_embed.py` builds the FastMCP sub-app with `make_server(auth=..., manage_database=False)` — the FastAPI lifespan owns the database engine — and `create_app` mounts it as the trailing catch-all so the OAuth protocol routes (`/authorize`, `/token`, `/.well-known/*`, …) resolve at the root. Each request carries a per-user `ActorRuntime` that reads `profile_id` from the request context var rather than a startup-time lookup. The standalone `snore mcp --transport http` command still exists but is deprecated in favor of the embedded endpoint.
 
 Both transports share the same tool and resource registrations; the only difference is which `SNORERuntime` implementation is yielded by the FastMCP lifespan.
 

@@ -85,6 +85,7 @@ src/snore/
 │   ├── deps.py         # Dependency injection (get_db)
 │   ├── errors.py       # Exception handlers
 │   ├── middleware.py    # Auth, CSRF/body-cap, and rate-limit middleware
+│   ├── mcp_embed.py    # Embedded MCP sub-app (build_mcp_app, is_mcp_path)
 │   ├── schemas.py      # API request/response schemas
 │   └── routers/        # Route handlers
 │       ├── auth/       # Auth package: routes_session, routes_invites, routes_google

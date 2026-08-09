@@ -83,3 +83,80 @@ def test_bootstrap_admin_email_without_at_sign_raises(monkeypatch):
     monkeypatch.setenv("SNORE_BOOTSTRAP_ADMIN_EMAIL", "notanemail")
     with pytest.raises(ConfigError, match="SNORE_BOOTSTRAP_ADMIN_EMAIL"):
         load_config(auth_mode_override="local")
+
+
+# ---------------------------------------------------------------------------
+# SNORE_MCP_BASE_URL / is_mcp_enabled
+# ---------------------------------------------------------------------------
+
+
+def _multiuser_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Minimal env for multiuser mode (secret + public base URL)."""
+    monkeypatch.setenv("SNORE_SESSION_SECRET", "x" * 32)
+    monkeypatch.setenv("SNORE_PUBLIC_BASE_URL", "https://snore.example.com")
+
+
+def _google_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "dummy-id")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "dummy-secret")
+
+
+def test_mcp_base_url_defaults_to_empty():
+    cfg = load_config(auth_mode_override="local")
+    assert cfg.mcp_base_url == ""
+    assert cfg.is_mcp_enabled is False
+
+
+def test_mcp_base_url_is_stripped(monkeypatch):
+    monkeypatch.setenv("SNORE_MCP_BASE_URL", "  https://mcp.example.com  ")
+    cfg = load_config(auth_mode_override="local")
+    assert cfg.mcp_base_url == "https://mcp.example.com"
+
+
+def test_mcp_base_url_malformed_raises(monkeypatch):
+    monkeypatch.setenv("SNORE_MCP_BASE_URL", "https://mcp.example.com/path")
+    with pytest.raises(ConfigError, match="SNORE_MCP_BASE_URL"):
+        load_config(auth_mode_override="local")
+
+
+def test_mcp_base_url_non_loopback_http_raises(monkeypatch):
+    monkeypatch.setenv("SNORE_MCP_BASE_URL", "http://mcp.example.com")
+    with pytest.raises(ConfigError, match="SNORE_MCP_BASE_URL"):
+        load_config(auth_mode_override="local")
+
+
+def test_mcp_base_url_loopback_http_accepted(monkeypatch):
+    monkeypatch.setenv("SNORE_MCP_BASE_URL", "http://127.0.0.1:8000")
+    cfg = load_config(auth_mode_override="local")
+    assert cfg.mcp_base_url == "http://127.0.0.1:8000"
+
+
+def test_is_mcp_enabled_true_when_all_prerequisites_met(monkeypatch):
+    _multiuser_env(monkeypatch)
+    _google_env(monkeypatch)
+    monkeypatch.setenv("SNORE_MCP_BASE_URL", "https://mcp.example.com")
+    cfg = load_config(auth_mode_override="multiuser")
+    assert cfg.is_mcp_enabled is True
+
+
+def test_is_mcp_enabled_false_in_local_mode(monkeypatch):
+    _google_env(monkeypatch)
+    monkeypatch.setenv("SNORE_MCP_BASE_URL", "https://mcp.example.com")
+    cfg = load_config(auth_mode_override="local")
+    assert cfg.is_mcp_enabled is False
+
+
+def test_is_mcp_enabled_false_without_base_url(monkeypatch):
+    _multiuser_env(monkeypatch)
+    _google_env(monkeypatch)
+    cfg = load_config(auth_mode_override="multiuser")
+    assert cfg.is_mcp_enabled is False
+
+
+def test_is_mcp_enabled_false_without_google_credentials(monkeypatch):
+    _multiuser_env(monkeypatch)
+    monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("SNORE_MCP_BASE_URL", "https://mcp.example.com")
+    cfg = load_config(auth_mode_override="multiuser")
+    assert cfg.is_mcp_enabled is False

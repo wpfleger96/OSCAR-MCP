@@ -147,7 +147,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     _start_import_worker(_run_import)
     try:
-        yield
+        # Chain the embedded MCP sub-app's lifespan (if mounted): it owns the
+        # StreamableHTTPSessionManager task group — without it /mcp requests
+        # fail with "Task group is not initialized".
+        mcp_app = getattr(app.state, "mcp_app", None)
+        if mcp_app is not None:
+            async with mcp_app.lifespan(mcp_app):
+                yield
+        else:
+            yield
     finally:
         reaper_stop.set()
         reaper_thread.join(timeout=5.0)
@@ -579,6 +587,17 @@ def create_app() -> FastAPI:
 
     _mount_spa(app)
 
+    # Embedded MCP sub-app — mounted last so it is the trailing catch-all:
+    # FastAPI's own routes match first, then /mcp and the OAuth protocol
+    # routes resolve inside the sub-app (which carries its own auth
+    # middleware stack).  The lifespan chains it via app.state.mcp_app.
+    from snore.api.mcp_embed import build_mcp_app  # noqa: PLC0415
+
+    mcp_app = build_mcp_app(cfg)
+    if mcp_app is not None:
+        app.state.mcp_app = mcp_app
+        app.mount("/", mcp_app)
+
     return app
 
 
@@ -610,7 +629,15 @@ def _mount_spa(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def spa_fallback(request: Request, call_next: object) -> Response:
+        from snore.api.mcp_embed import is_mcp_path  # noqa: PLC0415
+
         response: Response = await call_next(request)  # type: ignore[operator]
-        if response.status_code == 404 and not request.url.path.startswith("/api/"):
+        # MCP/OAuth/well-known 404s must reach the client as JSON errors, not
+        # be rewritten to the SPA shell.
+        if (
+            response.status_code == 404
+            and not request.url.path.startswith("/api/")
+            and not is_mcp_path(request.url.path)
+        ):
             return FileResponse(dist / "index.html")
         return response

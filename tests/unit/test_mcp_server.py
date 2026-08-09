@@ -37,6 +37,7 @@ async def _fake_static_lifespan(
     profile_name: str = "neutral",
     *,
     actor_scoped: bool = False,
+    manage_database: bool = True,
 ) -> AsyncIterator[StaticRuntime]:
     session = MagicMock()
     yield StaticRuntime(
