@@ -1630,8 +1630,6 @@ class TestImportCorruptTimezone:
     def test_corrupt_timezone_yields_clean_error(
         self, cli_runner, db_with_corrupt_timezone, tmp_path, monkeypatch
     ):
-        import logging
-
         from unittest.mock import patch
 
         import snore.logging_config as logging_config
@@ -1639,28 +1637,22 @@ class TestImportCorruptTimezone:
         from snore.services.import_service import ImportService
         from snore.services.schemas import ImportSource
 
-        # Pin the normal (non-debug) user path: the CLI re-raises errors when
-        # the root logger is at DEBUG, and setup_logging would set it there.
-        monkeypatch.setattr(logging_config, "_logging_configured", True)
-        root_logger = logging.getLogger()
-        original_level = root_logger.level
-        root_logger.setLevel(logging.INFO)
+        # Pin the normal (non --verbose) user path: the CLI re-raises import
+        # errors instead of rendering them when verbose_mode is set.
+        monkeypatch.setattr(logging_config, "verbose_mode", False)
 
         source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
-        try:
-            with patch.object(ImportService, "detect_sources", return_value=[source]):
-                result = cli_runner.invoke(
-                    cli,
-                    [
-                        "import",
-                        str(tmp_path),
-                        "--db",
-                        str(db_with_corrupt_timezone),
-                        "--no-backup",
-                    ],
-                )
-        finally:
-            root_logger.setLevel(original_level)
+        with patch.object(ImportService, "detect_sources", return_value=[source]):
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "import",
+                    str(tmp_path),
+                    "--db",
+                    str(db_with_corrupt_timezone),
+                    "--no-backup",
+                ],
+            )
 
         assert result.exit_code != 0
         # Clean, actionable click error — not a raw traceback.
@@ -1668,3 +1660,32 @@ class TestImportCorruptTimezone:
         assert "snore profile set-timezone" in result.output
         assert "Traceback" not in result.output
         assert not isinstance(result.exception, KeyError)
+
+    def test_verbose_mode_reraises_for_debugging(
+        self, cli_runner, db_with_corrupt_timezone, tmp_path, monkeypatch
+    ):
+        from unittest.mock import patch
+
+        import snore.logging_config as logging_config
+
+        from snore.services.import_service import ImportService
+        from snore.services.schemas import ImportSource
+
+        monkeypatch.setattr(logging_config, "verbose_mode", True)
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        with patch.object(ImportService, "detect_sources", return_value=[source]):
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "import",
+                    str(tmp_path),
+                    "--db",
+                    str(db_with_corrupt_timezone),
+                    "--no-backup",
+                ],
+            )
+
+        # --verbose users get the raw exception for debugging.
+        assert result.exit_code != 0
+        assert isinstance(result.exception, RuntimeError)

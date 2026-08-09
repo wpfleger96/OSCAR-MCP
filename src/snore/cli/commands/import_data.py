@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from collections.abc import Callable
 from datetime import datetime
@@ -13,6 +12,7 @@ import click
 
 from rich.markup import escape
 
+from snore import logging_config
 from snore.cli.decorators import actor_options, date_range_options, db_option, init_db
 from snore.cli.display import (
     ICON_BACKUP,
@@ -311,7 +311,7 @@ def import_data(
                     )
                 )
             except Exception as e:
-                if logging.getLogger().level == logging.DEBUG:
+                if logging_config.verbose_mode:
                     raise
                 if len(selected_sources) > 1:
                     print_warning(f"Error parsing sessions for {source_desc}: {e}")
@@ -400,7 +400,7 @@ def import_data(
                 )
             )
         except RuntimeError as e:
-            if logging.getLogger().level == logging.DEBUG:
+            if logging_config.verbose_mode:
                 raise
             if len(selected_sources) > 1:
                 print_warning(f"Import failed for {source_desc}: {e}")
