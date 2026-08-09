@@ -431,6 +431,12 @@ class Session(Base):
     data_quality_notes: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, default=dict
     )
+    # Ascending [start_offset_s, end_offset_s] mask-on intervals in session
+    # offset seconds (list of 2-element lists). NULL = unknown (OSCAR imports,
+    # pre-change data); a single-segment session stores [[0.0, duration]].
+    mask_on_segments: Mapped[list[Any] | None] = mapped_column(
+        ValidatedJSON, nullable=True
+    )
     has_waveform_data: Mapped[bool] = mapped_column(Boolean, default=False)
     has_event_data: Mapped[bool] = mapped_column(Boolean, default=False)
     has_statistics: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -766,11 +772,9 @@ class Breath(Base):
     leak_valid: Mapped[bool | None] = mapped_column(Boolean)
     leak_valid_reason: Mapped[str | None] = mapped_column(String)
     ramp_active: Mapped[bool | None] = mapped_column(Boolean)
-    ramp_active_reason: Mapped[str | None] = mapped_column(
-        String, default="not_available"
-    )
+    ramp_active_reason: Mapped[str | None] = mapped_column(String)
     mask_off: Mapped[bool | None] = mapped_column(Boolean)
-    mask_off_reason: Mapped[str | None] = mapped_column(String, default="not_available")
+    mask_off_reason: Mapped[str | None] = mapped_column(String)
 
     analysis_result = relationship(
         "AnalysisResult",

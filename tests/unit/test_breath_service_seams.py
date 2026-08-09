@@ -273,6 +273,39 @@ class TestGetAnalysisStatus:
 
         assert status == AnalysisStatus.STALE_VERSION
 
+    async def test_stale_version_for_format_version_3_identity(self, async_db_session):
+        """A stored identity from before the validity-flags bump classifies STALE.
+
+        Legacy format_version=3 rows lack the ``validity_flags`` field; pydantic
+        back-fills it from the default, so the ``format_version`` bump to 4 is
+        what makes the comparison fail — this test pins that behavior.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, date(2025, 1, 10)
+        )
+
+        stored = _make_algo_versions().model_dump()
+        stored["identity"]["format_version"] = 3
+        del stored["identity"]["validity_flags"]  # legacy rows never stored it
+        ar = models.AnalysisResult(
+            session_id=session.id,
+            timestamp_start=session.start_time,
+            timestamp_end=session.end_time or session.start_time + timedelta(hours=7),
+            programmatic_result_json={},
+            processing_time_ms=10,
+            engine_versions_json=stored,
+        )
+        async_db_session.add(ar)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        status, algo = await svc.get_analysis_status(session.id)
+
+        assert status == AnalysisStatus.STALE_VERSION
+        assert algo is not None  # the row parses; it is stale, not corrupt
+
 
 # ---------------------------------------------------------------------------
 # get_breath_table

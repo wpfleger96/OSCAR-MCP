@@ -1329,6 +1329,8 @@ class ResmedEDFParser(DeviceParser):
 
         if len(segment_sessions) == 1:
             session = segment_sessions[0]
+            # Known, no gaps — distinguishable from None = unknown.
+            session.mask_on_segments = [(0.0, session.duration_seconds)]
             if eve_files:
                 logger.debug(
                     f"Parsing {len(eve_files)} EVE file(s) for night {night_date}"
@@ -1342,7 +1344,18 @@ class ResmedEDFParser(DeviceParser):
 
         merged_session.device_session_id = f"{night_date}_merged"
 
+        # Capture the first segment's true duration BEFORE end_time is
+        # overwritten with the night's end below.
+        first_segment_duration = (
+            segment_sessions[0].end_time - segment_sessions[0].start_time
+        ).total_seconds()
+
         merged_session.end_time = segment_sessions[-1].end_time
+
+        # One [start_offset, end_offset] mask-on interval per segment, in
+        # merged-session offset seconds (ResMed writes one EDF segment per
+        # mask-on period).
+        mask_on_segments: list[tuple[float, float]] = [(0.0, first_segment_duration)]
 
         cumulative_time_offset = 0.0
         for i, segment in enumerate(segment_sessions):
@@ -1351,9 +1364,15 @@ class ResmedEDFParser(DeviceParser):
                     segment.end_time - segment.start_time
                 ).total_seconds()
             else:
+                segment_duration = (
+                    segment.end_time - segment.start_time
+                ).total_seconds()
                 segment_start_offset = (
                     segment.start_time - merged_session.start_time
                 ).total_seconds()
+                mask_on_segments.append(
+                    (segment_start_offset, segment_start_offset + segment_duration)
+                )
 
                 gap_duration = segment_start_offset - cumulative_time_offset
                 if gap_duration > 0:
@@ -1403,6 +1422,8 @@ class ResmedEDFParser(DeviceParser):
                 cumulative_time_offset = (
                     segment.end_time - merged_session.start_time
                 ).total_seconds()
+
+        merged_session.mask_on_segments = mask_on_segments
 
         merged_session.data_quality_notes.insert(
             0,

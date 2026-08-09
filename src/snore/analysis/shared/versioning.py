@@ -35,6 +35,9 @@ FLATTENING_ALGO_VERSION: str = "v1"  # mid-insp flattening (new)
 TRIGGER_CYCLE_ALGO_VERSION: str = "v1"  # trigger/cycle heuristic (new, experimental)
 LEAK_VALID_ALGO: str = "v1"
 RECOVERY_DETECTOR_ALGO_VERSION: str = "v1"
+# ramp_active / mask_off breath validity flags: settings-driven timed ramp
+# heuristic + persisted mask-on-segment gap overlap.
+VALIDITY_FLAGS_ALGO_VERSION: str = "v1"
 
 # Flow-derived MV fallback used by get_ca_analysis when no device MV channel
 # exists. NOT part of AlgorithmIdentity — it labels query-time derivation only.
@@ -69,13 +72,18 @@ class AlgorithmIdentity(BaseModel):
     AnalysisRunMetadata — not here.
     """
 
-    format_version: int = 3  # PR-A nested format; 2 = flat legacy rows
+    # 4 = validity_flags stamped; 3 = PR-A nested format; 2 = flat legacy rows.
+    # The bump to 4 is mandatory: pydantic validation back-fills missing fields
+    # from defaults, so without it legacy rows lacking validity_flags would
+    # compare equal to the current identity and silently stay OK.
+    format_version: int = 4
     segmenter: str = SEGMENTER_ALGO_VERSION
     fl_classifier: str = FL_CLASSIFIER_ALGO_VERSION
     flattening: str = FLATTENING_ALGO_VERSION
     trigger_cycle: str = TRIGGER_CYCLE_ALGO_VERSION
     leak_valid: str = LEAK_VALID_ALGO
     recovery_detector: str = RECOVERY_DETECTOR_ALGO_VERSION
+    validity_flags: str = VALIDITY_FLAGS_ALGO_VERSION
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, AlgorithmIdentity):
@@ -187,6 +195,8 @@ class NullReason(StrEnum):
     CHANNEL_ABSENT = "channel_absent"
     CHANNEL_UNALIGNED = "channel_unaligned"
     NOT_AVAILABLE = "not_available"
+    SMART_RAMP_INDETERMINATE = "smart_ramp_indeterminate"
+    SEGMENTS_UNKNOWN = "segments_unknown"
     DURATION_ZERO = "duration_zero"
     NO_DATA_IN_RANGE = "no_data_in_range"
     MULTI_SESSION_AMBIGUITY = "multi_session_ambiguity"
