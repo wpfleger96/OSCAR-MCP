@@ -23,6 +23,8 @@ when coverage is insufficient. Refusals are SUCCESS responses, never errors.
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
@@ -237,7 +239,8 @@ def register(mcp: FastMCP) -> None:
                 profile_id=runtime.profile_id,
                 device_id=device_id,
             )
-        result = ca_response_from_raw(raw, caps)
+        # CPU-bound: deserialize blobs, numpy statistics — off the event loop.
+        result = await asyncio.to_thread(ca_response_from_raw, raw, caps)
         payload: dict[str, Any] = result.model_dump(mode="json")
         _check_response_size(payload, "get_ca_analysis")
         return payload

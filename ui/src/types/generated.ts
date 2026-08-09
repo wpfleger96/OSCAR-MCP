@@ -55,6 +55,30 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/admin/mcp/status': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Mcp Status
+         * @description Return the current MCP server status.
+         *
+         *     Reports whether the embedded MCP streamable-HTTP server is active and, when
+         *     disabled, the reason.  Also returns the count of Google-linked identities so
+         *     admins can understand how many users can authenticate via MCP OAuth.
+         */
+        get: operations['get_mcp_status_api_v1_admin_mcp_status_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/admin/users': {
         parameters: {
             query?: never
@@ -2529,6 +2553,21 @@ export interface components {
             /** Password */
             password: string
         }
+        /** McpStatus */
+        McpStatus: {
+            /** Auth Provider */
+            auth_provider: string | null
+            /** Disabled Reason */
+            disabled_reason: string | null
+            /** Enabled */
+            enabled: boolean
+            /** Endpoint Url */
+            endpoint_url: string | null
+            /** Linked Google Identities */
+            linked_google_identities: number
+            /** Transport */
+            transport: string | null
+        }
         /** MeResponse */
         MeResponse: {
             /** Display Name */
@@ -3659,6 +3698,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_mcp_status_api_v1_admin_mcp_status_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['McpStatus']
                 }
             }
         }

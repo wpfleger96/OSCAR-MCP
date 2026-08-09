@@ -79,6 +79,12 @@ Environment variables
     startup, automatically creates a 7-day admin invite for this address and
     logs the redemption URL.  Empty or whitespace → no-op.  Ignored in local
     mode.
+
+``GOOGLE_CLIENT_ID`` / ``GOOGLE_CLIENT_SECRET``
+    When both are set in multiuser mode, the FastMCP streamable-HTTP server
+    is embedded into the FastAPI app and served at ``{SNORE_PUBLIC_BASE_URL}/mcp``.
+    The MCP OAuth issuer equals ``SNORE_PUBLIC_BASE_URL`` — no separate MCP
+    base URL is needed.  When absent, ``/mcp`` is not served.
 """
 
 from __future__ import annotations
@@ -169,6 +175,16 @@ class AppConfig:
     @property
     def is_google_configured(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
+
+    @property
+    def is_mcp_enabled(self) -> bool:
+        """True when the embedded MCP server should be mounted at /mcp.
+
+        Requires multiuser mode and Google OAuth credentials.  public_base_url
+        is already mandatory+validated in multiuser and serves as the MCP OAuth
+        issuer — no separate MCP base URL is needed.
+        """
+        return self.is_multiuser and self.is_google_configured
 
     @property
     def secure_cookie(self) -> bool:

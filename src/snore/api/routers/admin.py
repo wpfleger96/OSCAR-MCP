@@ -1,4 +1,4 @@
-"""Admin user-management router: user listing, patching, disable/enable, and invite lifecycle.
+"""Admin user-management router: user listing, patching, disable/enable, invite lifecycle, and MCP status.
 
 Routes
 ------
@@ -9,6 +9,7 @@ POST   /users/{user_id}/enable
 POST   /invites
 GET    /invites
 DELETE /invites/{invite_id}
+GET    /mcp/status
 
 All routes require admin role.  Registered at prefix /api/v1/admin by app.py.
 This prefix is intentionally outside the /api/v1/auth rate-limit scope;
@@ -45,6 +46,7 @@ from snore.auth.emails import normalize_email
 from snore.auth.invite import invite_valid_clauses
 from snore.auth.invite_tokens import hash_invite_token
 from snore.database import models
+from snore.database.models import AuthIdentity
 
 router = APIRouter()
 
@@ -389,3 +391,59 @@ async def revoke_invite(
 
     invite.revoked_at = now
     return MessageResponse(message="Invite revoked")
+
+
+# ---------------------------------------------------------------------------
+# MCP status route
+# ---------------------------------------------------------------------------
+
+
+class McpStatus(BaseModel):
+    enabled: bool
+    endpoint_url: str | None  # f"{cfg.public_base_url.rstrip('/')}/mcp" when enabled
+    transport: str | None  # "streamable-http" when enabled
+    auth_provider: str | None  # "google" when enabled
+    disabled_reason: str | None  # human-readable reason when not enabled
+    linked_google_identities: (
+        int  # count of auth_identities rows where provider="google"
+    )
+
+
+@router.get("/mcp/status", response_model=McpStatus)
+async def get_mcp_status(
+    actor: RequireAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> McpStatus:
+    """Return the current MCP server status.
+
+    Reports whether the embedded MCP streamable-HTTP server is active and, when
+    disabled, the reason.  Also returns the count of Google-linked identities so
+    admins can understand how many users can authenticate via MCP OAuth.
+    """
+    from snore.api.config import get_config  # noqa: PLC0415
+
+    cfg = get_config()
+
+    linked_count: int = (
+        await db.scalar(select(func.count()).where(AuthIdentity.provider == "google"))
+    ) or 0
+
+    if cfg.is_mcp_enabled:
+        return McpStatus(
+            enabled=True,
+            endpoint_url=f"{cfg.public_base_url.rstrip('/')}/mcp",
+            transport="streamable-http",
+            auth_provider="google",
+            disabled_reason=None,
+            linked_google_identities=linked_count,
+        )
+
+    reason = "local mode" if not cfg.is_multiuser else "Google OAuth not configured"
+    return McpStatus(
+        enabled=False,
+        endpoint_url=None,
+        transport=None,
+        auth_provider=None,
+        disabled_reason=reason,
+        linked_google_identities=linked_count,
+    )

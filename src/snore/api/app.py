@@ -146,24 +146,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from snore.api.import_worker import _run_import  # noqa: PLC0415
 
     _start_import_worker(_run_import)
+
+    mcp_app = getattr(app.state, "mcp_app", None)
     try:
-        yield
+        if mcp_app is not None:
+            # Chain the FastMCP sub-app lifespan inside the existing try/finally
+            # so that reaper/worker shutdown and lease release ordering is preserved.
+            # StarletteWithLifespan.lifespan is a property returning the context factory.
+            async with mcp_app.lifespan(mcp_app):
+                yield
+        else:
+            yield
     finally:
         reaper_stop.set()
         reaper_thread.join(timeout=5.0)
-        still_alive = _shutdown_import_jobs()
-        if still_alive:
-            raise RuntimeError(
-                f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
-                f"after timeout: {still_alive}. Active import writes may be interrupted."
-            )
-        # Stop analysis jobs first — they may have futures in the shared process
-        # pool, so the pool must still be alive while they drain.
-        _shutdown_analysis_jobs()
-        from snore.utils.process_pool import shutdown_pool  # noqa: PLC0415
+        try:
+            still_alive = _shutdown_import_jobs()
+            if still_alive:
+                raise RuntimeError(
+                    f"Shutdown incomplete: {len(still_alive)} import worker(s) still alive "
+                    f"after timeout: {still_alive}. Active import writes may be interrupted."
+                )
+            # Stop analysis jobs first — they may have futures in the shared process
+            # pool, so the pool must still be alive while they drain.
+            _shutdown_analysis_jobs()
+            from snore.utils.process_pool import shutdown_pool  # noqa: PLC0415
 
-        shutdown_pool(wait=False)
-        lease.release()
+            shutdown_pool(wait=False)
+        finally:
+            # Release the shared writer lease unconditionally — even if import-job
+            # shutdown raises the still-alive RuntimeError above.
+            lease.release()
 
 
 async def _startup_purge_expired_oauth_attempts() -> None:
@@ -579,6 +592,15 @@ def create_app() -> FastAPI:
 
     _mount_spa(app)
 
+    # Mount the embedded MCP sub-app last — after all API and SPA routes so
+    # that FastMCP's catch-all OAuth paths do not shadow /api/* or /assets/*.
+    from snore.api.mcp_embed import build_mcp_app  # noqa: PLC0415
+
+    mcp_app = build_mcp_app(cfg)
+    if mcp_app is not None:
+        app.state.mcp_app = mcp_app
+        app.mount("/", mcp_app)
+
     return app
 
 
@@ -608,9 +630,13 @@ def _mount_spa(app: FastAPI) -> None:
 
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="spa-assets")
 
+    from snore.api.mcp_embed import is_mcp_path as _is_mcp_path  # noqa: PLC0415
+
     @app.middleware("http")
     async def spa_fallback(request: Request, call_next: object) -> Response:
         response: Response = await call_next(request)  # type: ignore[operator]
-        if response.status_code == 404 and not request.url.path.startswith("/api/"):
+        if response.status_code == 404 and not (
+            request.url.path.startswith("/api/") or _is_mcp_path(request.url.path)
+        ):
             return FileResponse(dist / "index.html")
         return response

@@ -459,7 +459,7 @@ class TestMakeAuthProvider:
     def test_make_auth_provider_blank_base_url_raises_value_error(self) -> None:
         from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
 
-        with pytest.raises(ValueError, match="SNORE_MCP_BASE_URL"):
+        with pytest.raises(ValueError, match="SNORE_PUBLIC_BASE_URL"):
             make_auth_provider(
                 base_url="   ",
                 google_client_id="client-id",
@@ -489,7 +489,7 @@ class TestMakeAuthProvider:
     def test_make_auth_provider_http_non_loopback_rejected(self) -> None:
         from snore.mcp.auth import make_auth_provider  # noqa: PLC0415
 
-        with pytest.raises(ValueError, match="SNORE_MCP_BASE_URL"):
+        with pytest.raises(ValueError, match="SNORE_PUBLIC_BASE_URL"):
             make_auth_provider(
                 base_url="http://example.com",
                 google_client_id="client-id",

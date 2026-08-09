@@ -158,6 +158,12 @@ const router = createRouter({
             component: () => import('@/views/AdminUsersView.vue'),
             meta: { requiresMultiuser: true, requiresAdmin: true },
         },
+        {
+            path: '/admin/mcp',
+            name: 'admin-mcp',
+            component: () => import('@/views/AdminMcpView.vue'),
+            meta: { requiresMultiuser: true, requiresAdmin: true },
+        },
     ],
 })
 

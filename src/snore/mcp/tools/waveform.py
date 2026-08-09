@@ -16,6 +16,8 @@ Timestamp contract (A6):
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
@@ -212,7 +214,10 @@ def register(mcp: FastMCP) -> None:
             max_points=max_points,
             window_cap_seconds=120.0,
         )
-        payload = waveform_response_from_raw(raw).model_dump(mode="json")
+        # CPU-bound: deserialize blobs, LTTB, map to schema — off the event loop.
+        payload = (await asyncio.to_thread(waveform_response_from_raw, raw)).model_dump(
+            mode="json"
+        )
         _check_response_size(payload, "get_waveform")
         return payload
 
@@ -290,7 +295,8 @@ def register(mcp: FastMCP) -> None:
             max_points=max_points,
             window_cap_seconds=900.0,
         )
-        png = render_png_from_raw(raw)
+        # CPU-bound: deserialize blobs, LTTB, matplotlib render — off the event loop.
+        png = await asyncio.to_thread(render_png_from_raw, raw)
         return Image(data=png, format="png")
 
     render_window.__doc__ = (

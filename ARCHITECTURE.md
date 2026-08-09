@@ -534,10 +534,10 @@ JSON Response → Vue Frontend (ui/)
 
 ### Transports
 
-Two transports are supported, selected at startup:
+Two transports are available, controlled by the deployment mode:
 
-- **stdio** (`snore mcp stdio`): local tool use; no authentication. A `StaticRuntime` resolves the active profile at startup from the first live profile row and watches for database file replacement (inode change → auto-refresh).
-- **streamable-HTTP** (`snore mcp serve`): multi-user, OAuth 2.1 via FastMCP's `GoogleProvider`. Each request carries a per-user `ActorRuntime` that reads `profile_id` from the request context var rather than a startup-time lookup.
+- **stdio** (`snore mcp`): local tool use; no authentication. A `StaticRuntime` resolves the active profile at startup from the first live profile row and watches for database file replacement (inode change → auto-refresh). Use this for Claude Desktop / Claude Code integration.
+- **streamable-HTTP** (embedded in `snore serve`): multi-user, OAuth 2.1 via FastMCP's `GoogleProvider`. When `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are set in multiuser mode, `snore.api.mcp_embed.build_mcp_app` mounts the FastMCP server at `{SNORE_PUBLIC_BASE_URL}/mcp` inside the FastAPI app — one uvicorn process serves both, same origin, no separate MCP base URL needed. Each request carries a per-user `ActorRuntime` that reads `profile_id` from the request context var rather than a startup-time lookup. The FastMCP sub-app lifespan is chained inside the FastAPI lifespan so the database engine is shared and never double-initialized.
 
 Both transports share the same tool and resource registrations; the only difference is which `SNORERuntime` implementation is yielded by the FastMCP lifespan.
 
