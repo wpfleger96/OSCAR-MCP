@@ -40,23 +40,20 @@ from snore.api.analysis_jobs import (
 def clean_analysis_jobs():
     """Stop leaked workers and reset global analysis job state around each test.
 
-    shutdown() must run BEFORE the handles are nulled: clearing
-    _worker_threads/_stop_event while threads are alive orphans daemons that
-    keep draining the shared module-level queue, poisoning every later test
-    in the same process (jobs picked up instantly, queue never fills,
-    patched-executor jobs stolen by workers running the real executor).
+    shutdown() stops every worker generation registered in the module —
+    including workers leaked by other test files sharing this process (e.g.
+    an API lifespan that never finished its teardown) — and prunes exited
+    threads itself. Do NOT rebind jobs._worker_threads here: dropping the
+    registry would orphan any thread that outlived the join timeout, and an
+    orphan with an unset stop event steals jobs from the shared queue.
     """
     jobs.shutdown(timeout=5.0)
     jobs._all_jobs.clear()
     jobs._queue.clear()
-    jobs._worker_threads = []
-    jobs._stop_event = None
     yield
     jobs.shutdown(timeout=5.0)
     jobs._all_jobs.clear()
     jobs._queue.clear()
-    jobs._worker_threads = []
-    jobs._stop_event = None
 
 
 # ---------------------------------------------------------------------------

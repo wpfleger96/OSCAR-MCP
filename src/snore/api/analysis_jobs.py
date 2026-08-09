@@ -256,6 +256,11 @@ _condition = threading.Condition(_lock)
 
 _worker_threads: list[threading.Thread] = []
 _stop_event: threading.Event | None = None
+# Every stop event ever handed to a worker generation. start_worker() may be
+# called more than once per process (app restarts in tests, repeated test
+# setups); shutdown() must be able to stop EVERY generation, not just the
+# latest, or an abandoned generation keeps draining the shared queue.
+_stop_events: list[threading.Event] = []
 
 
 def enqueue(
@@ -432,10 +437,11 @@ def start_worker() -> tuple[list[threading.Thread], threading.Event]:
 
     Returns (threads, stop_event) so the caller can shut them down.
     """
-    global _worker_threads, _stop_event
+    global _stop_event
     n = _get_job_concurrency()
     stop_event = threading.Event()
     _stop_event = stop_event
+    _stop_events.append(stop_event)
     threads: list[threading.Thread] = []
     for i in range(n):
         t = threading.Thread(
@@ -446,13 +452,20 @@ def start_worker() -> tuple[list[threading.Thread], threading.Event]:
         )
         threads.append(t)
         t.start()
-    _worker_threads = threads
+    _worker_threads.extend(threads)
     return threads, stop_event
 
 
 def shutdown(timeout: float = 10.0) -> None:
-    """Signal all workers to stop; cancel all queued and running jobs."""
-    global _worker_threads, _stop_event
+    """Signal all workers to stop; cancel all queued and running jobs.
+
+    Stops every worker generation ever started in this process (see
+    ``_stop_events``), then drops references to exited threads. Threads that
+    outlive ``timeout`` stay registered so a later call can retry.
+    """
+    global _stop_event
+    for ev in _stop_events:
+        ev.set()
     if _stop_event is not None:
         _stop_event.set()
     with _condition:
@@ -462,3 +475,7 @@ def shutdown(timeout: float = 10.0) -> None:
         _condition.notify_all()  # Wake all idle workers so they see the stop event.
     for t in _worker_threads:
         t.join(timeout=timeout)
+    _worker_threads[:] = [t for t in _worker_threads if t.is_alive()]
+    if not _worker_threads:
+        _stop_events.clear()
+        _stop_event = None
