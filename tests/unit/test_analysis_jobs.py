@@ -38,12 +38,21 @@ from snore.api.analysis_jobs import (
 
 @pytest.fixture(autouse=True)
 def clean_analysis_jobs():
-    """Reset global analysis job state before and after each test."""
+    """Stop leaked workers and reset global analysis job state around each test.
+
+    shutdown() must run BEFORE the handles are nulled: clearing
+    _worker_threads/_stop_event while threads are alive orphans daemons that
+    keep draining the shared module-level queue, poisoning every later test
+    in the same process (jobs picked up instantly, queue never fills,
+    patched-executor jobs stolen by workers running the real executor).
+    """
+    jobs.shutdown(timeout=5.0)
     jobs._all_jobs.clear()
     jobs._queue.clear()
     jobs._worker_threads = []
     jobs._stop_event = None
     yield
+    jobs.shutdown(timeout=5.0)
     jobs._all_jobs.clear()
     jobs._queue.clear()
     jobs._worker_threads = []

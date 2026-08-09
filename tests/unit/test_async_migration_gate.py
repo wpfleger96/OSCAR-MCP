@@ -1,8 +1,7 @@
 """Exit-gate: no synchronous application Session or create_engine() outside Alembic.
 
-Frozen v8 §92-94 requires a complete async migration — no application-layer
-synchronous ORM Session or create_engine() may exist outside the Alembic
-migration path (``database/session.py::_apply_migrations_sync``).
+The async migration is complete: no application-layer synchronous ORM
+Session or create_engine() may exist outside the Alembic migration path (``database/session.py::_apply_migrations_sync``).
 
 This test is a standing regression guard so the completion gate cannot
 silently regress as new code is added.
@@ -95,7 +94,7 @@ def test_no_sync_application_session_or_create_engine() -> None:
     """No application code outside Alembic uses synchronous Session or create_engine.
 
     If this test fails, a synchronous persistence seam has been introduced
-    that violates the frozen v8 §92-94 async-migration completion gate.
+    that violates the async-migration completion gate.
     Add the offending path to ALEMBIC_ALLOWLIST only if it is a deliberate,
     spec-approved Alembic-only seam.
     """
@@ -130,6 +129,6 @@ def test_no_sync_application_session_or_create_engine() -> None:
 
     assert not all_violations, (
         "Synchronous application Session / create_engine usage found outside "
-        "the Alembic allowlist (v8 §92-94 async completion gate):\n"
+        "the Alembic allowlist (async-migration completion gate):\n"
         + "\n".join(f"  {v}" for v in all_violations)
     )
