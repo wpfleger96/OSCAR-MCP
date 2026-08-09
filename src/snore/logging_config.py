@@ -16,6 +16,12 @@ from snore.constants import (
 
 _logging_configured = False
 
+# Set by setup_logging. The root logger is always DEBUG so the file handler
+# captures everything; only this flag reflects the user's --verbose choice,
+# so read it as `logging_config.verbose_mode` (a from-import would freeze the
+# pre-setup value) instead of inspecting logger levels.
+verbose_mode = False
+
 
 def get_log_dir() -> Path:
     """
@@ -117,10 +123,12 @@ def setup_logging(
         verbose: If True, set console to DEBUG level
         show_time: If True, show timestamps in console log output
     """
-    global _logging_configured
+    global _logging_configured, verbose_mode
 
     if _logging_configured:
         return
+
+    verbose_mode = verbose
 
     try:
         from rich.logging import RichHandler

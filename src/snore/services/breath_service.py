@@ -1,26 +1,30 @@
 """BreathService — query layer over the breaths table.
 
-All types in this module are the Appendix-A typed seam definitions (plan v3.8).
-PR-B (Duncan) consumes these seams; PR-A (this PR) defines and implements them.
-
-All types live here per Appendix A §13 note ("All types live in
-src/snore/services/breath_service.py").
+This module is the single home for the typed seam contract consumed by the MCP
+tool layer: every DTO, enum, and seam function the tool adapters depend on is
+defined (or re-exported) here, so adapters import one surface and never reach
+into ORM models or analysis internals.
 """
 
 from __future__ import annotations
 
 import math
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
+
+if TYPE_CHECKING:
+    import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.shared.versioning import (
     CROSS_VERSION_REFUSAL_KEYS,
+    MV_FALLBACK_ALGO_VERSION,
+    RERA_PROXY_ALGO_VERSION,
     AlgorithmIdentity,
     AlgoVersions,
     AnalysisRunMetadata,
@@ -74,6 +78,7 @@ __all__ = [
     "NightlyAnalysisSummary",
     "NightlyRangeSummary",
     "DeviceCapabilities",
+    "MvSource",
     "CaDetail",
     "CaAnalysisResult",
     "RawCaEvent",
@@ -83,18 +88,19 @@ __all__ = [
     "fetch_waveform_window_raw",
     "compute_waveform_window",
     "compute_ca_analysis",
+    "derive_mv_from_flow",
     # Service
     "BreathService",
 ]
 
 
 # ---------------------------------------------------------------------------
-# Appendix A §1 re-exported from versioning (single source of truth)
+# Analysis-status/versioning types re-exported from versioning (single source of truth)
 # ---------------------------------------------------------------------------
 
 
 class SessionCoverage(BaseModel):
-    """Per-session analysis coverage entry (Appendix A §1)."""
+    """Per-session analysis coverage entry."""
 
     session_id: int
     analysis_status: AnalysisStatus
@@ -131,6 +137,7 @@ class SessionSummary(BaseModel):
     session_id: int
     start_wall_clock: datetime  # naive — tier-2 device wall-clock
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     duration_seconds: float
 
 
@@ -242,6 +249,7 @@ class BreathRow(BaseModel):
 
     session_start_wall_clock: datetime  # naive — tier-2
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     start_offset_seconds: float
     end_offset_seconds: float
 
@@ -293,6 +301,7 @@ class BreathBin(BaseModel):
 
     session_start_wall_clock: datetime  # naive — tier-2 anchor
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     bin_start_offset: float
     bin_end_offset: float
     breath_count: int
@@ -344,6 +353,7 @@ class WindowCriterionOptions(BaseModel):
     context_seconds: float = 120.0
     min_fl_run_length: int = 2
     fl_class_threshold: int = 4
+    recovery_amplitude_margin: float = Field(default=0.20, ge=0.0)
 
 
 class WindowResult(BaseModel):
@@ -353,6 +363,7 @@ class WindowResult(BaseModel):
     session_id: int
     session_start_wall_clock: datetime
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     window_start_offset: float
     window_end_offset: float
     reason_summary: str
@@ -433,6 +444,10 @@ class EpochBreathStats(BaseModel):
     ie_ratio: DistributionStats
     rera_proxy_count: int | None
     rera_reason: NullReason | None
+    # Version of the query-time RERA-proxy criterion (not part of
+    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).  Stamped only when the
+    # RERA scan actually ran (rera_proxy_count is non-null); None otherwise.
+    rera_proxy_version: str | None = None
     rx_settings: dict[str, str]
 
 
@@ -457,6 +472,7 @@ class ContextualEvent(BaseModel):
     event_type: str
     event_start_wall_clock: datetime  # naive — tier-2
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     offset_seconds: float
     duration_seconds: float | None
 
@@ -503,6 +519,9 @@ class RawWaveformWindow(BaseModel):
     request: WaveformWindowRequest
     session_id: int
     session_start_wall_clock: datetime  # naive — tier-2 anchor
+    # Set at fetch time; compute_waveform_window copies these into the output.
+    timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     channels: list[RawWaveformChannel]
     missing_channels: list[WaveformChannelName]
 
@@ -525,6 +544,7 @@ class WaveformWindow(BaseModel):
     session_id: int
     session_start_wall_clock: datetime  # naive — tier-2 anchor
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     window_start_offset: float
     window_end_offset: float
     channels: list[WaveformChannel]
@@ -568,6 +588,29 @@ class WaveformWindowRequest(BaseModel):
         return self
 
 
+async def _resolve_timezone(
+    db: AsyncSession, profile_id: int
+) -> tuple[TimezoneStatus, str | None]:
+    """Resolve the profile's user-declared timezone (A6 labeling metadata).
+
+    Returns ``(USER_DECLARED, iana_name)`` when the profile declares a
+    timezone, else ``(UNKNOWN, None)``.  Timestamps are never rewritten and
+    no UTC offset is ever fabricated — this labels interpretation only.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from snore.database import models  # noqa: PLC0415
+
+    tz_name = (
+        await db.execute(
+            select(models.Profile.timezone).where(models.Profile.id == profile_id)
+        )
+    ).scalar_one_or_none()
+    if tz_name:
+        return TimezoneStatus.USER_DECLARED, tz_name
+    return TimezoneStatus.UNKNOWN, None
+
+
 def _extract_window_mean(
     offsets: list[float],
     values: list[float],
@@ -588,6 +631,8 @@ async def _fetch_waveform_blobs(
     request: WaveformWindowRequest,
     session_id: int,
     session_start: datetime,
+    timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN,
+    timezone_name: str | None = None,
 ) -> RawWaveformWindow:
     """PRIVATE — fetch waveform blobs for a pre-resolved, already-owned session.
 
@@ -629,6 +674,8 @@ async def _fetch_waveform_blobs(
         request=request,
         session_id=session_id,
         session_start_wall_clock=session_start,
+        timezone_status=timezone_status,
+        timezone_name=timezone_name,
         channels=channels,
         missing_channels=missing,
     )
@@ -646,8 +693,8 @@ async def fetch_waveform_window_raw(
     ``request.session_id`` must be set (direct callers must have a resolved session).
     Verifies ``Device.profile_id == profile_id`` via a join; raises ``ValueError``
     when the session is not found or is not owned by ``profile_id``.  Derives
-    ``session_start`` from the DB row — never from caller-supplied data (plan §9
-    lines 720-735).
+    ``session_start`` from the DB row — never from caller-supplied data, so a
+    forged anchor cannot shift window offsets.
     """
 
     from sqlalchemy import select  # noqa: PLC0415
@@ -661,7 +708,7 @@ async def fetch_waveform_window_raw(
         )
 
     # Full-tuple ownership query: Session + Device (profile) + Day (date) + optional device.
-    # plan §9 lines 822-825: the session must match profile_id, therapy_date, AND device_id.
+    # Ownership contract: the session must match profile_id, therapy_date, AND device_id.
     stmt = (
         select(models.Session.start_time)
         .join(models.Device, models.Session.device_id == models.Device.id)
@@ -683,7 +730,15 @@ async def fetch_waveform_window_raw(
         )
 
     session_start: datetime = row[0]
-    return await _fetch_waveform_blobs(db, request, request.session_id, session_start)
+    tz_status, tz_name = await _resolve_timezone(db, profile_id)
+    return await _fetch_waveform_blobs(
+        db,
+        request,
+        request.session_id,
+        session_start,
+        timezone_status=tz_status,
+        timezone_name=tz_name,
+    )
 
 
 def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
@@ -744,6 +799,8 @@ def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
     return WaveformWindow(
         session_id=raw.session_id,
         session_start_wall_clock=raw.session_start_wall_clock,
+        timezone_status=raw.timezone_status,
+        timezone_name=raw.timezone_name,
         window_start_offset=request.offset_start,
         window_end_offset=request.offset_end,
         channels=channels_out,
@@ -772,11 +829,20 @@ class NightlyAnalysisSummary(BaseModel):
 
     rera_count: int | None
     rera_reason: NullReason | None
+    # Version of the query-time RERA-proxy criterion (not part of
+    # AlgorithmIdentity — see RERA_PROXY_ALGO_VERSION).  Stamped only when the
+    # RERA scan actually ran (rera_count is non-null); None otherwise.
+    rera_proxy_version: str | None = None
     primary_mode: str | None
     fl_median: float | None
     fl_95th: float | None
     fl_max: float | None
     fl_reason: NullReason | None
+    # Percent of leak-valid classified breaths with flow_class >= 4. Denominator
+    # is leak-valid breaths with a non-null flow_class (consistent with
+    # fl_median's leak-valid convention).
+    fl_class_ge4_pct: float | None
+    fl_class_ge4_pct_reason: NullReason | None
 
     ti_median_s: float | None
     ti_median_reason: NullReason | None
@@ -839,12 +905,22 @@ class DeviceCapabilities(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class MvSource(StrEnum):
+    """Provenance of the MV channel used in CA analysis."""
+
+    DEVICE = "device"
+    FLOW_DERIVED = "flow_derived"
+    # Night-level only: sessions on the night used different MV sources.
+    MIXED = "mixed"
+
+
 class CaDetail(BaseModel):
     """Per-CA event analysis."""
 
     session_id: int
     session_start_wall_clock: datetime  # naive — tier-2 anchor
     timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     offset_seconds: float
     duration_seconds: float | None
     preceding_mv_slope: float | None
@@ -853,6 +929,8 @@ class CaDetail(BaseModel):
     ps_reason: NullReason | None
     stability_index: float | None
     stability_reason: NullReason | None
+    # MV provenance: DEVICE | FLOW_DERIVED | None (no MV channel available)
+    mv_source: MvSource | None = None
 
 
 class CaAnalysisResult(BaseModel):
@@ -869,10 +947,14 @@ class CaAnalysisResult(BaseModel):
     pb_reason: NullReason | None
     mv_rolling_variance: float | None
     mv_variance_reason: NullReason | None
+    # Night-level MV provenance: DEVICE | FLOW_DERIVED | MIXED | None,
+    # aggregated across sessions that contributed an MV channel.
+    mv_source: MvSource | None = None
+    mv_fallback_version: str = MV_FALLBACK_ALGO_VERSION
 
 
 # ---------------------------------------------------------------------------
-# §12 — CA-analysis fetch/compute seam (plan §9 conformance)
+# §12 — CA-analysis fetch/compute seam (DB fetch in-scope; compute pure)
 # ---------------------------------------------------------------------------
 
 
@@ -897,6 +979,9 @@ class RawCaSessionData(BaseModel):
     coverage: SessionCoverage
     is_ok: bool  # analysis_status == OK and algo_versions is not None and ar_id is not None
     pre_waveform: RawWaveformWindow  # MV, THERAPY_PRESSURE, EPAP channels
+    # FLOW blobs, fetched only when the device MV channel is absent; input to
+    # the derive_mv_from_flow fallback in compute_ca_analysis.
+    flow_waveform: RawWaveformWindow | None = None
     ca_events: list[RawCaEvent]
     pb_json: (
         dict[str, Any] | None
@@ -915,6 +1000,9 @@ class RawCaAnalysis(BaseModel):
     therapy_date: date
     device_id: int
     session_data: list[RawCaSessionData]
+    # Set at fetch time; compute_ca_analysis copies these into CaDetail outputs.
+    timezone_status: TimezoneStatus = TimezoneStatus.UNKNOWN
+    timezone_name: str | None = None  # IANA name when USER_DECLARED
     # Pre-reduced day-level state (computed from coverage during fetch; no DB access)
     day_status: DayAnalysisStatus
     algorithm_identity: AlgorithmIdentity | None
@@ -926,34 +1014,82 @@ class RawCaAnalysis(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _iter_fl_run_recoveries(
+    breath_rows: Sequence[Any],
+    *,
+    fl_class_threshold: int = 4,
+    min_fl_run_length: int = 2,
+    recovery_amplitude_margin: float = 0.20,
+) -> Iterator[tuple[int, int, int]]:
+    """Yield (run_start_idx, run_last_idx, recovery_idx) per RERA-proxy event.
+
+    A qualifying event is a run of >= ``min_fl_run_length`` consecutive breaths
+    with ``flow_class >= fl_class_threshold`` whose immediately-next breath
+    (no gap; a ``flow_class is None`` breath ends the run) is a recovery
+    breath.  The follower is a recovery breath when EITHER:
+
+    (a) ``is_recovery_breath is True`` — the analysis-time amplitude detector; OR
+    (b) self-contained (RERA-proxy v2): the follower's ``flow_class`` drops to
+        <= 2 AND its ``peak_flow_lpm`` is >= ``(1 + recovery_amplitude_margin)``
+        times the mean of the run's non-null ``peak_flow_lpm`` values.
+
+    Missing data (null ``flow_class`` or ``peak_flow_lpm`` on the follower, or
+    an all-null-peak run) never satisfies (b).
+    """
+    n = len(breath_rows)
+    i = 0
+    while i < n:
+        b = breath_rows[i]
+        if b.flow_class is None or b.flow_class < fl_class_threshold:
+            i += 1
+            continue
+        run_start = i
+        while (
+            i < n
+            and breath_rows[i].flow_class is not None
+            and breath_rows[i].flow_class >= fl_class_threshold
+        ):
+            i += 1
+        if i - run_start < min_fl_run_length or i >= n:
+            continue
+        follower = breath_rows[i]
+        is_recovery = follower.is_recovery_breath is True
+        if (
+            not is_recovery
+            and follower.flow_class is not None
+            and follower.flow_class <= 2
+            and follower.peak_flow_lpm is not None
+        ):
+            run_peaks = [
+                breath_rows[k].peak_flow_lpm
+                for k in range(run_start, i)
+                if breath_rows[k].peak_flow_lpm is not None
+            ]
+            if run_peaks:
+                run_mean = sum(run_peaks) / len(run_peaks)
+                is_recovery = follower.peak_flow_lpm >= (
+                    (1.0 + recovery_amplitude_margin) * run_mean
+                )
+        if is_recovery:
+            yield (run_start, i - 1, i)
+
+
 def _count_fl_run_reras(
     breath_rows: Sequence[Any],
     fl_class_threshold: int = 4,
     min_fl_run_length: int = 2,
+    recovery_amplitude_margin: float = 0.20,
 ) -> int:
     """Count RERA-proxy events: FL runs ending in a recovery breath."""
-    count = 0
-    i = 0
-    while i < len(breath_rows):
-        b = breath_rows[i]
-        if b.flow_class is not None and b.flow_class >= fl_class_threshold:
-            run_start = i
-            while (
-                i < len(breath_rows)
-                and breath_rows[i].flow_class is not None
-                and breath_rows[i].flow_class >= fl_class_threshold
-            ):
-                i += 1
-            run_len = i - run_start
-            if (
-                run_len >= min_fl_run_length
-                and i < len(breath_rows)
-                and breath_rows[i].is_recovery_breath
-            ):
-                count += 1
-        else:
-            i += 1
-    return count
+    return sum(
+        1
+        for _ in _iter_fl_run_recoveries(
+            breath_rows,
+            fl_class_threshold=fl_class_threshold,
+            min_fl_run_length=min_fl_run_length,
+            recovery_amplitude_margin=recovery_amplitude_margin,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -972,10 +1108,17 @@ class BreathService:
     def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
         self._db = db_session
         self._profile_id = profile_id
+        self._tz_cache: tuple[TimezoneStatus, str | None] | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def resolve_timezone(self) -> tuple[TimezoneStatus, str | None]:
+        """Profile timezone label (A6), cached per service instance."""
+        if self._tz_cache is None:
+            self._tz_cache = await _resolve_timezone(self._db, self._profile_id)
+        return self._tz_cache
 
     async def _latest_analysis_for_session(
         self, session_id: int
@@ -1148,7 +1291,7 @@ class BreathService:
     ) -> DayAnalysisStatus:
         """Reduce per-session coverage to a day-level DayAnalysisStatus.
 
-        Precedence (plan §1 line 864):
+        Precedence:
         1. Multiple distinct algorithm identities among OK sessions → MIXED_VERSION
         2. All OK → OK
         3. All NOT_RUN → NOT_RUN
@@ -1158,7 +1301,7 @@ class BreathService:
         if not coverages:
             return DayAnalysisStatus.NOT_RUN
 
-        # plan §1 line 864 rule 1: multiple distinct identities → MIXED_VERSION
+        # Rule 1: multiple distinct identities → MIXED_VERSION
         if len(identities) > 1:
             id_strs = {str(i.model_dump()) for i in identities}
             if len(id_strs) > 1:
@@ -1166,19 +1309,19 @@ class BreathService:
 
         statuses = {c.analysis_status for c in coverages}
 
-        # plan §1 line 864 rule 2: all OK → OK
+        # Rule 2: all OK → OK
         if statuses == {AnalysisStatus.OK}:
             return DayAnalysisStatus.OK
 
-        # plan §1 line 864 rule 3: all NOT_RUN → NOT_RUN
+        # Rule 3: all NOT_RUN → NOT_RUN
         if statuses == {AnalysisStatus.NOT_RUN}:
             return DayAnalysisStatus.NOT_RUN
 
-        # plan §1 line 864 rule 4: all STALE_VERSION → STALE
+        # Rule 4: all STALE_VERSION → STALE
         if statuses == {AnalysisStatus.STALE_VERSION}:
             return DayAnalysisStatus.STALE
 
-        # plan §1 line 864 rule 5: any other mix → PARTIAL
+        # Rule 5: any other mix → PARTIAL
         return DayAnalysisStatus.PARTIAL
 
     # ------------------------------------------------------------------
@@ -1195,6 +1338,8 @@ class BreathService:
         from sqlalchemy import func, select  # noqa: PLC0415
 
         from snore.database import models  # noqa: PLC0415
+
+        tz_status, tz_name = await self.resolve_timezone()
 
         # Resolve session_id
         if query.session_id is not None:
@@ -1239,6 +1384,8 @@ class BreathService:
                     SessionSummary(
                         session_id=s.id,
                         start_wall_clock=s.start_time,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         duration_seconds=s.duration_seconds or 0.0,
                     )
                     for s in day_sessions
@@ -1325,6 +1472,8 @@ class BreathService:
                     session_id=b.session_id,
                     breath_number=b.breath_number,
                     session_start_wall_clock=session_start,
+                    timezone_status=tz_status,
+                    timezone_name=tz_name,
                     start_offset_seconds=b.start_offset_s,
                     end_offset_seconds=b.end_offset_s,
                     ti=b.inspiration_time_s,
@@ -1442,6 +1591,8 @@ class BreathService:
                     bins.append(
                         BreathBin(
                             session_start_wall_clock=session_start,
+                            timezone_status=tz_status,
+                            timezone_name=tz_name,
                             bin_start_offset=bin_start,
                             bin_end_offset=bin_end,
                             breath_count=len(bin_breaths),
@@ -1493,16 +1644,25 @@ class BreathService:
     ) -> FindWindowsResult:
         """N windows matching criterion, worst first.
 
-        See Appendix A §6 for full construction rules and dedup logic.
+        Windows are built per criterion (worst flattening over leak-valid
+        breaths, CA-centered, or FL run ending in recovery), severity-ranked
+        worst-first, and deduplicated by overlap so the same span is never
+        reported twice.  Options irrelevant to the chosen criterion are
+        rejected with ValueError rather than silently ignored.
         """
         opts = options or WindowCriterionOptions()
 
-        # Validate criterion-irrelevant options per §6 docstring
+        # Validate criterion-irrelevant options (see docstring)
         defaults = WindowCriterionOptions()
         if criterion == WindowCriterion.WORST_FLATTENING_LEAK_VALID:
             bad = [
                 f
-                for f in ("context_seconds", "min_fl_run_length", "fl_class_threshold")
+                for f in (
+                    "context_seconds",
+                    "min_fl_run_length",
+                    "fl_class_threshold",
+                    "recovery_amplitude_margin",
+                )
                 if getattr(opts, f) != getattr(defaults, f)
             ]
             if bad:
@@ -1520,6 +1680,7 @@ class BreathService:
                     "context_breaths_after",
                     "min_fl_run_length",
                     "fl_class_threshold",
+                    "recovery_amplitude_margin",
                 )
                 if getattr(opts, f) != getattr(defaults, f)
             ]
@@ -1596,7 +1757,7 @@ class BreathService:
                 identities.append(algo.identity)
                 primary_modes.append(algo.run.primary_mode)
 
-        # Determine day_status via centralized reducer (plan §1 line 864)
+        # Determine day_status via the centralized reducer (_reduce_day_status)
         day_status = self._reduce_day_status(coverage, identities)
 
         # Check identity uniformity for CROSS_VERSION_REFUSAL_KEYS
@@ -1711,6 +1872,7 @@ class BreathService:
 
         from snore.database import models  # noqa: PLC0415
 
+        tz_status, tz_name = await self.resolve_timezone()
         candidates: list[WindowResult] = []
         for sid in session_ids:
             ar_id = ar_by_session.get(sid)
@@ -1771,6 +1933,8 @@ class BreathService:
                         criterion=WindowCriterion.WORST_FLATTENING_LEAK_VALID,
                         session_id=sid,
                         session_start_wall_clock=session_start,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         window_start_offset=window_breaths[0].start_offset_s,
                         window_end_offset=window_breaths[-1].end_offset_s,
                         reason_summary=(
@@ -1819,6 +1983,7 @@ class BreathService:
         )
         event_rows = (await self._db.execute(stmt)).all()
 
+        tz_status, tz_name = await self.resolve_timezone()
         candidates: list[WindowResult] = []
         for ev_row in event_rows:
             ev = ev_row.Event
@@ -1838,6 +2003,8 @@ class BreathService:
                     criterion=WindowCriterion.CA_CENTERED,
                     session_id=sid,
                     session_start_wall_clock=session_start,
+                    timezone_status=tz_status,
+                    timezone_name=tz_name,
                     window_start_offset=win_start,
                     window_end_offset=win_end,
                     reason_summary=f"CA event at offset {ev_offset:.1f}s",
@@ -1866,11 +2033,13 @@ class BreathService:
         opts: WindowCriterionOptions,
     ) -> list[WindowResult]:
         """Build FL_RUN_ENDING_IN_RECOVERY windows — RERA-proxy: runs of ≥N consecutive
-        FL breaths ending with is_recovery_breath=True."""
+        FL breaths ending in a recovery breath (analysis-time flag OR the
+        self-contained v2 criterion; see _iter_fl_run_recoveries)."""
         from sqlalchemy import select  # noqa: PLC0415
 
         from snore.database import models  # noqa: PLC0415
 
+        tz_status, tz_name = await self.resolve_timezone()
         candidates: list[WindowResult] = []
         for sid in session_ids:
             ar_id = ar_by_session.get(sid)
@@ -1893,56 +2062,45 @@ class BreathService:
                 continue
 
             session_start = session_starts[sid]
-            # Scan for FL runs ending in recovery breath
-            i = 0
-            while i < len(breath_rows):
-                b = breath_rows[i]
-                if b.flow_class is not None and b.flow_class >= opts.fl_class_threshold:
-                    # Start of a potential FL run
-                    run_start = i
-                    j = i
-                    while j < len(breath_rows) and (
-                        breath_rows[j].flow_class is not None
-                        and (breath_rows[j].flow_class or 0) >= opts.fl_class_threshold
-                    ):
-                        j += 1
-                    fl_run = breath_rows[run_start:j]
-                    # Check if followed by a recovery breath
-                    if j < len(breath_rows) and breath_rows[j].is_recovery_breath:
-                        run_end_idx = j  # recovery breath
-                        full_run = breath_rows[run_start : run_end_idx + 1]
-                        fl_length = len(fl_run)
-                        if fl_length >= opts.min_fl_run_length:
-                            candidates.append(
-                                WindowResult(
-                                    criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
-                                    session_id=sid,
-                                    session_start_wall_clock=session_start,
-                                    window_start_offset=full_run[0].start_offset_s,
-                                    window_end_offset=full_run[-1].end_offset_s,
-                                    reason_summary=(
-                                        f"fl_run={fl_length} breaths, ends in recovery"
-                                    ),
-                                    worst_mid_insp_flattening=max(
-                                        (
-                                            b.mid_insp_flattening
-                                            for b in fl_run
-                                            if b.mid_insp_flattening is not None
-                                        ),
-                                        default=None,
-                                    ),
-                                    fl_run_length=fl_length,
-                                    anchor_event_offset=None,
-                                    analysis_result_id=ar_id,
-                                    analysis_status=ar_status,
-                                    analysis_reason=None,
-                                )
-                            )
-                        i = run_end_idx + 1
-                        continue
-                    i = j
-                else:
-                    i += 1
+            # Scan for FL runs ending in recovery breath — the same iterator
+            # backs _count_fl_run_reras, so windows and counts identify
+            # exactly the same events.
+            for run_start, run_last, recovery_idx in _iter_fl_run_recoveries(
+                breath_rows,
+                fl_class_threshold=opts.fl_class_threshold,
+                min_fl_run_length=opts.min_fl_run_length,
+                recovery_amplitude_margin=opts.recovery_amplitude_margin,
+            ):
+                fl_run = breath_rows[run_start : run_last + 1]
+                full_run = breath_rows[run_start : recovery_idx + 1]
+                fl_length = len(fl_run)
+                candidates.append(
+                    WindowResult(
+                        criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
+                        session_id=sid,
+                        session_start_wall_clock=session_start,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
+                        window_start_offset=full_run[0].start_offset_s,
+                        window_end_offset=full_run[-1].end_offset_s,
+                        reason_summary=(
+                            f"fl_run={fl_length} breaths, ends in recovery"
+                        ),
+                        worst_mid_insp_flattening=max(
+                            (
+                                b.mid_insp_flattening
+                                for b in fl_run
+                                if b.mid_insp_flattening is not None
+                            ),
+                            default=None,
+                        ),
+                        fl_run_length=fl_length,
+                        anchor_event_offset=None,
+                        analysis_result_id=ar_id,
+                        analysis_status=ar_status,
+                        analysis_reason=None,
+                    )
+                )
 
         return self._dedup_and_top_n(candidates, n, key=lambda w: w.fl_run_length or 0)
 
@@ -2425,6 +2583,9 @@ class BreathService:
                     else _null_dist,
                     rera_proxy_count=rera_count,
                     rera_reason=rera_reason,
+                    rera_proxy_version=(
+                        RERA_PROXY_ALGO_VERSION if rera_count is not None else None
+                    ),
                     rx_settings=all_rx[0] if all_rx else {},
                 )
             )
@@ -2565,6 +2726,8 @@ class BreathService:
                 fl_95th=None,
                 fl_max=None,
                 fl_reason=NullReason.NOT_AVAILABLE,
+                fl_class_ge4_pct=None,
+                fl_class_ge4_pct_reason=NullReason.NOT_AVAILABLE,
                 ti_median_s=None,
                 ti_median_reason=NullReason.NOT_AVAILABLE,
                 ie_ratio_median=None,
@@ -2587,6 +2750,8 @@ class BreathService:
         fl_vals: list[float] = []
         ti_vals: list[float] = []
         ie_vals: list[float] = []
+        fl_class_ge4_num = 0
+        fl_class_den = 0
         rera_count = 0
 
         for sid, _algo in ok_sessions:
@@ -2602,7 +2767,13 @@ class BreathService:
                         ti_vals.append(b.inspiration_time_s)
                     if b.i_e_ratio is not None:
                         ie_vals.append(b.i_e_ratio)
-            # RERA proxy: FL runs ending in recovery breath
+                    if b.flow_class is not None:
+                        fl_class_den += 1
+                        if b.flow_class >= 4:
+                            fl_class_ge4_num += 1
+            # RERA proxy: FL runs ending in recovery breath.  Intentionally
+            # scans ALL breaths (not just leak-valid) — runs need sequence
+            # contiguity.
             rera_count += _count_fl_run_reras(breath_rows)
 
         fl_median: float | None
@@ -2621,6 +2792,16 @@ class BreathService:
         else:
             fl_median = fl_95th = fl_max = None
             fl_reason = NullReason.NOT_AVAILABLE
+
+        fl_class_ge4_pct: float | None
+        fl_class_ge4_pct_reason: NullReason | None
+
+        if fl_class_den > 0:
+            fl_class_ge4_pct = 100.0 * fl_class_ge4_num / fl_class_den
+            fl_class_ge4_pct_reason = None
+        else:
+            fl_class_ge4_pct = None
+            fl_class_ge4_pct_reason = NullReason.NOT_AVAILABLE
 
         ti_median_s: float | None
         ti_median_reason: NullReason | None
@@ -2687,11 +2868,16 @@ class BreathService:
             algorithm_identity=algo_identity,
             rera_count=final_rera_count,
             rera_reason=rera_reason,
+            rera_proxy_version=(
+                RERA_PROXY_ALGO_VERSION if final_rera_count is not None else None
+            ),
             primary_mode=uniform_primary_mode,
             fl_median=fl_median,
             fl_95th=fl_95th,
             fl_max=fl_max,
             fl_reason=fl_reason,
+            fl_class_ge4_pct=fl_class_ge4_pct,
+            fl_class_ge4_pct_reason=fl_class_ge4_pct_reason,
             ti_median_s=ti_median_s,
             ti_median_reason=ti_median_reason,
             ie_ratio_median=ie_ratio_median,
@@ -2882,7 +3068,7 @@ class BreathService:
                 status, algo = self._classify_analysis_row(ar_row)
                 ar_classification[sid] = (status, algo, ar_row.id)
 
-        # Bulk Breath query for all OK ar_ids (8 columns only)
+        # Bulk Breath query for all OK ar_ids (9 columns only)
         ok_ar_ids = [
             ar_id
             for (_status, _algo, ar_id) in ar_classification.values()
@@ -2900,6 +3086,7 @@ class BreathService:
                 models.Breath.i_e_ratio,
                 models.Breath.flow_class,
                 models.Breath.is_recovery_breath,
+                models.Breath.peak_flow_lpm,
             )
             breath_result = await self._db.execute(
                 select(*breath_cols)
@@ -3000,7 +3187,7 @@ class BreathService:
             )
 
         # Date range of actual data — only days with at least one Session count
-        # as "imported nights" (plan §13 lines 949-961).
+        # as "imported nights"; empty Day rows never widen the reported range.
         from sqlalchemy import exists  # noqa: PLC0415
 
         day_stmt = select(models.Day).where(
@@ -3093,7 +3280,7 @@ class BreathService:
             )
             all_setting_keys = sorted(set(str(k) for k in setting_rows))
 
-        # rx_keys_present: only keys that actually have non-null values (plan §11)
+        # rx_keys_present: only keys that actually have non-null values
         from snore.analysis.rx_tracker import RX_KEYS as _RX_KEYS  # noqa: PLC0415
 
         rx_keys: list[str] = []
@@ -3165,7 +3352,7 @@ class BreathService:
                 raise ValueError(
                     "event_types must be None or a list of non-empty strings"
                 )
-            # Deduplicate (order-preserving), then enforce the 50-item cap (plan §13).
+            # Deduplicate (order-preserving), then enforce the 50-item cap.
             event_types = list(dict.fromkeys(event_types))
             if len(event_types) > 50:
                 raise ValueError("event_types must contain at most 50 unique values")
@@ -3179,6 +3366,7 @@ class BreathService:
         )
         day_sessions = sessions_by_date.get(therapy_date, [])
 
+        tz_status, tz_name = await self.resolve_timezone()
         results: list[ContextualEvent] = []
         for session_row in day_sessions:
             session_id = session_row.id
@@ -3196,7 +3384,7 @@ class BreathService:
 
             # Pre-load all needed channels for this session ONCE — one DB fetch for
             # all events rather than two per event (fix: per-event blob read N+1).
-            # Corrupt blobs still raise ValueError per plan IMPORTANT-8.
+            # Corrupt blobs still raise ValueError — never silently skipped.
             session_duration_s = session_row.duration_seconds or 32400.0
             pre_raw = await _fetch_waveform_blobs(
                 self._db,
@@ -3273,7 +3461,8 @@ class BreathService:
                         session_start_wall_clock=session_start,
                         event_type=ev.event_type,
                         event_start_wall_clock=ev.start_time,
-                        timezone_status=TimezoneStatus.UNKNOWN,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         offset_seconds=offset_s,
                         duration_seconds=ev.duration_seconds,
                         pressure_at_event_cmh2o=pressure_at,
@@ -3292,7 +3481,7 @@ class BreathService:
     ) -> RawWaveformWindow:
         """Resolve, validate, and fetch raw waveform blobs for a window request.
 
-        MCP raw/render seam (plan docs/mcp-server-plan.md §9): the fetch step runs
+        MCP raw/render seam: the fetch step runs
         inside the caller's DB scope while ``compute_waveform_window`` (pure, CPU-only)
         runs after the scope closes.  Direct callers that need the raw bytes or want
         to render a PNG call this method, then pass the returned ``RawWaveformWindow``
@@ -3309,9 +3498,11 @@ class BreathService:
         )
         day_sessions = sessions_by_date.get(request.therapy_date, [])
 
+        tz_status, tz_name = await self.resolve_timezone()
+
         # Validate explicit session_id BEFORE the empty-day return.
         # An owned device on an empty date with an explicit session_id must raise,
-        # not silently return a synthetic empty window (plan §9 lines 822-825).
+        # not silently return a synthetic empty window.
         if not day_sessions:
             if request.session_id is not None:
                 raise ValueError(
@@ -3322,6 +3513,8 @@ class BreathService:
                 request=request,
                 session_id=0,
                 session_start_wall_clock=datetime.min,
+                timezone_status=tz_status,
+                timezone_name=tz_name,
                 channels=[],
                 missing_channels=list(request.channels),
             )
@@ -3343,6 +3536,8 @@ class BreathService:
                     SessionSummary(
                         session_id=s.id,
                         start_wall_clock=s.start_time,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
                         duration_seconds=s.duration_seconds or 0.0,
                     )
                     for s in day_sessions
@@ -3355,7 +3550,12 @@ class BreathService:
             update={"device_id": resolved_device_id, "session_id": session_row.id}
         )
         return await _fetch_waveform_blobs(
-            self._db, resolved_request, session_row.id, session_row.start_time
+            self._db,
+            resolved_request,
+            session_row.id,
+            session_row.start_time,
+            timezone_status=tz_status,
+            timezone_name=tz_name,
         )
 
     async def get_waveform_window(
@@ -3398,11 +3598,15 @@ class BreathService:
         )
         all_day_sessions = sessions_by_date.get(therapy_date, [])
 
+        tz_status, tz_name = await self.resolve_timezone()
+
         if not all_day_sessions:
             return RawCaAnalysis(
                 therapy_date=therapy_date,
                 device_id=resolved_device_id,
                 session_data=[],
+                timezone_status=tz_status,
+                timezone_name=tz_name,
                 day_status=DayAnalysisStatus.NOT_RUN,
                 algorithm_identity=None,
                 null_reason=NullReason.ANALYSIS_NOT_RUN,
@@ -3429,7 +3633,7 @@ class BreathService:
 
         ca_day_status = self._reduce_day_status(coverage, identities_for_reduce)
 
-        # plan §12 lines 984-993: MIXED_VERSION must return algorithm_identity=None
+        # MIXED_VERSION contract: no single identity is representative → None
         if ca_day_status == DayAnalysisStatus.MIXED_VERSION:
             algo_identity = None
 
@@ -3439,7 +3643,7 @@ class BreathService:
         elif ca_day_status == DayAnalysisStatus.STALE:
             ca_null_reason = NullReason.ANALYSIS_STALE
         elif ca_day_status == DayAnalysisStatus.MIXED_VERSION:
-            # plan §12 lines 984-993: conflicting algo identities → ALGO_VERSION_MISMATCH
+            # Conflicting algo identities → ALGO_VERSION_MISMATCH
             ca_null_reason = NullReason.ALGO_VERSION_MISMATCH
         elif ca_day_status == DayAnalysisStatus.PARTIAL:
             ca_null_reason = None
@@ -3460,7 +3664,7 @@ class BreathService:
             is_ok = session_id in ok_session_ids
 
             # Pre-fetch MV + THERAPY_PRESSURE + EPAP blobs once per session.
-            # Corrupt blobs still raise ValueError per plan IMPORTANT-8.
+            # Corrupt blobs still raise ValueError — never silently skipped.
             session_cap = max(session_duration_s, 1.0)
             pre_raw = await _fetch_waveform_blobs(
                 self._db,
@@ -3504,6 +3708,30 @@ class BreathService:
                 for ev in ca_rows
             ]
 
+            # No device MV channel → fetch FLOW blobs for the flow-derived MV
+            # fallback (compute_ca_analysis runs derive_mv_from_flow on them).
+            # Derived MV is only consumed for per-event metrics (CA events
+            # present) or rolling-variance bins (analysis-OK session), so skip
+            # the fetch entirely when neither consumer exists.
+            flow_raw: RawWaveformWindow | None = None
+            if WaveformChannelName.MV in pre_raw.missing_channels and (
+                raw_events or is_ok
+            ):
+                flow_raw = await _fetch_waveform_blobs(
+                    self._db,
+                    WaveformWindowRequest(
+                        therapy_date=therapy_date,
+                        session_id=session_id,
+                        device_id=resolved_device_id,
+                        channels=[WaveformChannelName.FLOW],
+                        offset_start=0.0,
+                        offset_end=session_cap,
+                        window_cap_seconds=session_cap,
+                    ),
+                    session_id,
+                    session_start,
+                )
+
             # Load programmatic_result_json for OK sessions (PB% computation)
             pb_json: dict[str, Any] | None = None
             if is_ok and not night_level_refused:
@@ -3531,6 +3759,7 @@ class BreathService:
                     coverage=cov_by_session[session_id],
                     is_ok=is_ok,
                     pre_waveform=pre_raw,
+                    flow_waveform=flow_raw,
                     ca_events=raw_events,
                     pb_json=pb_json,
                 )
@@ -3540,6 +3769,8 @@ class BreathService:
             therapy_date=therapy_date,
             device_id=resolved_device_id,
             session_data=session_data,
+            timezone_status=tz_status,
+            timezone_name=tz_name,
             day_status=ca_day_status,
             algorithm_identity=algo_identity,
             null_reason=ca_null_reason,
@@ -3568,6 +3799,50 @@ class BreathService:
 # ---------------------------------------------------------------------------
 # §12 — compute_ca_analysis (module-level pure function)
 # ---------------------------------------------------------------------------
+
+
+def derive_mv_from_flow(
+    offsets: np.ndarray,
+    values: np.ndarray,
+    *,
+    window_s: float = 60.0,
+    out_dt_s: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pure — derive minute ventilation (L/min) from a flow waveform (L/min).
+
+    MV(t) = mean of positive-clipped flow over the trailing window
+    ``[t - window_s, t]``, sampled every ``out_dt_s`` seconds starting at
+    ``offsets[0] + window_s`` up to the last input offset.  Output samples
+    whose window contains zero input samples are omitted — merged sessions
+    have timestamp gaps, so uniform sampling is never assumed.
+
+    Returns ``(out_offsets, out_values)``; empty arrays when the input is too
+    short to cover a single window or when ``offsets`` is not non-decreasing
+    (searchsorted requires sorted input — unsorted offsets would silently
+    produce garbage windows, so downstream metrics go null instead).  NaN
+    samples in ``values`` are treated as 0.0 flow so they cannot poison the
+    cumulative sum.  O(n log n): cumsum + searchsorted, no per-window scans.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    if offsets.size == 0 or float(offsets[-1]) - float(offsets[0]) < window_s:
+        return np.array([]), np.array([])
+    if np.any(np.diff(offsets) < 0):
+        return np.array([]), np.array([])
+
+    clipped = np.clip(np.where(np.isnan(values), 0.0, values), 0.0, None)
+    csum = np.concatenate(([0.0], np.cumsum(clipped, dtype=np.float64)))
+
+    out_times = np.arange(
+        float(offsets[0]) + window_s, float(offsets[-1]) + 1e-9, out_dt_s
+    )
+    # Window [t - window_s, t] inclusive both ends
+    lo = np.searchsorted(offsets, out_times - window_s, side="left")
+    hi = np.searchsorted(offsets, out_times, side="right")
+    counts = hi - lo
+    mask = counts > 0
+    mv = (csum[hi[mask]] - csum[lo[mask]]) / counts[mask]
+    return out_times[mask], mv
 
 
 def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
@@ -3617,11 +3892,15 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
     ca_details: list[CaDetail] = []
     total_pb_s = 0.0
     total_eligible_s = 0.0
-    pb_seen_any = False
+    # True when PB detection ran for ≥1 OK session (pb_json persisted) — zero
+    # episodes on an analyzed night is a real 0.0 %, not "not_available".
+    pb_ran_any = False
     # Combined MV bin means from ALL OK sessions for cross-session variance
     combined_bin_means: list[float] = []
     mv_rolling_var: float | None = None
     mv_var_reason: NullReason | None = NullReason.NOT_AVAILABLE
+    # MV provenance per contributing session (DEVICE / FLOW_DERIVED)
+    mv_sources_seen: set[MvSource] = set()
 
     for sd in raw.session_data:
         session_start_f = sd.session_start.timestamp()
@@ -3638,12 +3917,55 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
             for ch in pre_window.channels
         }
 
+        # MV fallback: no device MV channel → derive MV from the flow waveform
+        # and insert it under the MV key so all downstream code (slope,
+        # stability, rolling variance) works unchanged.
+        mv_source: MvSource | None = None
+        if WaveformChannelName.MV in pre_ch:
+            mv_source = MvSource.DEVICE
+        elif sd.flow_waveform is not None:
+            # Deserialize the raw FLOW blob straight to numpy — bypassing the
+            # render-oriented compute_waveform_window avoids a numpy → list →
+            # numpy round trip over the full-session flow signal.  Window
+            # slicing and corrupt-blob semantics mirror compute_waveform_window.
+            from snore.analysis.data.waveform_loader import (  # noqa: PLC0415
+                deserialize_waveform_blob,
+            )
+
+            flow_req = sd.flow_waveform.request
+            for flow_ch in sd.flow_waveform.channels:
+                if flow_ch.waveform_type != WaveformChannelName.FLOW:
+                    continue
+                if flow_ch.sample_count <= 0 or not flow_ch.raw_bytes:
+                    break  # absent channel → no fallback (mv_source stays None)
+                try:
+                    flow_off, flow_val = deserialize_waveform_blob(
+                        flow_ch.raw_bytes, flow_ch.sample_count
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid waveform data for channel "
+                        f"'{flow_ch.waveform_type.value}'"
+                    ) from exc
+                in_window = (flow_off >= flow_req.offset_start) & (
+                    flow_off <= flow_req.offset_end
+                )
+                mv_off, mv_val = derive_mv_from_flow(
+                    flow_off[in_window], flow_val[in_window]
+                )
+                if mv_off.size > 0:
+                    pre_ch[WaveformChannelName.MV] = (mv_off, mv_val)
+                    mv_source = MvSource.FLOW_DERIVED
+                break
+        if mv_source is not None:
+            mv_sources_seen.add(mv_source)
+
         for raw_ev in sd.ca_events:
             ev_start_f = raw_ev.start_time.timestamp()
             offset_s = ev_start_f - session_start_f
 
             # --- preceding_mv_slope + stability_index ---
-            # Window: prior 60 s (plan §12 line 976: stability uses 60-second window)
+            # Contract: both metrics use the 60 s window preceding the event
             preceding_mv_slope: float | None = None
             preceding_mv_reason: NullReason | None = NullReason.NOT_AVAILABLE
             stability_index: float | None = None
@@ -3658,7 +3980,7 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                 ts_slice = off_mv[lo:hi]
                 v_slice = val_mv[lo:hi]
                 if len(ts_slice) >= 2:
-                    # plan §12 line 976: slope in L/min per MINUTE
+                    # Contract: slope is reported in L/min per MINUTE;
                     # _mv_slope returns L/min per SECOND (offset_seconds as x)
                     slope_per_s = _mv_slope(ts_slice.tolist(), v_slice.tolist())
                     if slope_per_s is not None:
@@ -3708,7 +4030,8 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                 CaDetail(
                     session_id=sd.session_id,
                     session_start_wall_clock=sd.session_start,
-                    timezone_status=TimezoneStatus.UNKNOWN,
+                    timezone_status=raw.timezone_status,
+                    timezone_name=raw.timezone_name,
                     offset_seconds=offset_s,
                     duration_seconds=raw_ev.duration_seconds,
                     preceding_mv_slope=preceding_mv_slope,
@@ -3717,6 +4040,7 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                     ps_reason=ps_reason,
                     stability_index=stability_index,
                     stability_reason=stability_reason,
+                    mv_source=mv_source,
                 )
             )
 
@@ -3730,21 +4054,17 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
                     AnalysisResult as AnalysisResultDTO,  # noqa: PLC0415
                 )
 
+                pb_ran_any = True
                 dto = AnalysisResultDTO.model_validate(sd.pb_json)
-                episodes = dto.periodic_breathing_episodes or []
-                if episodes:
-                    pb_seen_any = True
-                    for ep in episodes:
-                        start_t = float(ep.get("start_time", ep.get("start", 0)))
-                        end_t = float(
-                            ep.get(
-                                "end_time",
-                                ep.get("end", start_t + ep.get("duration", 0)),
-                            )
+                for ep in dto.periodic_breathing_episodes or []:
+                    start_t = float(ep.get("start_time", ep.get("start", 0)))
+                    end_t = float(
+                        ep.get(
+                            "end_time",
+                            ep.get("end", start_t + ep.get("duration", 0)),
                         )
-                        total_pb_s += max(0.0, end_t - start_t)
-                elif dto.periodic_breathing is not None:
-                    pb_seen_any = True
+                    )
+                    total_pb_s += max(0.0, end_t - start_t)
 
             # MV rolling variance: collect bin means across ALL OK sessions
             # (combined; variance computed once after the loop).
@@ -3773,14 +4093,19 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
     if night_level_refused:
         pb_reason = NullReason.ALGO_VERSION_MISMATCH
         mv_var_reason = NullReason.ALGO_VERSION_MISMATCH
-    elif pb_seen_any:
-        if total_eligible_s > 0:
-            pb_pct = total_pb_s / total_eligible_s * 100.0
-            pb_reason = None
-        else:
-            # session.duration_seconds was NULL — cannot compute a meaningful %
-            pb_pct = None
-            pb_reason = NullReason.NOT_AVAILABLE
+    elif pb_ran_any and total_eligible_s > 0:
+        # PB detection ran → zero episodes is a genuine 0.0 %, not null.
+        # total_eligible_s == 0 (NULL session durations) stays null+NOT_AVAILABLE.
+        pb_pct = total_pb_s / total_eligible_s * 100.0
+        pb_reason = None
+
+    # Aggregate MV provenance across contributing sessions
+    if not mv_sources_seen:
+        night_mv_source: MvSource | None = None
+    elif len(mv_sources_seen) == 1:
+        night_mv_source = next(iter(mv_sources_seen))
+    else:
+        night_mv_source = MvSource.MIXED
 
     return CaAnalysisResult(
         query_date=raw.therapy_date,
@@ -3794,4 +4119,5 @@ def compute_ca_analysis(raw: RawCaAnalysis) -> CaAnalysisResult:
         pb_reason=pb_reason,
         mv_rolling_variance=mv_rolling_var,
         mv_variance_reason=mv_var_reason,
+        mv_source=night_mv_source,
     )

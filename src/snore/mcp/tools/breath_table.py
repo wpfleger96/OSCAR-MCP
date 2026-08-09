@@ -2,7 +2,8 @@
 
 Timestamp contract (A6):
 - Session wall-clock anchor (session_start_wall_clock) uses tier-2
-  (offset-free ISO 8601 + timezone_status="unknown") for absolute times.
+  (offset-free ISO 8601 + timezone_status "unknown" | "user_declared", with
+  timezone_name carrying the profile's declared IANA zone) for absolute times.
 - In-session positions are numeric offsets in seconds (tier-3).
 """
 
@@ -23,6 +24,7 @@ from snore.mcp.schemas import (
     BreathTableQuery,
     BreathTableResponse,
     BreathTableRow,
+    tz_fields,
 )
 from snore.mcp.tools._capabilities import (
     build_device_capabilities,
@@ -142,7 +144,7 @@ async def get_breath_table(
             session_id=r.session_id,
             breath_number=r.breath_number,
             session_start_wall_clock=r.session_start_wall_clock.isoformat(),
-            timezone_status="unknown",
+            **tz_fields(r),
             start_offset_seconds=r.start_offset_seconds,
             end_offset_seconds=r.end_offset_seconds,
             ti_s=r.ti,
@@ -177,7 +179,7 @@ async def get_breath_table(
     bins = [
         BreathTableBin(
             session_start_wall_clock=b.session_start_wall_clock.isoformat(),
-            timezone_status="unknown",
+            **tz_fields(b),
             bin_start_offset=b.bin_start_offset,
             bin_end_offset=b.bin_end_offset,
             breath_count=b.breath_count,
@@ -214,11 +216,15 @@ async def get_breath_table(
         else None
     )
 
+    # Response-level anchor label — cached in the service instance, so this
+    # re-uses the resolution already done inside get_breath_table.
+    tz = await bs.resolve_timezone()
+
     return BreathTableResponse(
         query=mapped_query,
         session_id=top_session_id,
         session_start_wall_clock=top_session_start,
-        timezone_status="unknown",
+        **tz_fields(tz),
         analysis_status=str(dto.analysis_status),
         algo_versions=(
             dto.algo_versions.model_dump(mode="json")

@@ -2,9 +2,10 @@
 
 Timestamp contract (A6):
 - Event positions are stored as device wall-clock (naive datetime).
-- Output uses tier-2 (offset-free ISO 8601 + timezone_status="unknown")
-  for absolute times and tier-3 (offset_seconds from Session.start_time)
-  for in-session positions.  No UTC offsets are fabricated.
+- Output uses tier-2 (offset-free ISO 8601 + timezone_status
+  "unknown" | "user_declared", with timezone_name carrying the profile's
+  declared IANA zone) for absolute times and tier-3 (offset_seconds from
+  Session.start_time) for in-session positions.  No UTC offsets are fabricated.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import EventContext, EventRow, EventsResponse
+from snore.mcp.schemas import EventContext, EventRow, EventsResponse, tz_fields
 from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
@@ -82,11 +83,12 @@ async def get_events(
             if device_id is not None
             else None
         )
+        tz = await bs.resolve_timezone()
         return EventsResponse(
             date=event_date.isoformat(),
             session_id=None,
             session_start_wall_clock=None,
-            timezone_status="unknown",
+            **tz_fields(tz),
             events=[],
             total_events=0,
             device_capabilities=caps,
@@ -113,7 +115,7 @@ async def get_events(
                 session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
                 event_type=ev.event_type,
                 start_time_wall_clock=ev.event_start_wall_clock.isoformat(),
-                timezone_status="unknown",
+                **tz_fields(ev),
                 offset_seconds=ev.offset_seconds,
                 duration_seconds=ev.duration_seconds,
                 spo2_drop_pct=None,
@@ -160,7 +162,7 @@ async def get_events(
         date=event_date.isoformat(),
         session_id=anchor_session_id,
         session_start_wall_clock=anchor_session_start,
-        timezone_status="unknown",
+        **tz_fields(contextual_events[0]),
         events=rows,
         total_events=total_events,
         truncated=truncated,

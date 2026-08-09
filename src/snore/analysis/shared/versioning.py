@@ -1,6 +1,7 @@
-"""Algorithm versioning types and version constants for PR-A.
+"""Algorithm versioning types and version constants.
 
-Appendix A §1 / plan step 4 (binding typed contracts).
+Binding typed contracts for how analysis runs are versioned, stored, and
+compared for staleness.
 
 The stored engine_versions_json shape is the nested AlgoVersions composition:
 
@@ -35,6 +36,19 @@ FLATTENING_ALGO_VERSION: str = "v1"  # mid-insp flattening (new)
 TRIGGER_CYCLE_ALGO_VERSION: str = "v1"  # trigger/cycle heuristic (new, experimental)
 LEAK_VALID_ALGO: str = "v1"
 RECOVERY_DETECTOR_ALGO_VERSION: str = "v1"
+# ramp_active / mask_off breath validity flags: settings-driven timed ramp
+# heuristic + persisted mask-on-segment gap overlap.
+VALIDITY_FLAGS_ALGO_VERSION: str = "v1"
+
+# Flow-derived MV fallback used by get_ca_analysis when no device MV channel
+# exists. NOT part of AlgorithmIdentity — it labels query-time derivation only.
+MV_FALLBACK_ALGO_VERSION: str = "v1"
+
+# Query-time RERA-proxy criterion (FL runs ending in recovery). NOT part of
+# AlgorithmIdentity — it labels query-time derivation only. v2 adds the
+# self-contained recovery criterion (class drop to <=2 + peak-flow margin over
+# the run mean) alongside the analysis-time recovery flag.
+RERA_PROXY_ALGO_VERSION: str = "v2"
 
 # Threshold used by leak_valid derivation (v1).
 LEAK_VALID_THRESHOLD_LPM: float = 24.0
@@ -59,13 +73,18 @@ class AlgorithmIdentity(BaseModel):
     AnalysisRunMetadata — not here.
     """
 
-    format_version: int = 3  # PR-A nested format; 2 = flat legacy rows
+    # 4 = validity_flags stamped; 3 = PR-A nested format; 2 = flat legacy rows.
+    # The bump to 4 is mandatory: pydantic validation back-fills missing fields
+    # from defaults, so without it legacy rows lacking validity_flags would
+    # compare equal to the current identity and silently stay OK.
+    format_version: int = 4
     segmenter: str = SEGMENTER_ALGO_VERSION
     fl_classifier: str = FL_CLASSIFIER_ALGO_VERSION
     flattening: str = FLATTENING_ALGO_VERSION
     trigger_cycle: str = TRIGGER_CYCLE_ALGO_VERSION
     leak_valid: str = LEAK_VALID_ALGO
     recovery_detector: str = RECOVERY_DETECTOR_ALGO_VERSION
+    validity_flags: str = VALIDITY_FLAGS_ALGO_VERSION
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, AlgorithmIdentity):
@@ -78,7 +97,13 @@ class AlgorithmIdentity(BaseModel):
         return cls()
 
 
-# Fields whose mismatch blocks cross-epoch comparisons (§1 note 3).
+# Fields whose mismatch blocks cross-epoch comparisons.
+# trigger_cycle and validity_flags are intentionally excluded: neither feeds a
+# cross-epoch distribution (trigger/cycle labels are per-breath experimental
+# metadata; ramp_active/mask_off validity flags gate rows, not aggregates), so
+# a version bump in either need not refuse comparisons.  A solo bump of an
+# excluded key MUST be accompanied by a format_version bump so old rows still
+# go stale — format_version is in this set and catches it.
 CROSS_VERSION_REFUSAL_KEYS: frozenset[str] = frozenset(
     {
         "format_version",
@@ -177,6 +202,8 @@ class NullReason(StrEnum):
     CHANNEL_ABSENT = "channel_absent"
     CHANNEL_UNALIGNED = "channel_unaligned"
     NOT_AVAILABLE = "not_available"
+    SMART_RAMP_INDETERMINATE = "smart_ramp_indeterminate"
+    SEGMENTS_UNKNOWN = "segments_unknown"
     DURATION_ZERO = "duration_zero"
     NO_DATA_IN_RANGE = "no_data_in_range"
     MULTI_SESSION_AMBIGUITY = "multi_session_ambiguity"
@@ -190,3 +217,6 @@ class TimezoneStatus(StrEnum):
 
     UTC = "utc"
     UNKNOWN = "unknown"
+    # Profile-level user-declared IANA timezone applies (timestamps stay naive;
+    # the companion timezone_name field carries the declared zone).
+    USER_DECLARED = "user_declared"

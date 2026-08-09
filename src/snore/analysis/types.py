@@ -71,7 +71,7 @@ class AnalysisResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Per-breath compute envelope (plan step 5, Appendix A §1)
+# Per-breath compute envelope
 # ---------------------------------------------------------------------------
 
 

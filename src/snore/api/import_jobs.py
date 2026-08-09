@@ -225,7 +225,8 @@ class ImportJob:
     # Import-phase durability fields — set after import commits, before analysis.
     # Carried in EVERY terminal payload produced after import_committed=True
     # (success, analysis failure, and cancellation) so that late observers and
-    # stalled observers always learn that data landed (plan §A1, pass-4 IMPORTANT-1).
+    # stalled observers always learn that data landed — a committed import
+    # must never be reported as lost.
     _import_committed: bool = field(default=False, init=False, repr=False)
     _import_result: dict[str, Any] | None = field(default=None, init=False, repr=False)
     # Analysis linkage — set by the worker thread via set_analysis_link() after
@@ -426,7 +427,8 @@ class ImportJob:
         coalesced like any progress message: late/stalled observers may miss it.
         The import outcome is persisted on the job itself so that every subsequent
         terminal payload (success, analysis failure, or cancellation) carries it —
-        this is the durability guarantee (plan §A1, pass-4 IMPORTANT-1).
+        this is the durability guarantee: a committed import must never be
+        reported as lost, no matter which terminal state the job reaches.
 
         Must be called by the worker thread only, after the import transaction
         commits and BEFORE the analysis phase begins.

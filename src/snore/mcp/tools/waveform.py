@@ -1,6 +1,6 @@
 """get_waveform_window / render_window tool adapters.
 
-Architecture (plan §9 in-scope/out-of-scope split):
+Architecture (DB-fetch / pure-compute split):
 - DB fetch runs INSIDE the server's scope_provider context: ``fetch_waveform_raw``
   holds the AsyncSession only during the query; the scope closes before CPU work begins.
 - ``waveform_response_from_raw`` and ``render_png_from_raw`` are PURE — they call
@@ -9,7 +9,8 @@ Architecture (plan §9 in-scope/out-of-scope split):
 
 Timestamp contract (A6):
 - Session wall-clock anchor (session_start_wall_clock) uses tier-2
-  (offset-free ISO 8601 + timezone_status="unknown") for absolute times.
+  (offset-free ISO 8601 + timezone_status "unknown" | "user_declared", with
+  timezone_name carrying the profile's declared IANA zone) for absolute times.
 - In-session waveform positions are numeric offsets in seconds (tier-3).
 """
 
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import WaveformChannelSchema, WaveformWindowResponse
+from snore.mcp.schemas import WaveformChannelSchema, WaveformWindowResponse, tz_fields
 from snore.mcp.tools._scaffold import _check_response_size, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
@@ -156,7 +157,7 @@ def waveform_response_from_raw(raw: RawWaveformWindow) -> WaveformWindowResponse
     return WaveformWindowResponse(
         session_id=session_id,
         session_start_wall_clock=session_start_wall_clock,
-        timezone_status=str(window.timezone_status),
+        **tz_fields(window),
         window_start_offset_s=window.window_start_offset,
         window_end_offset_s=window.window_end_offset,
         channels=channels,
@@ -247,7 +248,8 @@ def register(mcp: FastMCP) -> None:
         "    max_points: LTTB target sample count per channel (1–1000).\n\n"
         "Returns:\n"
         "    WaveformWindowResponse.  ``session_id`` and ``session_start_wall_clock``\n"
-        '    (tier-2 offset-free ISO 8601, ``timezone_status: "unknown"``) are null\n'
+        '    (tier-2 offset-free ISO 8601, ``timezone_status: "unknown" | "user_declared"``,\n'
+        "    with ``timezone_name`` carrying the profile's declared IANA zone) are null\n"
         "    when the date has no session.  Each channel carries ``offset_seconds``\n"
         "    arrays (tier-3 positions from session start) and ``values``.\n"
         "    ``missing_channels`` lists channels the device did not record;\n"

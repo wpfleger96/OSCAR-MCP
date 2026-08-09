@@ -6,8 +6,12 @@ Timestamp contract (three tiers, A6):
   Tier 2 — device/session wall-clock times (e.g. ``Event.start_time``,
     ``Session.start_time``): offset-free ISO 8601 string (the DB deliberately
     stores these as naive datetimes — no TZ is known from the source device).
-    Always accompanied by ``timezone_status: "unknown"``.  Never emit a UTC
-    offset or fabricate one via ``.timestamp()`` / ``astimezone()``.
+    Always accompanied by ``timezone_status``: ``"unknown"`` (no TZ declared)
+    or ``"user_declared"`` (the profile declares an IANA timezone, carried in
+    the companion ``timezone_name`` field, e.g. "America/New_York").
+    ``timezone_name`` is interpretation metadata only — timestamps are never
+    rewritten and no UTC offset is ever fabricated via ``.timestamp()`` /
+    ``astimezone()``.
   Tier 3 — in-session positions: numeric ``offset_seconds`` from
     ``Session.start_time``.
 
@@ -22,6 +26,21 @@ from datetime import date
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+
+
+def tz_fields(source: Any) -> dict[str, Any]:
+    """Schema kwargs for the tier-2 timezone companion fields.
+
+    Accepts any service DTO with ``timezone_status`` / ``timezone_name``
+    attributes, or the ``(TimezoneStatus, str | None)`` tuple returned by
+    ``BreathService.resolve_timezone``.  Splat into a response constructor:
+    ``**tz_fields(dto)``.
+    """
+    if isinstance(source, tuple):
+        status, name = source
+    else:
+        status, name = source.timezone_status, source.timezone_name
+    return {"timezone_status": str(status), "timezone_name": name}
 
 
 class DeviceCapabilities(BaseModel):
@@ -142,8 +161,15 @@ class NightlyRow(BaseModel):
     fl_p95_reason: str | None = None
     fl_max: float | None = None
     fl_max_reason: str | None = None
+    # Percent of leak-valid classified breaths with flow_class >= 4
+    fl_class_ge4_pct: float | None = None
+    fl_class_ge4_pct_reason: str | None = None
     rera_proxy_count: int | None = None
     rera_proxy_reason: str | None = None
+    # Version of the query-time RERA-proxy criterion (independent of the
+    # persisted AlgorithmIdentity); stamped only when the RERA scan ran
+    # (rera_proxy_count non-null), null otherwise.
+    rera_proxy_version: str | None = None
 
     # Breath timing aggregates — from breath-level analysis; null + reason when analysis hasn't run
     ti_median_s: float | None = None
@@ -196,7 +222,8 @@ class EventRow(BaseModel):
     Timestamp contract (A6):
     - ``start_time_wall_clock``: device wall-clock, offset-free ISO 8601 (tier 2).
     - ``session_start_wall_clock``: per-event session anchor, offset-free ISO 8601 (tier 2).
-    - ``timezone_status``: always ``"unknown"`` — no TZ is recorded for device times.
+    - ``timezone_status``: ``"unknown"``, or ``"user_declared"`` when the profile
+      declares an IANA timezone (carried in ``timezone_name``).
     - ``offset_seconds``: position from this event's session start (tier 3).
     """
 
@@ -208,7 +235,8 @@ class EventRow(BaseModel):
     )
     event_type: str
     start_time_wall_clock: str  # offset-free ISO 8601 device wall-clock (tier 2)
-    timezone_status: str = "unknown"  # always "unknown" for device wall-clock
+    timezone_status: str = "unknown"  # "unknown" | "user_declared"
+    timezone_name: str | None = None  # IANA name when user_declared
     offset_seconds: float  # seconds from this event's Session.start_time (tier 3)
     duration_seconds: float | None = None
     spo2_drop_pct: float | None = None
@@ -234,6 +262,7 @@ class EventsResponse(BaseModel):
     session_id: int | None = None  # null when empty or multi-session
     session_start_wall_clock: str | None = None  # null when empty or multi-session
     timezone_status: str = "unknown"
+    timezone_name: str | None = None  # IANA name when user_declared
     events: list[EventRow]
     total_events: int
     truncated: bool = False
@@ -286,6 +315,7 @@ class BreathTableRow(BaseModel):
     breath_number: int
     session_start_wall_clock: str
     timezone_status: str = "unknown"
+    timezone_name: str | None = None  # IANA name when user_declared
     start_offset_seconds: float
     end_offset_seconds: float
     ti_s: float | None = None
@@ -322,6 +352,7 @@ class BreathTableBin(BaseModel):
 
     session_start_wall_clock: str
     timezone_status: str = "unknown"
+    timezone_name: str | None = None  # IANA name when user_declared
     bin_start_offset: float
     bin_end_offset: float
     breath_count: int
@@ -343,6 +374,7 @@ class BreathTableResponse(BaseModel):
     session_id: int | None = None
     session_start_wall_clock: str | None = None
     timezone_status: str = "unknown"
+    timezone_name: str | None = None  # IANA name when user_declared
     analysis_status: str
     algo_versions: dict[str, Any] | None = None
     null_reason: str | None = None
@@ -374,6 +406,7 @@ class WindowRow(BaseModel):
     session_id: int
     session_start_wall_clock: str
     timezone_status: str = "unknown"
+    timezone_name: str | None = None  # IANA name when user_declared
     window_start_offset: float
     window_end_offset: float
     reason_summary: str
@@ -455,6 +488,10 @@ class EpochStats(BaseModel):
     ie_ratio: EpochDistribution
     rera_proxy_count: int | None = None
     rera_reason: str | None = None
+    # Version of the query-time RERA-proxy criterion (independent of the
+    # persisted AlgorithmIdentity); stamped only when the RERA scan ran
+    # (rera_proxy_count non-null), null otherwise.
+    rera_proxy_version: str | None = None
     rx_settings: dict[str, str] = {}
 
 
@@ -497,6 +534,7 @@ class WaveformWindowResponse(BaseModel):
         None  # tier-2 naive ISO; null when session_id null
     )
     timezone_status: str = "unknown"
+    timezone_name: str | None = None  # IANA name when user_declared
     window_start_offset_s: float
     window_end_offset_s: float
     channels: list[WaveformChannelSchema]
@@ -512,6 +550,7 @@ class CaDetailSchema(BaseModel):
     session_id: int
     session_start_wall_clock: str  # tier-2 naive ISO
     timezone_status: str = "unknown"
+    timezone_name: str | None = None  # IANA name when user_declared
     offset_seconds: float  # tier-3 CA start from session start
     duration_seconds: float | None = None
     preceding_mv_slope_lpm_per_min: float | None = None
@@ -520,6 +559,8 @@ class CaDetailSchema(BaseModel):
     ps_reason: str | None = None
     stability_index: float | None = None
     stability_reason: str | None = None
+    # MV provenance: "device" | "flow_derived" | null (no MV channel available)
+    mv_source: str | None = None
 
 
 class CaAnalysisResponse(BaseModel):
@@ -539,6 +580,9 @@ class CaAnalysisResponse(BaseModel):
     pb_reason: str | None = None
     mv_rolling_variance: float | None = None
     mv_variance_reason: str | None = None
+    # Night-level MV provenance: "device" | "flow_derived" | "mixed" | null
+    mv_source: str | None = None
+    mv_fallback_version: str | None = None
     device_capabilities: DeviceCapabilities | None = None
 
 

@@ -441,6 +441,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
             import_source="demo",
             parser_version=src_sess.parser_version,
             data_quality_notes=src_sess.data_quality_notes,
+            mask_on_segments=src_sess.mask_on_segments,
             has_waveform_data=src_sess.has_waveform_data,
             has_event_data=src_sess.has_event_data,
             has_statistics=src_sess.has_statistics,

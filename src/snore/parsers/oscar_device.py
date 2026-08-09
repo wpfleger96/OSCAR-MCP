@@ -15,6 +15,7 @@ from concurrent.futures.process import BrokenProcessPool
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -73,12 +74,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_EVENT_DURATION_SECONDS = 10.0  # OSCAR's default apnea duration
 
 
+def _epoch_to_wall_clock(epoch_seconds: float, timezone_name: str | None) -> datetime:
+    """Convert epoch seconds to a naive wall-clock datetime.
+
+    With a declared profile timezone, the wall clock is that zone's local time —
+    matching ResMed's device-local semantics.  Without one, legacy behavior is
+    kept: naive UTC wall-clock (see the KNOWN A6 INCONSISTENCY note in
+    ``_parse_single_session``).
+    """
+    tz = ZoneInfo(timezone_name) if timezone_name else UTC
+    return datetime.fromtimestamp(epoch_seconds, tz=tz).replace(tzinfo=None)
+
+
 def _oscar_parse_session_worker(
     session_id: int,
     summary_path: "Path | None",
     events_path: "Path | None",
     device_info: DeviceInfo,
     base_path: "Path",
+    timezone_name: "str | None" = None,
 ) -> UnifiedSession:
     """Parse one OSCAR session in a subprocess.
 
@@ -86,7 +100,7 @@ def _oscar_parse_session_worker(
     is transferred across the process boundary.
     """
     return OscarDeviceParser()._parse_single_session(
-        session_id, summary_path, events_path, device_info, base_path
+        session_id, summary_path, events_path, device_info, base_path, timezone_name
     )
 
 
@@ -275,13 +289,25 @@ class OscarDeviceParser(DeviceParser):
         sort_by: str | None = None,
         parallel: bool = True,
         progress_callback: Callable[[str], None] | None = None,
+        timezone_name: str | None = None,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all sessions from OSCAR binary cache.
 
         Each .000/.001 pair is one session (OSCAR already groups sessions).
+
+        ``timezone_name`` is the profile's declared IANA timezone.  When set,
+        OSCAR's epoch-ms instants are converted to that zone's wall clock
+        (matching ResMed device-local semantics); when None, legacy naive UTC
+        wall-clock is kept.
         """
         path = Path(path)
+
+        # Defense in depth: the name was validated at `snore profile
+        # set-timezone` time, but an invalid stored name must fail loudly here
+        # rather than silently mislabel every imported timestamp.
+        if timezone_name is not None:
+            ZoneInfo(timezone_name)
 
         if self._data_roots:
             matching_roots = [r for r in self._data_roots if r.path == path]
@@ -319,6 +345,7 @@ class OscarDeviceParser(DeviceParser):
                     date_to,
                     limit,
                     progress_callback=progress_callback,
+                    timezone_name=timezone_name,
                 )
                 return
 
@@ -336,7 +363,11 @@ class OscarDeviceParser(DeviceParser):
                     return
 
                 if date_from or date_to:
-                    session_date = datetime.fromtimestamp(session_id, tz=UTC).date()
+                    # Same clock as _parse_single_session so date filtering
+                    # agrees with therapy-day assignment.
+                    session_date = _epoch_to_wall_clock(
+                        session_id, timezone_name
+                    ).date()
                     if (
                         date_from
                         and session_date < datetime.fromisoformat(date_from).date()
@@ -357,6 +388,7 @@ class OscarDeviceParser(DeviceParser):
                         events_path,
                         device_info,
                         data_root.path,
+                        timezone_name,
                     )
 
                     emit_progress()
@@ -423,12 +455,15 @@ class OscarDeviceParser(DeviceParser):
         date_to: str | None,
         limit: int | None,
         progress_callback: Callable[[str], None] | None = None,
+        timezone_name: str | None = None,
     ) -> Iterator[UnifiedSession]:
         """Parse sessions in parallel using ThreadPoolExecutor."""
         filtered_files = []
         for session_id, summary_path, events_path in session_files:
             if date_from or date_to:
-                session_date = datetime.fromtimestamp(session_id, tz=UTC).date()
+                # Same clock as _parse_single_session so date filtering
+                # agrees with therapy-day assignment.
+                session_date = _epoch_to_wall_clock(session_id, timezone_name).date()
                 if (
                     date_from
                     and session_date < datetime.fromisoformat(date_from).date()
@@ -466,6 +501,7 @@ class OscarDeviceParser(DeviceParser):
                     events_path,
                     device_info,
                     base_path,
+                    timezone_name,
                 ): session_id
                 for session_id, summary_path, events_path in filtered_files
             }
@@ -503,6 +539,7 @@ class OscarDeviceParser(DeviceParser):
         events_path: Path | None,
         device_info: DeviceInfo,
         base_path: Path,
+        timezone_name: str | None = None,
     ) -> UnifiedSession:
         """Parse a single session from .000 and .001 files."""
         summary: SessionSummary | None = None
@@ -529,8 +566,18 @@ class OscarDeviceParser(DeviceParser):
         else:
             raise ValueError(f"No data for session {session_id}")
 
-        start_time = datetime.fromtimestamp(first_ts / 1000, tz=UTC)
-        end_time = datetime.fromtimestamp(last_ts / 1000, tz=UTC)
+        # OSCAR stores epoch-ms instants.  With a declared profile timezone
+        # they are converted to that zone's wall clock, matching ResMed's
+        # device-local semantics in the naive tier-2 columns.
+        #
+        # KNOWN A6 INCONSISTENCY (only when timezone_name is None): without a
+        # declared timezone these datetimes fall back to UTC wall-clock, while
+        # ResMed session/event times are device-local wall-clock — so
+        # OSCAR-imported rows carry UTC-derived values under the "unknown"
+        # timezone label.  Declare a profile timezone
+        # (`snore profile set-timezone`) to resolve it.
+        start_time = _epoch_to_wall_clock(first_ts / 1000, timezone_name)
+        end_time = _epoch_to_wall_clock(last_ts / 1000, timezone_name)
 
         session = UnifiedSession(
             device_session_id=str(session_id),
@@ -550,7 +597,7 @@ class OscarDeviceParser(DeviceParser):
 
         if events:
             self._populate_waveforms_from_events(events, session)
-            self._populate_events_from_events(events, session)
+            self._populate_events_from_events(events, session, timezone_name)
 
         session.finalize_statistics()
         return session
@@ -717,7 +764,10 @@ class OscarDeviceParser(DeviceParser):
                 )
 
     def _populate_events_from_events(
-        self, events: SessionEvents, session: UnifiedSession
+        self,
+        events: SessionEvents,
+        session: UnifiedSession,
+        timezone_name: str | None = None,
     ) -> None:
         """Convert OSCAR EventLists to RespiratoryEvent objects."""
         for channel_id, event_lists in events.event_lists.items():
@@ -734,7 +784,9 @@ class OscarDeviceParser(DeviceParser):
                 durations = event_list.get_actual_values()
 
                 for i, timestamp_ms in enumerate(timestamps):
-                    event_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+                    event_time = _epoch_to_wall_clock(
+                        timestamp_ms / 1000, timezone_name
+                    )
 
                     duration = (
                         durations[i]

@@ -1,4 +1,4 @@
-"""Acceptance tests for breath-row persistence (plan v3.8, §A pinned obligations).
+"""Acceptance tests for breath-row persistence.
 
 Pinned scenarios:
 A1. Fresh import → Breath rows present.
@@ -14,6 +14,10 @@ A3. Atomic rollback: AnalysisResult parent is flushed, Breath children bulk-add
 
 A4. Non-UTC host determinism: AnalysisResult timestamps stored in naive UTC
     regardless of OS timezone (non-UTC host simulation via monkeypatching).
+
+A5. Validity flags end-to-end: analyze_session over a seeded session with ramp
+    settings + persisted mask-on segments persists Breath rows whose
+    ramp_active / mask_off values and reasons match the v1 derivations.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import uuid
 
 from datetime import UTC, datetime
 
+import numpy as np
 import pytest
 
 from sqlalchemy import func, select
@@ -399,6 +404,186 @@ class TestAtomicRollbackOnChildInsertFailure:
             assert breath_count == 0, (
                 f"Breath rows for analysis_result_id={ar_id} must not survive"
             )
+
+
+# ---------------------------------------------------------------------------
+# A5 — Validity flags end-to-end (ramp_active / mask_off)
+# ---------------------------------------------------------------------------
+
+
+def _sine_flow_blob(duration_s: float, sample_rate: float = 25.0) -> tuple[bytes, int]:
+    """Serialize a sinusoidal breathing flow waveform (±30 L/min, 4 s period)."""
+    timestamps = np.arange(0.0, duration_s, 1.0 / sample_rate, dtype=np.float32)
+    values = (30.0 * np.sin(2.0 * np.pi * timestamps / 4.0)).astype(np.float32)
+    blob = np.column_stack([timestamps, values]).astype(np.float32).tobytes()
+    return blob, len(timestamps)
+
+
+async def _seed_flow_session(
+    db: AsyncSession,
+    profile_id: int,
+    *,
+    duration_s: float,
+    mask_on_segments: list[list[float]] | None,
+    settings: dict[str, str],
+) -> int:
+    """Seed a Session with a synthetic flow waveform + settings. Returns its id."""
+    from datetime import timedelta
+
+    start = datetime(2025, 9, 10, 22, 0)
+    device = models.Device(
+        profile_id=profile_id,
+        serial_number=f"SN_{uuid.uuid4().hex[:6]}",
+        manufacturer="ResMed",
+        model="AirSense 10",
+    )
+    db.add(device)
+    await db.flush()
+    day = models.Day(device_id=device.id, date=start.date(), session_count=1)
+    db.add(day)
+    await db.flush()
+    session = models.Session(
+        device_id=device.id,
+        day_id=day.id,
+        device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+        start_time=start,
+        end_time=start + timedelta(seconds=duration_s),
+        duration_seconds=duration_s,
+        mask_on_segments=mask_on_segments,
+    )
+    db.add(session)
+    await db.flush()
+
+    blob, sample_count = _sine_flow_blob(duration_s)
+    db.add(
+        models.Waveform(
+            session_id=session.id,
+            waveform_type="flow",
+            sample_rate=25.0,
+            unit="L/min",
+            data_blob=blob,
+            sample_count=sample_count,
+        )
+    )
+    for key, value in settings.items():
+        db.add(models.Setting(session_id=session.id, key=key, value=value))
+    await db.flush()
+    return session.id
+
+
+@pytest.mark.integration
+class TestValidityFlagsEndToEnd:
+    async def test_ramp_and_mask_flags_persisted_from_settings_and_segments(
+        self, temp_db
+    ):
+        """Seeded ramp settings + segments → per-breath ramp_active/mask_off values."""
+        await init_database(str(temp_db))
+        duration_s = 720.0  # 12 min; ramp_time 5 min → flip at 300 s
+        async with session_scope() as db:
+            _, profile_id = await _make_profile(db)
+            session_id = await _seed_flow_session(
+                db,
+                profile_id,
+                duration_s=duration_s,
+                mask_on_segments=[[0.0, duration_s]],
+                settings={"ramp_enabled": "True", "ramp_time": "5"},
+            )
+            svc = AnalysisService(db, profile_id=profile_id)
+            await svc.analyze_session(session_id)
+
+        async with session_scope() as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(models.Breath)
+                        .where(models.Breath.session_id == session_id)
+                        .order_by(models.Breath.breath_number)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert rows, "analysis must persist Breath rows"
+
+            in_ramp = [r for r in rows if r.end_offset_s < 295.0]
+            past_ramp = [r for r in rows if r.start_offset_s > 305.0]
+            assert in_ramp and past_ramp, "session must span the ramp boundary"
+            assert all(r.ramp_active is True for r in in_ramp)
+            assert all(r.ramp_active is False for r in past_ramp)
+            assert all(r.ramp_active_reason is None for r in rows)
+
+            # One full mask-on segment, no gaps → uniformly False, no reason.
+            assert all(r.mask_off is False for r in rows)
+            assert all(r.mask_off_reason is None for r in rows)
+
+    async def test_unknown_settings_and_segments_yield_null_reasons(self, temp_db):
+        """No ramp settings + NULL segments → null flags with honest reasons."""
+        await init_database(str(temp_db))
+        async with session_scope() as db:
+            _, profile_id = await _make_profile(db)
+            session_id = await _seed_flow_session(
+                db,
+                profile_id,
+                duration_s=300.0,
+                mask_on_segments=None,
+                settings={},
+            )
+            svc = AnalysisService(db, profile_id=profile_id)
+            await svc.analyze_session(session_id)
+
+        async with session_scope() as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(models.Breath).where(
+                            models.Breath.session_id == session_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert rows, "analysis must persist Breath rows"
+            assert all(r.ramp_active is None for r in rows)
+            assert all(r.ramp_active_reason == "not_available" for r in rows)
+            assert all(r.mask_off is None for r in rows)
+            assert all(r.mask_off_reason == "segments_unknown" for r in rows)
+
+    async def test_malformed_stored_segments_degrade_to_unknown(self, temp_db):
+        """Malformed mask_on_segments JSON must not crash analysis.
+
+        The stored column value is untrusted; a wrong-shape item is rejected by
+        _parse_mask_on_segments (warning + None) so analysis completes with
+        mask_off=None / "segments_unknown" instead of raising.
+        """
+        await init_database(str(temp_db))
+        async with session_scope() as db:
+            _, profile_id = await _make_profile(db)
+            session_id = await _seed_flow_session(
+                db,
+                profile_id,
+                duration_s=300.0,
+                mask_on_segments=[[0.0, 100.0, 200.0]],  # 3-element item: malformed
+                settings={},
+            )
+            svc = AnalysisService(db, profile_id=profile_id)
+            await svc.analyze_session(session_id)
+
+        async with session_scope() as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(models.Breath).where(
+                            models.Breath.session_id == session_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert rows, "analysis must still persist Breath rows"
+            assert all(r.mask_off is None for r in rows)
+            assert all(r.mask_off_reason == "segments_unknown" for r in rows)
 
 
 # ---------------------------------------------------------------------------

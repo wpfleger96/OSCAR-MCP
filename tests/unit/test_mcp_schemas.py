@@ -88,12 +88,24 @@ class TestNightlyRowNullReasons:
         )
         assert row.rdi is None
 
+    def test_fl_class_ge4_pct_nullable_with_reason(self) -> None:
+        from datetime import date
+
+        row = NightlyRow(
+            date=date(2024, 1, 1),
+            fl_class_ge4_pct=None,
+            fl_class_ge4_pct_reason="analysis_not_run",
+        )
+        assert row.fl_class_ge4_pct is None
+        assert row.fl_class_ge4_pct_reason == "analysis_not_run"
+
     def test_all_optional_fields_default_to_none(self) -> None:
         from datetime import date
 
         row = NightlyRow(date=date(2024, 1, 1))
         assert row.ahi is None
         assert row.rera_index is None
+        assert row.fl_class_ge4_pct is None
         assert row.leak_median_lpm is None
         assert row.spo2_mean_pct is None
 

@@ -4,8 +4,8 @@ Analysis service for orchestrating programmatic analysis.
 This module provides the main interface for running comprehensive CPAP session
 analysis, loading data from the database, and storing results.
 
-I/O–compute separation (§7)
------------------------------
+I/O–compute separation
+----------------------
 ``AnalysisService.load_session_inputs_raw()`` performs **only** database reads,
 returning raw bytes in a ``RawSessionBlobs`` dataclass.
 
@@ -99,16 +99,22 @@ class RawSessionBlobs:
     pulse_blob: bytes | None = None
     pulse_sample_count: int = 0
     pulse_metadata: dict[str, Any] = field(default_factory=dict)
-    # Quality-flag inputs (plan step 3): leak channel for leak_valid derivation.
+    # Quality-flag inputs: leak channel for leak_valid derivation.
     leak_blob: bytes | None = None
     leak_sample_count: int = 0
     leak_metadata: dict[str, Any] = field(default_factory=dict)
     modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
-    # Primary mode for RERA/recovery-marker storage (plan step 4).
+    # Primary mode for RERA/recovery-marker storage.
     primary_mode: str = DEFAULT_MODE
     # Device manufacturer string from the Device row — used to gate
     # vendor-specific heuristics (e.g. trigger/cycle inference).
     device_manufacturer: str = "ResMed"
+    # Validity-flag inputs: mask-on segments + ramp settings.
+    mask_on_segments: list[tuple[float, float]] | None = None
+    session_duration_s: float | None = None
+    ramp_enabled: bool | None = None
+    ramp_time_minutes: int | None = None
+    smart_ramp: bool = False
 
 
 @dataclass
@@ -132,16 +138,22 @@ class AnalysisInputs:
     leak_timestamps: np.ndarray | None = None
     leak_values: np.ndarray | None = None
     modes: list[str] = field(default_factory=lambda: [DEFAULT_MODE])
-    # Primary mode for RERA/recovery-marker storage (plan step 4).
+    # Primary mode for RERA/recovery-marker storage.
     primary_mode: str = DEFAULT_MODE
     # Device manufacturer string — gates vendor-specific heuristics.
     device_manufacturer: str = "ResMed"
+    # Validity-flag inputs: mask-on segments + ramp settings.
+    mask_on_segments: list[tuple[float, float]] | None = None
+    session_duration_s: float | None = None
+    ramp_enabled: bool | None = None
+    ramp_time_minutes: int | None = None
+    smart_ramp: bool = False
 
 
 def _resolve_primary_mode(modes: list[str], primary_mode: str | None) -> str:
     """Resolve and validate primary_mode against modes list.
 
-    Rules (plan step 4):
+    Rules:
     - If primary_mode is supplied, it MUST be in modes → ValueError if not.
     - If not supplied and DEFAULT_MODE is in modes → DEFAULT_MODE.
     - If not supplied and DEFAULT_MODE is NOT in modes → ValueError (caller must
@@ -343,6 +355,27 @@ class AnalysisService:
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
+        # Validity-flag inputs: persisted mask-on segments + ramp settings.
+        mask_on_segments = _parse_mask_on_segments(session.mask_on_segments, session_id)
+        session_duration_s = (
+            float(session.duration_seconds)
+            if session.duration_seconds is not None
+            else None
+        )
+
+        setting_rows = (
+            await self.db_session.execute(
+                select(models.Setting.key, models.Setting.value).where(
+                    models.Setting.session_id == session_id,
+                    models.Setting.key.in_(("ramp_enabled", "ramp_time", "smart_ramp")),
+                )
+            )
+        ).all()
+        settings_by_key: dict[str, str | None] = {k: v for k, v in setting_rows}
+        ramp_enabled = _parse_bool_setting(settings_by_key.get("ramp_enabled"))
+        ramp_time_minutes = _parse_int_setting(settings_by_key.get("ramp_time"))
+        smart_ramp = _parse_bool_setting(settings_by_key.get("smart_ramp")) is True
+
         # Fetch device manufacturer for vendor-applicability gating.
         device_row = (
             (
@@ -390,7 +423,7 @@ class AnalysisService:
         except Exception as e:
             logger.debug(f"Pulse waveform not available: {e}")
 
-        # Leak channel for quality-flag derivation (plan step 3).
+        # Leak channel for quality-flag derivation.
         leak_blob: bytes | None = None
         leak_sample_count = 0
         leak_metadata: dict[str, Any] = {}
@@ -419,6 +452,11 @@ class AnalysisService:
             modes=modes_list,
             primary_mode=resolved_primary,
             device_manufacturer=device_manufacturer,
+            mask_on_segments=mask_on_segments,
+            session_duration_s=session_duration_s,
+            ramp_enabled=ramp_enabled,
+            ramp_time_minutes=ramp_time_minutes,
+            smart_ramp=smart_ramp,
         )
 
     @staticmethod
@@ -497,6 +535,11 @@ class AnalysisService:
             modes=raw.modes,
             primary_mode=raw.primary_mode,
             device_manufacturer=raw.device_manufacturer,
+            mask_on_segments=raw.mask_on_segments,
+            session_duration_s=raw.session_duration_s,
+            ramp_enabled=raw.ramp_enabled,
+            ramp_time_minutes=raw.ramp_time_minutes,
+            smart_ramp=raw.smart_ramp,
         )
 
     def compute_analysis(self, inputs: AnalysisInputs) -> AnalysisComputation:
@@ -656,7 +699,7 @@ class AnalysisService:
             timestamp_end=float(timestamps[-1]) if len(timestamps) > 0 else 0.0,
         )
 
-        # Build per-breath ComputedBreath objects (plan step 5).
+        # Build per-breath ComputedBreath objects.
         # Recovery breaths are sourced from the primary mode's RERA detector only.
         recovery_breath_indices = _collect_recovery_breath_indices(
             breaths, mode_results.get(primary_mode)
@@ -672,6 +715,11 @@ class AnalysisService:
             leak_timestamps=inputs.leak_timestamps,
             leak_values=inputs.leak_values,
             device_manufacturer=inputs.device_manufacturer,
+            mask_on_segments=inputs.mask_on_segments,
+            session_duration_s=inputs.session_duration_s,
+            ramp_enabled=inputs.ramp_enabled,
+            ramp_time_minutes=inputs.ramp_time_minutes,
+            smart_ramp=inputs.smart_ramp,
         )
 
         return AnalysisComputation(
@@ -786,13 +834,15 @@ class AnalysisService:
         session does not belong to ``self.profile_id``, preventing cross-profile
         writes.
 
-        Persistence contract (plan step 2):
+        Persistence contract:
         - ``AnalysisResult`` parent row is added and flushed to assign its PK.
         - ``Breath`` children are added with the flushed parent ID in one transaction.
         - ``programmatic_result_json`` contains only the public ``AnalysisResult``
-          summary — breaths are NEVER stored there (plan step 5, no duplication).
+          summary — breaths are NEVER stored there (they exist only as ``Breath``
+          rows; no duplication).
         - ``engine_versions_json`` uses the nested
-          ``{"identity": ..., "run": ...}`` shape (plan step 4, §14 note 5).
+          ``{"identity": ..., "run": ...}`` shape — static algorithm identity
+          kept separate from per-run metadata.
 
         Args:
             computation: AnalysisComputation envelope (summary + breaths).
@@ -826,7 +876,7 @@ class AnalysisService:
                 f"Session {result.session_id} not found or not owned by profile {self.profile_id}"
             )
 
-        # Build the nested engine_versions_json (plan step 4 / §14 note 5).
+        # Build the nested engine_versions_json ({"identity": ..., "run": ...}).
         mode_keys = list(result.mode_results.keys())
         identity = AlgorithmIdentity.current()
         run_metadata = AnalysisRunMetadata(
@@ -852,7 +902,7 @@ class AnalysisService:
         # Flush to assign analysis.id so Breath children can reference it.
         await self.db_session.flush()
 
-        # Persist breath children atomically in the same transaction (plan step 2).
+        # Persist breath children atomically in the same transaction.
         if computation.breaths:
             breath_rows = [
                 models.Breath(
@@ -915,6 +965,62 @@ class AnalysisService:
 # ---------------------------------------------------------------------------
 
 
+def _parse_mask_on_segments(
+    raw: Any, session_id: int
+) -> list[tuple[float, float]] | None:
+    """Validate and parse the persisted ``sessions.mask_on_segments`` JSON value.
+
+    The column stores ascending, non-overlapping ``[start, end)`` intervals in
+    session offset seconds as a JSON list of 2-element number lists.  The value
+    is untrusted at this boundary (written by older code versions, or edited
+    outside the app), so it is validated instead of consumed blindly:
+
+    - the value must be a list whose items are each a 2-element sequence of
+      real numbers (bools rejected), and
+    - intervals must have positive measure (start < end) and be ascending and
+      non-overlapping (each start >= the previous end).
+
+    On any violation a warning is logged and None is returned, so downstream
+    validity flags degrade to ``segments_unknown`` / ``not_available`` instead
+    of crashing the analysis run.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        logger.warning(
+            f"Session {session_id}: mask_on_segments is not a list "
+            f"({type(raw).__name__}) — treating segments as unknown"
+        )
+        return None
+
+    parsed: list[tuple[float, float]] = []
+    previous_end = float("-inf")
+    for seg in raw:
+        if (
+            not isinstance(seg, (list, tuple))
+            or len(seg) != 2
+            or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in seg
+            )
+        ):
+            logger.warning(
+                f"Session {session_id}: malformed mask_on_segments item {seg!r} "
+                "(expected a 2-sequence of numbers) — treating segments as unknown"
+            )
+            return None
+        start, end = float(seg[0]), float(seg[1])
+        if not start < end or start < previous_end:
+            logger.warning(
+                f"Session {session_id}: mask_on_segments interval "
+                f"[{start}, {end}) is empty, out of order, or overlaps the "
+                "previous interval — treating segments as unknown"
+            )
+            return None
+        parsed.append((start, end))
+        previous_end = end
+    return parsed
+
+
 def _collect_recovery_breath_indices(
     breaths: list[Any],
     primary_mode_result: Any | None,
@@ -945,6 +1051,11 @@ def _build_computed_breaths(
     leak_timestamps: Any | None,
     leak_values: Any | None,
     device_manufacturer: str = "ResMed",
+    mask_on_segments: list[tuple[float, float]] | None = None,
+    session_duration_s: float | None = None,
+    ramp_enabled: bool | None = None,
+    ramp_time_minutes: int | None = None,
+    smart_ramp: bool = False,
 ) -> list[ComputedBreath]:
     """Build the list of ComputedBreath for one session's analysis.
 
@@ -962,6 +1073,12 @@ def _build_computed_breaths(
         device_manufacturer: Manufacturer string from the Device row.  Trigger/cycle
             inference is only validated on ResMed devices; other vendors receive
             ``vendor_applicability="unvalidated_device"``.
+        mask_on_segments: Persisted [start, end) mask-on intervals in session
+            offset seconds (None = unknown).
+        session_duration_s: Session duration in seconds (None = unknown).
+        ramp_enabled: Parsed ``ramp_enabled`` setting (None = not recorded).
+        ramp_time_minutes: Parsed ``ramp_time`` setting in minutes.
+        smart_ramp: Parsed ``smart_ramp`` setting (SmartRamp active).
 
     Returns:
         list of ComputedBreath (same length as breaths).
@@ -981,6 +1098,15 @@ def _build_computed_breaths(
         APPLICABILITY_VALIDATED
         if device_manufacturer == "ResMed"
         else APPLICABILITY_UNVALIDATED_DEVICE
+    )
+
+    # Precompute per-session structures once, outside the ~10k-breath loop:
+    # the mask-off gap list and the mask-on segment starts for the ramp clock.
+    mask_off_gaps = _mask_off_gaps(mask_on_segments, session_duration_s)
+    ramp_segment_starts = (
+        [start for start, _end in mask_on_segments]
+        if mask_on_segments is not None
+        else None
     )
 
     computed: list[ComputedBreath] = []
@@ -1019,6 +1145,20 @@ def _build_computed_breaths(
             breath_end=breath.end_time,
             leak_timestamps=leak_timestamps,
             leak_values=leak_values,
+        )
+
+        ramp_active, ramp_active_reason = _compute_ramp_active(
+            breath_start_s=float(breath.start_time),
+            segment_starts=ramp_segment_starts,
+            ramp_enabled=ramp_enabled,
+            ramp_time_minutes=ramp_time_minutes,
+            smart_ramp=smart_ramp,
+        )
+
+        mask_off, mask_off_reason = _compute_mask_off(
+            breath_start_s=float(breath.start_time),
+            breath_end_s=float(breath.end_time),
+            gaps=mask_off_gaps,
         )
 
         duty_cycle: float | None = None
@@ -1064,10 +1204,10 @@ def _build_computed_breaths(
                 trigger_cycle_reason=tc.trigger_cycle_reason,
                 leak_valid=leak_valid,
                 leak_valid_reason=leak_valid_reason,
-                ramp_active=None,
-                ramp_active_reason="not_available",
-                mask_off=None,
-                mask_off_reason="not_available",
+                ramp_active=ramp_active,
+                ramp_active_reason=ramp_active_reason,
+                mask_off=mask_off,
+                mask_off_reason=mask_off_reason,
             )
         )
     return computed
@@ -1082,7 +1222,7 @@ def _compute_leak_valid(
 ) -> tuple[bool | None, str | None]:
     """Derive the ``leak_valid`` quality flag for one breath.
 
-    Logic (plan step 3, v1 spec):
+    Logic (leak_valid derivation, v1):
     - No leak channel present  →  (None, "channel_absent")
     - Overlapping samples found →  mean of overlapping samples < threshold
     - No overlap, nearest neighbour ≤ 5 s away  →  that sample's value < threshold
@@ -1112,6 +1252,143 @@ def _compute_leak_valid(
         return leak_sample < LEAK_VALID_THRESHOLD_LPM, None
 
     return None, "channel_unaligned"
+
+
+def _parse_bool_setting(value: str | None) -> bool | None:
+    """Parse a stored KV-settings boolean ("True"/"False"/"1"/"0", any case)."""
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in ("true", "1"):
+        return True
+    if normalized in ("false", "0"):
+        return False
+    return None
+
+
+def _parse_int_setting(value: str | None) -> int | None:
+    """Parse a stored KV-settings integer, tolerating float strings ("20.0")."""
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except ValueError:
+        return None
+
+
+def _compute_ramp_active(
+    *,
+    breath_start_s: float,
+    segment_starts: list[float] | None,
+    ramp_enabled: bool | None,
+    ramp_time_minutes: int | None,
+    smart_ramp: bool,
+) -> tuple[bool | None, str | None]:
+    """Derive the ``ramp_active`` validity flag for one breath.
+
+    Settings-driven timed heuristic (VALIDITY_FLAGS_ALGO_VERSION v1):
+
+    - ``ramp_enabled`` unknown          → (None, "not_available")
+    - SmartRamp active                  → (None, "smart_ramp_indeterminate") —
+      SmartRamp ends on sleep detection, not a timer; a timed heuristic would
+      fabricate data.
+    - Ramp disabled                     → (False, None)
+    - ``ramp_time`` unknown             → (None, "not_available")
+    - Else: the breath is in ramp iff its offset from the start of its
+      CONTAINING mask-on segment (ResMed re-runs ramp on every mask-on
+      restart) is below ``ramp_time_minutes * 60``.  When segments are
+      unknown (``segment_starts`` is None), the offset is measured from
+      session start (offset 0).
+
+    ``segment_starts`` holds the ascending mask-on segment start offsets,
+    precomputed once per session by ``_build_computed_breaths``.
+
+    Gap-interior breaths (deliberate semantic): a breath whose start lies
+    inside a mask-off gap has no containing segment, so its ramp offset is
+    measured against the PRECEDING mask-on segment's start.  This is a seam
+    artifact already flagged by ``mask_off=True``, and the slightly stale
+    offset is intentional and harmless — consumers gate on ``mask_off`` first.
+
+    Returns:
+        (ramp_active: bool | None, reason: str | None)
+    """
+    if ramp_enabled is None:
+        return None, "not_available"
+    if smart_ramp:
+        return None, "smart_ramp_indeterminate"
+    if ramp_enabled is False:
+        return False, None
+    if ramp_time_minutes is None:
+        return None, "not_available"
+
+    segment_start = 0.0
+    if segment_starts is not None:
+        for start in segment_starts:
+            if start <= breath_start_s:
+                segment_start = start
+            else:
+                break
+    offset_in_segment = breath_start_s - segment_start
+    return offset_in_segment < ramp_time_minutes * 60, None
+
+
+def _mask_off_gaps(
+    mask_on_segments: list[tuple[float, float]] | None,
+    session_duration_s: float | None,
+) -> list[tuple[float, float]] | None:
+    """Precompute the mask-off gap list for one session.
+
+    Gaps are the complement of the persisted mask-on segments within
+    ``[0, session_duration]`` — before, between, and after the segments.
+    When ``session_duration_s`` is None the trailing gap is omitted (leading
+    and inter-segment gaps are still detected).  Returns None when segments
+    are unknown.
+
+    Called once per session by ``_build_computed_breaths`` so the per-breath
+    ``_compute_mask_off`` does not rebuild the list ~10k times.
+    """
+    if mask_on_segments is None:
+        return None
+
+    gaps: list[tuple[float, float]] = []
+    previous_end = 0.0
+    for start, end in mask_on_segments:
+        if start > previous_end:
+            gaps.append((previous_end, start))
+        previous_end = max(previous_end, end)
+    if session_duration_s is not None and session_duration_s > previous_end:
+        gaps.append((previous_end, session_duration_s))
+    return gaps
+
+
+def _compute_mask_off(
+    *,
+    breath_start_s: float,
+    breath_end_s: float,
+    gaps: list[tuple[float, float]] | None,
+) -> tuple[bool | None, str | None]:
+    """Derive the ``mask_off`` validity flag for one breath.
+
+    ``gaps`` is the per-session precomputed gap list from ``_mask_off_gaps``
+    (None = segments unknown); the flag is True iff the breath interval
+    overlaps any gap with positive measure (VALIDITY_FLAGS_ALGO_VERSION v1).
+
+    Breaths cannot lie wholly inside a gap — there are no flow samples there
+    (the merge concatenates arrays across a timestamp jump) — so True marks
+    the rare seam-spanning artifact breath segmented across a mask-off gap.
+    The dominant honest value is False, replacing the previous uniform null.
+
+    Returns:
+        (mask_off: bool | None, reason: str | None)
+    """
+    if gaps is None:
+        return None, "segments_unknown"
+
+    for gap_start, gap_end in gaps:
+        overlap = min(breath_end_s, gap_end) - max(breath_start_s, gap_start)
+        if overlap > 0:
+            return True, None
+    return False, None
 
 
 def _compute_session_in_process(raw: RawSessionBlobs) -> AnalysisComputation:

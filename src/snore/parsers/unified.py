@@ -329,6 +329,15 @@ class UnifiedSession(BaseModel):
     has_waveform_data: bool = Field(default=False, description="Has waveform data")
     has_event_data: bool = Field(default=False, description="Has event data")
     has_statistics: bool = Field(default=False, description="Has statistics")
+    mask_on_segments: list[tuple[float, float]] | None = Field(
+        default=None,
+        description=(
+            "Ascending [start_offset_s, end_offset_s] mask-on intervals in "
+            "merged-session offset seconds. A single-segment session stores "
+            "[(0.0, duration)] so 'known, no gaps' is distinguishable from "
+            "None = unknown (e.g. OSCAR imports)."
+        ),
+    )
     data_quality_notes: list[str] = Field(
         default_factory=list, description="Data quality warnings"
     )

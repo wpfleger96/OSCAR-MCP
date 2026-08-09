@@ -183,6 +183,7 @@ class DeviceParser(ABC):
         sort_by: str | None = None,
         parallel: bool = True,
         progress_callback: Callable[[str], None] | None = None,
+        timezone_name: str | None = None,
     ) -> Iterator[UnifiedSession]:
         """
         Parse all sessions from the given path and yield unified sessions.
@@ -200,6 +201,11 @@ class DeviceParser(ABC):
             limit: Optional maximum number of sessions to yield
             sort_by: Optional sort order - "date-asc", "date-desc", or None for filesystem order
             progress_callback: Optional callback invoked with a progress message string as each session is parsed
+            timezone_name: Optional user-declared IANA timezone for the owning
+                profile.  Parsers whose source data encodes absolute instants
+                (e.g. OSCAR epoch-ms) use it to produce device-local wall-clock
+                datetimes; parsers whose source data is already device-local
+                wall-clock (e.g. ResMed EDF) ignore it.
 
         Yields:
             UnifiedSession objects

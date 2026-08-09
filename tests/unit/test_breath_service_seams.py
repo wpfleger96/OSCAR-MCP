@@ -55,6 +55,7 @@ from snore.services.breath_service import (
     WaveformWindowRequest,
     WindowCriterion,
     compute_waveform_window,
+    derive_mv_from_flow,
     fetch_waveform_window_raw,
 )
 
@@ -271,6 +272,39 @@ class TestGetAnalysisStatus:
         status, algo = await svc.get_analysis_status(session.id)
 
         assert status == AnalysisStatus.STALE_VERSION
+
+    async def test_stale_version_for_format_version_3_identity(self, async_db_session):
+        """A stored identity from before the validity-flags bump classifies STALE.
+
+        Legacy format_version=3 rows lack the ``validity_flags`` field; pydantic
+        back-fills it from the default, so the ``format_version`` bump to 4 is
+        what makes the comparison fail — this test pins that behavior.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, date(2025, 1, 10)
+        )
+
+        stored = _make_algo_versions().model_dump()
+        stored["identity"]["format_version"] = 3
+        del stored["identity"]["validity_flags"]  # legacy rows never stored it
+        ar = models.AnalysisResult(
+            session_id=session.id,
+            timestamp_start=session.start_time,
+            timestamp_end=session.end_time or session.start_time + timedelta(hours=7),
+            programmatic_result_json={},
+            processing_time_ms=10,
+            engine_versions_json=stored,
+        )
+        async_db_session.add(ar)
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        status, algo = await svc.get_analysis_status(session.id)
+
+        assert status == AnalysisStatus.STALE_VERSION
+        assert algo is not None  # the row parses; it is stale, not corrupt
 
 
 # ---------------------------------------------------------------------------
@@ -4467,7 +4501,8 @@ async def _store_night_with_breath_specs(
 
     Each dict in ``breath_specs`` may set any ``ComputedBreath`` field;
     unset keys fall back to sensible defaults.  Supported overrides:
-    ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``.
+    ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``, ``flow_class``,
+    ``peak_flow_lpm``, ``is_recovery_breath``.
     """
     from snore.analysis.types import ComputedBreath  # noqa: PLC0415
 
@@ -4487,15 +4522,15 @@ async def _store_night_with_breath_specs(
                 total_time_s=3.0,
                 i_e_ratio=spec.get("i_e_ratio", 0.67),
                 duty_cycle=0.4,
-                peak_flow_lpm=30.0,
+                peak_flow_lpm=spec.get("peak_flow_lpm", 30.0),
                 peak_exp_flow_lpm=20.0,
                 tidal_volume_ml=400.0,
                 respiratory_rate_rolling=15.0,
                 flatness_index=0.2,
                 mid_insp_flattening=0.35,
-                flow_class=1,
+                flow_class=spec.get("flow_class", 1),
                 flow_confidence=0.9,
-                is_recovery_breath=False,
+                is_recovery_breath=spec.get("is_recovery_breath", False),
                 inferred_trigger_type="normal",
                 trigger_confidence=0.8,
                 inferred_cycle_type="normal",
@@ -4703,6 +4738,65 @@ class TestNightlyRangeSummaryTiIe:
         assert night.ie_ratio_reason == NullReason.NOT_AVAILABLE
 
 
+@pytest.mark.unit
+class TestNightlySummaryFlClassGe4Pct:
+    """fl_class_ge4_pct on per-night NightlyAnalysisSummary."""
+
+    async def test_pct_counts_leak_valid_classified_breaths_only(
+        self, async_db_session
+    ):
+        """Denominator = leak-valid breaths with a class; leak-invalid and unclassified breaths excluded."""
+        therapy_date = date(2025, 7, 10)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                # Leak-valid classified: [5, 5, 1] → 2/3 with class >= 4
+                {"flow_class": 5, "leak_valid": True},
+                {"flow_class": 5, "leak_valid": True},
+                {"flow_class": 1, "leak_valid": True},
+                # Leak-valid but unclassified → excluded from denominator
+                {"flow_class": None, "leak_valid": True},
+                # Leak-INVALID class 6 → excluded entirely
+                {"flow_class": 6, "leak_valid": False},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.fl_class_ge4_pct == pytest.approx(100.0 * 2 / 3)
+        assert night.fl_class_ge4_pct_reason is None
+
+    async def test_all_breaths_leak_invalid_pct_null_with_not_available_reason(
+        self, async_db_session
+    ):
+        """All breaths leak_valid=False/None → fl_class_ge4_pct is None with NOT_AVAILABLE."""
+        therapy_date = date(2025, 7, 11)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"flow_class": 5, "leak_valid": False},
+                {"flow_class": 6, "leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.fl_class_ge4_pct is None
+        assert night.fl_class_ge4_pct_reason == NullReason.NOT_AVAILABLE
+
+
 # ---------------------------------------------------------------------------
 # rera_index, rdi, and DURATION_ZERO fields on NightlyAnalysisSummary
 # ---------------------------------------------------------------------------
@@ -4847,6 +4941,22 @@ class TestNightlySummaryReraRdi:
         assert summary.rdi is None
         assert summary.rdi_reason == NullReason.DURATION_ZERO
 
+    async def test_rera_proxy_version_null_when_analysis_not_run(
+        self, async_db_session
+    ):
+        """Session without analysis → no RERA scan ran, so rera_count is None
+        and rera_proxy_version must be None (not stamped 'v2')."""
+        therapy_date = date(2025, 8, 3)
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_summary(therapy_date, device_id=dev.id)
+
+        assert summary.rera_count is None
+        assert summary.rera_proxy_version is None
+
     async def test_range_summary_bulk_matches_per_night_summary(self, async_db_session):
         """get_nightly_range_summary over N nights produces identical per-night fields as get_nightly_summary."""
         therapy_dates = [date(2025, 8, 10), date(2025, 8, 11)]
@@ -4876,9 +4986,12 @@ class TestNightlySummaryReraRdi:
             assert bulk.eligible_session_count == per_night.eligible_session_count
             assert bulk.rera_count == per_night.rera_count
             assert bulk.rera_reason == per_night.rera_reason
+            assert bulk.rera_proxy_version == per_night.rera_proxy_version == "v2"
             assert bulk.fl_median == per_night.fl_median
             assert bulk.fl_95th == per_night.fl_95th
             assert bulk.fl_max == per_night.fl_max
+            assert bulk.fl_class_ge4_pct == per_night.fl_class_ge4_pct
+            assert bulk.fl_class_ge4_pct_reason == per_night.fl_class_ge4_pct_reason
             assert bulk.ti_median_s == per_night.ti_median_s
             assert bulk.ie_ratio_median == per_night.ie_ratio_median
             assert bulk.rera_index == per_night.rera_index
@@ -4910,3 +5023,500 @@ class TestNightlySummaryReraRdi:
         assert d1 in night_dates
         assert d3 in night_dates
         assert d2 not in night_dates
+
+
+# ---------------------------------------------------------------------------
+# RERA-proxy v2 — _iter_fl_run_recoveries / _count_fl_run_reras
+# ---------------------------------------------------------------------------
+
+
+def _fl_row(
+    flow_class: int | None,
+    peak_flow_lpm: float | None = None,
+    is_recovery_breath: bool = False,
+) -> Any:
+    """Minimal breath-row stub for the module-level FL-run scanner."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    return SimpleNamespace(
+        flow_class=flow_class,
+        peak_flow_lpm=peak_flow_lpm,
+        is_recovery_breath=is_recovery_breath,
+    )
+
+
+@pytest.mark.unit
+class TestReraProxyV2Scanner:
+    """Self-contained recovery criterion (b) + analysis-flag criterion (a)."""
+
+    def test_amplitude_recovery_without_flag_counted(self):
+        """Class-1 follower 30% above the run's mean peak flow counts without the flag."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=26.0, is_recovery_breath=False),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_follower_only_10pct_above_mean_not_counted(self):
+        """Follower amplitude below the 20% margin does not count."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=22.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+
+    def test_follower_at_exact_margin_boundary_counted(self):
+        """Follower at exactly (1 + margin) * run mean counts (>= comparison)."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=(1.0 + 0.20) * 20.0),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_custom_margin_kwarg_respected(self):
+        """A smaller recovery_amplitude_margin admits a smaller amplitude rise."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=22.0),
+        ]
+        assert _count_fl_run_reras(rows, recovery_amplitude_margin=0.05) == 1
+
+    def test_follower_class_3_high_amplitude_not_counted(self):
+        """Class must drop to <= 2; a class-3 follower never satisfies criterion (b)."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(3, peak_flow_lpm=40.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+
+    def test_run_at_end_of_rows_not_counted(self):
+        """A qualifying run with no follower cannot end in recovery."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+
+    def test_fl_class_follower_extends_run_no_double_count(self):
+        """A class >= threshold breath extends the run; the event counts once."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(4, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=26.0),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_null_follower_peak_flow_skips_criterion_b(self):
+        """Follower with null peak_flow_lpm can only count via the recovery flag."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=None),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+        rows[-1].is_recovery_breath = True
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_all_null_run_peaks_skip_criterion_b(self):
+        """A run with no non-null peak_flow_lpm can only count via the recovery flag."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=None),
+            _fl_row(5, peak_flow_lpm=None),
+            _fl_row(1, peak_flow_lpm=100.0),
+        ]
+        assert _count_fl_run_reras(rows) == 0
+        rows[-1].is_recovery_breath = True
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_recovery_flag_still_counts_without_amplitude(self):
+        """Criterion (a): the analysis-time flag counts regardless of amplitude."""
+        from snore.services.breath_service import _count_fl_run_reras  # noqa: PLC0415
+
+        rows = [
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=10.0, is_recovery_breath=True),
+        ]
+        assert _count_fl_run_reras(rows) == 1
+
+    def test_iterator_yields_run_and_recovery_indices(self):
+        """The scanner yields (run_start_idx, run_last_idx, recovery_idx)."""
+        from snore.services.breath_service import (  # noqa: PLC0415
+            _iter_fl_run_recoveries,
+        )
+
+        rows = [
+            _fl_row(1, peak_flow_lpm=30.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(5, peak_flow_lpm=20.0),
+            _fl_row(1, peak_flow_lpm=26.0),
+        ]
+        assert list(_iter_fl_run_recoveries(rows)) == [(1, 2, 3)]
+
+    async def test_windows_and_count_identify_same_events(self, async_db_session):
+        """_find_fl_run_windows and _count_fl_run_reras agree on the same rows."""
+        therapy_date = date(2025, 9, 1)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                # Run 1 (amplitude recovery, no flag)
+                {"flow_class": 5, "peak_flow_lpm": 20.0},
+                {"flow_class": 5, "peak_flow_lpm": 20.0},
+                {"flow_class": 1, "peak_flow_lpm": 26.0},
+                # Separator
+                {"flow_class": 1, "peak_flow_lpm": 20.0},
+                # Run 2 (flagged recovery, low amplitude)
+                {"flow_class": 4, "peak_flow_lpm": 20.0},
+                {"flow_class": 4, "peak_flow_lpm": 20.0},
+                {"flow_class": 4, "peak_flow_lpm": 20.0},
+                {
+                    "flow_class": 1,
+                    "peak_flow_lpm": 10.0,
+                    "is_recovery_breath": True,
+                },
+                # Run 3 — too short (length 1), never counts
+                {"flow_class": 5, "peak_flow_lpm": 20.0},
+                {"flow_class": 1, "peak_flow_lpm": 26.0},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+
+        windows_result = await svc.find_windows(
+            therapy_date=therapy_date,
+            criterion=WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
+            n=50,
+            device_id=device_id,
+        )
+        summary = await svc.get_nightly_summary(therapy_date, device_id=device_id)
+
+        assert summary.rera_count == 2
+        assert len(windows_result.windows) == summary.rera_count
+
+
+@pytest.mark.unit
+class TestDeriveMvFromFlow:
+    """Pure-function tests for the flow-derived MV fallback."""
+
+    def test_constant_positive_flow_yields_constant_mv(self):
+        """Constant 12 L/min flow → every derived MV sample ≈ 12; first output
+        lands exactly at offsets[0] + window_s."""
+        offsets = np.arange(10.0, 310.0, 1.0)
+        values = np.full_like(offsets, 12.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size > 0
+        assert out_t[0] == pytest.approx(10.0 + 60.0)
+        assert out_t[-1] <= offsets[-1]
+        assert np.allclose(out_v, 12.0)
+
+    def test_negative_flow_clipped_to_zero(self):
+        """Flow alternating +10/−10 → negatives clip to 0 → derived MV ≈ 5."""
+        offsets = np.arange(0.0, 200.0, 1.0)
+        values = np.where(offsets % 2 == 0, 10.0, -10.0)
+
+        _, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_v.size > 0
+        assert np.allclose(out_v, 5.0, atol=0.5)
+
+    def test_timestamp_gap_omits_empty_window_samples(self):
+        """Merged-session gap [101, 400) → output samples whose trailing window
+        contains zero input samples are omitted, then resume after the gap."""
+        offsets = np.concatenate([np.arange(0.0, 101.0), np.arange(400.0, 501.0)])
+        values = np.full_like(offsets, 6.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        # Grid is every 2 s from 60; windows [t-60, t] for t in [162, 398]
+        # fall entirely inside the gap and must be omitted.
+        in_gap = (out_t >= 162.0) & (out_t < 400.0)
+        assert not in_gap.any()
+        # Samples resume once the window reaches post-gap data
+        assert (out_t >= 400.0).any()
+        assert np.allclose(out_v, 6.0)
+
+    def test_input_shorter_than_window_returns_empty(self):
+        """Input spanning < window_s seconds cannot fill one window → empty."""
+        offsets = np.arange(0.0, 30.0, 1.0)
+        values = np.full_like(offsets, 12.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size == 0
+        assert out_v.size == 0
+
+    def test_empty_input_returns_empty(self):
+        out_t, out_v = derive_mv_from_flow(np.array([]), np.array([]))
+
+        assert out_t.size == 0
+        assert out_v.size == 0
+
+    def test_non_monotonic_offsets_return_empty(self):
+        """Offsets with an inversion would produce garbage windows via
+        searchsorted → empty arrays (downstream metrics go null)."""
+        offsets = np.concatenate([np.arange(0.0, 100.0), np.arange(50.0, 200.0)])
+        values = np.full_like(offsets, 8.0)
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size == 0
+        assert out_v.size == 0
+
+    def test_nan_values_treated_as_zero(self):
+        """NaN flow samples count as 0.0 flow instead of poisoning the
+        cumulative sum: alternating 10/NaN → derived MV ≈ 5, all finite."""
+        offsets = np.arange(0.0, 200.0, 1.0)
+        values = np.full_like(offsets, 10.0)
+        values[::2] = np.nan
+
+        out_t, out_v = derive_mv_from_flow(offsets, values)
+
+        assert out_t.size > 0
+        assert np.all(np.isfinite(out_v))
+        assert np.allclose(out_v, 5.0, atol=0.5)
+
+
+@pytest.mark.unit
+class TestCaMvFlowFallback:
+    """CA analysis derives MV from flow when no device MV channel exists."""
+
+    async def test_flow_only_session_derives_mv_metrics(self, async_db_session):
+        """No mv waveform, flow seeded → slope/stability/variance non-null and
+        mv_source == 'flow_derived' at both event and night level.
+
+        Flow: 5 L/min for [0, 600) s, 15 L/min for [600, 1200) s (all positive,
+        so derived MV mirrors the flow levels) → two 600-s bins with distinct
+        means → mv_rolling_variance > 0.  CA at 300 s: derived MV in the
+        window [240, 300] is constant 5.0 → slope 0.0, CV 0.0 (non-null).
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 1)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1200.0 / 3600.0
+        )
+        # OK analysis → session passes the night-level eligibility gate
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=1
+        )
+
+        n = 1200
+        ts = np.arange(n, dtype=np.float32)
+        vals = np.where(ts < 600.0, 5.0, 15.0).astype(np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="flow",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(ts, vals),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        # Fetch side: MV absent → FLOW blobs fetched for the fallback
+        assert raw.session_data[0].flow_waveform is not None
+
+        from snore.services.breath_service import compute_ca_analysis  # noqa: PLC0415
+
+        result = compute_ca_analysis(raw)
+
+        assert len(result.ca_events) == 1
+        ev = result.ca_events[0]
+        assert ev.mv_source == "flow_derived"
+        assert ev.preceding_mv_slope is not None
+        assert ev.preceding_mv_reason is None
+        assert ev.stability_index is not None
+        assert ev.stability_reason is None
+
+        assert result.mv_source == "flow_derived"
+        assert result.mv_fallback_version == "v1"
+        assert result.mv_rolling_variance is not None
+        assert result.mv_rolling_variance > 0.0
+        assert result.mv_variance_reason is None
+
+    async def test_device_mv_session_skips_flow_fetch(self, async_db_session):
+        """Device mv waveform present → mv_source == 'device' and the FLOW
+        blob is never fetched (flow_waveform is None on the raw data)."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 2)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+
+        n = 3600
+        ts = np.arange(n, dtype=np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="mv",
+                sample_rate=1.0,
+                sample_count=n,
+                data_blob=_make_waveform_blob_from_arrays(
+                    ts, np.full(n, 8.0, dtype=np.float32)
+                ),
+            )
+        )
+        async_db_session.add(
+            models.Event(
+                session_id=session.id,
+                event_type="CA",
+                start_time=session.start_time + timedelta(seconds=300),
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        raw = await svc.fetch_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        # Device MV present → no needless FLOW fetch
+        assert raw.session_data[0].flow_waveform is None
+
+        from snore.services.breath_service import compute_ca_analysis  # noqa: PLC0415
+
+        result = compute_ca_analysis(raw)
+
+        assert len(result.ca_events) == 1
+        assert result.ca_events[0].mv_source == "device"
+        assert result.mv_source == "device"
+
+    async def test_mixed_mv_sources_yield_mixed_night_source(self, async_db_session):
+        """Two sessions on one night — one with a device mv waveform, one with
+        only flow → per-event mv_source is 'device' / 'flow_derived' per
+        session and the night-level mv_source is 'mixed'."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 4)
+
+        start_a = datetime(
+            therapy_date.year, therapy_date.month, therapy_date.day, 21, 0
+        )
+        day = models.Day(device_id=dev.id, date=therapy_date, session_count=2)
+        async_db_session.add(day)
+        await async_db_session.flush()
+        session_a = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a,
+            end_time=start_a + timedelta(seconds=1200),
+            duration_seconds=1200.0,
+        )
+        session_b = models.Session(
+            device_id=dev.id,
+            day_id=day.id,
+            device_session_id=f"SESS_{uuid.uuid4().hex[:8]}",
+            start_time=start_a + timedelta(hours=2),
+            end_time=start_a + timedelta(hours=2, seconds=1200),
+            duration_seconds=1200.0,
+        )
+        async_db_session.add_all([session_a, session_b])
+        await async_db_session.flush()
+
+        n = 1200
+        ts = np.arange(n, dtype=np.float32)
+        # Session A: device mv channel; session B: flow only (fallback path)
+        async_db_session.add_all(
+            [
+                models.Waveform(
+                    session_id=session_a.id,
+                    waveform_type="mv",
+                    sample_rate=1.0,
+                    sample_count=n,
+                    data_blob=_make_waveform_blob_from_arrays(
+                        ts, np.full(n, 8.0, dtype=np.float32)
+                    ),
+                ),
+                models.Waveform(
+                    session_id=session_b.id,
+                    waveform_type="flow",
+                    sample_rate=1.0,
+                    sample_count=n,
+                    data_blob=_make_waveform_blob_from_arrays(
+                        ts, np.full(n, 12.0, dtype=np.float32)
+                    ),
+                ),
+                models.Event(
+                    session_id=session_a.id,
+                    event_type="CA",
+                    start_time=session_a.start_time + timedelta(seconds=300),
+                    duration_seconds=10.0,
+                ),
+                models.Event(
+                    session_id=session_b.id,
+                    event_type="CA",
+                    start_time=session_b.start_time + timedelta(seconds=300),
+                    duration_seconds=10.0,
+                ),
+            ]
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert len(result.ca_events) == 2
+        source_by_session = {ev.session_id: ev.mv_source for ev in result.ca_events}
+        assert source_by_session[session_a.id] == "device"
+        assert source_by_session[session_b.id] == "flow_derived"
+        assert result.mv_source == "mixed"
+
+    async def test_pb_zero_episodes_yields_zero_pct(self, async_db_session):
+        """Analyzed-OK session with pb_json present but zero PB episodes →
+        periodic_breathing_pct == 0.0 with reason None (not null+not_available)."""
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2026, 7, 3)
+        _, session = await _make_day_and_session(
+            async_db_session, dev.id, therapy_date, duration_hours=1.0
+        )
+        # store_result persists programmatic_result_json (no PB episodes)
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=1
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.get_ca_analysis(therapy_date=therapy_date, device_id=dev.id)
+
+        assert result.periodic_breathing_pct == 0.0
+        assert result.pb_reason is None

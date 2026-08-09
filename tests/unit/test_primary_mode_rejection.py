@@ -1,4 +1,4 @@
-"""Pinned tests for primary_mode end-to-end validation (plan v3.8).
+"""Pinned tests for primary_mode end-to-end validation.
 
 Scenarios covered:
 1. _resolve_primary_mode raises ValueError when primary_mode is not in modes.
@@ -13,8 +13,10 @@ Scenarios covered:
 8. _compute_leak_valid: alignment gap exactly == 5 s → nearest-neighbour used.
 9. _compute_leak_valid: alignment gap just above 5 s → (None, "channel_unaligned").
 10. _compute_leak_valid: differing sample rates (1 Hz vs 25 Hz) resolve correctly.
-11. Ramp-active field is set to None with reason "not_available" always (no
-    ramp-signal available in current implementation).
+11. _compute_ramp_active: settings-driven timed heuristic with per-mask-on-
+    segment restart; SmartRamp / unknown settings yield null + reason.
+12. _compute_mask_off: gap overlap from persisted mask-on segments; unknown
+    segments yield null + "segments_unknown".
 """
 
 from __future__ import annotations
@@ -28,7 +30,13 @@ import pytest
 import snore.api.analysis_jobs as _aj_store
 
 from snore.analysis.modes import DEFAULT_MODE
-from snore.analysis.service import _compute_leak_valid, _resolve_primary_mode
+from snore.analysis.service import (
+    _compute_leak_valid,
+    _compute_mask_off,
+    _compute_ramp_active,
+    _mask_off_gaps,
+    _resolve_primary_mode,
+)
 from snore.analysis.shared.versioning import (
     LEAK_VALID_MAX_ALIGNMENT_GAP_S,
     LEAK_VALID_THRESHOLD_LPM,
@@ -203,7 +211,7 @@ class TestAnalysisRouterPrimaryMode:
 
 
 class TestComputeLeakValid:
-    """Boundary tests for _compute_leak_valid (plan step 3)."""
+    """Boundary tests for _compute_leak_valid (leak_valid derivation v1)."""
 
     _threshold = LEAK_VALID_THRESHOLD_LPM
     _gap_limit = LEAK_VALID_MAX_ALIGNMENT_GAP_S  # == 5.0 s
@@ -325,21 +333,213 @@ class TestComputeLeakValid:
         assert valid is True
         assert reason is None
 
-    def test_ramp_active_is_not_derived_from_leak(self):
-        """ramp_active is set to None/'not_available' regardless of leak channel.
 
-        This is a compile-time test: the AnalysisService hard-codes ramp_active=None
-        because no ramp-signal channel is currently available.  Validate the
-        constant in the analysis service matches that expectation.
+class TestComputeRampActive:
+    """Behavioral tests for _compute_ramp_active (validity flags v1)."""
+
+    _segments = [(0.0, 3600.0), (4200.0, 7800.0)]  # 10-min gap at 3600 s
+    _segment_starts = [0.0, 4200.0]
+
+    def test_breath_within_ramp_window_is_true(self):
+        """Enabled + timed ramp, breath at 30 s of a 10-min ramp → True."""
+        active, reason = _compute_ramp_active(
+            breath_start_s=30.0,
+            segment_starts=self._segment_starts,
+            ramp_enabled=True,
+            ramp_time_minutes=10,
+            smart_ramp=False,
+        )
+        assert active is True
+        assert reason is None
+
+    def test_breath_past_ramp_time_is_false(self):
+        """Breath past ramp_time within the first segment → False."""
+        active, reason = _compute_ramp_active(
+            breath_start_s=601.0,  # past 10 min = 600 s
+            segment_starts=self._segment_starts,
+            ramp_enabled=True,
+            ramp_time_minutes=10,
+            smart_ramp=False,
+        )
+        assert active is False
+        assert reason is None
+
+    def test_second_mask_on_segment_restarts_ramp_clock(self):
+        """A breath early in segment 2 is in ramp again (per-segment restart)."""
+        active, reason = _compute_ramp_active(
+            breath_start_s=4230.0,  # 30 s into segment 2 (starts at 4200 s)
+            segment_starts=self._segment_starts,
+            ramp_enabled=True,
+            ramp_time_minutes=10,
+            smart_ramp=False,
+        )
+        assert active is True
+        assert reason is None
+
+    def test_smart_ramp_is_indeterminate(self):
+        """SmartRamp ends on sleep detection, not a timer → null + reason."""
+        active, reason = _compute_ramp_active(
+            breath_start_s=30.0,
+            segment_starts=self._segment_starts,
+            ramp_enabled=False,  # ResMed: S.RampEnable=2 → enabled False + smart
+            ramp_time_minutes=10,
+            smart_ramp=True,
+        )
+        assert active is None
+        assert reason == "smart_ramp_indeterminate"
+
+    def test_ramp_enabled_unknown_is_not_available(self):
+        """ramp_enabled=None (setting not recorded) → (None, 'not_available')."""
+        active, reason = _compute_ramp_active(
+            breath_start_s=30.0,
+            segment_starts=self._segment_starts,
+            ramp_enabled=None,
+            ramp_time_minutes=10,
+            smart_ramp=False,
+        )
+        assert active is None
+        assert reason == "not_available"
+
+    def test_ramp_disabled_is_false(self):
+        """ramp_enabled=False → (False, None) — no ramp ever runs."""
+        active, reason = _compute_ramp_active(
+            breath_start_s=30.0,
+            segment_starts=self._segment_starts,
+            ramp_enabled=False,
+            ramp_time_minutes=None,
+            smart_ramp=False,
+        )
+        assert active is False
+        assert reason is None
+
+    def test_ramp_time_unknown_is_not_available(self):
+        """Ramp enabled but ramp_time missing → (None, 'not_available')."""
+        active, reason = _compute_ramp_active(
+            breath_start_s=30.0,
+            segment_starts=self._segment_starts,
+            ramp_enabled=True,
+            ramp_time_minutes=None,
+            smart_ramp=False,
+        )
+        assert active is None
+        assert reason == "not_available"
+
+    def test_segments_unknown_falls_back_to_session_start_offset(self):
+        """Without segments, the ramp clock starts at session offset 0."""
+        active_early, reason_early = _compute_ramp_active(
+            breath_start_s=30.0,
+            segment_starts=None,
+            ramp_enabled=True,
+            ramp_time_minutes=10,
+            smart_ramp=False,
+        )
+        active_late, reason_late = _compute_ramp_active(
+            breath_start_s=4230.0,  # would be in ramp if segment 2 were known
+            segment_starts=None,
+            ramp_enabled=True,
+            ramp_time_minutes=10,
+            smart_ramp=False,
+        )
+        assert (active_early, reason_early) == (True, None)
+        assert (active_late, reason_late) == (False, None)
+
+    def test_gap_interior_breath_uses_preceding_segment_and_is_mask_off(self):
+        """Pinned interaction: a breath starting inside a mask-off gap.
+
+        Such a breath is a seam artifact — mask_off flags it True, and the
+        ramp clock deliberately keeps ticking from the PRECEDING mask-on
+        segment's start (documented in _compute_ramp_active): consumers gate
+        on mask_off first, so the stale ramp offset is harmless.
         """
-        import inspect
-
-        from snore.analysis.service import _build_computed_breaths
-
-        src = inspect.getsource(_build_computed_breaths)
-        assert "ramp_active=None" in src, (
-            "ramp_active must always be None (no ramp channel available)"
+        gaps = _mask_off_gaps(self._segments, 7800.0)
+        # Breath at 3650 s lies inside the [3600, 4200) gap.
+        mask_off, mask_off_reason = _compute_mask_off(
+            breath_start_s=3650.0,
+            breath_end_s=3653.0,
+            gaps=gaps,
         )
-        assert '"not_available"' in src, (
-            "ramp_active_reason must always be 'not_available'"
+        assert (mask_off, mask_off_reason) == (True, None)
+
+        # Ramp offset vs preceding segment start (0.0): 3650 s >> 600 s → False.
+        active, reason = _compute_ramp_active(
+            breath_start_s=3650.0,
+            segment_starts=self._segment_starts,
+            ramp_enabled=True,
+            ramp_time_minutes=10,
+            smart_ramp=False,
         )
+        assert (active, reason) == (False, None)
+
+
+class TestComputeMaskOff:
+    """Behavioral tests for _mask_off_gaps + _compute_mask_off (validity flags v1)."""
+
+    def test_segments_unknown_returns_null_with_reason(self):
+        """mask_on_segments=None (un-reimported / OSCAR data) → null + reason."""
+        gaps = _mask_off_gaps(None, 7200.0)
+        assert gaps is None
+        mask_off, reason = _compute_mask_off(
+            breath_start_s=10.0,
+            breath_end_s=13.0,
+            gaps=gaps,
+        )
+        assert mask_off is None
+        assert reason == "segments_unknown"
+
+    def test_single_full_segment_is_all_false(self):
+        """A single segment covering the whole session has no gaps → False."""
+        gaps = _mask_off_gaps([(0.0, 7200.0)], 7200.0)
+        assert gaps == []
+        mask_off, reason = _compute_mask_off(
+            breath_start_s=10.0,
+            breath_end_s=13.0,
+            gaps=gaps,
+        )
+        assert mask_off is False
+        assert reason is None
+
+    def test_seam_spanning_breath_is_true(self):
+        """A breath straddling the gap boundary overlaps the gap → True."""
+        gaps = _mask_off_gaps([(0.0, 3600.0), (4200.0, 7800.0)], 7800.0)
+        mask_off, reason = _compute_mask_off(
+            breath_start_s=3598.0,
+            breath_end_s=3602.0,  # gap is [3600, 4200)
+            gaps=gaps,
+        )
+        assert mask_off is True
+        assert reason is None
+
+    def test_interior_breath_is_false(self):
+        """A breath fully inside a mask-on segment → False."""
+        gaps = _mask_off_gaps([(0.0, 3600.0), (4200.0, 7800.0)], 7800.0)
+        mask_off, reason = _compute_mask_off(
+            breath_start_s=4300.0,
+            breath_end_s=4303.0,
+            gaps=gaps,
+        )
+        assert mask_off is False
+        assert reason is None
+
+    def test_none_session_duration_omits_trailing_gap(self):
+        """session_duration_s=None: no trailing gap, other gaps still found."""
+        gaps = _mask_off_gaps([(100.0, 3600.0), (4200.0, 7800.0)], None)
+        # Leading gap [0, 100) and inter-segment gap [3600, 4200) only.
+        assert gaps == [(0.0, 100.0), (3600.0, 4200.0)]
+
+        # A breath after the last segment end is NOT flagged (trailing gap
+        # unknown without a session duration).
+        trailing, trailing_reason = _compute_mask_off(
+            breath_start_s=7900.0,
+            breath_end_s=7903.0,
+            gaps=gaps,
+        )
+        assert (trailing, trailing_reason) == (False, None)
+
+        # Leading and inter-segment gaps still detected.
+        assert _compute_mask_off(breath_start_s=50.0, breath_end_s=53.0, gaps=gaps) == (
+            True,
+            None,
+        )
+        assert _compute_mask_off(
+            breath_start_s=3700.0, breath_end_s=3703.0, gaps=gaps
+        ) == (True, None)

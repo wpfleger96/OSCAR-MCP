@@ -208,6 +208,11 @@ class SessionImporter:
             import_source=session_data.import_source,
             parser_version=session_data.parser_version,
             data_quality_notes=notes_json,
+            mask_on_segments=(
+                [list(seg) for seg in session_data.mask_on_segments]
+                if session_data.mask_on_segments is not None
+                else None
+            ),
             has_waveform_data=session_data.has_waveform_data,
             has_event_data=session_data.has_event_data,
             has_statistics=session_data.has_statistics,

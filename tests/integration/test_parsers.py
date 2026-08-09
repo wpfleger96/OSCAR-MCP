@@ -125,6 +125,40 @@ class TestEDFSignalParsing:
             )
 
     @pytest.mark.parser
+    def test_parse_minute_ventilation_from_pld(
+        self, resmed_parser, resmed_fixture_path
+    ):
+        """PLD MinVent signal parses to an mv waveform with unconverted L/min values."""
+        sessions = list(resmed_parser.parse_sessions(resmed_fixture_path))
+        session = sessions[0]
+
+        assert WaveformType.MINUTE_VENTILATION in session.waveforms, (
+            "No mv waveform parsed from PLD file"
+        )
+        mv = session.waveforms[WaveformType.MINUTE_VENTILATION]
+        assert mv.unit == "L/min", f"Expected L/min, got {mv.unit}"
+        assert len(mv.values) > 0, "No mv values"
+
+        pld_file = resmed_fixture_path / "DATALOG/2024/20240621_013454_PLD.edf"
+        with EDFReader(pld_file) as edf:
+            mv_signal = None
+            for name in edf.list_signal_labels():
+                if "MinVent" in name:
+                    mv_signal = name
+                    break
+            assert mv_signal is not None, "No MinVent signal in PLD fixture"
+            raw_data, raw_info = edf.read_signal(
+                mv_signal, start_sample=0, num_samples=100
+            )
+
+        # ResMed stores MinVent in L/min already — values must NOT be ×60 converted
+        assert raw_info.physical_dimension == "L/min"
+        np.testing.assert_allclose(
+            np.asarray(mv.values[:100], dtype=np.float64),
+            raw_data[:100].astype(np.float64),
+        )
+
+    @pytest.mark.parser
     def test_parse_statistics_from_sa2(self, resmed_fixture_path):
         """Test statistics extraction from SA2 file."""
         sa2_file = resmed_fixture_path / "DATALOG/2024/20240621_013454_SA2.edf"

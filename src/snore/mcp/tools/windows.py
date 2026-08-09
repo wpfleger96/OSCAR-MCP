@@ -2,9 +2,11 @@
 
 Timestamp contract (A6):
 - Session wall-clock anchors are stored as naive device datetimes.
-- Output uses tier-2 (offset-free ISO 8601 + timezone_status="unknown")
-  for session wall-clock anchors and tier-3 (float offsets from session
-  start) for in-session window positions.  No UTC offsets are fabricated.
+- Output uses tier-2 (offset-free ISO 8601 + timezone_status
+  "unknown" | "user_declared", with timezone_name carrying the profile's
+  declared IANA zone) for session wall-clock anchors and tier-3 (float offsets
+  from session start) for in-session window positions.  No UTC offsets are
+  fabricated.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
-from snore.mcp.schemas import FindWindowsResponse, WindowRow
+from snore.mcp.schemas import FindWindowsResponse, WindowRow, tz_fields
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
 from snore.mcp.tools._helpers import str_or_none
@@ -45,6 +47,7 @@ async def find_windows(
     context_seconds: float = 120.0,
     min_fl_run_length: int = 2,
     fl_class_threshold: int = 4,
+    recovery_amplitude_margin: float = 0.20,
 ) -> FindWindowsResponse:
     """Return N worst breath windows matching a flow-limitation criterion.
 
@@ -66,6 +69,8 @@ async def find_windows(
         context_seconds: Window half-width in seconds (ca_centered only).
         min_fl_run_length: Minimum FL-class run length (fl_run_ending_in_recovery only).
         fl_class_threshold: Minimum flow_class value to count as flow-limited.
+        recovery_amplitude_margin: Peak-flow margin over the FL-run mean for the
+            self-contained recovery criterion (fl_run_ending_in_recovery only).
     """
     from snore.services.breath_service import (  # noqa: PLC0415
         BreathService,
@@ -91,6 +96,7 @@ async def find_windows(
         context_seconds=context_seconds,
         min_fl_run_length=min_fl_run_length,
         fl_class_threshold=fl_class_threshold,
+        recovery_amplitude_margin=recovery_amplitude_margin,
     )
 
     try:
@@ -116,7 +122,7 @@ async def find_windows(
             criterion=str(w.criterion),
             session_id=w.session_id,
             session_start_wall_clock=w.session_start_wall_clock.isoformat(),
-            timezone_status="unknown",
+            **tz_fields(w),
             window_start_offset=w.window_start_offset,
             window_end_offset=w.window_end_offset,
             reason_summary=w.reason_summary,
@@ -175,6 +181,7 @@ def register(mcp: FastMCP) -> None:
         context_seconds: float = 120.0,
         min_fl_run_length: int = 2,
         fl_class_threshold: int = 4,
+        recovery_amplitude_margin: float = 0.20,
     ) -> dict[str, Any]:
         """Find the N worst breath windows matching a flow-limitation criterion for a night.
 
@@ -195,7 +202,10 @@ def register(mcp: FastMCP) -> None:
                 ``"ca_centered"`` — context window around each CA event; works even when
                     the day mixes algorithm versions.
                 ``"fl_run_ending_in_recovery"`` — FL runs immediately followed by a
-                    recovery breath; requires uniform primary_mode across sessions.
+                    recovery breath (the analysis-time recovery flag OR the
+                    self-contained v2 criterion: flow class drops to <=2 with peak
+                    flow >= ``(1 + recovery_amplitude_margin)`` x the run mean);
+                    requires uniform primary_mode across sessions.
             n: Number of windows to return (1–50, default 5).
             device_id: Filter to a specific device.  Required when multiple devices
                        have data for the same date.
@@ -211,6 +221,9 @@ def register(mcp: FastMCP) -> None:
             min_fl_run_length: Minimum FL-class run length (default 2).
                 Only relevant for ``fl_run_ending_in_recovery``.
             fl_class_threshold: Minimum flow class to count as FL (default 4).
+                Only relevant for ``fl_run_ending_in_recovery``.
+            recovery_amplitude_margin: Fractional peak-flow margin over the FL-run
+                mean for the self-contained recovery criterion (default 0.20).
                 Only relevant for ``fl_run_ending_in_recovery``.
 
         Returns:
@@ -258,4 +271,5 @@ def register(mcp: FastMCP) -> None:
             context_seconds=context_seconds,
             min_fl_run_length=min_fl_run_length,
             fl_class_threshold=fl_class_threshold,
+            recovery_amplitude_margin=recovery_amplitude_margin,
         )

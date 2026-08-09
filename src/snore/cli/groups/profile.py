@@ -61,7 +61,8 @@ def profile_list(user_email: str | None, db: str | None) -> None:
             for p in profiles:
                 marker = " [default]" if p.id == default_id else ""
                 deleting = " [DELETING]" if p.deleting_at else ""
-                console.print(f"  [{p.id}] {p.name}{marker}{deleting}")
+                tz = f" (tz: {p.timezone})" if p.timezone else ""
+                console.print(f"  [{p.id}] {p.name}{tz}{marker}{deleting}")
 
     asyncio.run(_run())
 
@@ -132,6 +133,76 @@ def profile_rename(
             p.name = new_name
 
         print_success(f"Renamed profile {profile_id} to '{new_name}'")
+
+    asyncio.run(_run())
+
+
+@profile.command("set-timezone")
+@click.argument("profile_id", type=int)
+@click.argument("tz", required=False, default=None)
+@click.option("--clear", is_flag=True, help="Clear the profile's declared timezone")
+@click.option("--user", "user_email", default=None, help="User email")
+@db_option
+def profile_set_timezone(
+    profile_id: int,
+    tz: str | None,
+    clear: bool,
+    user_email: str | None,
+    db: str | None,
+) -> None:
+    """Declare the IANA timezone for a profile (e.g. "America/New_York").
+
+    Labeling metadata only: device wall-clock timestamps stay naive — MCP
+    responses report timezone_status="user_declared" plus the zone name so
+    clients can localize.  Use --clear to remove the declaration.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
+
+    if clear == (tz is not None):
+        print_error("Provide exactly one of TZ or --clear")
+        return
+    if tz is not None:
+        try:
+            ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            print_error(
+                f"Unknown IANA timezone {tz!r}. "
+                'Use a name like "America/New_York" or "Europe/London".'
+            )
+            return
+
+    async def _run() -> None:
+        async with db_session(db) as session:
+            from sqlalchemy import select  # noqa: PLC0415
+
+            from snore.database.models import Profile  # noqa: PLC0415
+
+            user = await _resolve_user(session, user_email)
+            if user is None:
+                return
+
+            p = (
+                (
+                    await session.execute(
+                        select(Profile).where(
+                            Profile.id == profile_id,
+                            Profile.user_id == user.id,
+                            Profile.deleting_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if p is None:
+                print_error(f"Profile {profile_id} not found")
+                return
+            p.timezone = tz
+
+        if tz is None:
+            print_success(f"Cleared timezone for profile {profile_id}")
+        else:
+            print_success(f"Set timezone for profile {profile_id} to '{tz}'")
 
     asyncio.run(_run())
 

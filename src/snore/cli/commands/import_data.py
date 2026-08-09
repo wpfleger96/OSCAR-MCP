@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from collections.abc import Callable
 from datetime import datetime
@@ -13,6 +12,7 @@ import click
 
 from rich.markup import escape
 
+from snore import logging_config
 from snore.cli.decorators import actor_options, date_range_options, db_option, init_db
 from snore.cli.display import (
     ICON_BACKUP,
@@ -72,6 +72,27 @@ async def _resolve_and_import(
         progress_callback=progress_callback,
         profile_id=profile_id,
     )
+
+
+async def _resolve_profile_timezone(
+    actor_user: str | None, actor_profile: str | None
+) -> str | None:
+    """Best-effort profile timezone so dry-run display matches the real import.
+
+    Returns None when no profile can be resolved — dry-run must keep working
+    against an unconfigured database (legacy UTC wall-clock in that case).
+    """
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.database.models import Profile  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    try:
+        async with session_scope() as db:
+            profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
+            profile = await db.get(Profile, profile_id)
+            return profile.timezone if profile else None
+    except click.ClickException:
+        return None
 
 
 @click.command("import")
@@ -274,6 +295,9 @@ def import_data(
 
             parse_root = Path(source.root_path)
             try:
+                timezone_name = asyncio.run(
+                    _resolve_profile_timezone(actor_user, actor_profile)
+                )
                 sessions = list(
                     parser.parse_sessions(
                         parse_root,
@@ -283,10 +307,11 @@ def import_data(
                         sort_by=sort_by if sort_by != "filesystem" else None,
                         parallel=not no_parallel,
                         progress_callback=_progress,
+                        timezone_name=timezone_name,
                     )
                 )
             except Exception as e:
-                if logging.getLogger().level == logging.DEBUG:
+                if logging_config.verbose_mode:
                     raise
                 if len(selected_sources) > 1:
                     print_warning(f"Error parsing sessions for {source_desc}: {e}")
@@ -375,7 +400,7 @@ def import_data(
                 )
             )
         except RuntimeError as e:
-            if logging.getLogger().level == logging.DEBUG:
+            if logging_config.verbose_mode:
                 raise
             if len(selected_sources) > 1:
                 print_warning(f"Import failed for {source_desc}: {e}")
@@ -423,7 +448,8 @@ def import_data(
         raise click.ClickException(f"{total_failed} session(s) failed to import")
 
     # Analysis phase — post-commit, separate from import transaction.
-    # Import data is fully committed before this phase begins (plan §A1).
+    # Import data is fully committed before this phase begins, so an analysis
+    # failure can never roll back or hide a successful import.
     if not no_analyze and all_imported_session_ids:
         from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415

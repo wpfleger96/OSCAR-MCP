@@ -1484,3 +1484,208 @@ class TestRxCompareCommand:
         assert result.exit_code == 0
         # Short form for bilevel: "<epap>-<ipap>" without units
         assert "6.0-18.0" in result.output
+
+
+class TestProfileTimezoneCommand:
+    """Test profile set-timezone command and timezone display in profile list."""
+
+    @pytest.fixture
+    async def db_with_profile(self, temp_db):
+        """Database with a single user + profile; returns (db_path, profile_id)."""
+        await init_database(str(temp_db))
+        async with session_scope() as session:
+            _profile = await _create_test_user_and_profile(session)
+            profile_id = _profile.id
+        return temp_db, profile_id
+
+    async def _get_timezone(self, db_path: Path, profile_id: int) -> str | None:
+        await init_database(str(db_path))
+        async with session_scope() as session:
+            row = await session.get(models.Profile, profile_id)
+            return row.timezone
+
+    def test_set_timezone_valid_zone_persists(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "America/New_York",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "America/New_York" in result.output
+        assert (
+            asyncio.run(self._get_timezone(db_path, profile_id)) == "America/New_York"
+        )
+
+    def test_clear_timezone_resets_to_null(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "Europe/London",
+                "--db",
+                str(db_path),
+            ],
+        )
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "--clear",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "Cleared" in result.output
+        assert asyncio.run(self._get_timezone(db_path, profile_id)) is None
+
+    def test_invalid_zone_rejected_with_example(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "Not/AZone",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert "America/New_York" in result.output  # friendly example in the error
+        assert asyncio.run(self._get_timezone(db_path, profile_id)) is None
+
+    def test_tz_and_clear_together_rejected(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        result = cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "Europe/London",
+                "--clear",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert "exactly one" in result.output
+        assert asyncio.run(self._get_timezone(db_path, profile_id)) is None
+
+    def test_profile_list_shows_timezone(self, cli_runner, db_with_profile):
+        db_path, profile_id = db_with_profile
+        cli_runner.invoke(
+            cli,
+            [
+                "profile",
+                "set-timezone",
+                str(profile_id),
+                "America/New_York",
+                "--db",
+                str(db_path),
+            ],
+        )
+        result = cli_runner.invoke(cli, ["profile", "list", "--db", str(db_path)])
+
+        assert result.exit_code == 0
+        assert "America/New_York" in result.output
+
+
+class TestImportCorruptTimezone:
+    """A corrupt stored Profile.timezone must fail the real import cleanly.
+
+    ZoneInfoNotFoundError is a KeyError subclass; if it escaped to the CLI it
+    would bypass the `except RuntimeError` handler and print a raw traceback.
+    The service re-raises it as RuntimeError, which the CLI renders as a
+    click error with the `snore profile set-timezone` remediation hint.
+    """
+
+    @pytest.fixture
+    async def db_with_corrupt_timezone(self, temp_db):
+        """Database with one user + profile whose timezone is corrupt."""
+        await init_database(str(temp_db))
+        async with session_scope() as session:
+            _profile = await _create_test_user_and_profile(session)
+            # Written directly — bypasses `snore profile set-timezone`
+            # validation, simulating a corrupted stored value.
+            _profile.timezone = "Not/A_Zone"
+        return temp_db
+
+    def test_corrupt_timezone_yields_clean_error(
+        self, cli_runner, db_with_corrupt_timezone, tmp_path, monkeypatch
+    ):
+        from unittest.mock import patch
+
+        import snore.logging_config as logging_config
+
+        from snore.services.import_service import ImportService
+        from snore.services.schemas import ImportSource
+
+        # Pin the normal (non --verbose) user path: the CLI re-raises import
+        # errors instead of rendering them when verbose_mode is set.
+        monkeypatch.setattr(logging_config, "verbose_mode", False)
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        with patch.object(ImportService, "detect_sources", return_value=[source]):
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "import",
+                    str(tmp_path),
+                    "--db",
+                    str(db_with_corrupt_timezone),
+                    "--no-backup",
+                ],
+            )
+
+        assert result.exit_code != 0
+        # Clean, actionable click error — not a raw traceback.
+        assert "Not/A_Zone" in result.output
+        assert "snore profile set-timezone" in result.output
+        assert "Traceback" not in result.output
+        assert not isinstance(result.exception, KeyError)
+
+    def test_verbose_mode_reraises_for_debugging(
+        self, cli_runner, db_with_corrupt_timezone, tmp_path, monkeypatch
+    ):
+        from unittest.mock import patch
+
+        import snore.logging_config as logging_config
+
+        from snore.services.import_service import ImportService
+        from snore.services.schemas import ImportSource
+
+        monkeypatch.setattr(logging_config, "verbose_mode", True)
+
+        source = ImportSource(parser_name="oscar_binary", root_path=str(tmp_path))
+        with patch.object(ImportService, "detect_sources", return_value=[source]):
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "import",
+                    str(tmp_path),
+                    "--db",
+                    str(db_with_corrupt_timezone),
+                    "--no-backup",
+                ],
+            )
+
+        # --verbose users get the raw exception for debugging.
+        assert result.exit_code != 0
+        assert isinstance(result.exception, RuntimeError)

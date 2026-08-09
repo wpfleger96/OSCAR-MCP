@@ -1,6 +1,6 @@
 """get_ca_analysis tool — BreathService CA-analysis adapter.
 
-Architecture (plan §9 in-scope/out-of-scope split):
+Architecture (DB-fetch / pure-compute split):
 - DB fetch runs INSIDE the server's scope_provider context: ``fetch_ca_raw``
   holds the AsyncSession only during the query and device-capabilities fetch;
   the scope closes before CPU work begins.
@@ -10,7 +10,8 @@ Architecture (plan §9 in-scope/out-of-scope split):
 
 Timestamp contract (A6):
 - Session wall-clock anchors (session_start_wall_clock) use tier-2
-  (offset-free ISO 8601 + timezone_status="unknown") for absolute times.
+  (offset-free ISO 8601 + timezone_status "unknown" | "user_declared", with
+  timezone_name carrying the profile's declared IANA zone) for absolute times.
 - In-session positions are numeric offset_seconds (tier-3).
 
 CA events are event-anchored (import-time Event rows with event_type='CA')
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import CaAnalysisResponse, CaDetailSchema
+from snore.mcp.schemas import CaAnalysisResponse, CaDetailSchema, tz_fields
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
 from snore.mcp.tools._helpers import str_or_none
@@ -124,7 +125,7 @@ def ca_response_from_raw(
         CaDetailSchema(
             session_id=ev.session_id,
             session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
-            timezone_status=str(ev.timezone_status),
+            **tz_fields(ev),
             offset_seconds=ev.offset_seconds,
             duration_seconds=ev.duration_seconds,
             preceding_mv_slope_lpm_per_min=ev.preceding_mv_slope,
@@ -133,6 +134,7 @@ def ca_response_from_raw(
             ps_reason=str_or_none(ev.ps_reason),
             stability_index=ev.stability_index,
             stability_reason=str_or_none(ev.stability_reason),
+            mv_source=str_or_none(ev.mv_source),
         )
         for ev in result.ca_events
     ]
@@ -151,6 +153,8 @@ def ca_response_from_raw(
         pb_reason=str_or_none(result.pb_reason),
         mv_rolling_variance=result.mv_rolling_variance,
         mv_variance_reason=str_or_none(result.mv_variance_reason),
+        mv_source=str_or_none(result.mv_source),
+        mv_fallback_version=result.mv_fallback_version,
         device_capabilities=caps,
     )
 

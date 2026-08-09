@@ -55,7 +55,9 @@ async def get_nightly_summary(
 ) -> NightlySummaryResponse:
     """Return per-night therapy summary for a date range.
 
-    Analysis-derived fields (RERA index, RDI, Ti, I:E, FL) are populated from
+    Analysis-derived fields (RERA index, RDI, Ti, I:E, FL — including
+    fl_class_ge4_pct, the percent of leak-valid classified breaths with
+    flow_class >= 4) are populated from
     BreathService.get_nightly_range_summary(); absent entries are null with
     reason (A2).  Compliance uses n_calendar_nights as denominator.
 
@@ -210,8 +212,11 @@ async def get_nightly_summary(
         fl_p95_reason: str | None = None
         fl_max: float | None = None
         fl_max_reason: str | None = None
+        fl_class_ge4_pct: float | None = None
+        fl_class_ge4_pct_reason: str | None = None
         rera_proxy_count: int | None = None
         rera_proxy_reason: str | None = None
+        rera_proxy_version: str | None = None
         ti_median_s: float | None = None
         ti_median_reason: str | None = None
         ie_ratio: float | None = None
@@ -223,6 +228,7 @@ async def get_nightly_summary(
                 rera_proxy_count = bs_night.rera_count
             elif bs_night.rera_reason is not None:
                 rera_proxy_reason = str(bs_night.rera_reason)
+            rera_proxy_version = bs_night.rera_proxy_version
 
             # rera_index and rdi mapped straight through from service DTO
             rera_index = bs_night.rera_index
@@ -242,6 +248,11 @@ async def get_nightly_summary(
             if bs_night.fl_max is not None:
                 fl_max = round(bs_night.fl_max, 4)
 
+            if bs_night.fl_class_ge4_pct is not None:
+                fl_class_ge4_pct = round(bs_night.fl_class_ge4_pct, 1)
+            if bs_night.fl_class_ge4_pct_reason is not None:
+                fl_class_ge4_pct_reason = str_or_none(bs_night.fl_class_ge4_pct_reason)
+
             # Ti and I:E from BreathService
             if bs_night.ti_median_s is not None:
                 ti_median_s = round(bs_night.ti_median_s, 3)
@@ -255,6 +266,7 @@ async def get_nightly_summary(
             fl_median_reason = "analysis_not_run"
             fl_p95_reason = "analysis_not_run"
             fl_max_reason = "analysis_not_run"
+            fl_class_ge4_pct_reason = "analysis_not_run"
             rera_proxy_reason = "analysis_not_run"
             ti_median_reason = "analysis_not_run"
             ie_ratio_reason = "analysis_not_run"
@@ -280,8 +292,11 @@ async def get_nightly_summary(
                 fl_p95_reason=fl_p95_reason,
                 fl_max=fl_max,
                 fl_max_reason=fl_max_reason,
+                fl_class_ge4_pct=fl_class_ge4_pct,
+                fl_class_ge4_pct_reason=fl_class_ge4_pct_reason,
                 rera_proxy_count=rera_proxy_count,
                 rera_proxy_reason=rera_proxy_reason,
+                rera_proxy_version=rera_proxy_version,
                 ti_median_s=ti_median_s,
                 ti_median_reason=ti_median_reason,
                 ie_ratio=ie_ratio,
@@ -362,7 +377,9 @@ def register(mcp: FastMCP) -> None:
 
         Paginated at 30 nights/call (adjustable). Analysis-derived fields (RERA
         index, RDI) are null + reason "analysis_not_run" when analysis has not
-        been run. Compliance fields are included in the response.
+        been run. ``fl_class_ge4_pct`` is the percent of leak-valid classified
+        breaths with ``flow_class >= 4``. Compliance fields are included in the
+        response.
 
         The ``compliance`` block is present whenever ``start != end`` (range
         mode), even when the range contains no night data rows; it is ``null``

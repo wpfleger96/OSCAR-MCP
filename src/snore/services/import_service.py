@@ -6,6 +6,7 @@ import logging
 
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -135,6 +136,31 @@ class ImportService:
 
             backup_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
 
+        # Profile-declared IANA timezone: parsers whose source data encodes
+        # absolute instants (OSCAR epoch-ms) use it to emit device-local
+        # wall-clock times matching the ResMed contract; None keeps legacy
+        # UTC wall-clock (A6).
+        from snore.database.models import Profile  # noqa: PLC0415
+
+        async with session_scope() as db_session:
+            profile = await db_session.get(Profile, profile_id)
+            timezone_name = profile.timezone if profile else None
+
+        # Validate the stored name eagerly.  ZoneInfoNotFoundError is a
+        # KeyError subclass, so if it escaped from the lazy parse generators
+        # it would bypass the CLI's RuntimeError handling and surface as a raw
+        # traceback.  Re-raise as RuntimeError — the error type callers of
+        # import_sources already render cleanly.
+        if timezone_name is not None:
+            try:
+                ZoneInfo(timezone_name)
+            except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+                raise RuntimeError(
+                    f"Stored profile timezone {timezone_name!r} is not a valid "
+                    "IANA timezone. Fix it with 'snore profile set-timezone "
+                    "<ZONE>' and re-run the import."
+                ) from exc
+
         if not dry_run:
             async with write_gate():
                 async with session_scope(immediate=True) as db_session:
@@ -211,6 +237,7 @@ class ImportService:
                 sort_by=sort_by,
                 parallel=parallel,
                 progress_callback=emit,
+                timezone_name=timezone_name,
             )
             emit("Detected sessions — starting import")
 
