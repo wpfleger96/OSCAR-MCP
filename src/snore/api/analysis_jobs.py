@@ -1,13 +1,14 @@
 """In-memory FIFO analysis job queue.
 
-By default, all admitted analysis jobs start immediately (one worker thread per
-slot, up to MAX_QUEUED).  Set ``SNORE_ANALYSIS_JOB_CONCURRENCY`` to throttle
-concurrency on memory-constrained machines.  Within each job, sessions run with
-configurable per-job concurrency (``SNORE_ANALYSIS_MAX_WORKERS``, default 4):
-the write gate serializes SQLite writes while the read/compute phases overlap
-safely.  CPU across all concurrent jobs is capped globally by the shared
-ProcessPoolExecutor (``SNORE_COMPUTE_MAX_WORKERS``).  Jobs are retained for
-JOB_TTL_SECONDS after completion for status queries, then reaped.
+By default, 4 admitted analysis jobs run concurrently — sized for a typical
+4-5 worker compute pool so CPU is fully utilized without piling unstarted jobs
+onto the process pool.  Set ``SNORE_ANALYSIS_JOB_CONCURRENCY`` to override.
+Within each job, sessions run with configurable per-job concurrency
+(``SNORE_ANALYSIS_MAX_WORKERS``, default 4): the write gate serializes SQLite
+writes while the read/compute phases overlap safely.  CPU across all concurrent
+jobs is capped globally by the shared ProcessPoolExecutor
+(``SNORE_COMPUTE_MAX_WORKERS``).  Jobs are retained for JOB_TTL_SECONDS after
+completion for status queries, then reaped.
 """
 
 from __future__ import annotations
@@ -32,9 +33,10 @@ MAX_QUEUED: int = 10
 # that skip full lifespan setup get a sensible fallback without loading config.
 _DEFAULT_ANALYSIS_MAX_WORKERS: int = 4
 
-# Default number of concurrent analysis job workers: all admitted jobs run
-# immediately, bounded by the queue admission cap.
-_DEFAULT_ANALYSIS_JOB_CONCURRENCY: int = MAX_QUEUED
+# Default number of concurrent analysis job workers: sized for a ~4-5 worker
+# compute pool so the process pool stays saturated without unstarted jobs
+# piling up.  Explicit SNORE_ANALYSIS_JOB_CONCURRENCY overrides this value.
+_DEFAULT_ANALYSIS_JOB_CONCURRENCY: int = 4
 
 
 def _get_analysis_workers() -> int:
@@ -51,17 +53,17 @@ def _get_job_concurrency() -> int:
     """Return the number of concurrent analysis job workers.
 
     Reads ``analysis_job_concurrency`` from config.  ``None`` (the default when
-    ``SNORE_ANALYSIS_JOB_CONCURRENCY`` is unset) resolves to ``MAX_QUEUED`` so
-    every admitted job starts immediately.  A positive integer is clamped to
-    ``MAX_QUEUED`` to prevent spawning more workers than the queue can ever fill.
-    Falls back to ``MAX_QUEUED`` when config is unavailable.
+    ``SNORE_ANALYSIS_JOB_CONCURRENCY`` is unset) resolves to the module default
+    (4), sized for a typical 4-5 worker compute pool.  A positive integer is
+    clamped to ``MAX_QUEUED`` to prevent spawning more workers than the queue
+    can ever fill.  Falls back to the module default when config is unavailable.
     """
     try:
         from snore.api.config import get_config  # noqa: PLC0415
 
         cfg_value = get_config().analysis_job_concurrency
         if cfg_value is None:
-            return MAX_QUEUED
+            return _DEFAULT_ANALYSIS_JOB_CONCURRENCY
         return min(cfg_value, MAX_QUEUED)
     except Exception:
         return _DEFAULT_ANALYSIS_JOB_CONCURRENCY
@@ -209,7 +211,24 @@ class AnalysisJob:
             self._progress_total = total or 0
 
     def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serialisable snapshot of this job's state.
+
+        eta_seconds is a linear extrapolation: (elapsed / done) * remaining.
+        Early estimates can be imprecise; the value is clamped to zero so a
+        race where progress_completed momentarily exceeds progress_total never
+        produces a negative ETA.
+        """
         with self._lock:
+            eta: int | None = None
+            if (
+                self._state == AnalysisJobState.RUNNING
+                and self._started_at is not None
+                and self._progress_completed > 0
+                and self._progress_total > 0
+            ):
+                elapsed = time.monotonic() - self._started_at
+                remaining = max(0, self._progress_total - self._progress_completed)
+                eta = round((elapsed / self._progress_completed) * remaining)
             return {
                 "job_id": self.job_id,
                 "session_count": len(self.session_ids),
@@ -218,6 +237,7 @@ class AnalysisJob:
                 "state": self._state.value,
                 "progress_completed": self._progress_completed,
                 "progress_total": self._progress_total,
+                "eta_seconds": eta,
                 "error_message": self._error_message,
                 "created_at": self.created_at,
                 "started_at": self._started_at,
@@ -236,6 +256,11 @@ _condition = threading.Condition(_lock)
 
 _worker_threads: list[threading.Thread] = []
 _stop_event: threading.Event | None = None
+# Every stop event ever handed to a worker generation. start_worker() may be
+# called more than once per process (app restarts in tests, repeated test
+# setups); shutdown() must be able to stop EVERY generation, not just the
+# latest, or an abandoned generation keeps draining the shared queue.
+_stop_events: list[threading.Event] = []
 
 
 def enqueue(
@@ -412,10 +437,11 @@ def start_worker() -> tuple[list[threading.Thread], threading.Event]:
 
     Returns (threads, stop_event) so the caller can shut them down.
     """
-    global _worker_threads, _stop_event
+    global _stop_event
     n = _get_job_concurrency()
     stop_event = threading.Event()
     _stop_event = stop_event
+    _stop_events.append(stop_event)
     threads: list[threading.Thread] = []
     for i in range(n):
         t = threading.Thread(
@@ -426,13 +452,20 @@ def start_worker() -> tuple[list[threading.Thread], threading.Event]:
         )
         threads.append(t)
         t.start()
-    _worker_threads = threads
+    _worker_threads.extend(threads)
     return threads, stop_event
 
 
 def shutdown(timeout: float = 10.0) -> None:
-    """Signal all workers to stop; cancel all queued and running jobs."""
-    global _worker_threads, _stop_event
+    """Signal all workers to stop; cancel all queued and running jobs.
+
+    Stops every worker generation ever started in this process (see
+    ``_stop_events``), then drops references to exited threads. Threads that
+    outlive ``timeout`` stay registered so a later call can retry.
+    """
+    global _stop_event
+    for ev in _stop_events:
+        ev.set()
     if _stop_event is not None:
         _stop_event.set()
     with _condition:
@@ -442,3 +475,7 @@ def shutdown(timeout: float = 10.0) -> None:
         _condition.notify_all()  # Wake all idle workers so they see the stop event.
     for t in _worker_threads:
         t.join(timeout=timeout)
+    _worker_threads[:] = [t for t in _worker_threads if t.is_alive()]
+    if not _worker_threads:
+        _stop_events.clear()
+        _stop_event = None

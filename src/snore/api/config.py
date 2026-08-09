@@ -70,9 +70,20 @@ Environment variables
 
 ``SNORE_COMPUTE_MAX_WORKERS``
     Number of worker *processes* in the shared CPU process pool used for
-    device-data parsing and analysis compute.  Each worker carries a full
-    Python + NumPy runtime (~75-150 MB RSS); on machines with limited RAM set
-    this to ``1``.  Default: ``max(1, cpu_count - 1)``.
+    analysis compute.  Each worker carries a full Python + NumPy runtime
+    (~75-150 MB RSS); on machines with limited RAM set this to ``1``.
+    Default: ``max(1, cpu_count - 1)``.
+
+``SNORE_PARSE_MAX_WORKERS``
+    Number of worker *processes* in the dedicated parse pool used for
+    device-data parsing (ResMed EDF+, OSCAR).  Separated from the compute
+    pool so large imports do not starve analysis jobs.  Default:
+    ``max(1, cpu_count // 2)``.
+
+    **Combined footprint:** total worker processes = compute (default
+    ``cpu_count - 1``) + parse (default ``cpu_count // 2``), each ~75-150 MB
+    RSS.  Operators tuning memory should consider both ``SNORE_COMPUTE_MAX_WORKERS``
+    and ``SNORE_PARSE_MAX_WORKERS`` together.
 
 ``SNORE_BOOTSTRAP_ADMIN_EMAIL``
     Optional.  Multiuser mode only.  When no active admin user exists at
@@ -165,7 +176,10 @@ class AppConfig:
     )
     compute_max_workers: int = max(
         1, (os.cpu_count() or 2) - 1
-    )  # Shared CPU process pool size.
+    )  # Shared CPU process pool size (analysis compute).
+    parse_max_workers: int = max(
+        1, (os.cpu_count() or 2) // 2
+    )  # Parse process pool size (device-data parsing).
     bootstrap_admin_email: str | None = None
 
     @property
@@ -319,6 +333,9 @@ def load_config(
     compute_max_workers = _parse_positive_int(
         "SNORE_COMPUTE_MAX_WORKERS", max(1, (os.cpu_count() or 2) - 1)
     )
+    parse_max_workers = _parse_positive_int(
+        "SNORE_PARSE_MAX_WORKERS", max(1, (os.cpu_count() or 2) // 2)
+    )
 
     raw_bootstrap_email = os.environ.get("SNORE_BOOTSTRAP_ADMIN_EMAIL", "").strip()
     bootstrap_admin_email = (
@@ -397,6 +414,7 @@ def load_config(
         analysis_max_workers=analysis_max_workers,
         analysis_job_concurrency=analysis_job_concurrency,
         compute_max_workers=compute_max_workers,
+        parse_max_workers=parse_max_workers,
         bootstrap_admin_email=bootstrap_admin_email,
     )
 
