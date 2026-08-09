@@ -53,6 +53,8 @@ __all__ = [
     "ResetResult",
     # Per-user data deletion schema
     "DeleteDataResult",
+    # Stats range schema
+    "DataRange",
 ]
 
 
@@ -682,6 +684,13 @@ class ResetResult(BaseModel):
             " The caller's account was deleted; redeem this URL to create a new admin account."
         ),
     )
+
+
+class DataRange(BaseModel):
+    """Profile data availability — always all-time, unaffected by days_limit."""
+
+    earliest_date: date | None = None
+    latest_date: date | None = None
 
 
 class DeleteDataResult(BaseModel):

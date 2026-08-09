@@ -50,7 +50,7 @@
                 </template>
                 <TableRow v-else>
                     <TableCell :colspan="8" class="h-24 text-center text-muted-foreground">
-                        No period data available.
+                        {{ emptyMessage ?? 'No period data available.' }}
                     </TableCell>
                 </TableRow>
             </TableBody>
@@ -74,5 +74,6 @@ import { ahiClass, formatDateMonthDay } from '@/utils/formatting'
 defineProps<{
     periods: PeriodStatistics[]
     loading: boolean
+    emptyMessage?: string
 }>()
 </script>

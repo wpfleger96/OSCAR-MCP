@@ -78,7 +78,12 @@
         <div class="section-card">
             <h2>Period Breakdown</h2>
             <ErrorState v-if="periodsError" :message="periodsError" :retry="reloadPeriods" />
-            <PeriodStatsTable v-else :periods="periods" :loading="periodsLoading" />
+            <PeriodStatsTable
+                v-else
+                :periods="periods"
+                :loading="periodsLoading || dataRangeLoading"
+                :empty-message="periodsEmptyMessage"
+            />
         </div>
 
         <!-- Trend Charts (one per selected metric) -->
@@ -104,7 +109,12 @@
         <div class="section-card">
             <h2>Records</h2>
             <ErrorState v-if="recordsError" :message="recordsError" :retry="reloadRecords" />
-            <RecordsPanel v-else :records="records" :loading="recordsLoading" />
+            <RecordsPanel
+                v-else
+                :records="records"
+                :loading="recordsLoading || dataRangeLoading"
+                :empty-message="recordsEmptyMessage"
+            />
         </div>
     </div>
 </template>
@@ -117,8 +127,9 @@ import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import RecordsPanel from '@/components/RecordsPanel.vue'
 import ErrorState from '@/components/ErrorState.vue'
-import { getSummary, getPeriods, getTrends, getRecords } from '@/api/stats'
+import { getSummary, getPeriods, getTrends, getRecords, getDataRange } from '@/api/stats'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { formatDateFull } from '@/utils/formatting'
 import type { PeriodStatistics, TrendData } from '@/types'
 
 // ────────────────────────────── Metric config ──────────────────────────────
@@ -153,6 +164,8 @@ const granularityOptions = [
     { label: 'Year', value: 'year' },
 ]
 
+// Toggle button labels ('30d', '1yr', 'All') differ from the message labels ('30 days', '1 year',
+// 'all time'), so rangeOptions is kept as a separate structure rather than derived from RANGE_CONFIG.
 const rangeOptions = [
     { label: '30d', value: '30d' },
     { label: '90d', value: '90d' },
@@ -161,12 +174,12 @@ const rangeOptions = [
     { label: 'All', value: 'all' },
 ]
 
-const rangeDaysMap: Record<string, number | undefined> = {
-    '30d': 30,
-    '90d': 90,
-    '180d': 180,
-    '1yr': 365,
-    all: undefined,
+const RANGE_CONFIG: Record<string, { days?: number; label: string }> = {
+    '30d': { days: 30, label: '30 days' },
+    '90d': { days: 90, label: '90 days' },
+    '180d': { days: 180, label: '180 days' },
+    '1yr': { days: 365, label: '1 year' },
+    all: { days: undefined, label: 'all time' },
 }
 
 // ────────────────────────────── State ──────────────────────────────
@@ -183,7 +196,7 @@ function setGranularity(v: string): void {
     }
 }
 
-const effectiveDaysLimit = computed<number | undefined>(() => rangeDaysMap[daysRange.value])
+const effectiveDaysLimit = computed<number | undefined>(() => RANGE_CONFIG[daysRange.value]?.days)
 
 // ────────────────────────────── Metric selection + persistence ──────────────────────────────
 
@@ -223,7 +236,7 @@ const {
     const [periods, trends, summary] = await Promise.all([
         getPeriods(granularity.value, effectiveDaysLimit.value),
         getTrends(granularity.value, effectiveDaysLimit.value),
-        getSummary(),
+        getSummary(effectiveDaysLimit.value),
     ])
     return { periods, trends, summary }
 })
@@ -243,6 +256,24 @@ watch([granularity, daysRange], () => {
     void reloadPeriods()
     void reloadRecords()
 })
+
+// Mount-only; the all-time latest data date doesn't change with the range picker.
+// Errors are intentionally not surfaced — on failure, empty states fall back to generic copy.
+const { data: dataRange, loading: dataRangeLoading } = useApiLoad(() => getDataRange())
+
+// ────────────────────────────── Empty-state messages ──────────────────────────────
+
+function rangeEmptyMessage(noun: string, fallback: string): string {
+    if (dataRange.value?.latest_date && daysRange.value !== 'all') {
+        const { label } = RANGE_CONFIG[daysRange.value]
+        const formattedDate = formatDateFull(dataRange.value.latest_date)
+        return `No ${noun} in the last ${label} — most recent night is ${formattedDate}. Try a wider range.`
+    }
+    return fallback
+}
+
+const periodsEmptyMessage = computed(() => rangeEmptyMessage('data', 'No period data available.'))
+const recordsEmptyMessage = computed(() => rangeEmptyMessage('records', 'No records available.'))
 
 // ────────────────────────────── Chart helpers ──────────────────────────────
 

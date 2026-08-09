@@ -1,6 +1,9 @@
 <template>
-    <div v-if="loading" class="records-loading">
+    <div v-if="loading" class="records-placeholder">
         <Loader2 class="h-4 w-4 animate-spin" /> Loading records...
+    </div>
+    <div v-else-if="!displayMetrics.length" class="records-placeholder">
+        {{ props.emptyMessage ?? 'No records available.' }}
     </div>
     <div v-else class="records-grid">
         <div v-for="(metric, key) in displayMetrics" :key="key" class="record-card">
@@ -40,6 +43,7 @@ import type { RecordsData } from '@/types'
 const props = defineProps<{
     records: RecordsData | null
     loading: boolean
+    emptyMessage?: string
 }>()
 
 const METRIC_CONFIG: Record<string, { label: string; decimals: number }> = {
@@ -63,7 +67,7 @@ const displayMetrics = computed(() => {
 </script>
 
 <style scoped>
-.records-loading {
+.records-placeholder {
     padding: 2rem;
     text-align: center;
     color: var(--color-muted-foreground);

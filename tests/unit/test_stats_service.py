@@ -1,5 +1,7 @@
 """Unit tests for StatsService."""
 
+import uuid
+
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -7,7 +9,7 @@ import pytest
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.database.models import Day, Device, Event, Session, Statistics
+from snore.database.models import Day, Device, Event, Profile, Session, Statistics, User
 from snore.services.stats_service import StatsService
 
 
@@ -320,6 +322,120 @@ class TestStatsService:
         assert summary.avg_spo2 is not None
         assert abs(summary.avg_spo2 - 95.5) < 0.1
         assert summary.min_spo2 == 88
+
+
+class TestGetDataRange:
+    """Tests for StatsService.get_data_range()."""
+
+    async def test_returns_none_fields_with_no_data(self, async_db_session):
+        """Empty database returns DataRange with both dates None."""
+        service = StatsService(async_db_session, profile_id=1)
+        result = await service.get_data_range()
+
+        assert result.earliest_date is None
+        assert result.latest_date is None
+
+    async def test_returns_both_bounds_with_multiple_days(
+        self, async_db_session, async_test_device
+    ):
+        """Returns earliest and latest Day.date across all profile days."""
+        today = date.today()
+        oldest = today - timedelta(days=30)
+        newest = today - timedelta(days=5)
+        await _create_day_with_session(async_db_session, async_test_device, oldest)
+        await _create_day_with_session(async_db_session, async_test_device, newest)
+        await _create_day_with_session(
+            async_db_session, async_test_device, today - timedelta(days=15)
+        )
+
+        service = StatsService(async_db_session, profile_id=1)
+        result = await service.get_data_range()
+
+        assert result.earliest_date == oldest
+        assert result.latest_date == newest
+
+    async def test_multi_device_spans_both_devices(self, async_db_session):
+        """Min/max span days from two devices on the same profile."""
+        user = User(
+            canonical_email=f"u_{uuid.uuid4().hex[:8]}@test.com",
+            role="admin",
+        )
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="P")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+
+        dev_a = Device(
+            profile_id=profile.id,
+            manufacturer="Mfr",
+            model="A",
+            serial_number=f"SN_{uuid.uuid4().hex[:6]}",
+        )
+        dev_b = Device(
+            profile_id=profile.id,
+            manufacturer="Mfr",
+            model="B",
+            serial_number=f"SN_{uuid.uuid4().hex[:6]}",
+        )
+        async_db_session.add(dev_a)
+        async_db_session.add(dev_b)
+        await async_db_session.flush()
+
+        today = date.today()
+        earliest = today - timedelta(days=60)
+        latest = today - timedelta(days=1)
+        # dev_a owns the earliest day; dev_b owns the latest day
+        await _create_day_with_session(async_db_session, dev_a, earliest)
+        await _create_day_with_session(async_db_session, dev_b, latest)
+
+        service = StatsService(async_db_session, profile_id=profile.id)
+        result = await service.get_data_range()
+
+        assert result.earliest_date == earliest
+        assert result.latest_date == latest
+
+    async def test_cross_profile_isolation(self, async_db_session):
+        """Days on a different profile do not affect the result."""
+
+        async def _make_profile_and_device() -> tuple[Profile, Device]:
+            user = User(
+                canonical_email=f"u_{uuid.uuid4().hex[:8]}@test.com",
+                role="admin",
+            )
+            async_db_session.add(user)
+            await async_db_session.flush()
+            profile = Profile(user_id=user.id, name="P")
+            async_db_session.add(profile)
+            await async_db_session.flush()
+            device = Device(
+                profile_id=profile.id,
+                manufacturer="Mfr",
+                model="M",
+                serial_number=f"SN_{uuid.uuid4().hex[:6]}",
+            )
+            async_db_session.add(device)
+            await async_db_session.flush()
+            return profile, device
+
+        profile_a, dev_a = await _make_profile_and_device()
+        profile_b, dev_b = await _make_profile_and_device()
+
+        today = date.today()
+        # profile_a has a day 10 days ago
+        await _create_day_with_session(
+            async_db_session, dev_a, today - timedelta(days=10)
+        )
+        # profile_b has a day 1 day ago — must NOT appear in profile_a's range
+        await _create_day_with_session(
+            async_db_session, dev_b, today - timedelta(days=1)
+        )
+
+        service = StatsService(async_db_session, profile_id=profile_a.id)
+        result = await service.get_data_range()
+
+        assert result.earliest_date == today - timedelta(days=10)
+        assert result.latest_date == today - timedelta(days=10)
 
 
 class TestQueryDaysFiltering:
