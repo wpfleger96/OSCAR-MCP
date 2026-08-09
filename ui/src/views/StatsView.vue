@@ -81,7 +81,7 @@
             <PeriodStatsTable
                 v-else
                 :periods="periods"
-                :loading="periodsLoading"
+                :loading="periodsLoading || dataRangeLoading"
                 :empty-message="periodsEmptyMessage"
             />
         </div>
@@ -112,7 +112,7 @@
             <RecordsPanel
                 v-else
                 :records="records"
-                :loading="recordsLoading"
+                :loading="recordsLoading || dataRangeLoading"
                 :empty-message="recordsEmptyMessage"
             />
         </div>
@@ -164,6 +164,8 @@ const granularityOptions = [
     { label: 'Year', value: 'year' },
 ]
 
+// Toggle button labels ('30d', '1yr', 'All') differ from the message labels ('30 days', '1 year',
+// 'all time'), so rangeOptions is kept as a separate structure rather than derived from RANGE_CONFIG.
 const rangeOptions = [
     { label: '30d', value: '30d' },
     { label: '90d', value: '90d' },
@@ -172,20 +174,12 @@ const rangeOptions = [
     { label: 'All', value: 'all' },
 ]
 
-const rangeDaysMap: Record<string, number | undefined> = {
-    '30d': 30,
-    '90d': 90,
-    '180d': 180,
-    '1yr': 365,
-    all: undefined,
-}
-
-const rangeLabelMap: Record<string, string> = {
-    '30d': '30 days',
-    '90d': '90 days',
-    '180d': '180 days',
-    '1yr': '1 year',
-    all: 'all time',
+const RANGE_CONFIG: Record<string, { days?: number; label: string }> = {
+    '30d': { days: 30, label: '30 days' },
+    '90d': { days: 90, label: '90 days' },
+    '180d': { days: 180, label: '180 days' },
+    '1yr': { days: 365, label: '1 year' },
+    all: { days: undefined, label: 'all time' },
 }
 
 // ────────────────────────────── State ──────────────────────────────
@@ -202,7 +196,7 @@ function setGranularity(v: string): void {
     }
 }
 
-const effectiveDaysLimit = computed<number | undefined>(() => rangeDaysMap[daysRange.value])
+const effectiveDaysLimit = computed<number | undefined>(() => RANGE_CONFIG[daysRange.value]?.days)
 
 // ────────────────────────────── Metric selection + persistence ──────────────────────────────
 
@@ -263,28 +257,23 @@ watch([granularity, daysRange], () => {
     void reloadRecords()
 })
 
-// Mount-only load — the all-time latest data date doesn't change with the range picker.
-const { data: dataRange } = useApiLoad(() => getDataRange(), 'Failed to load data range')
+// Mount-only; the all-time latest data date doesn't change with the range picker.
+// Errors are intentionally not surfaced — on failure, empty states fall back to generic copy.
+const { data: dataRange, loading: dataRangeLoading } = useApiLoad(() => getDataRange())
 
 // ────────────────────────────── Empty-state messages ──────────────────────────────
 
-const periodsEmptyMessage = computed(() => {
+function rangeEmptyMessage(noun: string, fallback: string): string {
     if (dataRange.value?.latest_date && daysRange.value !== 'all') {
-        const label = rangeLabelMap[daysRange.value]
+        const { label } = RANGE_CONFIG[daysRange.value]
         const formattedDate = formatDateFull(dataRange.value.latest_date)
-        return `No data in the last ${label} — most recent night is ${formattedDate}. Try a wider range.`
+        return `No ${noun} in the last ${label} — most recent night is ${formattedDate}. Try a wider range.`
     }
-    return 'No period data available.'
-})
+    return fallback
+}
 
-const recordsEmptyMessage = computed(() => {
-    if (dataRange.value?.latest_date && daysRange.value !== 'all') {
-        const label = rangeLabelMap[daysRange.value]
-        const formattedDate = formatDateFull(dataRange.value.latest_date)
-        return `No records in the last ${label} — most recent night is ${formattedDate}. Try a wider range.`
-    }
-    return 'No records available.'
-})
+const periodsEmptyMessage = computed(() => rangeEmptyMessage('data', 'No period data available.'))
+const recordsEmptyMessage = computed(() => rangeEmptyMessage('records', 'No records available.'))
 
 // ────────────────────────────── Chart helpers ──────────────────────────────
 

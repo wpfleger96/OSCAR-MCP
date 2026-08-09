@@ -25,10 +25,12 @@ vi.mock('@/utils/formatting', () => ({
 }))
 
 vi.mock('@/components/ui/toggle-group', () => ({
-    ToggleGroup: {
+    ToggleGroup: defineComponent({
+        name: 'ToggleGroup',
         props: ['modelValue', 'type', 'variant'],
+        emits: ['update:model-value'],
         template: '<div><slot /></div>',
-    },
+    }),
     ToggleGroupItem: {
         props: ['value', 'disabled'],
         template: '<button><slot /></button>',
@@ -134,5 +136,29 @@ describe('StatsView', () => {
         // The date formatter is mocked to return the ISO string as-is.
         expect(msg).toContain('2026-05-03')
         expect(msg).toContain('Try a wider range')
+    })
+
+    it('test_records_empty_message_includes_date_and_hint_when_data_range_known', async () => {
+        vi.mocked(getDataRange).mockResolvedValue({ latest_date: '2026-05-03' })
+        vi.mocked(getRecords).mockResolvedValue({})
+
+        const wrapper = await mountAndLoad()
+
+        const panel = wrapper.find('.records-panel-stub')
+        const msg = panel.attributes('data-empty-message') ?? ''
+        // The date formatter is mocked to return the ISO string as-is.
+        expect(msg).toContain('2026-05-03')
+        expect(msg).toContain('Try a wider range')
+    })
+
+    it('test_getSummary_called_with_undefined_when_range_is_all', async () => {
+        const wrapper = await mountAndLoad()
+
+        // The Range toggle is the second ToggleGroup (after Granularity, before Metrics).
+        const rangeToggle = wrapper.findAllComponents({ name: 'ToggleGroup' })[1]
+        await rangeToggle.vm.$emit('update:model-value', 'all')
+        await flushPromises()
+
+        expect(getSummary).toHaveBeenLastCalledWith(undefined)
     })
 })

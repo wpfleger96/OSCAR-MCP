@@ -1,8 +1,10 @@
+import uuid
+
 from datetime import date, datetime, timedelta
 
 import pytest
 
-from snore.database.models import Day
+from snore.database.models import Day, Device, Profile, User
 
 
 class TestStatsSummary:
@@ -194,13 +196,13 @@ class TestStatsRecords:
 
 class TestStatsDataRange:
     def test_data_range_empty(self, api_client):
-        """/data-range returns 200 with null latest_date when no data exists."""
+        """/data-range returns 200 with both dates null when no data exists."""
         response = api_client.get("/api/v1/stats/data-range")
         assert response.status_code == 200
-        assert response.json() == {"latest_date": None}
+        assert response.json() == {"earliest_date": None, "latest_date": None}
 
-    def test_data_range_returns_max_date(self, api_client, db_session, test_device):
-        """/data-range returns the most recent Day.date across all profile data."""
+    def test_data_range_returns_both_bounds(self, api_client, db_session, test_device):
+        """/data-range returns earliest and latest Day.date across all profile data."""
         older = date.today() - timedelta(days=30)
         newer = date.today() - timedelta(days=5)
         db_session.add(
@@ -213,12 +215,14 @@ class TestStatsDataRange:
 
         response = api_client.get("/api/v1/stats/data-range")
         assert response.status_code == 200
-        assert response.json()["latest_date"] == str(newer)
+        data = response.json()
+        assert data["earliest_date"] == str(older)
+        assert data["latest_date"] == str(newer)
 
-    def test_data_range_returns_all_time_max_for_old_data(
+    def test_data_range_returns_all_time_bounds_for_old_data(
         self, api_client, db_session, test_device
     ):
-        """/data-range returns the all-time max even when data is >400 days old."""
+        """/data-range returns the all-time bounds even when data is >400 days old."""
         old_date = date.today() - timedelta(days=450)
         db_session.add(
             Day(device_id=test_device.id, date=old_date, total_therapy_hours=7.0)
@@ -227,7 +231,62 @@ class TestStatsDataRange:
 
         response = api_client.get("/api/v1/stats/data-range")
         assert response.status_code == 200
-        assert response.json()["latest_date"] == str(old_date)
+        data = response.json()
+        assert data["earliest_date"] == str(old_date)
+        assert data["latest_date"] == str(old_date)
+
+
+class TestStatsDataRangeProfileIsolation:
+    def test_data_range_excludes_foreign_profile_days(
+        self, api_client, db_session, test_device
+    ):
+        """/data-range does not bleed days from a second profile into the response.
+
+        ``api_client`` operates as the actor backed by ``test_profile`` (the
+        first admin user's profile).  A foreign Day seeded on a second profile's
+        device must not affect the returned bounds.
+        """
+        today = date.today()
+        own_date = today - timedelta(days=10)
+
+        # Seed one day for the actor's profile (via test_device).
+        db_session.add(
+            Day(device_id=test_device.id, date=own_date, total_therapy_hours=7.0)
+        )
+
+        # Create a completely separate user + profile + device with a newer date.
+        foreign_user = User(
+            canonical_email=f"foreign_{uuid.uuid4().hex[:8]}@test.com",
+            role="member",
+        )
+        db_session.add(foreign_user)
+        db_session.flush()
+        foreign_profile = Profile(user_id=foreign_user.id, name="Foreign")
+        db_session.add(foreign_profile)
+        db_session.flush()
+        foreign_device = Device(
+            profile_id=foreign_profile.id,
+            manufacturer="Mfr",
+            model="M",
+            serial_number=f"SN_{uuid.uuid4().hex[:8]}",
+        )
+        db_session.add(foreign_device)
+        db_session.flush()
+        db_session.add(
+            Day(
+                device_id=foreign_device.id,
+                date=today - timedelta(days=1),
+                total_therapy_hours=7.0,
+            )
+        )
+        db_session.flush()
+
+        response = api_client.get("/api/v1/stats/data-range")
+        assert response.status_code == 200
+        data = response.json()
+        # Both bounds must reflect only the actor's own day — not the foreign one.
+        assert data["earliest_date"] == str(own_date)
+        assert data["latest_date"] == str(own_date)
 
 
 class TestStatsSummaryDaysLimitEdgeCase:

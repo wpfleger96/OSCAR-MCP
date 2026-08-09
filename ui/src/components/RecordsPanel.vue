@@ -1,8 +1,8 @@
 <template>
-    <div v-if="loading" class="records-loading">
+    <div v-if="loading" class="records-placeholder">
         <Loader2 class="h-4 w-4 animate-spin" /> Loading records...
     </div>
-    <div v-else-if="!displayMetrics.length" class="records-empty">
+    <div v-else-if="!displayMetrics.length" class="records-placeholder">
         {{ props.emptyMessage ?? 'No records available.' }}
     </div>
     <div v-else class="records-grid">
@@ -67,13 +67,7 @@ const displayMetrics = computed(() => {
 </script>
 
 <style scoped>
-.records-loading {
-    padding: 2rem;
-    text-align: center;
-    color: var(--color-muted-foreground);
-}
-
-.records-empty {
+.records-placeholder {
     padding: 2rem;
     text-align: center;
     color: var(--color-muted-foreground);

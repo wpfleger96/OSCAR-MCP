@@ -16,7 +16,12 @@ from snore.analysis.calculations import (
     calculate_trends_extended,
 )
 from snore.database import models
-from snore.services.schemas import EventTypeCount, PeriodStatistics, TherapySummary
+from snore.services.schemas import (
+    DataRange,
+    EventTypeCount,
+    PeriodStatistics,
+    TherapySummary,
+)
 
 __all__ = ["StatsService"]
 
@@ -332,11 +337,13 @@ class StatsService:
         day_records = await self._query_days(days_limit)
         return calculate_records(day_records, top_n)
 
-    async def get_data_range(self) -> date | None:
-        """Return the profile's latest Day.date (all-time, ignores days_limit)."""
-        result = await self.db_session.execute(
-            select(func.max(models.Day.date))
-            .join(models.Device, models.Day.device_id == models.Device.id)
-            .where(self._profile_filter())
-        )
-        return result.scalar()
+    async def get_data_range(self) -> DataRange:
+        """Return the profile's earliest and latest Day.date (all-time, ignores days_limit)."""
+        row = (
+            await self.db_session.execute(
+                select(func.min(models.Day.date), func.max(models.Day.date))
+                .join(models.Device, models.Day.device_id == models.Device.id)
+                .where(self._profile_filter())
+            )
+        ).one()
+        return DataRange(earliest_date=row[0], latest_date=row[1])

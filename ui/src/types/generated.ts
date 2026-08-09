@@ -1845,6 +1845,8 @@ export interface components {
          * @description Profile data availability — always all-time, unaffected by days_limit.
          */
         DataRange: {
+            /** Earliest Date */
+            earliest_date?: string | null
             /** Latest Date */
             latest_date?: string | null
         }

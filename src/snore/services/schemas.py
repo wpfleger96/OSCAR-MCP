@@ -689,6 +689,7 @@ class ResetResult(BaseModel):
 class DataRange(BaseModel):
     """Profile data availability — always all-time, unaffected by days_limit."""
 
+    earliest_date: date | None = None
     latest_date: date | None = None
 
 

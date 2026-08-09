@@ -60,7 +60,7 @@ async def get_trends(
 
 @router.get("/data-range", response_model=DataRange)
 async def get_data_range(service: StatsServiceDep) -> DataRange:
-    return DataRange(latest_date=await service.get_data_range())
+    return await service.get_data_range()
 
 
 @router.get("/records", response_model=dict[str, dict[str, list[list[Any]]]])
