@@ -322,6 +322,37 @@ class TestStatsService:
         assert summary.min_spo2 == 88
 
 
+class TestGetDataRange:
+    """Tests for StatsService.get_data_range()."""
+
+    async def test_returns_none_with_no_data(self, async_db_session):
+        """Empty database returns None."""
+        service = StatsService(async_db_session, profile_id=1)
+        result = await service.get_data_range()
+
+        assert result is None
+
+    async def test_returns_max_date_with_multiple_days(
+        self, async_db_session, async_test_device
+    ):
+        """Returns the latest Day.date across all profile days."""
+        today = date.today()
+        await _create_day_with_session(
+            async_db_session, async_test_device, today - timedelta(days=30)
+        )
+        await _create_day_with_session(
+            async_db_session, async_test_device, today - timedelta(days=5)
+        )
+        await _create_day_with_session(
+            async_db_session, async_test_device, today - timedelta(days=15)
+        )
+
+        service = StatsService(async_db_session, profile_id=1)
+        result = await service.get_data_range()
+
+        assert result == today - timedelta(days=5)
+
+
 class TestQueryDaysFiltering:
     """Test _query_days with from_date and to_date parameters."""
 

@@ -749,3 +749,52 @@ class TestCalculateAhiTrendDirection:
         # latest = 5.2, prior_avg = 5.0 → within ±10% → stable
         result = calculate_ahi_trend_direction([5.0, 5.0, 5.2])
         assert result == "stable"
+
+
+class TestNullGuardInPeriodStatistics:
+    """NULL total_therapy_hours/reras must not crash calculate_period_statistics.
+
+    SQLite ALTER TABLE ADD COLUMN leaves existing rows NULL even when the ORM
+    column is declared non-nullable.  These tests verify the guard condition
+    safely excludes such rows from avg_rera rather than raising TypeError.
+    """
+
+    def test_null_total_therapy_hours_excluded_from_avg_rera(self):
+        """Day with NULL total_therapy_hours is skipped in rera_rates without error."""
+        day = Day()
+        day.date = date(2024, 1, 15)
+        day.reras = 5
+        day.total_therapy_hours = None  # simulates ALTER TABLE ADD COLUMN NULL
+        day.ahi = None
+        day.pressure_median = None
+        day.leak_median = None
+        day.spo2_mean = None
+        day.spo2_min = None
+        day.oai = None
+        day.cai = None
+        day.hi = None
+
+        result = calculate_period_statistics([day], "month")
+
+        assert len(result) == 1
+        assert result[0].avg_rera is None
+
+    def test_null_reras_excluded_from_avg_rera(self):
+        """Day with NULL reras is skipped in rera_rates without error."""
+        day = Day()
+        day.date = date(2024, 1, 15)
+        day.reras = None  # simulates ALTER TABLE ADD COLUMN NULL
+        day.total_therapy_hours = 8.0
+        day.ahi = None
+        day.pressure_median = None
+        day.leak_median = None
+        day.spo2_mean = None
+        day.spo2_min = None
+        day.oai = None
+        day.cai = None
+        day.hi = None
+
+        result = calculate_period_statistics([day], "month")
+
+        assert len(result) == 1
+        assert result[0].avg_rera is None

@@ -242,7 +242,9 @@ def calculate_period_statistics(
         rera_rates = [
             day.reras / day.total_therapy_hours
             for day in days_in_period
-            if day.total_therapy_hours > 0
+            if day.reras is not None
+            and day.total_therapy_hours is not None
+            and day.total_therapy_hours > 0
         ]
         avg_rera = sum(rera_rates) / len(rera_rates) if rera_rates else None
 

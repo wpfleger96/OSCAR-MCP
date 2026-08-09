@@ -190,3 +190,56 @@ class TestStatsRecords:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, dict)
+
+
+class TestStatsDataRange:
+    def test_data_range_empty(self, api_client):
+        """/data-range returns 200 with null latest_date when no data exists."""
+        response = api_client.get("/api/v1/stats/data-range")
+        assert response.status_code == 200
+        assert response.json() == {"latest_date": None}
+
+    def test_data_range_returns_max_date(self, api_client, db_session, test_device):
+        """/data-range returns the most recent Day.date across all profile data."""
+        older = date.today() - timedelta(days=30)
+        newer = date.today() - timedelta(days=5)
+        db_session.add(
+            Day(device_id=test_device.id, date=older, total_therapy_hours=7.0)
+        )
+        db_session.add(
+            Day(device_id=test_device.id, date=newer, total_therapy_hours=7.0)
+        )
+        db_session.flush()
+
+        response = api_client.get("/api/v1/stats/data-range")
+        assert response.status_code == 200
+        assert response.json()["latest_date"] == str(newer)
+
+    def test_data_range_returns_all_time_max_for_old_data(
+        self, api_client, db_session, test_device
+    ):
+        """/data-range returns the all-time max even when data is >400 days old."""
+        old_date = date.today() - timedelta(days=450)
+        db_session.add(
+            Day(device_id=test_device.id, date=old_date, total_therapy_hours=7.0)
+        )
+        db_session.flush()
+
+        response = api_client.get("/api/v1/stats/data-range")
+        assert response.status_code == 200
+        assert response.json()["latest_date"] == str(old_date)
+
+
+class TestStatsSummaryDaysLimitEdgeCase:
+    def test_summary_returns_204_when_data_older_than_days_limit(
+        self, api_client, db_session, test_device
+    ):
+        """/summary?days_limit=90 returns 204 when the only data is ~200 days old."""
+        old_date = date.today() - timedelta(days=200)
+        db_session.add(
+            Day(device_id=test_device.id, date=old_date, total_therapy_hours=7.0)
+        )
+        db_session.flush()
+
+        response = api_client.get("/api/v1/stats/summary?days_limit=90")
+        assert response.status_code == 204

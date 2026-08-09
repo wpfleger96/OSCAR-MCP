@@ -331,3 +331,12 @@ class StatsService:
         """Calculate top best/worst days for key metrics."""
         day_records = await self._query_days(days_limit)
         return calculate_records(day_records, top_n)
+
+    async def get_data_range(self) -> date | None:
+        """Return the profile's latest Day.date (all-time, ignores days_limit)."""
+        result = await self.db_session.execute(
+            select(func.max(models.Day.date))
+            .join(models.Device, models.Day.device_id == models.Device.id)
+            .where(self._profile_filter())
+        )
+        return result.scalar()

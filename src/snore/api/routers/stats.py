@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from snore.analysis.calculations import PeriodType
 from snore.api.deps import service_dep
 from snore.services import StatsService
-from snore.services.schemas import PeriodStatistics, TherapySummary
+from snore.services.schemas import DataRange, PeriodStatistics, TherapySummary
 
 router = APIRouter()
 
@@ -56,6 +56,11 @@ async def get_trends(
     if period_type == "day" and days_limit is None:
         days_limit = 180
     return await service.get_trends(period_type, days_limit)
+
+
+@router.get("/data-range", response_model=DataRange)
+async def get_data_range(service: StatsServiceDep) -> DataRange:
+    return DataRange(latest_date=await service.get_data_range())
 
 
 @router.get("/records", response_model=dict[str, dict[str, list[list[Any]]]])

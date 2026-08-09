@@ -46,6 +46,7 @@ export type DeletePreview = Schemas['DeletePreview']
 export type TherapySummary = Schemas['TherapySummary']
 export type EventTypeCount = Schemas['EventTypeCount']
 export type PeriodStatistics = Schemas['PeriodStatistics']
+export type DataRange = Schemas['DataRange']
 
 // Days
 export type DayListItem = Schemas['DayListItem']

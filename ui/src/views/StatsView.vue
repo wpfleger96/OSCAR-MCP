@@ -78,7 +78,12 @@
         <div class="section-card">
             <h2>Period Breakdown</h2>
             <ErrorState v-if="periodsError" :message="periodsError" :retry="reloadPeriods" />
-            <PeriodStatsTable v-else :periods="periods" :loading="periodsLoading" />
+            <PeriodStatsTable
+                v-else
+                :periods="periods"
+                :loading="periodsLoading"
+                :empty-message="periodsEmptyMessage"
+            />
         </div>
 
         <!-- Trend Charts (one per selected metric) -->
@@ -104,7 +109,12 @@
         <div class="section-card">
             <h2>Records</h2>
             <ErrorState v-if="recordsError" :message="recordsError" :retry="reloadRecords" />
-            <RecordsPanel v-else :records="records" :loading="recordsLoading" />
+            <RecordsPanel
+                v-else
+                :records="records"
+                :loading="recordsLoading"
+                :empty-message="recordsEmptyMessage"
+            />
         </div>
     </div>
 </template>
@@ -117,8 +127,9 @@ import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import RecordsPanel from '@/components/RecordsPanel.vue'
 import ErrorState from '@/components/ErrorState.vue'
-import { getSummary, getPeriods, getTrends, getRecords } from '@/api/stats'
+import { getSummary, getPeriods, getTrends, getRecords, getDataRange } from '@/api/stats'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { formatDateFull } from '@/utils/formatting'
 import type { PeriodStatistics, TrendData } from '@/types'
 
 // ────────────────────────────── Metric config ──────────────────────────────
@@ -167,6 +178,14 @@ const rangeDaysMap: Record<string, number | undefined> = {
     '180d': 180,
     '1yr': 365,
     all: undefined,
+}
+
+const rangeLabelMap: Record<string, string> = {
+    '30d': '30 days',
+    '90d': '90 days',
+    '180d': '180 days',
+    '1yr': '1 year',
+    all: 'all time',
 }
 
 // ────────────────────────────── State ──────────────────────────────
@@ -223,7 +242,7 @@ const {
     const [periods, trends, summary] = await Promise.all([
         getPeriods(granularity.value, effectiveDaysLimit.value),
         getTrends(granularity.value, effectiveDaysLimit.value),
-        getSummary(),
+        getSummary(effectiveDaysLimit.value),
     ])
     return { periods, trends, summary }
 })
@@ -242,6 +261,29 @@ const trends = computed(() => periodData.value?.trends ?? null)
 watch([granularity, daysRange], () => {
     void reloadPeriods()
     void reloadRecords()
+})
+
+// Mount-only load — the all-time latest data date doesn't change with the range picker.
+const { data: dataRange } = useApiLoad(() => getDataRange(), 'Failed to load data range')
+
+// ────────────────────────────── Empty-state messages ──────────────────────────────
+
+const periodsEmptyMessage = computed(() => {
+    if (dataRange.value?.latest_date && daysRange.value !== 'all') {
+        const label = rangeLabelMap[daysRange.value]
+        const formattedDate = formatDateFull(dataRange.value.latest_date)
+        return `No data in the last ${label} — most recent night is ${formattedDate}. Try a wider range.`
+    }
+    return 'No period data available.'
+})
+
+const recordsEmptyMessage = computed(() => {
+    if (dataRange.value?.latest_date && daysRange.value !== 'all') {
+        const label = rangeLabelMap[daysRange.value]
+        const formattedDate = formatDateFull(dataRange.value.latest_date)
+        return `No records in the last ${label} — most recent night is ${formattedDate}. Try a wider range.`
+    }
+    return 'No records available.'
 })
 
 // ────────────────────────────── Chart helpers ──────────────────────────────
