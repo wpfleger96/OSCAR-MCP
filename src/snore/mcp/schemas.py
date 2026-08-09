@@ -142,6 +142,9 @@ class NightlyRow(BaseModel):
     fl_p95_reason: str | None = None
     fl_max: float | None = None
     fl_max_reason: str | None = None
+    # Percent of leak-valid classified breaths with flow_class >= 4
+    fl_class_ge4_pct: float | None = None
+    fl_class_ge4_pct_reason: str | None = None
     rera_proxy_count: int | None = None
     rera_proxy_reason: str | None = None
 

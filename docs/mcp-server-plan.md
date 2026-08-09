@@ -935,6 +935,9 @@ class NightlyAnalysisSummary(BaseModel):
     fl_95th: float | None
     fl_max: float | None
     fl_reason: NullReason | None
+    # % of leak-valid classified breaths with flow_class >= 4
+    fl_class_ge4_pct: float | None
+    fl_class_ge4_pct_reason: NullReason | None
     # FL aggregation rule: day_status=MIXED_VERSION → fl_median/fl_95th/fl_max = None,
     # fl_reason = NullReason.ALGO_VERSION_MISMATCH. Otherwise aggregate across OK sessions.
 

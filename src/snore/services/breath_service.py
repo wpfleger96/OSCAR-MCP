@@ -782,6 +782,11 @@ class NightlyAnalysisSummary(BaseModel):
     fl_95th: float | None
     fl_max: float | None
     fl_reason: NullReason | None
+    # Percent of leak-valid classified breaths with flow_class >= 4. Denominator
+    # is leak-valid breaths with a non-null flow_class (consistent with
+    # fl_median's leak-valid convention).
+    fl_class_ge4_pct: float | None
+    fl_class_ge4_pct_reason: NullReason | None
 
     ti_median_s: float | None
     ti_median_reason: NullReason | None
@@ -2579,6 +2584,8 @@ class BreathService:
                 fl_95th=None,
                 fl_max=None,
                 fl_reason=NullReason.NOT_AVAILABLE,
+                fl_class_ge4_pct=None,
+                fl_class_ge4_pct_reason=NullReason.NOT_AVAILABLE,
                 ti_median_s=None,
                 ti_median_reason=NullReason.NOT_AVAILABLE,
                 ie_ratio_median=None,
@@ -2601,6 +2608,8 @@ class BreathService:
         fl_vals: list[float] = []
         ti_vals: list[float] = []
         ie_vals: list[float] = []
+        fl_class_ge4_num = 0
+        fl_class_den = 0
         rera_count = 0
 
         for sid, _algo in ok_sessions:
@@ -2616,7 +2625,13 @@ class BreathService:
                         ti_vals.append(b.inspiration_time_s)
                     if b.i_e_ratio is not None:
                         ie_vals.append(b.i_e_ratio)
-            # RERA proxy: FL runs ending in recovery breath
+                    if b.flow_class is not None:
+                        fl_class_den += 1
+                        if b.flow_class >= 4:
+                            fl_class_ge4_num += 1
+            # RERA proxy: FL runs ending in recovery breath.  Intentionally
+            # scans ALL breaths (not just leak-valid) — runs need sequence
+            # contiguity.
             rera_count += _count_fl_run_reras(breath_rows)
 
         fl_median: float | None
@@ -2635,6 +2650,16 @@ class BreathService:
         else:
             fl_median = fl_95th = fl_max = None
             fl_reason = NullReason.NOT_AVAILABLE
+
+        fl_class_ge4_pct: float | None
+        fl_class_ge4_pct_reason: NullReason | None
+
+        if fl_class_den > 0:
+            fl_class_ge4_pct = 100.0 * fl_class_ge4_num / fl_class_den
+            fl_class_ge4_pct_reason = None
+        else:
+            fl_class_ge4_pct = None
+            fl_class_ge4_pct_reason = NullReason.NOT_AVAILABLE
 
         ti_median_s: float | None
         ti_median_reason: NullReason | None
@@ -2706,6 +2731,8 @@ class BreathService:
             fl_95th=fl_95th,
             fl_max=fl_max,
             fl_reason=fl_reason,
+            fl_class_ge4_pct=fl_class_ge4_pct,
+            fl_class_ge4_pct_reason=fl_class_ge4_pct_reason,
             ti_median_s=ti_median_s,
             ti_median_reason=ti_median_reason,
             ie_ratio_median=ie_ratio_median,

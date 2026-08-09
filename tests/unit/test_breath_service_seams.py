@@ -4468,7 +4468,7 @@ async def _store_night_with_breath_specs(
 
     Each dict in ``breath_specs`` may set any ``ComputedBreath`` field;
     unset keys fall back to sensible defaults.  Supported overrides:
-    ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``.
+    ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``, ``flow_class``.
     """
     from snore.analysis.types import ComputedBreath  # noqa: PLC0415
 
@@ -4494,7 +4494,7 @@ async def _store_night_with_breath_specs(
                 respiratory_rate_rolling=15.0,
                 flatness_index=0.2,
                 mid_insp_flattening=0.35,
-                flow_class=1,
+                flow_class=spec.get("flow_class", 1),
                 flow_confidence=0.9,
                 is_recovery_breath=False,
                 inferred_trigger_type="normal",
@@ -4704,6 +4704,65 @@ class TestNightlyRangeSummaryTiIe:
         assert night.ie_ratio_reason == NullReason.NOT_AVAILABLE
 
 
+@pytest.mark.unit
+class TestNightlySummaryFlClassGe4Pct:
+    """fl_class_ge4_pct on per-night NightlyAnalysisSummary."""
+
+    async def test_pct_counts_leak_valid_classified_breaths_only(
+        self, async_db_session
+    ):
+        """Denominator = leak-valid breaths with a class; leak-invalid and unclassified breaths excluded."""
+        therapy_date = date(2025, 7, 10)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                # Leak-valid classified: [5, 5, 1] → 2/3 with class >= 4
+                {"flow_class": 5, "leak_valid": True},
+                {"flow_class": 5, "leak_valid": True},
+                {"flow_class": 1, "leak_valid": True},
+                # Leak-valid but unclassified → excluded from denominator
+                {"flow_class": None, "leak_valid": True},
+                # Leak-INVALID class 6 → excluded entirely
+                {"flow_class": 6, "leak_valid": False},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.fl_class_ge4_pct == pytest.approx(100.0 * 2 / 3)
+        assert night.fl_class_ge4_pct_reason is None
+
+    async def test_all_breaths_leak_invalid_pct_null_with_not_available_reason(
+        self, async_db_session
+    ):
+        """All breaths leak_valid=False/None → fl_class_ge4_pct is None with NOT_AVAILABLE."""
+        therapy_date = date(2025, 7, 11)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"flow_class": 5, "leak_valid": False},
+                {"flow_class": 6, "leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.fl_class_ge4_pct is None
+        assert night.fl_class_ge4_pct_reason == NullReason.NOT_AVAILABLE
+
+
 # ---------------------------------------------------------------------------
 # rera_index, rdi, and DURATION_ZERO fields on NightlyAnalysisSummary
 # ---------------------------------------------------------------------------
@@ -4880,6 +4939,8 @@ class TestNightlySummaryReraRdi:
             assert bulk.fl_median == per_night.fl_median
             assert bulk.fl_95th == per_night.fl_95th
             assert bulk.fl_max == per_night.fl_max
+            assert bulk.fl_class_ge4_pct == per_night.fl_class_ge4_pct
+            assert bulk.fl_class_ge4_pct_reason == per_night.fl_class_ge4_pct_reason
             assert bulk.ti_median_s == per_night.ti_median_s
             assert bulk.ie_ratio_median == per_night.ie_ratio_median
             assert bulk.rera_index == per_night.rera_index

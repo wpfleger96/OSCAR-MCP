@@ -163,6 +163,8 @@ class TestGetNightlySummary:
         assert night.rera_index is None
         assert night.rera_index_reason == "not_available"
         assert night.rdi is None
+        assert night.fl_class_ge4_pct is None
+        assert night.fl_class_ge4_pct_reason == "not_available"
         assert night.leak_above_24_pct is None
         assert night.leak_above_24_pct_reason == "not_available"
 
