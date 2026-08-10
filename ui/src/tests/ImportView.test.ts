@@ -18,9 +18,14 @@ vi.mock('@/api/importJobs', () => ({
 vi.mock('@/api/analysis', () => ({
     cancelAnalysisJob: vi.fn(),
 }))
-vi.mock('@/api/import', () => ({
-    importFiles: vi.fn(),
-}))
+vi.mock('@/api/import', async (importActual) => {
+    const actual = await importActual<typeof import('@/api/import')>()
+    return {
+        ...actual,
+        importFiles: vi.fn(),
+        precheckFiles: vi.fn(),
+    }
+})
 vi.mock('@/utils/formatting', () => ({
     formatBytes: (n: number) => `${n}B`,
 }))
@@ -42,6 +47,7 @@ import { makeAuthMock } from './helpers/mockUseAuth'
 import { useAuth } from '@/composables/useAuth'
 import { getImportJobs, cancelImport } from '@/api/importJobs'
 import { cancelAnalysisJob } from '@/api/analysis'
+import { importFiles, precheckFiles } from '@/api/import'
 import ImportView from '@/views/ImportView.vue'
 
 function makeJob(overrides: Partial<PipelineJobStatus> = {}): PipelineJobStatus {
@@ -137,5 +143,347 @@ describe('ImportView cancel handler', () => {
 
         expect(cancelImport).toHaveBeenCalledWith('import-2')
         expect(cancelAnalysisJob).not.toHaveBeenCalled()
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Helpers for precheck tests
+// ---------------------------------------------------------------------------
+
+function makeFile(name: string, size: number, relativePath?: string): File {
+    const file = new File([new Uint8Array(size)], name, { type: 'application/octet-stream' })
+    if (relativePath) {
+        Object.defineProperty(file, 'webkitRelativePath', {
+            value: relativePath,
+            configurable: true,
+        })
+    }
+    return file
+}
+
+async function triggerFileSelection(
+    wrapper: ReturnType<typeof mount>,
+    files: File[],
+): Promise<void> {
+    const input = wrapper.find('input[type="file"]').element as HTMLInputElement
+    const fileListLike = { length: files.length, item: (i: number) => files[i] ?? null }
+    files.forEach((f, i) => {
+        ;(fileListLike as Record<string | number, unknown>)[i] = f
+    })
+    Object.defineProperty(fileListLike, Symbol.iterator, {
+        value: () => files[Symbol.iterator](),
+    })
+    Object.defineProperty(input, 'files', { value: fileListLike, configurable: true })
+    await wrapper.find('input[type="file"]').trigger('change')
+    await flushPromises()
+}
+
+function makeDeferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>((res) => {
+        resolve = res
+    })
+    return { promise, resolve }
+}
+
+const resMedFiles = [
+    makeFile('STR.edf', 200, 'MySD/STR.edf'),
+    makeFile('BRP.edf', 1000, 'MySD/DATALOG/20240101_010000_BRP.edf'),
+    makeFile('Identification.json', 100, 'MySD/Identification.json'),
+]
+
+const nonResMedFiles = [makeFile('random.txt', 50, 'MyFolder/random.txt')]
+
+describe('ImportView precheck', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        vi.mocked(useAuth).mockReturnValue(
+            makeAuthMock({
+                profiles: ref([{ id: 1, name: 'Test' }]),
+                activeProfileId: ref(1),
+            }) as never,
+        )
+        vi.mocked(getImportJobs).mockResolvedValue({ jobs: [] })
+        vi.mocked(importFiles).mockResolvedValue({ job_id: 'job-1' } as never)
+        vi.mocked(precheckFiles).mockResolvedValue(new Set())
+    })
+
+    it('precheck fires on selection for ResMed-structured entries', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        expect(precheckFiles).toHaveBeenCalledOnce()
+    })
+
+    it('precheck does NOT fire for non-ResMed selection', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        await triggerFileSelection(wrapper, nonResMedFiles)
+
+        expect(precheckFiles).not.toHaveBeenCalled()
+    })
+
+    it('skippable non-anchor entries are excluded from importFiles call', async () => {
+        // precheck marks the data file as skippable, not the anchor
+        vi.mocked(precheckFiles).mockResolvedValue(
+            new Set(['MySD/DATALOG/20240101_010000_BRP.edf']),
+        )
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        const sentEntries = vi.mocked(importFiles).mock.calls[0][0]
+        const sentPaths = sentEntries.map((e: { path: string }) => e.path)
+        expect(sentPaths).not.toContain('MySD/DATALOG/20240101_010000_BRP.edf')
+    })
+
+    it('anchor files are always retained even when marked skippable', async () => {
+        // server wrongly marks STR.edf skippable — client must still send it
+        vi.mocked(precheckFiles).mockResolvedValue(
+            new Set(['MySD/STR.edf', 'MySD/DATALOG/20240101_010000_BRP.edf']),
+        )
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        const sentPaths = vi
+            .mocked(importFiles)
+            .mock.calls[0][0].map((e: { path: string }) => e.path)
+        expect(sentPaths).toContain('MySD/STR.edf')
+        expect(sentPaths).toContain('MySD/Identification.json')
+        expect(sentPaths).not.toContain('MySD/DATALOG/20240101_010000_BRP.edf')
+    })
+
+    it('fail-open — precheck error causes importFiles to receive all entries', async () => {
+        vi.mocked(precheckFiles).mockResolvedValue(new Set())
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        const sentPaths = vi
+            .mocked(importFiles)
+            .mock.calls[0][0].map((e: { path: string }) => e.path)
+        expect(sentPaths).toHaveLength(resMedFiles.length)
+    })
+
+    it('forceUploadAll sends all entries despite non-empty skippable set', async () => {
+        vi.mocked(precheckFiles).mockResolvedValue(
+            new Set(['MySD/DATALOG/20240101_010000_BRP.edf']),
+        )
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        // Check the "Upload all files" checkbox
+        const checkbox = wrapper.find('input[type="checkbox"]')
+        await checkbox.setValue(true)
+
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        const sentPaths = vi
+            .mocked(importFiles)
+            .mock.calls[0][0].map((e: { path: string }) => e.path)
+        expect(sentPaths).toHaveLength(resMedFiles.length)
+        expect(sentPaths).toContain('MySD/DATALOG/20240101_010000_BRP.edf')
+    })
+
+    it('stale precheck result is discarded on reselection', async () => {
+        const deferred1 = makeDeferred<Set<string>>()
+        const deferred2 = makeDeferred<Set<string>>()
+        vi.mocked(precheckFiles)
+            .mockReturnValueOnce(deferred1.promise)
+            .mockReturnValueOnce(deferred2.promise)
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        // First selection (precheck pending, not yet resolved)
+        const input = wrapper.find('input[type="file"]').element as HTMLInputElement
+        const makeFileList = (files: File[]) => {
+            const fl = { length: files.length, item: (i: number) => files[i] ?? null }
+            files.forEach((f, i) => {
+                ;(fl as Record<string | number, unknown>)[i] = f
+            })
+            Object.defineProperty(fl, Symbol.iterator, { value: () => files[Symbol.iterator]() })
+            return fl
+        }
+        Object.defineProperty(input, 'files', {
+            value: makeFileList(resMedFiles),
+            configurable: true,
+        })
+        await wrapper.find('input[type="file"]').trigger('change')
+        // Do NOT flush — deferred1 is still pending
+
+        // Second selection before first resolves
+        Object.defineProperty(input, 'files', {
+            value: makeFileList([
+                makeFile('STR.edf', 50, 'NewSD/STR.edf'),
+                makeFile('BRP2.edf', 200, 'NewSD/DATALOG/20240102_BRP.edf'),
+            ]),
+            configurable: true,
+        })
+        await wrapper.find('input[type="file"]').trigger('change')
+
+        // Resolve first precheck with a non-empty set (should be stale)
+        deferred1.resolve(new Set(['MySD/DATALOG/20240101_010000_BRP.edf']))
+        await flushPromises()
+
+        // Resolve second precheck with empty set
+        deferred2.resolve(new Set())
+        await flushPromises()
+
+        // Click Import — importFiles should receive all entries from second selection
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        const sentPaths = vi
+            .mocked(importFiles)
+            .mock.calls[0][0].map((e: { path: string }) => e.path)
+        // Stale result from first precheck must not filter second selection's entries
+        expect(sentPaths).not.toContain('MySD/DATALOG/20240101_010000_BRP.edf')
+    })
+
+    it('anchor retention hard case — Identification.json in skippable set is still uploaded', async () => {
+        // Server wrongly marks both anchors skippable — client must retain them both.
+        vi.mocked(precheckFiles).mockResolvedValue(
+            new Set([
+                'MySD/STR.edf',
+                'MySD/Identification.json',
+                'MySD/DATALOG/20240101_010000_BRP.edf',
+            ]),
+        )
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        const sentPaths = vi
+            .mocked(importFiles)
+            .mock.calls[0][0].map((e: { path: string }) => e.path)
+        expect(sentPaths).toContain('MySD/STR.edf')
+        expect(sentPaths).toContain('MySD/Identification.json')
+        expect(sentPaths).not.toContain('MySD/DATALOG/20240101_010000_BRP.edf')
+    })
+
+    it('double-click on Import triggers importFiles exactly once', async () => {
+        vi.mocked(precheckFiles).mockResolvedValue(new Set())
+        // Keep importFiles pending so the uploading phase stays active during the test.
+        vi.mocked(importFiles).mockReturnValue(new Promise(() => {}))
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        const btn = wrapper.findAll('button').at(-1)!
+        // Two rapid clicks — second must be rejected by the re-entrancy guard.
+        void btn.trigger('click')
+        void btn.trigger('click')
+        await flushPromises()
+
+        expect(importFiles).toHaveBeenCalledTimes(1)
+    })
+
+    it('profile switch after precheck uses new profile skip set, not stale one', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            makeAuthMock({
+                profiles: ref([
+                    { id: 1, name: 'Profile A' },
+                    { id: 2, name: 'Profile B' },
+                ]),
+                activeProfileId: ref(1),
+            }) as never,
+        )
+        // Profile 1 marks BRP.edf skippable; profile 2 has nothing skippable.
+        vi.mocked(precheckFiles)
+            .mockResolvedValueOnce(new Set(['MySD/DATALOG/20240101_010000_BRP.edf']))
+            .mockResolvedValueOnce(new Set())
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+        // Profile 1 precheck has resolved with a skippable entry.
+
+        // Switch to profile 2 — triggers re-precheck which clears the stale set.
+        await wrapper.find('select').setValue(2)
+        await flushPromises()
+        // Profile 2 precheck has resolved with an empty set.
+
+        // Import should send all files (profile 2 has no skippable entries).
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        const sentPaths = vi
+            .mocked(importFiles)
+            .mock.calls[0][0].map((e: { path: string }) => e.path)
+        expect(sentPaths).toHaveLength(resMedFiles.length)
+    })
+
+    it('profile switch in error phase re-triggers precheck', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            makeAuthMock({
+                profiles: ref([
+                    { id: 1, name: 'Profile A' },
+                    { id: 2, name: 'Profile B' },
+                ]),
+                activeProfileId: ref(1),
+            }) as never,
+        )
+        vi.mocked(precheckFiles).mockResolvedValue(new Set())
+        vi.mocked(importFiles).mockRejectedValue(new Error('Upload failed'))
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        // Trigger a failing import to land in error phase.
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+        expect(wrapper.find('.error-text').exists()).toBe(true)
+
+        const precheckCallsBefore = vi.mocked(precheckFiles).mock.calls.length
+
+        // Switch profile while in error phase — must re-run precheck.
+        await wrapper.find('select').setValue(2)
+        await flushPromises()
+
+        expect(vi.mocked(precheckFiles).mock.calls.length).toBe(precheckCallsBefore + 1)
+    })
+
+    it('skip summary text renders during uploading when files are skipped', async () => {
+        vi.mocked(precheckFiles).mockResolvedValue(
+            new Set(['MySD/DATALOG/20240101_010000_BRP.edf']),
+        )
+        // Keep importFiles pending so uploading phase stays visible
+        vi.mocked(importFiles).mockReturnValue(new Promise(() => {}))
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        expect(wrapper.find('.skip-summary').exists()).toBe(true)
+        expect(wrapper.find('.skip-summary').text()).toContain('Skipped 1 files already on server')
     })
 })

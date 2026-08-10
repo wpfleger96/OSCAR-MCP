@@ -38,8 +38,9 @@ DEMO_ALLOWED_MUTATING = {
     "POST /api/v1/auth/invites/google",
     # Demo may switch profiles (RequireAuth only, not RequireWritable).
     "POST /api/v1/auth/active-profile",
-    # Read-only preview — no data is mutated.
+    # Read-only previews / queries — no data is mutated.
     "POST /api/v1/sessions/delete-preview",
+    "POST /api/v1/import/precheck",
     # Local-only route: protected by require_local_only (→ 403 in multiuser
     # where demo users actually live). In local mode (test default) it passes
     # require_local_only but demo users don't exist in practice.
