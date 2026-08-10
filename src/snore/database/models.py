@@ -837,6 +837,7 @@ class ImportJobRecord(Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text)
     analysis_queued: Mapped[bool | None] = mapped_column(Boolean)
+    spool_dir_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
     # None for non-terminal states; set when the job reaches terminal state.
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
@@ -855,6 +856,47 @@ class ImportJobRecord(Base):
         return (
             f"<ImportJobRecord(id={self.id}, job_id={self.job_id}, state={self.state})>"
         )
+
+
+class AnalysisJobRecord(Base):
+    """Persisted record of an analysis job, updated at each state transition.
+
+    Written at RUNNING and terminal states so the job survives server restarts.
+    Orphaned non-terminal rows are marked failed at startup.
+    """
+
+    __tablename__ = "analysis_job_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    # No FK: records must survive user/profile deletion.
+    profile_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer)
+    session_ids_json: Mapped[list[int]] = mapped_column(ValidatedJSON, nullable=False)
+    modes: Mapped[list[str] | None] = mapped_column(ValidatedJSON, nullable=True)
+    primary_mode: Mapped[str | None] = mapped_column(String(50))
+    store_results: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    progress_completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_analysis_job_records_owner_user_id", "owner_user_id"),
+        Index("ix_analysis_job_records_profile_state", "profile_id", "state"),
+        CheckConstraint(
+            "state IN ('running','succeeded','failed','cancelled')",
+            name="chk_analysis_job_record_state",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalysisJobRecord(id={self.id}, job_id={self.job_id}, state={self.state})>"
 
 
 class DetectedPattern(Base):
