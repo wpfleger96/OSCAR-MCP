@@ -138,6 +138,10 @@ export type WaveformType =
     | 'pulse'
     | 'fl'
     | 'snore'
+    | 'ie_ratio'
+    | 'ti'
+    | 'pressure_hr'
+    | 'trigger_cycle'
 
 export const WAVEFORM_LABELS: Record<string, string> = {
     flow: 'Flow Rate',
@@ -150,8 +154,13 @@ export const WAVEFORM_LABELS: Record<string, string> = {
     tv: 'Tidal Volume',
     spo2: 'SpO₂',
     pulse: 'Pulse Rate',
-    fl: 'Flow Limitation',
-    snore: 'Snore',
+    // Device-reported channels — named to distinguish from SNORE's computed metrics
+    fl: 'Flow Limitation (device)',
+    snore: 'Snore (device)',
+    ie_ratio: 'I:E Ratio',
+    ti: 'Inspiratory Time',
+    pressure_hr: 'Mask Pressure (25 Hz)',
+    trigger_cycle: 'Trigger/Cycle (raw codes)',
 }
 
 // Stats trend/records payloads (untyped on the backend)
