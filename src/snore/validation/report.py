@@ -28,6 +28,24 @@ class SessionValidation(BaseModel):
     hypopnea_f1: float = Field(description="Hypopnea F1 score (0-1)")
     notes: str | None = Field(default=None, description="Additional notes")
 
+    # Device-reported nightly indices from the Statistics table.
+    # Null when the Statistics row is absent or the device did not record the index
+    # (e.g. APAP records ahi/oai/cai/hi but not uai; vAuto records all five).
+    device_ahi: float | None = Field(default=None, description="Device AHI (events/hr)")
+    device_oai: float | None = Field(
+        default=None, description="Device OAI (obstructive apnea index, events/hr)"
+    )
+    device_cai: float | None = Field(
+        default=None, description="Device CAI (central apnea index, events/hr)"
+    )
+    device_hi: float | None = Field(
+        default=None, description="Device HI (hypopnea index, events/hr)"
+    )
+    device_uai: float | None = Field(
+        default=None,
+        description="Device UAI (upper-airway/unclassified apnea index, events/hr; vAuto/bilevel only)",
+    )
+
 
 class AggregateMetrics(BaseModel):
     """Aggregate validation metrics across multiple sessions."""
@@ -91,6 +109,11 @@ def export_report_csv(report: ValidationReport, output_path: Path) -> None:
                 "hypopnea_sens",
                 "hypopnea_prec",
                 "hypopnea_f1",
+                "device_ahi",
+                "device_oai",
+                "device_cai",
+                "device_hi",
+                "device_uai",
                 "notes",
             ],
         )
@@ -110,6 +133,21 @@ def export_report_csv(report: ValidationReport, output_path: Path) -> None:
                     "hypopnea_sens": f"{session.hypopnea_sensitivity * 100:.0f}%",
                     "hypopnea_prec": f"{session.hypopnea_precision * 100:.0f}%",
                     "hypopnea_f1": f"{session.hypopnea_f1:.2f}",
+                    "device_ahi": f"{session.device_ahi:.2f}"
+                    if session.device_ahi is not None
+                    else "",
+                    "device_oai": f"{session.device_oai:.2f}"
+                    if session.device_oai is not None
+                    else "",
+                    "device_cai": f"{session.device_cai:.2f}"
+                    if session.device_cai is not None
+                    else "",
+                    "device_hi": f"{session.device_hi:.2f}"
+                    if session.device_hi is not None
+                    else "",
+                    "device_uai": f"{session.device_uai:.2f}"
+                    if session.device_uai is not None
+                    else "",
                     "notes": session.notes or "",
                 }
             )

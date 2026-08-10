@@ -190,6 +190,26 @@ class NightlyRow(BaseModel):
     ie_ratio: float | None = None
     ie_ratio_reason: str | None = None
 
+    # Device-recorded flow-limitation waveform ("fl" channel, 0–1 unitless).
+    # Negative sentinel values filtered before aggregation; zeros retained.
+    # Null + reason when the channel was not recorded for this night.
+    # Reason tokens: "channel_absent" (session(s) had no fl channel),
+    # "no_sessions" (the day had no enabled sessions at all).
+    device_flg_median: float | None = None
+    device_flg_95th: float | None = None
+    device_flg_max: float | None = None
+    device_flg_reason: str | None = None
+
+    # Device-recorded snore waveform ("snore" channel, 0–5 unitless).
+    # snore_pct_time: fraction of samples (0–1) where snore value > 0.5.
+    # Null + reason when the channel was not recorded.
+    # Reason tokens: "channel_absent" (session(s) had no snore channel),
+    # "no_sessions" (the day had no enabled sessions at all).
+    snore_median: float | None = None
+    snore_95th: float | None = None
+    snore_pct_time: float | None = None
+    snore_reason: str | None = None
+
     device_id: int | None = None
 
 
@@ -506,6 +526,14 @@ class EpochStats(BaseModel):
     # (rera_proxy_count non-null), null otherwise.
     rera_proxy_version: str | None = None
     rx_settings: dict[str, str] = {}
+    # Device waveform channel distributions (n_breaths carries sample count).
+    # Null fields when the channel was not recorded in the epoch's sessions.
+    device_flg: EpochDistribution = EpochDistribution(
+        median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+    )
+    snore_dist: EpochDistribution = EpochDistribution(
+        median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+    )
 
 
 class CompareEpochsResponse(BaseModel):

@@ -396,6 +396,22 @@ CLI remains as automation/scripting interface alongside the web UI.
 
 ---
 
+## Tier-3 Roadmap Entries
+
+_Deep-analysis items that require decoding or correlating channels now imported but not yet fully surfaced._
+
+- **Trigger/cycle event code decoding.** The `trigger_cycle` waveform channel is imported raw (per-breath event codes, currently undecoded). Calibrating the decode table against detected breath boundaries and matching the STR `SpontCyc%` (spontaneous-cycle percentage per session) would yield per-breath synchrony metrics — a direct measure of patient–ventilator interaction on vAuto/bilevel modes.
+
+- **Within-breath pressure analytics.** The `pressure_hr` channel (25 Hz) carries the full intra-breath pressure waveform. Rise-time estimation (time from EPAP to IPAP target) correlated against the `S.S.RiseTime` setting per session would quantify how closely the device achieves its configured rise time and whether deviations correlate with flow-limitation events.
+
+- **Environment and humidifier correlation analyses.** The STR daily fields `amb_humidity_median`, `hum_temp_median`, `htube_temp_median`, `htube_pow_median`, and `hum_pow_median` are now imported. Correlating ambient humidity and heated-tube power against leak rate and comfort metrics across nights would surface whether humidifier settings are optimized for the patient's environment.
+
+- **SNORE-vs-device FL overlay chart in the UI.** The breath-level computed flow-limitation (`fl_median`, `fl_class_ge4_pct`) and the device-reported FL waveform (`device_flg_median`, `device_flg_95th`) are now both surfaced in nightly summaries. A dedicated chart panel overlaying both signals per night would give immediate visual feedback on how SNORE's algorithm tracks the device's own FL assessment, supporting algorithm calibration workflows.
+
+- **Normalize OSCAR summary tidal-volume units.** The OSCAR parser stores `tidal_volume_*` statistics columns in mL, whereas the ResMed STR path stores them in liters. The `Statistics` table currently holds mixed units depending on import path; UI/MCP display conversions assume the liters convention. Normalizing to a single unit at import time (liters) would eliminate the source-path dependency and allow cross-device comparisons without path-aware conversion.
+
+---
+
 ## Data Availability Notes
 
 **Verified via OSCAR loader analysis:**
