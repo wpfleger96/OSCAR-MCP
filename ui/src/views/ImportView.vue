@@ -58,9 +58,40 @@
                     <AlertTriangle class="h-4 w-4" />
                     Doesn't look like a ResMed SD card — import will still be attempted
                 </p>
+                <p v-if="precheckPending" class="folder-meta precheck-hint">
+                    Checking for files already on server…
+                </p>
+                <template v-else-if="skippedCount > 0">
+                    <p class="structure-ok">
+                        <CheckCircle2 class="h-4 w-4" />
+                        <template v-if="forceUploadAll">
+                            Uploading all {{ fileEntries.length }} files (dedupe skipped)
+                        </template>
+                        <template v-else-if="uploadCount === 0">
+                            All {{ sessionEntries.length }} session files already on server
+                        </template>
+                        <template v-else>
+                            {{ skippedCount }} of {{ sessionEntries.length }} session files already
+                            on server — will upload {{ uploadCount }} files ({{
+                                formatBytes(uploadBytes)
+                            }})
+                        </template>
+                    </p>
+                    <label v-if="uploadCount > 0" class="dedupe-skip-label">
+                        <input
+                            v-model="forceUploadAll"
+                            type="checkbox"
+                            class="dedupe-skip-checkbox"
+                        />
+                        Upload all files (skip dedupe)
+                    </label>
+                </template>
                 <div class="card-actions">
                     <Button variant="outline" @click="resetUpload">Change folder</Button>
-                    <Button @click="handleImport">
+                    <Button
+                        :disabled="skippedCount > 0 && uploadCount === 0 && !forceUploadAll"
+                        @click="handleImport"
+                    >
                         <Upload class="mr-2 h-4 w-4" />
                         Import
                     </Button>
@@ -69,6 +100,12 @@
 
             <!-- uploading: progress bar -->
             <template v-else-if="uploadPhase === 'uploading'">
+                <p v-if="skipSummary" class="skip-summary">
+                    Skipped {{ skipSummary.count }} files already on server ({{
+                        formatBytes(skipSummary.bytes)
+                    }}
+                    saved)
+                </p>
                 <p class="progress-label">
                     {{ batchLabel ?? 'Uploading' }}… {{ uploadProgress }}%
                     <span v-if="uploadTotal > 0">
@@ -96,9 +133,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { PipelineJobStatus } from '@/types'
-import { importFiles, type FileEntry, type ChunkedImportProgress } from '@/api/import'
+import {
+    importFiles,
+    precheckFiles,
+    isAnchorFile,
+    isImportableFile,
+    type FileEntry,
+    type ChunkedImportProgress,
+} from '@/api/import'
 import { getImportJobs, cancelImport, ACTIVE_PIPELINE_STAGES } from '@/api/importJobs'
 import { cancelAnalysisJob } from '@/api/analysis'
 import { formatBytes } from '@/utils/formatting'
@@ -132,12 +176,66 @@ const isDragging = ref(false)
 const dropError = ref<string | null>(null)
 const batchLabel = ref<string | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const precheckPending = ref(false)
+const skippablePaths = ref<Set<string>>(new Set())
+// The profile the current skippablePaths was computed for; undefined = no valid result.
+const precheckProfileId = ref<number | null | undefined>(undefined)
+const forceUploadAll = ref(false)
+const skipSummary = ref<{ count: number; bytes: number } | null>(null)
+let precheckPromise: Promise<void> | null = null
+let precheckGeneration = 0
 
 const hasResMedStructure = computed(
     () =>
         fileEntries.value.some((e) => /(^|\/)STR\.edf$/i.test(e.path)) &&
         fileEntries.value.some((e) => /(^|\/)DATALOG\//i.test(e.path)),
 )
+
+const sessionEntries = computed(() =>
+    fileEntries.value.filter((e) => !isAnchorFile(e) && isImportableFile(e)),
+)
+const skippedEntries = computed(() =>
+    fileEntries.value.filter((e) => skippablePaths.value.has(e.path) && !isAnchorFile(e)),
+)
+const skippedCount = computed(() => skippedEntries.value.length)
+const skippedBytes = computed(() => skippedEntries.value.reduce((s, e) => s + e.file.size, 0))
+const newSessionCount = computed(() => sessionEntries.value.length - skippedCount.value)
+const uploadCount = computed(() => (newSessionCount.value > 0 ? newSessionCount.value : 0))
+const uploadBytes = computed(() => {
+    if (newSessionCount.value <= 0) return 0
+    const sessionBytes = sessionEntries.value.reduce((s, e) => s + e.file.size, 0)
+    return sessionBytes - skippedBytes.value
+})
+
+function runPrecheck(): void {
+    precheckGeneration++
+    const gen = precheckGeneration
+    // Clear stale data immediately so it is never used while a re-check is pending.
+    skippablePaths.value = new Set()
+    precheckProfileId.value = undefined
+    if (!hasResMedStructure.value) {
+        precheckPending.value = false
+        precheckPromise = null
+        return
+    }
+    precheckPending.value = true
+    // Capture the profile now; we tag the result with it so handleImport can
+    // reject a set computed for a different profile.
+    const profile = selectedProfileId.value
+    precheckPromise = precheckFiles(fileEntries.value, profile ?? undefined).then((result) => {
+        if (gen === precheckGeneration) {
+            skippablePaths.value = result
+            precheckProfileId.value = profile
+            precheckPending.value = false
+        }
+    })
+}
+
+watch(selectedProfileId, () => {
+    if (uploadPhase.value === 'selected' || uploadPhase.value === 'error') {
+        runPrecheck()
+    }
+})
 
 function setEntries(entries: FileEntry[]) {
     dropError.value = null
@@ -146,6 +244,7 @@ function setEntries(entries: FileEntry[]) {
     folderName.value = firstWithSlash ? firstWithSlash.path.split('/')[0] : 'Selected files'
     totalSize.value = entries.reduce((sum, e) => sum + e.file.size, 0)
     uploadPhase.value = 'selected'
+    void runPrecheck()
 }
 
 function onFileChange(event: Event) {
@@ -220,9 +319,51 @@ async function onDrop(event: DragEvent) {
 }
 
 async function handleImport() {
+    // Re-entrancy guard: a second click while uploading is a no-op.
+    // The synchronous set closes the race before any await.
+    if (uploadPhase.value === 'uploading') return
+    uploadPhase.value = 'uploading'
+
+    // Capture the profile at entry so a mid-await selector change can't
+    // silently apply the wrong skip set or drift the upload's profile_id.
+    const profileId = selectedProfileId.value
+
+    // Await any in-flight precheck (bounded by 5 s axios timeout; never rejects).
+    if (precheckPromise !== null) {
+        await precheckPromise
+    }
+
+    // The skip set is only usable when it was computed for the profile we're
+    // importing into; a mismatch (profile switched during the await) fails open.
+    const skipSetValid = !forceUploadAll.value && precheckProfileId.value === profileId
+
+    const skipped = skipSetValid
+        ? fileEntries.value.filter((e) => skippablePaths.value.has(e.path) && !isAnchorFile(e))
+        : []
+    skipSummary.value =
+        skipped.length > 0
+            ? { count: skipped.length, bytes: skipped.reduce((s, e) => s + e.file.size, 0) }
+            : null
+
+    const importable = fileEntries.value.filter(isImportableFile)
+    let entriesToUpload: FileEntry[]
+    if (skipSetValid && skippablePaths.value.size > 0) {
+        const newSessions = importable.filter(
+            (e) => !isAnchorFile(e) && !skippablePaths.value.has(e.path),
+        )
+        if (newSessions.length === 0) {
+            resetUpload()
+            return
+        }
+        entriesToUpload = importable.filter(
+            (e) => !skippablePaths.value.has(e.path) || isAnchorFile(e),
+        )
+    } else {
+        entriesToUpload = importable
+    }
+
     // Do NOT call setActiveProfile() here — it increments profileKey and
     // would unmount this view before the upload begins.
-    uploadPhase.value = 'uploading'
     uploadProgress.value = 0
     uploadLoaded.value = 0
     uploadTotal.value = 0
@@ -241,7 +382,8 @@ async function handleImport() {
     }
 
     try {
-        await importFiles(fileEntries.value, onProgress, selectedProfileId.value ?? undefined)
+        // Pass captured profileId to avoid drift if the selector changes mid-upload.
+        await importFiles(entriesToUpload, onProgress, profileId ?? undefined)
         resetUpload()
         void fetchImportJobs()
     } catch (e: unknown) {
@@ -251,6 +393,7 @@ async function handleImport() {
 }
 
 function resetUpload() {
+    precheckGeneration++
     uploadPhase.value = 'idle'
     fileEntries.value = []
     folderName.value = ''
@@ -260,6 +403,12 @@ function resetUpload() {
     uploadTotal.value = 0
     importError.value = null
     batchLabel.value = null
+    skippablePaths.value = new Set()
+    precheckProfileId.value = undefined
+    forceUploadAll.value = false
+    precheckPending.value = false
+    precheckPromise = null
+    skipSummary.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
@@ -313,6 +462,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+    // Invalidate any in-flight precheck so its .then() doesn't write to
+    // refs of a destroyed component instance.
+    precheckGeneration++
+    precheckPromise = null
     pollStopped = true
     if (pollTimer) clearTimeout(pollTimer)
 })
@@ -449,6 +602,23 @@ onUnmounted(() => {
     margin: 0;
 }
 
+.precheck-hint {
+    font-style: italic;
+}
+
+.dedupe-skip-label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    color: var(--color-muted-foreground);
+    cursor: pointer;
+}
+
+.dedupe-skip-checkbox {
+    cursor: pointer;
+}
+
 /* ---- Card action row (selected, error) ---- */
 
 .card-actions {
@@ -459,6 +629,12 @@ onUnmounted(() => {
 }
 
 /* ---- Upload progress ---- */
+
+.skip-summary {
+    font-size: 0.85rem;
+    color: var(--color-success);
+    margin: 0;
+}
 
 .progress-label {
     font-size: 0.875rem;

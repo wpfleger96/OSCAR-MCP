@@ -11,7 +11,13 @@ vi.mock('@/api/client', () => ({
 }))
 
 import api from '@/api/client'
-import { importFiles, buildChunks, type FileEntry, type ChunkedImportProgress } from '@/api/import'
+import {
+    importFiles,
+    precheckFiles,
+    buildChunks,
+    type FileEntry,
+    type ChunkedImportProgress,
+} from '@/api/import'
 
 function makeEntry(path: string, sizeBytes: number): FileEntry {
     return { file: new File([new Uint8Array(sizeBytes)], path.split('/').pop()!), path }
@@ -220,5 +226,69 @@ describe('importFiles', () => {
         const fd = vi.mocked(api.post).mock.calls[0][1] as FormData
         expect(fd.get('batch_id')).toBeNull()
         expect(fd.get('batch_final')).toBeNull()
+    })
+})
+
+describe('precheckFiles', () => {
+    beforeEach(() => {
+        vi.resetAllMocks()
+    })
+
+    it('returns Set of skippable paths on success', async () => {
+        vi.mocked(api.post).mockResolvedValue({
+            data: { skippable: ['DATALOG/a/b.edf', 'DATALOG/c/d.edf'] },
+        })
+        const entries = [makeEntry('DATALOG/a/b.edf', 100), makeEntry('DATALOG/c/d.edf', 200)]
+        const result = await precheckFiles(entries)
+        expect(result).toEqual(new Set(['DATALOG/a/b.edf', 'DATALOG/c/d.edf']))
+    })
+
+    it('returns empty Set without throwing on rejection (exercises catch branch)', async () => {
+        // api.post itself rejects — verifies the catch branch, not just an empty response.
+        vi.mocked(api.post).mockRejectedValue(new Error('network error'))
+        const entries = [makeEntry('DATALOG/a/b.edf', 100)]
+        const result = await precheckFiles(entries)
+        expect(result).toEqual(new Set())
+        expect(api.post).toHaveBeenCalled()
+    })
+
+    it('sends profile_id when provided', async () => {
+        vi.mocked(api.post).mockResolvedValue({ data: { skippable: [] } })
+        const entries = [makeEntry('DATALOG/a/b.edf', 100)]
+        await precheckFiles(entries, 42)
+        const [, body] = vi.mocked(api.post).mock.calls[0]
+        expect(body).toMatchObject({ profile_id: 42 })
+    })
+
+    it('omits profile_id when undefined', async () => {
+        vi.mocked(api.post).mockResolvedValue({ data: { skippable: [] } })
+        const entries = [makeEntry('DATALOG/a/b.edf', 100)]
+        await precheckFiles(entries)
+        const [, body] = vi.mocked(api.post).mock.calls[0]
+        expect(body).not.toHaveProperty('profile_id')
+    })
+
+    it('excludes anchor files and non-DATALOG paths from the request body', async () => {
+        vi.mocked(api.post).mockResolvedValue({ data: { skippable: [] } })
+        const entries = [
+            makeEntry('STR.edf', 100),
+            makeEntry('Identification.json', 100),
+            makeEntry('some_file.txt', 100),
+            makeEntry('DATALOG/20240101_010000_BRP.edf', 100),
+        ]
+        await precheckFiles(entries)
+        const [, body] = vi.mocked(api.post).mock.calls[0]
+        const paths = (body as { files: { path: string }[] }).files.map((f) => f.path)
+        expect(paths).not.toContain('STR.edf')
+        expect(paths).not.toContain('Identification.json')
+        expect(paths).not.toContain('some_file.txt')
+        expect(paths).toContain('DATALOG/20240101_010000_BRP.edf')
+    })
+
+    it('returns empty Set without calling api.post when no DATALOG candidates', async () => {
+        const entries = [makeEntry('STR.edf', 100), makeEntry('some_file.txt', 100)]
+        const result = await precheckFiles(entries)
+        expect(result).toEqual(new Set())
+        expect(api.post).not.toHaveBeenCalled()
     })
 })

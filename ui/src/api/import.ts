@@ -24,10 +24,55 @@ const CHUNK_SIZE_LIMIT: number = (() => {
 })()
 
 const ANCHOR_FILE_RE = /^(STR\.edf|Identification\.(json|tgt))$/i
+const DATALOG_RE = /(^|\/)DATALOG\//i
 
-function isAnchorFile(entry: FileEntry): boolean {
+export function isAnchorFile(entry: FileEntry): boolean {
     const name = entry.path.split('/').pop() ?? ''
     return ANCHOR_FILE_RE.test(name)
+}
+
+export function isImportableFile(entry: FileEntry): boolean {
+    if (isAnchorFile(entry)) return true
+    if (!DATALOG_RE.test(entry.path)) return false
+    const basename = entry.path.split('/').pop() ?? ''
+    return /\.edf$/i.test(basename) && !basename.startsWith('.')
+}
+
+interface PrecheckFileEntry {
+    path: string
+    size: number
+}
+
+interface PrecheckRequest {
+    files: PrecheckFileEntry[]
+    profile_id?: number
+}
+
+interface PrecheckResponse {
+    skippable: string[]
+}
+
+export async function precheckFiles(
+    entries: FileEntry[],
+    profileId?: number,
+): Promise<Set<string>> {
+    // Only send non-anchor DATALOG files; anchors are never skippable and
+    // other paths are irrelevant to the server's dedupe check.
+    const candidates = entries.filter((e) => !isAnchorFile(e) && DATALOG_RE.test(e.path))
+    if (candidates.length === 0) return new Set()
+    try {
+        const body: PrecheckRequest = {
+            files: candidates.map((e) => ({ path: e.path, size: e.file.size })),
+            ...(profileId !== undefined ? { profile_id: profileId } : {}),
+        }
+        const { data } = await api.post<PrecheckResponse>('/import/precheck', body, {
+            timeout: 5000,
+        })
+        return new Set(data.skippable)
+    } catch (err) {
+        console.warn('[precheck] failed, proceeding with full upload', err)
+        return new Set()
+    }
 }
 
 function extractNightDate(path: string): string | null {

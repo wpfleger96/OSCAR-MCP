@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import uuid
 
@@ -13,7 +14,7 @@ from typing import IO, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -39,7 +40,7 @@ from snore.api.schemas import (
 )
 from snore.auth.actor import ActorContext
 from snore.database import models
-from snore.services.import_service import safe_relative_path
+from snore.services.import_service import normalize_datalog_suffix, safe_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,118 @@ def _copy_chunked(src_file: IO[bytes], dest: Path, max_bytes: int) -> None:
 
 class JobResponse(BaseModel):
     job_id: str
+
+
+class PrecheckFileEntry(BaseModel):
+    path: str = Field(max_length=1024)
+    size: int = Field(ge=0)
+
+
+class PrecheckRequest(BaseModel):
+    files: list[PrecheckFileEntry] = Field(max_length=50_000)
+    profile_id: int | None = None
+
+
+class PrecheckResponse(BaseModel):
+    skippable: list[str]
+
+
+# Anchor files must never be reported as skippable. STR.edf changes daily and
+# drives parser detection and CPAP settings history; the server check is
+# authoritative — the client also omits anchors from precheck requests and never
+# drops them from uploads, but must not be relied on.
+_ANCHOR_NAMES = frozenset({"str.edf", "identification.json", "identification.tgt"})
+
+# Bound concurrent backup filesystem walks to prevent thread-pool exhaustion.
+# Each precheck spawns a to_thread walk; N concurrent prechecks could starve
+# other to_thread users (e.g. active upload copies) on the default executor.
+_PRECHECK_WALK_SEM = asyncio.Semaphore(4)
+
+
+def _build_backup_index(
+    profile_raw_root: Path,
+) -> dict[str, set[tuple[str, int]]]:
+    """Return per-serial (datalog_suffix, size) pairs for every file under the profile backup.
+
+    Keyed by serial dir name. An SD card belongs to one device, so per-serial
+    indexing prevents cross-device collisions: two same-model devices can produce
+    identically named, identically sized files, and merging them into one set
+    would silently mark device B's unuploaded file as already present via device
+    A's backup — silent data loss.
+
+    Walks each <serial>/DATALOG/ subtree synchronously (intended for
+    asyncio.to_thread). STR_Backup/ is outside DATALOG/ and is naturally
+    excluded. Any OSError in an individual serial branch is caught, logged, and
+    skipped so a partially-readable backup never prevents a precheck response
+    (fail-open).
+    """
+    if not profile_raw_root.is_dir():
+        return {}
+    try:
+        serial_dirs = list(profile_raw_root.iterdir())
+    except OSError:
+        logger.warning("Cannot list backup root %s", profile_raw_root)
+        return {}
+    indexes: dict[str, set[tuple[str, int]]] = {}
+    for serial_dir in serial_dirs:
+        try:
+            if not serial_dir.is_dir():
+                continue
+            datalog_dir = serial_dir / "DATALOG"
+            if not datalog_dir.is_dir():
+                continue
+            serial_index: set[tuple[str, int]] = set()
+            for dirpath, _, filenames in os.walk(datalog_dir):
+                for fname in filenames:
+                    fpath = Path(dirpath) / fname
+                    try:
+                        rel = str(fpath.relative_to(serial_dir))
+                        suffix = normalize_datalog_suffix(rel)
+                        if suffix is not None:
+                            serial_index.add((suffix, fpath.stat().st_size))
+                    except Exception:  # noqa: BLE001
+                        logger.warning("Skipping backup file %s", fpath)
+            if serial_index:
+                indexes[serial_dir.name] = serial_index
+        except OSError:
+            logger.warning("Error reading serial dir %s", serial_dir)
+    return indexes
+
+
+def _classify_files(
+    indexes: dict[str, set[tuple[str, int]]],
+    files: list[PrecheckFileEntry],
+) -> list[str]:
+    """Return original path strings for files safe to skip.
+
+    Classifies files per serial backup and returns results for the dominant
+    serial — the one with the most matches. An SD card belongs to one device,
+    so its files should overwhelmingly match one serial dir; cross-serial
+    matches are treated as coincidence and never justify skipping.
+
+    A file is skippable iff its DATALOG-relative suffix (lowercased) and exact
+    size appear in that serial's backup index. Anchor files and non-DATALOG
+    paths are excluded unconditionally. Ties between serials with equal match
+    counts are broken alphabetically by serial name for determinism.
+    """
+    if not indexes:
+        return []
+    best: list[str] = []
+    for serial in sorted(indexes):
+        index = indexes[serial]
+        skippable: list[str] = []
+        for f in files:
+            normalized_name = f.path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            if normalized_name in _ANCHOR_NAMES:
+                continue
+            suffix = normalize_datalog_suffix(f.path)
+            if suffix is None:
+                continue
+            if (suffix, f.size) in index:
+                skippable.append(f.path)
+        if len(skippable) > len(best):
+            best = skippable
+    return best
 
 
 def _get_upload_limits() -> tuple[int, int, int]:
@@ -392,6 +505,44 @@ async def import_files(
     # Enqueue for serial execution — /progress is observer-only.
     enqueue_for_execution(job, profile_raw_root)
     return JobResponse(job_id=job.job_id)
+
+
+@router.post("/precheck", response_model=PrecheckResponse)
+async def precheck_upload(
+    body: PrecheckRequest,
+    actor: RequireAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PrecheckResponse:
+    """Return which client files are already present in the server backup.
+
+    Fail-open: a missing or empty backup returns nothing skippable so the client
+    uploads everything. Anchor files (STR.edf, Identification.json,
+    Identification.tgt) are never skippable — STR.edf changes daily and drives
+    parser detection and CPAP settings history; the server check is authoritative.
+    The filesystem walk runs off the event loop via asyncio.to_thread; concurrent
+    walks are bounded by _PRECHECK_WALK_SEM (fail-open on timeout).
+    """
+    profile_id = await _resolve_profile_id(db, actor, body.profile_id)
+
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
+
+    try:
+        async with asyncio.timeout(2):
+            await _PRECHECK_WALK_SEM.acquire()
+    except TimeoutError:
+        return PrecheckResponse(skippable=[])
+
+    try:
+        indexes = await asyncio.to_thread(_build_backup_index, profile_raw_root)
+    finally:
+        _PRECHECK_WALK_SEM.release()
+
+    if not indexes:
+        return PrecheckResponse(skippable=[])
+
+    return PrecheckResponse(skippable=_classify_files(indexes, body.files))
 
 
 def _derive_stage(
