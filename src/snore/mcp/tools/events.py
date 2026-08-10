@@ -19,7 +19,13 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import EventContext, EventRow, EventsResponse, tz_fields
+from snore.mcp.schemas import (
+    EventContext,
+    EventRow,
+    EventsResponse,
+    localize_wall_clock,
+    tz_fields,
+)
 from snore.mcp.tools._capabilities import (
     build_device_capabilities,
     get_device_id_for_session,
@@ -112,9 +118,15 @@ async def get_events(
         rows.append(
             EventRow(
                 session_id=ev.session_id,
-                session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
+                session_start_wall_clock=localize_wall_clock(
+                    ev.session_start_wall_clock,
+                    str(ev.timezone_status),
+                    ev.timezone_name,
+                ),
                 event_type=ev.event_type,
-                start_time_wall_clock=ev.event_start_wall_clock.isoformat(),
+                start_time_wall_clock=localize_wall_clock(
+                    ev.event_start_wall_clock, str(ev.timezone_status), ev.timezone_name
+                ),
                 **tz_fields(ev),
                 offset_seconds=ev.offset_seconds,
                 duration_seconds=ev.duration_seconds,
@@ -131,9 +143,11 @@ async def get_events(
     session_ids = {ev.session_id for ev in contextual_events}
     if len(session_ids) == 1:
         anchor_session_id: int | None = contextual_events[0].session_id
-        anchor_session_start: str | None = contextual_events[
-            0
-        ].session_start_wall_clock.isoformat()
+        anchor_session_start: str | None = localize_wall_clock(
+            contextual_events[0].session_start_wall_clock,
+            str(contextual_events[0].timezone_status),
+            contextual_events[0].timezone_name,
+        )
     else:
         anchor_session_id = None
         anchor_session_start = None

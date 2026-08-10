@@ -757,3 +757,183 @@ class TestIsolation:
         # (profile_id is server-internal; leaking it aids enumeration)
         assert f"device_id={device_b.id}" in err_msg
         assert "profile" not in err_msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestReraProxyCentered
+# ---------------------------------------------------------------------------
+
+
+class TestReraProxyCentered:
+    async def test_rera_proxy_centered_window_anchor_and_clamping(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """rera_proxy_centered returns a window centered on the recovery breath's
+        start_offset_s (±context_seconds/2), clamped to [0, last_breath.end_offset_s].
+
+        Fixture: breaths 0–4 with breath spacing of 5s (each breath spans 5s).
+          breath 0: start=0.0,  end=4.0  (normal)
+          breath 1: start=5.0,  end=9.0  (FL, flow_class=5)
+          breath 2: start=10.0, end=14.0 (FL, flow_class=6)
+          breath 3: start=15.0, end=19.0 (recovery, is_recovery_breath=True)
+          breath 4: start=20.0, end=24.0 (normal)
+
+        With default context_seconds=120.0 (half=60.0):
+          win_start = max(0.0, 15.0 - 60.0) = 0.0  [clamped]
+          win_end   = min(24.0, 15.0 + 60.0) = 24.0 [clamped]
+          anchor_event_offset = 15.0
+          fl_run_length = 2
+        """
+        from snore.mcp.tools.windows import find_windows  # noqa: PLC0415
+
+        target_date = date(2024, 7, 1)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        _, sess = await _make_day_session(async_db_session, device, target_date)
+        ar = await _make_analysis_result(async_db_session, sess)
+
+        await _make_breath(async_db_session, ar, sess, breath_number=0, flow_class=1)
+        await _make_breath(async_db_session, ar, sess, breath_number=1, flow_class=5)
+        await _make_breath(async_db_session, ar, sess, breath_number=2, flow_class=6)
+        await _make_breath(
+            async_db_session,
+            ar,
+            sess,
+            breath_number=3,
+            flow_class=1,
+            is_recovery_breath=True,
+        )
+        await _make_breath(async_db_session, ar, sess, breath_number=4, flow_class=1)
+
+        await async_db_session.flush()
+        result = await find_windows(
+            async_db_session,
+            target_date,
+            profile_id=async_test_profile.id,
+            criterion="rera_proxy_centered",
+            n=5,
+        )
+
+        assert result.null_reason is None
+        assert len(result.windows) == 1
+        w = result.windows[0]
+        assert w.criterion == "rera_proxy_centered"
+        assert w.fl_run_length == 2
+        # anchor is the recovery breath's start_offset_s (breath_number=3 → 15.0)
+        assert w.anchor_event_offset == pytest.approx(15.0)
+        # clamped to session bounds
+        assert w.window_start_offset == pytest.approx(0.0)
+        assert w.window_end_offset == pytest.approx(24.0)
+        assert w.analysis_status == "ok"
+        assert "rera_proxy" in w.reason_summary
+
+    async def test_rera_proxy_centered_no_clamping_mid_session(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Window is not clamped when the recovery breath is far from both ends.
+
+        Fixture: 50 breaths (spacing 5s each), FL run at breaths 20-21,
+        recovery at breath 22. Last breath ends at 254.0.
+          rec_offset = 22 * 5 = 110.0
+          half = 60.0 (context_seconds=120.0 default)
+          win_start = max(0.0, 110.0 - 60.0) = 50.0  [not clamped]
+          win_end   = min(254.0, 110.0 + 60.0) = 170.0 [not clamped]
+        """
+        from snore.mcp.tools.windows import find_windows  # noqa: PLC0415
+
+        target_date = date(2024, 7, 2)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        _, sess = await _make_day_session(async_db_session, device, target_date)
+        ar = await _make_analysis_result(async_db_session, sess)
+
+        for i in range(50):
+            if i in (20, 21):
+                fc = 5
+                is_rec = None
+            elif i == 22:
+                fc = 1
+                is_rec = True
+            else:
+                fc = 1
+                is_rec = None
+            await _make_breath(
+                async_db_session,
+                ar,
+                sess,
+                breath_number=i,
+                flow_class=fc,
+                is_recovery_breath=is_rec,
+            )
+
+        await async_db_session.flush()
+        result = await find_windows(
+            async_db_session,
+            target_date,
+            profile_id=async_test_profile.id,
+            criterion="rera_proxy_centered",
+            n=5,
+        )
+
+        assert result.null_reason is None
+        assert len(result.windows) == 1
+        w = result.windows[0]
+        rec_offset = 22 * 5.0  # breath_number=22, start_offset_s = 110.0
+        assert w.anchor_event_offset == pytest.approx(rec_offset)
+        assert w.window_start_offset == pytest.approx(rec_offset - 60.0)
+        assert w.window_end_offset == pytest.approx(rec_offset + 60.0)
+
+    async def test_rera_proxy_centered_irrelevant_option_rejected(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Passing an option irrelevant to rera_proxy_centered raises ValueError
+        naming the offending field."""
+        from snore.mcp.tools.windows import find_windows  # noqa: PLC0415
+
+        target_date = date(2024, 7, 3)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        _, sess = await _make_day_session(async_db_session, device, target_date)
+        ar = await _make_analysis_result(async_db_session, sess)
+        await _make_breath(async_db_session, ar, sess, breath_number=0, flow_class=5)
+        await _make_breath(
+            async_db_session,
+            ar,
+            sess,
+            breath_number=1,
+            flow_class=1,
+            is_recovery_breath=True,
+        )
+
+        await async_db_session.flush()
+        with pytest.raises(ValueError) as exc_info:
+            await find_windows(
+                async_db_session,
+                target_date,
+                profile_id=async_test_profile.id,
+                criterion="rera_proxy_centered",
+                n=5,
+                include_unknown_leak=True,  # irrelevant to rera_proxy_centered
+            )
+
+        assert "include_unknown_leak" in str(exc_info.value)
+
+    async def test_unknown_criterion_error_includes_rera_proxy_centered(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Unknown criterion error message must list rera_proxy_centered."""
+        from snore.mcp.errors import ValidationError  # noqa: PLC0415
+        from snore.mcp.tools.windows import find_windows  # noqa: PLC0415
+
+        target_date = date(2024, 7, 4)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        _, sess = await _make_day_session(async_db_session, device, target_date)
+
+        await async_db_session.flush()
+        with pytest.raises(ValidationError) as exc_info:
+            await find_windows(
+                async_db_session,
+                target_date,
+                profile_id=async_test_profile.id,
+                criterion="totally_bogus_criterion",
+                n=5,
+            )
+
+        assert "rera_proxy_centered" in str(exc_info.value)

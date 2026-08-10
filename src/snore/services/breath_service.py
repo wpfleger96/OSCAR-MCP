@@ -340,6 +340,7 @@ class WindowCriterion(StrEnum):
     WORST_FLATTENING_LEAK_VALID = "worst_flattening_leak_valid"
     CA_CENTERED = "ca_centered"
     FL_RUN_ENDING_IN_RECOVERY = "fl_run_ending_in_recovery"
+    RERA_PROXY_CENTERED = "rera_proxy_centered"
 
 
 class WindowCriterionOptions(BaseModel):
@@ -457,6 +458,10 @@ class CompareEpochsResult(BaseModel):
     epochs: list[EpochBreathStats]
     null_reason: NullReason | None
     rx_violations: list[EpochRxViolation] = Field(default_factory=list)
+    # Per-field warnings when algorithm identity fields in CROSS_VERSION_REFUSAL_KEYS
+    # differ across contributing sessions (previously a hard refusal, now a warning).
+    # Also includes a warning when rera_proxy_version differs across epochs.
+    version_warnings: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -857,6 +862,11 @@ class NightlyAnalysisSummary(BaseModel):
     rera_index_reason: NullReason | None = None
     rdi: float | None = None
     rdi_reason: NullReason | None = None
+    # Percent of breaths where leak_valid is False (i.e. leak > 24 L/min).
+    # Denominator: breaths where leak_valid is not None (excludes indeterminate).
+    # None when no breath has a determinate leak_valid value.
+    leak_above_24_pct: float | None = None
+    leak_above_24_pct_reason: NullReason | None = None
 
 
 class NightlyRangeSummary(BaseModel):
@@ -1703,6 +1713,20 @@ class BreathService:
                 raise ValueError(
                     f"Options irrelevant to FL_RUN_ENDING_IN_RECOVERY: {bad}"
                 )
+        elif criterion == WindowCriterion.RERA_PROXY_CENTERED:
+            bad = [
+                f
+                for f in (
+                    "include_unknown_leak",
+                    "flattening_threshold",
+                    "min_window_breaths",
+                    "context_breaths_before",
+                    "context_breaths_after",
+                )
+                if getattr(opts, f) != getattr(defaults, f)
+            ]
+            if bad:
+                raise ValueError(f"Options irrelevant to RERA_PROXY_CENTERED: {bad}")
 
         # Resolve device (raises DeviceAmbiguityError for ≥2 devices, ValueError for 0)
         try:
@@ -1792,7 +1816,10 @@ class BreathService:
         if primary_modes:
             if len(set(primary_modes)) == 1:
                 uniform_primary_mode = primary_modes[0]
-            elif criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY:
+            elif criterion in (
+                WindowCriterion.FL_RUN_ENDING_IN_RECOVERY,
+                WindowCriterion.RERA_PROXY_CENTERED,
+            ):
                 return FindWindowsResult(
                     query_date=therapy_date,
                     device_id=resolved_device_id,
@@ -1838,6 +1865,16 @@ class BreathService:
 
         elif criterion == WindowCriterion.FL_RUN_ENDING_IN_RECOVERY:
             windows = await self._find_fl_run_windows(
+                session_ids=session_ids,
+                session_starts=session_starts,
+                ar_by_session=ar_by_session,
+                ar_status_by_session=ar_status_by_session,
+                n=n,
+                opts=opts,
+            )
+
+        elif criterion == WindowCriterion.RERA_PROXY_CENTERED:
+            windows = await self._find_rera_proxy_centered_windows(
                 session_ids=session_ids,
                 session_starts=session_starts,
                 ar_by_session=ar_by_session,
@@ -2104,6 +2141,89 @@ class BreathService:
 
         return self._dedup_and_top_n(candidates, n, key=lambda w: w.fl_run_length or 0)
 
+    async def _find_rera_proxy_centered_windows(
+        self,
+        session_ids: list[int],
+        session_starts: dict[int, datetime],
+        ar_by_session: dict[int, int | None],
+        ar_status_by_session: dict[int, AnalysisStatus],
+        n: int,
+        opts: WindowCriterionOptions,
+    ) -> list[WindowResult]:
+        """Build RERA_PROXY_CENTERED windows — context window of ±(context_seconds/2)
+        centered on the recovery breath of each RERA-proxy event, ranked by run length."""
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database import models  # noqa: PLC0415
+
+        tz_status, tz_name = await self.resolve_timezone()
+        half = opts.context_seconds / 2.0
+        candidates: list[WindowResult] = []
+        for sid in session_ids:
+            ar_id = ar_by_session.get(sid)
+            ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
+            if ar_id is None or ar_status != AnalysisStatus.OK:
+                continue
+
+            breath_rows = (
+                (
+                    await self._db.execute(
+                        select(models.Breath)
+                        .where(models.Breath.analysis_result_id == ar_id)
+                        .order_by(models.Breath.breath_number)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not breath_rows:
+                continue
+
+            session_start = session_starts[sid]
+            last_end = breath_rows[-1].end_offset_s
+            for run_start, run_last, recovery_idx in _iter_fl_run_recoveries(
+                breath_rows,
+                fl_class_threshold=opts.fl_class_threshold,
+                min_fl_run_length=opts.min_fl_run_length,
+                recovery_amplitude_margin=opts.recovery_amplitude_margin,
+            ):
+                rec_b = breath_rows[recovery_idx]
+                rec_offset = rec_b.start_offset_s
+                fl_run = breath_rows[run_start : run_last + 1]
+                fl_length = run_last - run_start + 1
+                run_start_offset = fl_run[0].start_offset_s
+                run_end_offset = fl_run[-1].end_offset_s
+                candidates.append(
+                    WindowResult(
+                        criterion=WindowCriterion.RERA_PROXY_CENTERED,
+                        session_id=sid,
+                        session_start_wall_clock=session_start,
+                        timezone_status=tz_status,
+                        timezone_name=tz_name,
+                        window_start_offset=max(0.0, rec_offset - half),
+                        window_end_offset=min(last_end, rec_offset + half),
+                        reason_summary=(
+                            f"rera_proxy: fl_run [{run_start_offset:.1f}-{run_end_offset:.1f}]s,"
+                            f" recovery at {rec_offset:.1f}s"
+                        ),
+                        worst_mid_insp_flattening=max(
+                            (
+                                b.mid_insp_flattening
+                                for b in fl_run
+                                if b.mid_insp_flattening is not None
+                            ),
+                            default=None,
+                        ),
+                        fl_run_length=fl_length,
+                        anchor_event_offset=rec_offset,
+                        analysis_result_id=ar_id,
+                        analysis_status=ar_status,
+                        analysis_reason=None,
+                    )
+                )
+
+        return self._dedup_and_top_n(candidates, n, key=lambda w: w.fl_run_length or 0)
+
     @staticmethod
     def _dedup_and_top_n(
         candidates: list[WindowResult],
@@ -2147,11 +2267,12 @@ class BreathService:
         """Distributions across RxTracker epochs.
 
         Two-phase design: metadata checks (RX + identity) run across ALL epochs
-        BEFORE any breath queries.  Any failure nulls all epoch distributions.
+        BEFORE any breath queries.  Hard refusals null all epoch distributions.
 
-        Refuses on CROSS_VERSION_REFUSAL_KEYS mismatch (ALGO_VERSION_MISMATCH)
-        or mid-epoch RX change (RX_CHANGED_WITHIN_EPOCH).  Mixed primary modes
-        degrade RERA fields only (PRIMARY_MODE_MISMATCH).
+        Hard refusal: mid-epoch RX change (RX_CHANGED_WITHIN_EPOCH).
+        Warning (non-blocking): CROSS_VERSION_REFUSAL_KEYS differ across epochs —
+        distributions are still computed; callers should inspect version_warnings.
+        Mixed primary modes degrade RERA fields only (PRIMARY_MODE_MISMATCH).
         """
         import statistics  # noqa: PLC0415
 
@@ -2224,6 +2345,7 @@ class BreathService:
             return CompareEpochsResult(
                 null_reason=NullReason.NOT_AVAILABLE,
                 epochs=not_avail_epochs,
+                version_warnings=[],
             )
         except ValueError:
             # ValueError here means auto-select found no sessions in range — always
@@ -2254,6 +2376,7 @@ class BreathService:
             return CompareEpochsResult(
                 null_reason=no_data_reason,
                 epochs=null_epochs,
+                version_warnings=[],
             )
 
         # Each entry: dict with epoch metadata + resolved sessions + RX data
@@ -2374,26 +2497,27 @@ class BreathService:
             for _, algo in ed["contributing_sessions"]
         ]
 
-        cross_epoch_mismatch = False
+        # Collect version warnings for CROSS_VERSION_REFUSAL_KEYS fields that differ
+        # across contributing sessions.  This is non-blocking: distributions are still
+        # computed; callers should inspect version_warnings for compatibility context.
+        version_warnings: list[str] = []
         if len(all_identities_combined) > 1:
             cross_keys = CROSS_VERSION_REFUSAL_KEYS
-            first_cross_id = {
-                k: all_identities_combined[0].model_dump()[k] for k in cross_keys
-            }
-            cross_epoch_mismatch = any(
-                {k: id_.model_dump()[k] for k in cross_keys} != first_cross_id
-                for id_ in all_identities_combined[1:]
-            )
+            for k in sorted(cross_keys):
+                all_vals_for_key = sorted(
+                    {id_.model_dump()[k] for id_ in all_identities_combined}
+                )
+                if len(all_vals_for_key) > 1:
+                    vals_str = ", ".join(f"'{v}'" for v in all_vals_for_key)
+                    version_warnings.append(
+                        f"algorithm_identity.{k} differs across epochs: {vals_str}"
+                    )
 
         has_rx_violation = bool(rx_violations)
 
-        # If any check failed, return null payloads for ALL epochs immediately
-        if has_rx_violation or cross_epoch_mismatch:
-            refusal_reason = (
-                NullReason.RX_CHANGED_WITHIN_EPOCH
-                if has_rx_violation
-                else NullReason.ALGO_VERSION_MISMATCH
-            )
+        # RX change within an epoch is a hard refusal: distributions are meaningless
+        # when therapy settings changed mid-epoch.
+        if has_rx_violation:
             epoch_stats: list[EpochBreathStats] = [
                 EpochBreathStats(
                     label=ed["epoch"].label,
@@ -2402,7 +2526,7 @@ class BreathService:
                     nights_with_data=ed["nights_with_data"],
                     nights_missing_analysis=ed["nights_missing_analysis"],
                     algorithm_identity=None,
-                    null_reason=refusal_reason,
+                    null_reason=NullReason.RX_CHANGED_WITHIN_EPOCH,
                     primary_mode=None,
                     mid_insp_flattening=_null_dist,
                     flatness_index=_null_dist,
@@ -2410,15 +2534,16 @@ class BreathService:
                     tidal_volume_ml=_null_dist,
                     ie_ratio=_null_dist,
                     rera_proxy_count=None,
-                    rera_reason=refusal_reason,
+                    rera_reason=NullReason.RX_CHANGED_WITHIN_EPOCH,
                     rx_settings=ed["all_rx"][0] if ed["all_rx"] else {},
                 )
                 for ed in epoch_resolved
             ]
             return CompareEpochsResult(
                 epochs=epoch_stats,
-                null_reason=refusal_reason,
+                null_reason=NullReason.RX_CHANGED_WITHIN_EPOCH,
                 rx_violations=rx_violations,
+                version_warnings=version_warnings,
             )
 
         # -----------------------------------------------------------------------
@@ -2590,10 +2715,25 @@ class BreathService:
                 )
             )
 
+        # Future-proofing: warn when rera_proxy_version differs across epochs.
+        # Currently impossible (single constant), but guards against future bumps.
+        rera_versions = {
+            es.rera_proxy_version
+            for es in epoch_stats
+            if es.rera_proxy_version is not None
+        }
+        if len(rera_versions) > 1:
+            sorted_vers = sorted(rera_versions)
+            vals_str = ", ".join(f"'{v}'" for v in sorted_vers)
+            version_warnings.append(
+                f"rera_proxy_version differs across epochs: {vals_str}"
+            )
+
         return CompareEpochsResult(
             epochs=epoch_stats,
             null_reason=None,
             rx_violations=rx_violations,
+            version_warnings=version_warnings,
         )
 
     async def get_analysis_status(
@@ -2739,6 +2879,8 @@ class BreathService:
                 rera_index_reason=NullReason.NOT_AVAILABLE,
                 rdi=None,
                 rdi_reason=NullReason.NOT_AVAILABLE,
+                leak_above_24_pct=None,
+                leak_above_24_pct_reason=NullReason.NOT_AVAILABLE,
             )
 
         # MIXED_VERSION within a day is handled by _reduce_day_status; under current
@@ -2753,6 +2895,8 @@ class BreathService:
         fl_class_ge4_num = 0
         fl_class_den = 0
         rera_count = 0
+        leak_above_24_num = 0  # breaths with leak_valid is False (leak > 24 L/min)
+        leak_above_24_den = 0  # breaths with determinate leak_valid (True or False)
 
         for sid, _algo in ok_sessions:
             _status, _a, ar_id = ar_classification.get(sid, (None, None, None))
@@ -2760,6 +2904,10 @@ class BreathService:
                 continue
             breath_rows = breath_rows_by_ar_id.get(ar_id, [])
             for b in breath_rows:
+                if b.leak_valid is not None:
+                    leak_above_24_den += 1
+                    if b.leak_valid is False:
+                        leak_above_24_num += 1
                 if b.leak_valid is True:
                     if b.mid_insp_flattening is not None:
                         fl_vals.append(b.mid_insp_flattening)
@@ -2821,6 +2969,15 @@ class BreathService:
         else:
             ie_ratio_median = None
             ie_ratio_reason = NullReason.NOT_AVAILABLE
+
+        leak_above_24_pct: float | None
+        leak_above_24_pct_reason: NullReason | None
+        if leak_above_24_den > 0:
+            leak_above_24_pct = round(100.0 * leak_above_24_num / leak_above_24_den, 1)
+            leak_above_24_pct_reason = None
+        else:
+            leak_above_24_pct = None
+            leak_above_24_pct_reason = NullReason.NOT_AVAILABLE
 
         # rera_index / rdi arithmetic (finding 7 — moves into service)
         rera_reason: NullReason | None = (
@@ -2889,6 +3046,8 @@ class BreathService:
             rera_index_reason=rera_index_reason,
             rdi=rdi,
             rdi_reason=rdi_reason,
+            leak_above_24_pct=leak_above_24_pct,
+            leak_above_24_pct_reason=leak_above_24_pct_reason,
         )
 
     async def get_nightly_summary(

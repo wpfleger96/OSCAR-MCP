@@ -3398,7 +3398,12 @@ class TestSameProfileTwoDeviceExtended:
 
 @pytest.mark.unit
 class TestCompareEpochsRefusal:
-    """Verify that metadata failures null ALL epoch distributions before any breath queries."""
+    """Verify that metadata failures null ALL epoch distributions before any breath queries.
+
+    RX change within an epoch is a hard refusal (null_reason=RX_CHANGED_WITHIN_EPOCH).
+    Cross-epoch algorithm identity mismatch is now a non-blocking warning: distributions
+    are still computed and version_warnings is populated instead of nulling everything.
+    """
 
     async def _make_setting(
         self,
@@ -3486,16 +3491,19 @@ class TestCompareEpochsRefusal:
         assert epoch_result.flatness_index.median is None
         assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
 
-    async def test_cross_epoch_identity_mismatch_refuses_with_null_distributions(
+    async def test_cross_epoch_identity_mismatch_warns_instead_of_refusing(
         self, async_db_session
     ):
-        """Cross-epoch algorithm identity mismatch → null_reason=ALGO_VERSION_MISMATCH on all epochs.
+        """Cross-epoch algorithm identity mismatch → version_warnings populated, NOT a hard refusal.
 
         Because _latest_analysis_for_session only returns OK when the stored identity
         matches the current runtime identity, genuine cross-epoch mismatches cannot be
         created through DB fixtures alone.  We mock _latest_analysis_for_session to
         inject different AlgoVersions (each individually OK) for two sessions in two
         different epochs, so the cross-epoch identity check fires.
+
+        New semantics: result.null_reason is None (not ALGO_VERSION_MISMATCH);
+        epoch null_reasons are None; version_warnings lists the differing fields.
         """
         import copy  # noqa: PLC0415
 
@@ -3593,12 +3601,15 @@ class TestCompareEpochsRefusal:
                 ]
             )
 
-        # Cross-epoch identity mismatch → all null
-        assert result.null_reason == NullReason.ALGO_VERSION_MISMATCH
+        # Cross-epoch identity mismatch is now a warning, not a hard refusal.
+        assert result.null_reason is None
         for es in result.epochs:
-            assert es.null_reason == NullReason.ALGO_VERSION_MISMATCH
-            assert es.mid_insp_flattening.median is None
-            assert es.flatness_index.median is None
+            assert es.null_reason is None
+        # version_warnings must mention the differing field and both version strings
+        assert len(result.version_warnings) > 0
+        assert any("segmenter" in w for w in result.version_warnings)
+        segmenter_warn = next(w for w in result.version_warnings if "segmenter" in w)
+        assert "v999.999.999" in segmenter_warn
 
     async def test_primary_mode_mismatch_nulls_rera_fields(self, async_db_session):
         """Same identity but different primary_mode → rera_reason=PRIMARY_MODE_MISMATCH, rera_proxy_count=None.

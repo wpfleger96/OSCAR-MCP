@@ -4,14 +4,14 @@ Timestamp contract (three tiers, A6):
   Tier 1 — absolute audit instants (e.g. ``AnalysisResult.created_at``):
     UTC ISO 8601 with ``Z`` suffix.
   Tier 2 — device/session wall-clock times (e.g. ``Event.start_time``,
-    ``Session.start_time``): offset-free ISO 8601 string (the DB deliberately
-    stores these as naive datetimes — no TZ is known from the source device).
-    Always accompanied by ``timezone_status``: ``"unknown"`` (no TZ declared)
-    or ``"user_declared"`` (the profile declares an IANA timezone, carried in
-    the companion ``timezone_name`` field, e.g. "America/New_York").
-    ``timezone_name`` is interpretation metadata only — timestamps are never
-    rewritten and no UTC offset is ever fabricated via ``.timestamp()`` /
-    ``astimezone()``.
+    ``Session.start_time``): ISO 8601 string, conditionally offset-qualified.
+    When ``timezone_status`` is ``"user_declared"`` (the profile declares an
+    IANA timezone in ``timezone_name``, e.g. "America/New_York"), wall-clock
+    strings carry a UTC offset (e.g. "2026-08-08T22:31:00-04:00") via
+    ``localize_wall_clock()``.  When ``timezone_status`` is ``"unknown"``
+    (no TZ declared), strings stay offset-free (naive ISO 8601), preserving
+    the original DB representation.  The DB stores these as naive datetimes;
+    no UTC offset is ever fabricated via ``.timestamp()`` / ``astimezone()``.
   Tier 3 — in-session positions: numeric ``offset_seconds`` from
     ``Session.start_time``.
 
@@ -22,8 +22,9 @@ All measurement fields carry their unit in the field name or tool docstring.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 
@@ -41,6 +42,13 @@ def tz_fields(source: Any) -> dict[str, Any]:
     else:
         status, name = source.timezone_status, source.timezone_name
     return {"timezone_status": str(status), "timezone_name": name}
+
+
+def localize_wall_clock(dt: datetime, tz_status: str, tz_name: str | None) -> str:
+    """Naive device wall-clock -> ISO 8601. Offset-qualified when the profile timezone is known."""
+    if tz_status == "user_declared" and tz_name:
+        return dt.replace(tzinfo=ZoneInfo(tz_name)).isoformat()
+    return dt.isoformat()
 
 
 class DeviceCapabilities(BaseModel):
@@ -89,6 +97,8 @@ class DataOverviewResponse(BaseModel):
     available_event_types: list[str] = []
     analysis_run: bool = False
     analysis_session_count: int = 0
+    timezone_status: str = "unknown"
+    timezone_name: str | None = None
 
 
 class SettingsEpoch(BaseModel):
@@ -503,6 +513,10 @@ class CompareEpochsResponse(BaseModel):
     epochs: list[EpochStats] = []
     null_reason: str | None = None
     rx_violations: list[EpochRxViolationRow] = []
+    # Per-field warnings when algorithm identity fields differ across epochs.
+    # Non-empty means distributions were computed across sessions with different
+    # algorithm versions — callers should review before drawing conclusions.
+    version_warnings: list[str] = []
 
 
 # ---------------------------------------------------------------------------

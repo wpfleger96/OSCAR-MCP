@@ -149,6 +149,7 @@ async def compare_epochs(
             )
             for v in result.rx_violations
         ],
+        version_warnings=result.version_warnings,
     )
 
 
@@ -193,11 +194,11 @@ def register(mcp: FastMCP) -> None:
             ``rx_settings`` holds representative therapy settings observed for the epoch.
             ``rx_violations`` lists any therapy-settings changes detected within an
             epoch's date range; callers should split affected epochs at those dates.
+            ``version_warnings`` lists per-field messages when algorithm identity fields
+            differ across epochs — distributions are still populated but callers should
+            review version_warnings before drawing conclusions.
 
         Refusal semantics (ALL epoch distributions set to null):
-            ``null_reason: "algo_version_mismatch"`` — epochs span sessions analysed
-                with incompatible algorithm versions (cross-version refusal keys differ);
-                re-run analysis with a uniform version before comparing.
             ``null_reason: "rx_changed_within_epoch"`` — therapy settings changed within
                 at least one epoch; ``rx_violations`` lists the epoch label, changed keys,
                 and change dates so the caller can split the range.
@@ -208,6 +209,8 @@ def register(mcp: FastMCP) -> None:
             Device not owned by the active profile: the service catches this internally
                 and returns a success response with every epoch's
                 ``null_reason: "not_available"``.
+            Algorithm version mismatch (``algo_version_mismatch``) is NOT a hard refusal
+                — distributions are computed and ``version_warnings`` is populated instead.
 
         Error conditions:
             - Epochs list empty or >6 entries → tool error.

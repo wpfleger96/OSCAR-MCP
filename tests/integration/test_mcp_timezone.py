@@ -2,13 +2,15 @@
 
 A profile may declare an IANA timezone name.  When set, MCP responses carry
 ``timezone_status: "user_declared"`` plus ``timezone_name`` beside every tier-2
-wall-clock anchor.  Timestamps stay naive — declaring a timezone must never
-introduce a UTC offset or ``Z`` suffix into any wall-clock string.
+wall-clock anchor.  When timezone is declared, wall-clock strings are
+offset-qualified ISO 8601 (e.g. "2024-08-18T22:00:00-04:00"); when unknown,
+strings stay offset-free (naive ISO 8601).  The DB stores naive datetimes;
+no UTC offset is ever fabricated via ``.timestamp()`` / ``astimezone()``.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -29,9 +31,20 @@ TZ = "America/New_York"
 
 
 def _assert_naive(wall_clock: str) -> None:
-    """Tier-2 wall-clock strings stay offset-free even when a TZ is declared."""
+    """Tier-2 wall-clock strings stay offset-free when no TZ is declared."""
     assert "+" not in wall_clock
     assert not wall_clock.endswith("Z")
+    # Must also not end in an explicit negative offset like "-05:00"
+    parsed = datetime.fromisoformat(wall_clock)
+    assert parsed.tzinfo is None
+
+
+def _assert_offset_aware(wall_clock: str) -> None:
+    """Tier-2 wall-clock strings carry a UTC offset when TZ is user_declared."""
+    parsed = datetime.fromisoformat(wall_clock)
+    assert parsed.tzinfo is not None, (
+        f"Expected offset-aware timestamp, got: {wall_clock!r}"
+    )
 
 
 @pytest.fixture
@@ -70,8 +83,8 @@ class TestUserDeclaredTimezone:
         ev = result.events[0]
         assert ev.timezone_status == "user_declared"
         assert ev.timezone_name == TZ
-        _assert_naive(ev.start_time_wall_clock)
-        _assert_naive(ev.session_start_wall_clock)
+        _assert_offset_aware(ev.start_time_wall_clock)
+        _assert_offset_aware(ev.session_start_wall_clock)
 
     async def test_get_breath_table_carries_user_declared_timezone(
         self, async_db_session: AsyncSession, tz_profile: Any
@@ -98,7 +111,7 @@ class TestUserDeclaredTimezone:
         row = result.rows[0]
         assert row.timezone_status == "user_declared"
         assert row.timezone_name == TZ
-        _assert_naive(row.session_start_wall_clock)
+        _assert_offset_aware(row.session_start_wall_clock)
 
     async def test_find_windows_carries_user_declared_timezone(
         self, async_db_session: AsyncSession, tz_profile: Any
@@ -121,7 +134,7 @@ class TestUserDeclaredTimezone:
         win = result.windows[0]
         assert win.timezone_status == "user_declared"
         assert win.timezone_name == TZ
-        _assert_naive(win.session_start_wall_clock)
+        _assert_offset_aware(win.session_start_wall_clock)
 
     async def test_get_waveform_carries_user_declared_timezone(
         self, async_db_session: AsyncSession, tz_profile: Any
@@ -149,7 +162,7 @@ class TestUserDeclaredTimezone:
         assert response.timezone_status == "user_declared"
         assert response.timezone_name == TZ
         assert response.session_start_wall_clock is not None
-        _assert_naive(response.session_start_wall_clock)
+        _assert_offset_aware(response.session_start_wall_clock)
 
     async def test_get_ca_analysis_carries_user_declared_timezone(
         self, async_db_session: AsyncSession, tz_profile: Any
@@ -172,12 +185,42 @@ class TestUserDeclaredTimezone:
         ev = result.ca_events[0]
         assert ev.timezone_status == "user_declared"
         assert ev.timezone_name == TZ
-        _assert_naive(ev.session_start_wall_clock)
+        _assert_offset_aware(ev.session_start_wall_clock)
+
+    async def test_get_data_overview_carries_timezone_status(
+        self, async_db_session: AsyncSession, tz_profile: Any
+    ) -> None:
+        """get_data_overview stamps timezone_status/timezone_name when TZ is declared."""
+        from snore.mcp.tools.overview import get_data_overview  # noqa: PLC0415
+
+        target_date = date(2024, 8, 18)
+        device = await _make_device(async_db_session, tz_profile.id)
+        await _make_day_session(async_db_session, device, target_date)
+
+        result = await get_data_overview(async_db_session, tz_profile.id)
+
+        assert result.timezone_status == "user_declared"
+        assert result.timezone_name == TZ
+
+    async def test_get_data_overview_unknown_when_no_timezone(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Control: no declared timezone → get_data_overview returns status "unknown"."""
+        from snore.mcp.tools.overview import get_data_overview  # noqa: PLC0415
+
+        target_date = date(2024, 8, 18)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        await _make_day_session(async_db_session, device, target_date)
+
+        result = await get_data_overview(async_db_session, async_test_profile.id)
+
+        assert result.timezone_status == "unknown"
+        assert result.timezone_name is None
 
     async def test_undeclared_profile_stays_unknown_with_null_name(
         self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
-        """Control: no declared timezone → status "unknown", timezone_name null."""
+        """Control: no declared timezone → status "unknown", timestamps stay naive."""
         from snore.mcp.tools.events import get_events  # noqa: PLC0415
 
         target_date = date(2024, 8, 18)
@@ -199,5 +242,8 @@ class TestUserDeclaredTimezone:
 
         assert result.timezone_status == "unknown"
         assert result.timezone_name is None
-        assert result.events[0].timezone_status == "unknown"
-        assert result.events[0].timezone_name is None
+        ev = result.events[0]
+        assert ev.timezone_status == "unknown"
+        assert ev.timezone_name is None
+        _assert_naive(ev.start_time_wall_clock)
+        _assert_naive(ev.session_start_wall_clock)
