@@ -7,7 +7,7 @@
     </div>
     <div v-else class="records-grid">
         <div v-for="(metric, key) in displayMetrics" :key="key" class="record-card">
-            <h4>{{ metric.label }}</h4>
+            <h4>{{ metric.label }} <InfoHint :glossary-key="metric.glossaryKey" /></h4>
             <div class="record-columns">
                 <div class="record-col">
                     <span class="col-header best-header">Best</span>
@@ -38,6 +38,7 @@
 import { computed } from 'vue'
 import { Loader2 } from '@lucide/vue'
 import { formatDateMonthDay } from '@/utils/formatting'
+import InfoHint from '@/components/InfoHint.vue'
 import type { RecordsData } from '@/types'
 
 const props = defineProps<{
@@ -46,11 +47,11 @@ const props = defineProps<{
     emptyMessage?: string
 }>()
 
-const METRIC_CONFIG: Record<string, { label: string; decimals: number }> = {
-    ahi: { label: 'AHI', decimals: 1 },
-    leak: { label: 'Leak (L/min)', decimals: 1 },
-    therapy_hours: { label: 'Therapy Hours', decimals: 1 },
-    spo2_min: { label: 'SpO₂ Min (%)', decimals: 0 },
+const METRIC_CONFIG: Record<string, { label: string; decimals: number; glossaryKey: string }> = {
+    ahi: { label: 'AHI', decimals: 1, glossaryKey: 'ahi' },
+    leak: { label: 'Leak (L/min)', decimals: 1, glossaryKey: 'leak' },
+    therapy_hours: { label: 'Therapy Hours', decimals: 1, glossaryKey: 'usage' },
+    spo2_min: { label: 'SpO₂ Min (%)', decimals: 0, glossaryKey: 'spo2' },
 }
 
 const displayMetrics = computed(() => {
@@ -60,6 +61,7 @@ const displayMetrics = computed(() => {
         .map(([key, cfg]) => ({
             label: cfg.label,
             decimals: cfg.decimals,
+            glossaryKey: cfg.glossaryKey,
             best: props.records![key]?.best ?? [],
             worst: props.records![key]?.worst ?? [],
         }))

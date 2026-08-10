@@ -108,36 +108,71 @@
                 </CollapsibleTrigger>
                 <CollapsibleContent>
                     <div class="stats-grid">
-                        <StatCard label="AHI" :value="session.statistics.ahi" :decimals="1" />
-                        <StatCard label="REI" :value="session.statistics.rei" :decimals="1" />
-                        <StatCard label="OAI" :value="session.statistics.oai" :decimals="2" />
-                        <StatCard label="CAI" :value="session.statistics.cai" :decimals="2" />
-                        <StatCard label="HI" :value="session.statistics.hi" :decimals="2" />
+                        <StatCard
+                            label="AHI"
+                            :value="session.statistics.ahi"
+                            :decimals="1"
+                            hintKey="ahi"
+                        />
+                        <StatCard
+                            label="REI"
+                            :value="session.statistics.rei"
+                            :decimals="1"
+                            hintKey="rei"
+                        />
+                        <StatCard
+                            label="OAI"
+                            :value="session.statistics.oai"
+                            :decimals="2"
+                            hintKey="oai"
+                        />
+                        <StatCard
+                            label="CAI"
+                            :value="session.statistics.cai"
+                            :decimals="2"
+                            hintKey="cai"
+                        />
+                        <StatCard
+                            label="HI"
+                            :value="session.statistics.hi"
+                            :decimals="2"
+                            hintKey="hi"
+                        />
                         <StatCard
                             label="Obstructive Apneas"
                             :value="session.statistics.obstructive_apneas"
                             :decimals="0"
+                            hintKey="obstructive_apneas"
                         />
                         <StatCard
                             label="Central Apneas"
                             :value="session.statistics.central_apneas"
                             :decimals="0"
+                            hintKey="central_apneas"
                         />
                         <StatCard
                             label="Mixed Apneas"
                             :value="session.statistics.mixed_apneas"
                             :decimals="0"
+                            hintKey="mixed_apneas"
                         />
                         <StatCard
                             label="Hypopneas"
                             :value="session.statistics.hypopneas"
                             :decimals="0"
+                            hintKey="hypopneas"
                         />
-                        <StatCard label="RERAs" :value="session.statistics.reras" :decimals="0" />
+                        <StatCard
+                            label="RERAs"
+                            :value="session.statistics.reras"
+                            :decimals="0"
+                            hintKey="reras"
+                        />
                         <StatCard
                             label="Flow Limitations"
                             :value="session.statistics.flow_limitations"
                             :decimals="0"
+                            hintKey="flow_limitations"
                         />
                     </div>
                 </CollapsibleContent>
@@ -160,6 +195,7 @@
                             :value="session.statistics.pressure_mean"
                             unit="cmH₂O"
                             :decimals="1"
+                            hintKey="pressure"
                         />
                         <StatCard
                             label="Pressure Min"
@@ -190,6 +226,7 @@
                             :value="session.statistics.epap_mean"
                             unit="cmH₂O"
                             :decimals="1"
+                            hintKey="epap"
                         />
                         <StatCard
                             label="EPAP Min"
@@ -228,6 +265,7 @@
                                 :value="session.statistics.ipap_median"
                                 unit="cmH₂O"
                                 :decimals="1"
+                                hintKey="ipap"
                             />
                             <StatCard
                                 v-if="session.statistics.ipap_95th != null"
@@ -265,6 +303,7 @@
                             :value="session.statistics.leak_mean"
                             unit="L/min"
                             :decimals="1"
+                            hintKey="leak"
                         />
                         <StatCard
                             label="Leak Min"
@@ -317,6 +356,7 @@
                             :value="session.statistics.spo2_mean"
                             unit="%"
                             :decimals="1"
+                            hintKey="spo2"
                         />
                         <StatCard
                             label="SpO₂ Min"
@@ -335,12 +375,14 @@
                             :value="session.statistics.spo2_time_below_90"
                             unit="s"
                             :decimals="0"
+                            hintKey="spo2_below_90"
                         />
                         <StatCard
                             label="Pulse Mean"
                             :value="session.statistics.pulse_mean"
                             unit="bpm"
                             :decimals="0"
+                            hintKey="pulse"
                         />
                         <StatCard
                             label="Pulse Min"
@@ -375,6 +417,7 @@
                             :value="session.statistics.respiratory_rate_mean"
                             unit="br/min"
                             :decimals="1"
+                            hintKey="resp_rate"
                         />
                         <StatCard
                             label="Resp Rate Min"
@@ -393,6 +436,7 @@
                             :value="session.statistics.tidal_volume_mean"
                             unit="mL"
                             :decimals="0"
+                            hintKey="tidal_volume"
                         />
                         <StatCard
                             label="Tidal Volume Min"
@@ -411,6 +455,7 @@
                             :value="session.statistics.minute_ventilation_mean"
                             unit="L/min"
                             :decimals="1"
+                            hintKey="mv"
                         />
                         <StatCard
                             label="Min Ventilation Min"

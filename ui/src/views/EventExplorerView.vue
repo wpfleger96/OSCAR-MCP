@@ -23,24 +23,38 @@
         <div v-if="matchResult" class="section-card">
             <h2>Machine vs Programmatic</h2>
             <div class="match-grid">
-                <StatCard label="Machine Events" :value="matchResult.machine_count" :decimals="0" />
+                <StatCard
+                    label="Machine Events"
+                    :value="matchResult.machine_count"
+                    :decimals="0"
+                    hint-key="machine_events"
+                />
                 <StatCard
                     label="Programmatic"
                     :value="matchResult.programmatic_count"
                     :decimals="0"
+                    hint-key="programmatic_events"
                 />
                 <StatCard label="Matched" :value="matchResult.matched" :decimals="0" />
                 <StatCard
                     label="False Positives"
                     :value="matchResult.false_positives"
                     :decimals="0"
+                    hint-key="false_positives"
                 />
                 <StatCard
                     label="False Negatives"
                     :value="matchResult.false_negatives"
                     :decimals="0"
+                    hint-key="false_negatives"
                 />
-                <StatCard label="Sensitivity" :value="sensitivity" unit="%" :decimals="1" />
+                <StatCard
+                    label="Sensitivity"
+                    :value="sensitivity"
+                    unit="%"
+                    :decimals="1"
+                    hint-key="sensitivity"
+                />
             </div>
         </div>
 
@@ -62,6 +76,9 @@
                     {{ t }}
                 </button>
             </div>
+            <InfoHint label="Event Types">
+                <EventTypeLegend />
+            </InfoHint>
         </div>
 
         <!-- Event List -->
@@ -71,8 +88,12 @@
                     <TableHead style="width: 80px">Type</TableHead>
                     <TableHead>Time</TableHead>
                     <TableHead style="width: 100px">Duration</TableHead>
-                    <TableHead style="width: 100px">SpO₂ Drop</TableHead>
-                    <TableHead style="width: 90px">Peak FL</TableHead>
+                    <TableHead style="width: 100px" class="whitespace-nowrap"
+                        >SpO₂ Drop <InfoHint glossary-key="spo2"
+                    /></TableHead>
+                    <TableHead style="width: 90px" class="whitespace-nowrap"
+                        >Peak FL <InfoHint glossary-key="peak_fl"
+                    /></TableHead>
                 </TableRow>
             </TableHeader>
             <TableBody>
@@ -146,6 +167,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { Loader2, ArrowLeft } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
+import InfoHint from '@/components/InfoHint.vue'
+import EventTypeLegend from '@/components/EventTypeLegend.vue'
 import { getSessionEvents, getEventMatch } from '@/api/events'
 import { getSession } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'

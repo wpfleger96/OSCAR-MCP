@@ -36,18 +36,26 @@
                 :value="analysis.session_duration_hours"
                 unit="hrs"
                 :decimals="1"
+                hint-key="session_duration_hours"
             />
-            <StatCard label="Total Breaths" :value="analysis.total_breaths" :decimals="0" />
+            <StatCard
+                label="Total Breaths"
+                :value="analysis.total_breaths"
+                :decimals="0"
+                hint-key="total_breaths"
+            />
             <StatCard
                 label="Machine Events"
                 :value="analysis.machine_events?.length ?? 0"
                 :decimals="0"
+                hint-key="machine_events"
             />
             <StatCard
                 v-if="analysis.pulse_change_count != null"
                 label="Pulse Changes"
                 :value="analysis.pulse_change_count"
                 :decimals="0"
+                hint-key="pulse_change_count"
             />
         </div>
 
@@ -58,11 +66,21 @@
                 <TableHeader>
                     <TableRow>
                         <TableHead>Mode</TableHead>
-                        <TableHead style="width: 80px">AHI</TableHead>
-                        <TableHead style="width: 80px">RDI</TableHead>
-                        <TableHead style="width: 80px">Apneas</TableHead>
-                        <TableHead style="width: 100px">Hypopneas</TableHead>
-                        <TableHead style="width: 80px">RERAs</TableHead>
+                        <TableHead class="whitespace-nowrap" style="width: 80px">
+                            AHI <InfoHint glossary-key="ahi" />
+                        </TableHead>
+                        <TableHead class="whitespace-nowrap" style="width: 80px">
+                            RDI <InfoHint glossary-key="rdi" />
+                        </TableHead>
+                        <TableHead class="whitespace-nowrap" style="width: 80px">
+                            Apneas <InfoHint glossary-key="apneas" />
+                        </TableHead>
+                        <TableHead class="whitespace-nowrap" style="width: 100px">
+                            Hypopneas <InfoHint glossary-key="hypopneas" />
+                        </TableHead>
+                        <TableHead class="whitespace-nowrap" style="width: 80px">
+                            RERAs <InfoHint glossary-key="reras" />
+                        </TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -106,8 +124,12 @@
                             <TableHead style="width: 80px">Type</TableHead>
                             <TableHead>Start Time</TableHead>
                             <TableHead style="width: 90px">Duration</TableHead>
-                            <TableHead style="width: 100px">Flow Red.</TableHead>
-                            <TableHead style="width: 100px">Confidence</TableHead>
+                            <TableHead class="whitespace-nowrap" style="width: 100px">
+                                Flow Red. <InfoHint glossary-key="flow_reduction" />
+                            </TableHead>
+                            <TableHead class="whitespace-nowrap" style="width: 100px">
+                                Confidence <InfoHint glossary-key="confidence" />
+                            </TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -162,10 +184,13 @@
         <div v-if="analysis.csr_detection || analysis.periodic_breathing" class="section-card">
             <h2>Breathing Patterns</h2>
             <div v-if="analysis.csr_episodes?.length" class="pattern-info">
-                <strong>CSR Episodes:</strong> {{ analysis.csr_episodes.length }}
+                <strong>CSR Episodes:</strong>
+                <InfoHint glossary-key="csr" />
+                {{ analysis.csr_episodes.length }}
             </div>
             <div v-if="analysis.periodic_breathing_episodes?.length" class="pattern-info">
                 <strong>Periodic Breathing Episodes:</strong>
+                <InfoHint glossary-key="periodic_breathing" />
                 {{ analysis.periodic_breathing_episodes.length }}
             </div>
         </div>
@@ -179,22 +204,26 @@
                     :value="flowAnalysis!.flow_limitation_index * 100"
                     unit="%"
                     :decimals="1"
+                    hint-key="flow_limitation_index"
                 />
                 <StatCard
                     label="Total Breaths"
                     :value="flowAnalysis!.total_breaths"
                     :decimals="0"
+                    hint-key="total_breaths"
                 />
                 <StatCard
                     label="Avg Confidence"
                     :value="flowAnalysis!.average_confidence * 100"
                     unit="%"
                     :decimals="1"
+                    hint-key="avg_confidence"
                 />
             </div>
             <Table>
                 <TableHeader>
                     <TableRow>
+                        <TableHead style="width: 60px">Shape</TableHead>
                         <TableHead style="width: 60px">Class</TableHead>
                         <TableHead>Name</TableHead>
                         <TableHead style="width: 80px">Severity</TableHead>
@@ -208,6 +237,53 @@
                         :key="cls.classNum"
                         class="odd:bg-muted/50"
                     >
+                        <TableCell>
+                            <Popover>
+                                <PopoverTrigger as-child>
+                                    <button
+                                        type="button"
+                                        :aria-label="`Show details for Class ${cls.classNum}: ${cls.name}`"
+                                        class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    >
+                                        <FlowClassGlyph :class-num="cls.classNum" size="sm" />
+                                    </button>
+                                </PopoverTrigger>
+                                <PopoverContent class="w-80" side="right">
+                                    <div
+                                        class="flex justify-center mb-3 py-2 bg-muted/30 rounded-md"
+                                    >
+                                        <FlowClassGlyph :class-num="cls.classNum" size="lg" />
+                                    </div>
+                                    <PopoverHeader>
+                                        <PopoverTitle
+                                            >Class {{ cls.classNum }}: {{ cls.name }}</PopoverTitle
+                                        >
+                                    </PopoverHeader>
+                                    <span
+                                        class="text-xs px-1.5 py-0.5 rounded-full font-medium"
+                                        :class="severityClass(cls.severity)"
+                                        >{{ cls.severity }}</span
+                                    >
+                                    <p class="text-sm text-muted-foreground">
+                                        {{ FLOW_LIMITATION_CLASSES[cls.classNum]?.description }}
+                                    </p>
+                                    <p class="text-xs text-muted-foreground">
+                                        <strong class="text-foreground">Visual:</strong>
+                                        {{
+                                            FLOW_LIMITATION_CLASSES[cls.classNum]
+                                                ?.visualCharacteristics
+                                        }}
+                                    </p>
+                                    <p class="text-xs text-muted-foreground">
+                                        <strong class="text-foreground">Clinical:</strong>
+                                        {{
+                                            FLOW_LIMITATION_CLASSES[cls.classNum]
+                                                ?.clinicalSignificance
+                                        }}
+                                    </p>
+                                </PopoverContent>
+                            </Popover>
+                        </TableCell>
                         <TableCell>{{ cls.classNum }}</TableCell>
                         <TableCell>{{ cls.name }}</TableCell>
                         <TableCell>{{ cls.severity }}</TableCell>
@@ -216,6 +292,48 @@
                     </TableRow>
                 </TableBody>
             </Table>
+
+            <!-- FL class legend -->
+            <Collapsible v-model:open="flLegendOpen" class="mt-4">
+                <CollapsibleTrigger as-child>
+                    <button
+                        type="button"
+                        class="flex w-full items-center justify-between px-1 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                        What do these classes mean?
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': flLegendOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="mt-2 border border-border rounded-md overflow-hidden">
+                        <div
+                            v-for="[num, info] in flLegendEntries"
+                            :key="num"
+                            class="flex items-start gap-3 px-3 py-2 text-sm border-t border-border first:border-t-0"
+                        >
+                            <div class="shrink-0 text-muted-foreground">
+                                <FlowClassGlyph :class-num="Number(num)" size="lg" />
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-2 mb-0.5">
+                                    <span class="font-medium"
+                                        >Class {{ num }}: {{ info.name }}</span
+                                    >
+                                    <span
+                                        class="text-xs px-1.5 py-0.5 rounded-full font-medium"
+                                        :class="severityClass(info.severity)"
+                                        >{{ info.severity }}</span
+                                    >
+                                </div>
+                                <p class="text-muted-foreground text-xs">{{ info.description }}</p>
+                            </div>
+                        </div>
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
         </div>
 
         <!-- Event Comparison -->
@@ -226,16 +344,19 @@
                     label="Machine Events"
                     :value="comparison.machine_event_count"
                     :decimals="0"
+                    hint-key="machine_events"
                 />
                 <StatCard
                     label="Programmatic Events"
                     :value="comparison.programmatic_event_count"
                     :decimals="0"
+                    hint-key="programmatic_events"
                 />
                 <StatCard
                     label="False Negatives"
                     :value="comparison.false_negatives?.length ?? 0"
                     :decimals="0"
+                    hint-key="false_negatives"
                 />
                 <StatCard
                     label="False Positives"
@@ -244,6 +365,7 @@
                         (comparison.false_positives_hypopnea?.length ?? 0)
                     "
                     :decimals="0"
+                    hint-key="false_positives"
                 />
             </div>
 
@@ -360,8 +482,18 @@ import {
 } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { Loader2, AlertTriangle, ArrowLeft, BarChart3, Play } from '@lucide/vue'
+import { Loader2, AlertTriangle, ArrowLeft, BarChart3, Play, ChevronDown } from '@lucide/vue'
+import {
+    Popover,
+    PopoverContent,
+    PopoverHeader,
+    PopoverTitle,
+    PopoverTrigger,
+} from '@/components/ui/popover'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import StatCard from '@/components/StatCard.vue'
+import InfoHint from '@/components/InfoHint.vue'
+import FlowClassGlyph from '@/components/FlowClassGlyph.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
 import { getWaveformCompare } from '@/api/waveforms'
 import { useAuth } from '@/composables/useAuth'
@@ -390,6 +522,7 @@ const comparison = ref<EventComparisonResult | null>(null)
 const selectedMode = ref('')
 const eventsPage = ref(0)
 const eventsPageSize = 25
+const flLegendOpen = ref(false)
 
 const modeOptions = computed(() => Object.keys(analysis.value?.mode_results ?? {}))
 
@@ -501,12 +634,35 @@ const flDistributionRows = computed<FlDistRow[]>(() => {
         .sort((a, b) => a.classNum - b.classNum)
 })
 
+const flLegendEntries = computed(() =>
+    Object.entries(FLOW_LIMITATION_CLASSES).sort(([a], [b]) => Number(a) - Number(b)),
+)
+
 const allFalsePositives = computed(() =>
     [
         ...(comparison.value?.false_positives_apnea ?? []),
         ...(comparison.value?.false_positives_hypopnea ?? []),
     ].sort((a, b) => a.start_time - b.start_time),
 )
+
+function severityClass(severity: string): string {
+    switch (severity) {
+        case 'normal':
+            return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+        case 'mild':
+            return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+        case 'mild-moderate':
+            return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+        case 'moderate':
+            return 'bg-orange-200 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300'
+        case 'moderate-severe':
+            return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+        case 'severe':
+            return 'bg-red-200 text-red-800 dark:bg-red-900/40 dark:text-red-300'
+        default:
+            return 'bg-muted text-muted-foreground'
+    }
+}
 
 watch(selectedMode, () => {
     eventsPage.value = 0

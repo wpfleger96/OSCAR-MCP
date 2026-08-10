@@ -91,7 +91,10 @@
             <h2>Trends</h2>
             <template v-for="key in selectedMetrics" :key="key">
                 <div v-if="hasData(key)" class="trend-metric">
-                    <p class="trend-metric-label">{{ METRIC_CONFIG[key].label }}</p>
+                    <p class="trend-metric-label">
+                        {{ METRIC_CONFIG[key].label }}
+                        <InfoHint :glossary-key="METRIC_CONFIG[key].glossaryKey" />
+                    </p>
                     <TrendChart
                         :labels="trendLabels"
                         :datasets="[metricDataset(key)]"
@@ -127,27 +130,85 @@ import PeriodStatsTable from '@/components/PeriodStatsTable.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import RecordsPanel from '@/components/RecordsPanel.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import InfoHint from '@/components/InfoHint.vue'
 import { getSummary, getPeriods, getTrends, getRecords, getDataRange } from '@/api/stats'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
+import { GLOSSARY } from '@/utils/glossary'
 import type { PeriodStatistics, TrendData } from '@/types'
 
 // ────────────────────────────── Metric config ──────────────────────────────
 
-const METRIC_CONFIG: Record<string, { label: string; key: keyof TrendData; color: string }> = {
-    ahi: { label: 'AHI (events/hr)', key: 'ahi', color: '#2563eb' },
-    usage: { label: 'Usage (hrs)', key: 'usage', color: '#16a34a' },
-    spo2: { label: 'SpO₂ (%)', key: 'spo2', color: '#f97316' },
-    leak: { label: 'Leak (L/min)', key: 'leak', color: '#dc2626' },
-    pressure: { label: 'Pressure (cmH₂O)', key: 'pressure', color: '#7c3aed' },
-    epap: { label: 'EPAP (cmH₂O)', key: 'epap', color: '#06b6d4' },
-    rr: { label: 'Resp Rate (br/min)', key: 'rr', color: '#db2777' },
-    pulse: { label: 'Pulse (BPM)', key: 'pulse', color: '#d97706' },
-    mv: { label: 'Minute Vent (L/min)', key: 'mv', color: '#059669' },
-    oai: { label: 'OAI (events/hr)', key: 'oai', color: '#be123c' },
-    cai: { label: 'CAI (events/hr)', key: 'cai', color: '#0284c7' },
-    hi: { label: 'HI (events/hr)', key: 'hi', color: '#ca8a04' },
-    rera: { label: 'RERA (events/hr)', key: 'rera', color: '#ea580c' },
+// glossaryKey is the GLOSSARY key for InfoHint; differs from the METRIC_CONFIG entry key only
+// for rr (glossary: resp_rate). Labels are composed from GLOSSARY where the label matches the
+// desired display name; rr/mv/rera keep local names because their glossary labels differ.
+const METRIC_CONFIG: Record<
+    string,
+    { label: string; glossaryKey: string; key: keyof TrendData; color: string }
+> = {
+    ahi: {
+        label: `${GLOSSARY.ahi.label} (events/hr)`,
+        glossaryKey: 'ahi',
+        key: 'ahi',
+        color: '#2563eb',
+    },
+    usage: {
+        label: `${GLOSSARY.usage.label} (hrs)`,
+        glossaryKey: 'usage',
+        key: 'usage',
+        color: '#16a34a',
+    },
+    spo2: {
+        label: `${GLOSSARY.spo2.label} (%)`,
+        glossaryKey: 'spo2',
+        key: 'spo2',
+        color: '#f97316',
+    },
+    leak: {
+        label: `${GLOSSARY.leak.label} (L/min)`,
+        glossaryKey: 'leak',
+        key: 'leak',
+        color: '#dc2626',
+    },
+    pressure: {
+        label: `${GLOSSARY.pressure.label} (cmH₂O)`,
+        glossaryKey: 'pressure',
+        key: 'pressure',
+        color: '#7c3aed',
+    },
+    epap: {
+        label: `${GLOSSARY.epap.label} (cmH₂O)`,
+        glossaryKey: 'epap',
+        key: 'epap',
+        color: '#06b6d4',
+    },
+    rr: { label: 'Resp Rate (br/min)', glossaryKey: 'resp_rate', key: 'rr', color: '#db2777' },
+    pulse: {
+        label: `${GLOSSARY.pulse.label} (BPM)`,
+        glossaryKey: 'pulse',
+        key: 'pulse',
+        color: '#d97706',
+    },
+    mv: { label: 'Minute Vent (L/min)', glossaryKey: 'mv', key: 'mv', color: '#059669' },
+    oai: {
+        label: `${GLOSSARY.oai.label} (events/hr)`,
+        glossaryKey: 'oai',
+        key: 'oai',
+        color: '#be123c',
+    },
+    cai: {
+        label: `${GLOSSARY.cai.label} (events/hr)`,
+        glossaryKey: 'cai',
+        key: 'cai',
+        color: '#0284c7',
+    },
+    hi: {
+        label: `${GLOSSARY.hi.label} (events/hr)`,
+        glossaryKey: 'hi',
+        key: 'hi',
+        color: '#ca8a04',
+    },
+    rera: { label: 'RERA (events/hr)', glossaryKey: 'rera', key: 'rera', color: '#ea580c' },
 }
 
 const VALID_METRICS = new Set(Object.keys(METRIC_CONFIG))

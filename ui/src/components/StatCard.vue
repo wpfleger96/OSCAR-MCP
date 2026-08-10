@@ -1,6 +1,11 @@
 <template>
     <div class="stat-card">
-        <div class="stat-label">{{ label }}</div>
+        <div class="stat-label">
+            {{ label
+            }}<span v-if="hintKey" class="ml-1 normal-case"
+                ><InfoHint :glossary-key="hintKey"
+            /></span>
+        </div>
         <div class="stat-value">
             <template v-if="value != null">
                 {{ decimals != null ? value.toFixed(decimals) : value }}
@@ -14,11 +19,14 @@
 </template>
 
 <script setup lang="ts">
+import InfoHint from '@/components/InfoHint.vue'
+
 defineProps<{
     label: string
     value: number | null | undefined
     unit?: string
     decimals?: number
+    hintKey?: string
 }>()
 </script>
 

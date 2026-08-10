@@ -47,6 +47,7 @@
                     "
                     unit="%"
                     :decimals="1"
+                    hint-key="sensitivity"
                 />
                 <StatCard
                     label="Avg Apnea F1"
@@ -57,6 +58,7 @@
                     "
                     unit="%"
                     :decimals="1"
+                    hint-key="f1"
                 />
                 <StatCard
                     label="Avg Hypopnea Sensitivity"
@@ -67,6 +69,7 @@
                     "
                     unit="%"
                     :decimals="1"
+                    hint-key="sensitivity"
                 />
                 <StatCard
                     label="Avg Hypopnea F1"
@@ -77,6 +80,7 @@
                     "
                     unit="%"
                     :decimals="1"
+                    hint-key="f1"
                 />
                 <StatCard
                     label="Sessions Validated"
@@ -91,9 +95,15 @@
                         <TableRow>
                             <TableHead>Date</TableHead>
                             <TableHead>Duration</TableHead>
-                            <TableHead>Apnea Sens</TableHead>
-                            <TableHead>Apnea Prec</TableHead>
-                            <TableHead>Apnea F1</TableHead>
+                            <TableHead class="whitespace-nowrap"
+                                >Apnea Sens <InfoHint glossary-key="sensitivity"
+                            /></TableHead>
+                            <TableHead class="whitespace-nowrap"
+                                >Apnea Prec <InfoHint glossary-key="precision"
+                            /></TableHead>
+                            <TableHead class="whitespace-nowrap"
+                                >Apnea F1 <InfoHint glossary-key="f1"
+                            /></TableHead>
                             <TableHead>Hypopnea Sens</TableHead>
                             <TableHead>Hypopnea Prec</TableHead>
                             <TableHead>Hypopnea F1</TableHead>
@@ -147,6 +157,7 @@
 import { ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatCard from '@/components/StatCard.vue'
+import InfoHint from '@/components/InfoHint.vue'
 import { Button } from '@/components/ui/button'
 import {
     Select,
