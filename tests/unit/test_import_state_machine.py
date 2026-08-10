@@ -1031,11 +1031,11 @@ class TestRouteHTTPBoundary:
     def test_post_upload_registration_failure_cleans_temp_dir(
         self, tmp_path, monkeypatch
     ):
-        """POST /import: if an error occurs after mkdtemp, the uploaded temp dir is removed.
+        """POST /import: if an error occurs after spool dir creation, it is removed.
 
-        Patches tempfile.mkdtemp to return a known path, patches convert_to_pending
-        at the router's import site to raise (simulating a failure after files are
-        written), then asserts the temp dir is gone.
+        Patches the upload spool dir to a test-private path, patches
+        convert_to_pending to raise (simulating a failure after files are
+        written), then asserts the spool dir is cleaned up.
         """
 
         from unittest.mock import patch  # noqa: PLC0415
@@ -1043,17 +1043,16 @@ class TestRouteHTTPBoundary:
         from fastapi.testclient import TestClient  # noqa: PLC0415
 
         app = self._make_app()
-        known_tmp = str(tmp_path / "known_upload_dir")
+        spool_dir = tmp_path / "spool"
+        spool_dir.mkdir()
 
-        def _known_mkdtemp():
-            import os  # noqa: PLC0415
+        # Point config's upload_spool_dir at our test-private spool dir.
+        from snore.api.config import get_config, set_config  # noqa: PLC0415
 
-            os.makedirs(known_tmp, exist_ok=True)
-            return known_tmp
+        cfg = get_config()
+        cfg = type(cfg)(**{**cfg.__dict__, "upload_spool_dir": spool_dir})
+        set_config(cfg)
 
-        # Patch mkdtemp so we know the exact directory; patch convert_to_pending
-        # to raise after files are written (simulating a registration failure in the
-        # try/except block that owns cleanup).
         import snore.api.import_jobs as _job_mod  # noqa: PLC0415
 
         original_reserve = _job_mod.reserve_slot
@@ -1068,7 +1067,6 @@ class TestRouteHTTPBoundary:
             return job
 
         with (
-            patch("snore.api.routers.import_data.tempfile.mkdtemp", _known_mkdtemp),
             patch(
                 "snore.api.routers.import_data.reserve_slot",
                 side_effect=_raising_reserve,
@@ -1083,11 +1081,10 @@ class TestRouteHTTPBoundary:
         assert resp.status_code == 500, (
             f"Expected 500 when registration fails; got {resp.status_code}"
         )
-        # The temp directory must have been removed by the route's cleanup.
-        import os  # noqa: PLC0415
-
-        assert not os.path.exists(known_tmp), (
-            f"Temp dir {known_tmp!r} must be removed after registration failure"
+        # The spool dir entries must have been removed by the route's cleanup.
+        remaining = list(spool_dir.iterdir())
+        assert not remaining, (
+            f"Spool entries leaked after registration failure: {remaining}"
         )
         # No job should remain in the store.
         with job_store._lock:

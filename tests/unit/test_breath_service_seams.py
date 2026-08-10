@@ -3398,7 +3398,12 @@ class TestSameProfileTwoDeviceExtended:
 
 @pytest.mark.unit
 class TestCompareEpochsRefusal:
-    """Verify that metadata failures null ALL epoch distributions before any breath queries."""
+    """Verify that metadata failures null ALL epoch distributions before any breath queries.
+
+    RX change within an epoch is a hard refusal (null_reason=RX_CHANGED_WITHIN_EPOCH).
+    Cross-epoch algorithm identity mismatch is now a non-blocking warning: distributions
+    are still computed and version_warnings is populated instead of nulling everything.
+    """
 
     async def _make_setting(
         self,
@@ -3486,16 +3491,19 @@ class TestCompareEpochsRefusal:
         assert epoch_result.flatness_index.median is None
         assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
 
-    async def test_cross_epoch_identity_mismatch_refuses_with_null_distributions(
+    async def test_cross_epoch_identity_mismatch_warns_instead_of_refusing(
         self, async_db_session
     ):
-        """Cross-epoch algorithm identity mismatch → null_reason=ALGO_VERSION_MISMATCH on all epochs.
+        """Cross-epoch algorithm identity mismatch → version_warnings populated, NOT a hard refusal.
 
         Because _latest_analysis_for_session only returns OK when the stored identity
         matches the current runtime identity, genuine cross-epoch mismatches cannot be
         created through DB fixtures alone.  We mock _latest_analysis_for_session to
         inject different AlgoVersions (each individually OK) for two sessions in two
         different epochs, so the cross-epoch identity check fires.
+
+        New semantics: result.null_reason is None (not ALGO_VERSION_MISMATCH);
+        epoch null_reasons are None; version_warnings lists the differing fields.
         """
         import copy  # noqa: PLC0415
 
@@ -3593,12 +3601,15 @@ class TestCompareEpochsRefusal:
                 ]
             )
 
-        # Cross-epoch identity mismatch → all null
-        assert result.null_reason == NullReason.ALGO_VERSION_MISMATCH
+        # Cross-epoch identity mismatch is now a warning, not a hard refusal.
+        assert result.null_reason is None
         for es in result.epochs:
-            assert es.null_reason == NullReason.ALGO_VERSION_MISMATCH
-            assert es.mid_insp_flattening.median is None
-            assert es.flatness_index.median is None
+            assert es.null_reason is None
+        # version_warnings must mention the differing field and both version strings
+        assert len(result.version_warnings) > 0
+        assert any("segmenter" in w for w in result.version_warnings)
+        segmenter_warn = next(w for w in result.version_warnings if "segmenter" in w)
+        assert "v999.999.999" in segmenter_warn
 
     async def test_primary_mode_mismatch_nulls_rera_fields(self, async_db_session):
         """Same identity but different primary_mode → rera_reason=PRIMARY_MODE_MISMATCH, rera_proxy_count=None.
@@ -4795,6 +4806,95 @@ class TestNightlySummaryFlClassGe4Pct:
         night = summary.nights[0]
         assert night.fl_class_ge4_pct is None
         assert night.fl_class_ge4_pct_reason == NullReason.NOT_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# leak_above_24_pct on NightlyAnalysisSummary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNightlySummaryLeakAbove24Pct:
+    """leak_above_24_pct on per-night NightlyAnalysisSummary.
+
+    Denominator = breaths with determinate leak_valid (True or False).
+    Numerator   = breaths with leak_valid is False (leak > 24 L/min).
+    None breaths are excluded from both.
+    Result is rounded to 1 decimal.
+    """
+
+    async def test_mixed_leak_valid_values_pct_excludes_none(self, async_db_session):
+        """3 True, 1 False, 2 None → denominator=4, numerator=1, pct=25.0."""
+        therapy_date = date(2025, 7, 20)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"leak_valid": True},
+                {"leak_valid": True},
+                {"leak_valid": True},
+                {"leak_valid": False},
+                {"leak_valid": None},
+                {"leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.leak_above_24_pct == 25.0
+        assert night.leak_above_24_pct_reason is None
+
+    async def test_all_leak_valid_true_pct_is_zero(self, async_db_session):
+        """All breaths leak_valid=True → 0 numerator → leak_above_24_pct == 0.0."""
+        therapy_date = date(2025, 7, 21)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"leak_valid": True},
+                {"leak_valid": True},
+                {"leak_valid": True},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.leak_above_24_pct == 0.0
+        assert night.leak_above_24_pct_reason is None
+
+    async def test_all_leak_valid_none_pct_is_null_with_not_available_reason(
+        self, async_db_session
+    ):
+        """All breaths leak_valid=None → denominator=0 → leak_above_24_pct is None with NOT_AVAILABLE."""
+        therapy_date = date(2025, 7, 22)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"leak_valid": None},
+                {"leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.leak_above_24_pct is None
+        assert night.leak_above_24_pct_reason == NullReason.NOT_AVAILABLE
 
 
 # ---------------------------------------------------------------------------

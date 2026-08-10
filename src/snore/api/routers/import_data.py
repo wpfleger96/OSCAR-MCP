@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import shutil
-import tempfile
+import uuid
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
 from datetime import datetime
@@ -296,10 +296,13 @@ async def import_files(
                 assert job.temp_dir is not None
                 tmp_path = job.temp_dir
             else:
-                tmp = tempfile.mkdtemp(prefix="snore-upload-")
-                tmp_path = Path(tmp)
+                from snore.api.config import get_config  # noqa: PLC0415
+
+                spool_base = get_config().upload_spool_dir
+                spool_base.mkdir(parents=True, exist_ok=True)
+                tmp_path = spool_base / uuid.uuid4().hex
+                tmp_path.mkdir()
                 job.temp_dir = tmp_path
-                tmp = None  # job owns the directory from creation
 
             tmp_root = tmp_path.resolve()
             for upload in uploads:

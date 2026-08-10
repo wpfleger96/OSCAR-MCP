@@ -4,6 +4,7 @@ import importlib.resources
 import logging
 import os
 import resource
+import uuid
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -133,11 +134,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _startup_ensure_demo_data(app)
         await _startup_ensure_bootstrap_admin()
 
-    # Clean orphaned import-spool temp directories left by a crashed process.
-    _cleanup_stale_upload_tempdirs()
+    # Mark orphaned import/analysis jobs as failed; collect resume candidates.
+    import_resume_candidates = await _recover_orphaned_import_jobs()
+    analysis_affected_profiles = await _recover_orphaned_analysis_jobs()
 
-    # Mark any import jobs that were in-progress at the last crash as failed.
-    await _recover_orphaned_import_jobs()
+    # Clean stale spool directories, skipping any that will be resumed.
+    skip_paths = {c[0] for c in import_resume_candidates}
+    _cleanup_stale_upload_spool_dirs(skip_paths=skip_paths)
 
     # Start a single lifespan-owned TTL reaper, the analysis job worker, and the
     # import job worker (serialises execution to avoid SQLite write-lock contention).
@@ -146,6 +149,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from snore.api.import_worker import _run_import  # noqa: PLC0415
 
     _start_import_worker(_run_import)
+
+    # Resume interrupted jobs after workers are ready to process them.
+    if import_resume_candidates:
+        _startup_resume_imports(import_resume_candidates)
+    if analysis_affected_profiles:
+        await _startup_resume_analysis(analysis_affected_profiles)
 
     mcp_app = getattr(app.state, "mcp_app", None)
     try:
@@ -426,68 +435,106 @@ async def _startup_ensure_bootstrap_admin() -> None:
 _STALE_UPLOAD_TMPDIR_AGE_SECONDS: float = 2 * 3600  # 2 hours
 
 
-def _cleanup_stale_upload_tempdirs() -> None:
-    """Remove orphaned ``snore-upload-*`` temp dirs from a previous crashed process.
+def _cleanup_stale_upload_spool_dirs(
+    skip_paths: set[Path] | frozenset[Path] = frozenset(),
+) -> None:
+    """Remove orphaned upload spool directories from a previous crashed process.
 
-    A normal upload cleans its temp directory via ``ImportJob.cleanup_files()``
-    on every terminal path.  A hard crash (SIGKILL, OOM) leaks the spool tree
-    forever.  This scans ``tempfile.gettempdir()`` at startup and removes any
-    ``snore-upload-*`` directories that are older than
-    ``_STALE_UPLOAD_TMPDIR_AGE_SECONDS``.
+    Scans both the legacy ``snore-upload-*`` prefix in the system temp dir
+    (backward compat) and the durable spool directory on the persistent volume.
+    Directories in *skip_paths* are preserved for startup resume.
     """
     import shutil  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
     import time  # noqa: PLC0415
 
-    from pathlib import Path  # noqa: PLC0415
+    from snore.api.config import get_config  # noqa: PLC0415
 
-    tmpdir = Path(tempfile.gettempdir())
     now = time.time()
     cleaned = 0
-    for entry in tmpdir.iterdir():
-        if not entry.name.startswith("snore-upload-"):
-            continue
-        if not entry.is_dir():
-            continue
+
+    scan_dirs: list[tuple[Path, bool]] = [
+        (Path(tempfile.gettempdir()), True),  # (dir, require_prefix)
+    ]
+    try:
+        spool_dir = get_config().upload_spool_dir
+        if spool_dir.exists():
+            scan_dirs.append((spool_dir, False))
+    except Exception:
+        pass
+
+    for parent, require_prefix in scan_dirs:
         try:
-            age = now - entry.stat().st_mtime
-            if age > _STALE_UPLOAD_TMPDIR_AGE_SECONDS:
-                shutil.rmtree(entry, ignore_errors=True)
-                logger.info("Cleaned stale upload temp dir: %s (age=%.0fs)", entry, age)
-                cleaned += 1
-        except OSError as exc:
-            logger.warning("Could not check/remove stale temp dir %s: %s", entry, exc)
+            entries = parent.iterdir()
+        except OSError:
+            continue
+        for entry in entries:
+            if require_prefix and not entry.name.startswith("snore-upload-"):
+                continue
+            if not entry.is_dir():
+                continue
+            if entry in skip_paths:
+                continue
+            try:
+                age = now - entry.stat().st_mtime
+                if age > _STALE_UPLOAD_TMPDIR_AGE_SECONDS:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    logger.info(
+                        "Cleaned stale upload spool dir: %s (age=%.0fs)", entry, age
+                    )
+                    cleaned += 1
+            except OSError as exc:
+                logger.warning(
+                    "Could not check/remove stale spool dir %s: %s", entry, exc
+                )
     if cleaned:
-        logger.info("Startup: removed %d stale upload temp dir(s)", cleaned)
+        logger.info("Startup: removed %d stale upload spool dir(s)", cleaned)
 
 
-async def _recover_orphaned_import_jobs() -> None:
-    """Mark any in-progress import jobs in the database as failed at startup.
+async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
+    """Mark orphaned import jobs as failed; return resume candidates.
 
     Jobs in PENDING_UPLOAD, PENDING, or RUNNING state at startup are orphans
-    from a previous server run that crashed or was killed.  They will never
-    reach a terminal state on their own, so this function marks them failed so
-    operators and the jobs-list endpoint see an honest final state.
+    from a previous server run.  All are marked failed.  Those whose spool
+    directory still exists on disk are returned as resume candidates — the
+    caller can re-enqueue them as new import jobs.
     """
     from datetime import UTC, datetime  # noqa: PLC0415
 
-    from sqlalchemy import update  # noqa: PLC0415
+    from sqlalchemy import select, update  # noqa: PLC0415
 
+    from snore.api.import_jobs import ACTIVE_STATES, JobState  # noqa: PLC0415
     from snore.database import models  # noqa: PLC0415
     from snore.database.session import session_scope  # noqa: PLC0415
 
+    non_terminal = [s.value for s in ACTIVE_STATES]
+    resume_candidates: list[tuple[Path, int, int | None]] = []
     now = datetime.now(UTC)
     try:
         async with session_scope(immediate=True) as db:
-            result = await db.execute(
-                update(models.ImportJobRecord)
-                .where(
-                    models.ImportJobRecord.state.in_(
-                        ["pending_upload", "pending", "running"]
+            # Collect resume candidates before marking everything failed.
+            rows = (
+                await db.execute(
+                    select(
+                        models.ImportJobRecord.spool_dir_path,
+                        models.ImportJobRecord.target_profile_id,
+                        models.ImportJobRecord.owner_user_id,
+                    ).where(
+                        models.ImportJobRecord.state.in_(non_terminal),
+                        models.ImportJobRecord.spool_dir_path.is_not(None),
                     )
                 )
+            ).all()
+            for spool_path_str, profile_id, owner_user_id in rows:
+                spool_path = Path(spool_path_str)
+                if profile_id is not None and spool_path.exists():
+                    resume_candidates.append((spool_path, profile_id, owner_user_id))
+
+            result = await db.execute(
+                update(models.ImportJobRecord)
+                .where(models.ImportJobRecord.state.in_(non_terminal))
                 .values(
-                    state="failed",
+                    state=JobState.FAILED.value,
                     error_message="Server restarted while job was in progress",
                     finished_at=now,
                     updated_at=now,
@@ -496,10 +543,153 @@ async def _recover_orphaned_import_jobs() -> None:
             count = result.rowcount or 0  # type: ignore[attr-defined]
         if count > 0:
             logger.info(
-                "Startup recovery: marked %d orphaned import job(s) as failed", count
+                "Startup recovery: marked %d orphaned import job(s) as failed"
+                " (%d resumable)",
+                count,
+                len(resume_candidates),
             )
     except Exception as exc:
         logger.warning("Orphaned import job recovery failed: %s", exc)
+    return resume_candidates
+
+
+async def _recover_orphaned_analysis_jobs() -> set[int]:
+    """Mark orphaned analysis job records as failed; return affected profile IDs.
+
+    Non-terminal ``analysis_job_records`` rows indicate jobs that were
+    interrupted by a crash or restart.  They are marked failed, and the
+    distinct profile IDs are returned so the caller can gap-fill analysis.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from sqlalchemy import select, update  # noqa: PLC0415
+
+    from snore.api.analysis_jobs import AnalysisJobState  # noqa: PLC0415
+    from snore.database import models  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    affected_profiles: set[int] = set()
+    now = datetime.now(UTC)
+    try:
+        async with session_scope(immediate=True) as db:
+            # Collect affected profile IDs before marking failed.
+            rows = (
+                (
+                    await db.execute(
+                        select(models.AnalysisJobRecord.profile_id)
+                        .where(
+                            models.AnalysisJobRecord.state
+                            == AnalysisJobState.RUNNING.value
+                        )
+                        .distinct()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            affected_profiles = set(rows)
+
+            result = await db.execute(
+                update(models.AnalysisJobRecord)
+                .where(models.AnalysisJobRecord.state == AnalysisJobState.RUNNING.value)
+                .values(
+                    state=AnalysisJobState.FAILED.value,
+                    error_message="Server restarted while job was in progress",
+                    finished_at=now,
+                    updated_at=now,
+                )
+            )
+            count = result.rowcount or 0  # type: ignore[attr-defined]
+        if count > 0:
+            logger.info(
+                "Startup recovery: marked %d orphaned analysis job(s) as failed"
+                " (profiles: %s)",
+                count,
+                affected_profiles,
+            )
+    except Exception as exc:
+        logger.warning("Orphaned analysis job recovery failed: %s", exc)
+    return affected_profiles
+
+
+def _startup_resume_imports(
+    candidates: list[tuple[Path, int, int | None]],
+) -> None:
+    """Re-enqueue import jobs for which spool files survived the restart."""
+    from snore.api.import_jobs import (  # noqa: PLC0415
+        ImportJob,
+        JobType,
+        enqueue_for_execution,
+    )
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    for spool_path, profile_id, owner_user_id in candidates:
+        try:
+            job = ImportJob(
+                job_id=uuid.uuid4().hex,
+                job_type=JobType.UPLOAD,
+                owner_user_id=owner_user_id,
+                target_profile_id=profile_id,
+                temp_dir=spool_path,
+            )
+            job._state = job._state.__class__("pending")
+            job._file_count = sum(1 for f in spool_path.iterdir() if f.is_file())
+            # Register in the in-memory store without checking admission caps —
+            # startup resume should not be refused by caps.
+            from snore.api.import_jobs import _jobs, _lock  # noqa: PLC0415
+
+            with _lock:
+                _jobs[job.job_id] = job
+
+            profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
+            enqueue_for_execution(job, profile_raw_root)
+            logger.info(
+                "Startup: re-enqueued import job %s (spool=%s, files=%d)",
+                job.job_id,
+                spool_path,
+                job._file_count,
+            )
+        except Exception:
+            logger.exception(
+                "Startup: failed to re-enqueue import for spool %s", spool_path
+            )
+
+
+async def _startup_resume_analysis(affected_profile_ids: set[int]) -> None:
+    """Enqueue gap-fill analysis for profiles that had interrupted analysis."""
+    from snore.api import analysis_jobs  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+    from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
+
+    for profile_id in affected_profile_ids:
+        try:
+            async with session_scope() as db:
+                facade = AnalysisFacade(db, profile_id=profile_id)
+                session_ids = await facade.list_session_ids(missing_only=True)
+            if not session_ids:
+                logger.debug("Startup: no gap-fill needed for profile %d", profile_id)
+                continue
+            aj = analysis_jobs.enqueue(
+                profile_id=profile_id,
+                session_ids=session_ids,
+                source=analysis_jobs.AnalysisJobSource.BATCH,
+            )
+            if aj:
+                logger.info(
+                    "Startup: enqueued gap-fill analysis for profile %d (%d sessions)",
+                    profile_id,
+                    len(session_ids),
+                )
+            else:
+                logger.warning(
+                    "Startup: analysis queue full; gap-fill for profile %d deferred",
+                    profile_id,
+                )
+        except Exception:
+            logger.exception(
+                "Startup: failed to enqueue gap-fill analysis for profile %d",
+                profile_id,
+            )
 
 
 def create_app() -> FastAPI:

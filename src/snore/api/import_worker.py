@@ -53,6 +53,7 @@ async def _upsert_job_record(job: ImportJob) -> None:
             import_result_json=job.import_result_snapshot,
             error_message=job.error_message,
             analysis_queued=job.analysis_queued,
+            spool_dir_path=str(job.temp_dir) if job.temp_dir is not None else None,
             created_at=job.created_at_wall,
             finished_at=finished,
             updated_at=now,
@@ -66,6 +67,9 @@ async def _upsert_job_record(job: ImportJob) -> None:
                 "import_result_json": job.import_result_snapshot,
                 "error_message": job.error_message,
                 "analysis_queued": job.analysis_queued,
+                "spool_dir_path": str(job.temp_dir)
+                if job.temp_dir is not None
+                else None,
                 "finished_at": finished,
                 "updated_at": now,
             },
@@ -204,5 +208,8 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
                 asyncio.run(_upsert_job_record(job))
             except Exception:
                 logger.exception("Failed to persist job record for %s", job.job_id)
-        job.cleanup_files()
+        from snore.api.import_jobs import is_shutdown_in_progress  # noqa: PLC0415
+
+        if not is_shutdown_in_progress():
+            job.cleanup_files()
         job.release_capacity()

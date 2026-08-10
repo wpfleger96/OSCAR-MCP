@@ -28,7 +28,12 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import WaveformChannelSchema, WaveformWindowResponse, tz_fields
+from snore.mcp.schemas import (
+    WaveformChannelSchema,
+    WaveformWindowResponse,
+    localize_wall_clock,
+    tz_fields,
+)
 from snore.mcp.tools._scaffold import _check_response_size, tool_error_boundary
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
@@ -41,9 +46,17 @@ if TYPE_CHECKING:
 # Shared channel vocabulary block for get_waveform and render_window tool descriptions.
 _CHANNEL_VOCAB_DOC = """\
 Channel vocabulary (12 channels):
-    ``flow``             — inspiratory/expiratory flow (L/min)
-    ``pressure``         — delivered mask pressure (cmH2O)
-    ``therapy_pressure`` — therapy-algorithm target pressure (cmH2O)
+    ``flow``             — inspiratory/expiratory flow (L/min), 25 Hz from BRP.edf
+    ``pressure``         — mask pressure (cmH2O), 0.5 Hz duty-cycle average from
+                           PLD.edf.  Reads approximately the time-weighted mean of
+                           IPAP/EPAP — NOT the instantaneous bilevel square wave —
+                           so it sits between EPAP and IPAP.  No higher-resolution
+                           pressure channel exists in ResMed source data.  Plot
+                           alongside ``therapy_pressure`` for delivered-vs-target
+                           comparison.
+    ``therapy_pressure`` — therapy-algorithm target pressure (cmH2O), 0.5 Hz
+                           duty-cycle average from PLD.edf; same averaging caveat
+                           as ``pressure``.
     ``epap``             — expiratory positive airway pressure (cmH2O)
     ``leak``             — estimated unintentional leak (L/min)
     ``mv``               — minute ventilation derived from flow (L/min)
@@ -138,7 +151,13 @@ def waveform_response_from_raw(raw: RawWaveformWindow) -> WaveformWindowResponse
     # Empty-day sentinel: session_id=0 means no session on the date.
     session_id = window.session_id if window.session_id > 0 else None
     session_start_wall_clock = (
-        window.session_start_wall_clock.isoformat() if window.session_id > 0 else None
+        localize_wall_clock(
+            window.session_start_wall_clock,
+            window.timezone_status,
+            window.timezone_name,
+        )
+        if window.session_id > 0
+        else None
     )
 
     channels = [

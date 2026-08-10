@@ -24,6 +24,7 @@ from snore.mcp.schemas import (
     BreathTableQuery,
     BreathTableResponse,
     BreathTableRow,
+    localize_wall_clock,
     tz_fields,
 )
 from snore.mcp.tools._capabilities import (
@@ -127,9 +128,17 @@ async def get_breath_table(
     top_session_id: int | None = dto.session_id
     top_session_start: str | None
     if dto.rows:
-        top_session_start = dto.rows[0].session_start_wall_clock.isoformat()
+        top_session_start = localize_wall_clock(
+            dto.rows[0].session_start_wall_clock,
+            dto.rows[0].timezone_status,
+            dto.rows[0].timezone_name,
+        )
     elif dto.bins:
-        top_session_start = dto.bins[0].session_start_wall_clock.isoformat()
+        top_session_start = localize_wall_clock(
+            dto.bins[0].session_start_wall_clock,
+            dto.bins[0].timezone_status,
+            dto.bins[0].timezone_name,
+        )
     else:
         top_session_start = None
 
@@ -143,7 +152,9 @@ async def get_breath_table(
             analysis_result_id=r.analysis_result_id,
             session_id=r.session_id,
             breath_number=r.breath_number,
-            session_start_wall_clock=r.session_start_wall_clock.isoformat(),
+            session_start_wall_clock=localize_wall_clock(
+                r.session_start_wall_clock, r.timezone_status, r.timezone_name
+            ),
             **tz_fields(r),
             start_offset_seconds=r.start_offset_seconds,
             end_offset_seconds=r.end_offset_seconds,
@@ -178,7 +189,9 @@ async def get_breath_table(
     # Map aggregated bins — tidal_volume_median → tidal_volume_median_ml.
     bins = [
         BreathTableBin(
-            session_start_wall_clock=b.session_start_wall_clock.isoformat(),
+            session_start_wall_clock=localize_wall_clock(
+                b.session_start_wall_clock, b.timezone_status, b.timezone_name
+            ),
             **tz_fields(b),
             bin_start_offset=b.bin_start_offset,
             bin_end_offset=b.bin_end_offset,
