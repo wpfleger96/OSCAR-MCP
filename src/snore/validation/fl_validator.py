@@ -1,0 +1,315 @@
+"""
+Flow-limitation signal validator.
+
+Compares SNORE's per-breath FL metrics against the ResMed device's continuous
+FlowLim.2s (FLG) signal stored in the waveforms table.
+
+Unlike the event-matching BatchValidator, this module is signal-level because
+ResMed emits FL only as a 0.5 Hz continuous signal (FlowLim.2s, 0–1) and never
+as discrete FL events.  The validator aligns each breath window against the FLG
+signal and computes Spearman correlations and AUC metrics.
+
+The primary SNORE comparator is ``flattening_severity = 1 − mid_insp_flattening``
+(direct severity: higher = more flow-limited), because ``mid_insp_flattening``
+is an inverse measure (~1.0 = unimpeded).  The secondary comparator is
+``flatness_index`` (already direct severity).
+"""
+
+from __future__ import annotations
+
+import logging
+import warnings
+
+from datetime import datetime
+
+import numpy as np
+
+from scipy.stats import mannwhitneyu
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from snore.analysis.data.waveform_loader import deserialize_waveform_blob
+from snore.analysis.shared.versioning import AnalysisStatus
+from snore.database import models
+from snore.services.breath_service import BreathService
+from snore.validation.alignment import average_waveform_over_breaths
+from snore.validation.fl_report import (
+    FlAggregateMetrics,
+    FlSessionValidation,
+    FlValidationReport,
+)
+from snore.validation.stats import mean_or_none, spearman_or_none
+
+logger = logging.getLogger(__name__)
+
+_FLG_WAVEFORM_TYPE = "fl"
+
+
+def _auc_mwu(scores: np.ndarray, labels: np.ndarray) -> float | None:
+    """AUC via Mann-Whitney U: U / (n_pos * n_neg).  None if either class empty."""
+    pos = scores[labels]
+    neg = scores[~labels]
+    if len(pos) == 0 or len(neg) == 0:
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = mannwhitneyu(pos, neg, alternative="greater")
+    return float(result.statistic) / (len(pos) * len(neg))
+
+
+def _percentile95(arr: np.ndarray) -> float | None:
+    """95th percentile; None for empty arrays."""
+    if len(arr) == 0:
+        return None
+    idx = min(int(len(arr) * 0.95), len(arr) - 1)
+    return float(np.sort(arr)[idx])
+
+
+class FlowLimitationValidator:
+    """Validates SNORE's FL metrics against the device's FLG waveform signal."""
+
+    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
+        self._db = db_session
+        self._profile_id = profile_id
+
+    async def validate_date_range(
+        self,
+        date_from: str,
+        date_to: str,
+    ) -> FlValidationReport:
+        """Run FL signal validation across a date range.
+
+        Args:
+            date_from: Start date (YYYY-MM-DD)
+            date_to: End date (YYYY-MM-DD)
+
+        Returns:
+            FlValidationReport with aggregate and per-session metrics
+        """
+        stmt = (
+            select(models.Session)
+            .join(models.Device, models.Session.device_id == models.Device.id)
+            .where(
+                models.Device.profile_id == self._profile_id,
+                models.Session.start_time >= datetime.fromisoformat(date_from),
+                models.Session.start_time
+                <= datetime.fromisoformat(f"{date_to} 23:59:59"),
+            )
+            .order_by(models.Session.start_time)
+        )
+
+        sessions = (await self._db.execute(stmt)).scalars().all()
+        logger.info(f"Found {len(sessions)} sessions between {date_from} and {date_to}")
+
+        session_results: list[FlSessionValidation] = []
+        for session in sessions:
+            try:
+                result = await self._validate_session(session)
+                session_results.append(result)
+            except Exception as e:
+                logger.warning(f"Failed to validate session {session.id}: {e}")
+                session_results.append(
+                    FlSessionValidation(
+                        session_id=session.id,
+                        date=session.start_time.strftime("%Y-%m-%d"),
+                        duration_hours=(session.duration_seconds or 0) / 3600.0,
+                        parser_version=session.parser_version or "unknown",
+                        has_flg_waveform=False,
+                        skipped_reason="error",
+                    )
+                )
+
+        aggregate = self._calculate_aggregate(session_results)
+
+        return FlValidationReport(
+            report_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            date_range_start=date_from,
+            date_range_end=date_to,
+            aggregate=aggregate,
+            sessions=session_results,
+        )
+
+    async def _validate_session(self, session: models.Session) -> FlSessionValidation:
+        """Validate a single session, returning a FlSessionValidation (possibly skipped)."""
+        duration_hours = (session.duration_seconds or 0) / 3600.0
+        date_str = session.start_time.strftime("%Y-%m-%d")
+        parser_version = session.parser_version or "unknown"
+
+        def _skip(reason: str, has_flg: bool) -> FlSessionValidation:
+            return FlSessionValidation(
+                session_id=session.id,
+                date=date_str,
+                duration_hours=duration_hours,
+                parser_version=parser_version,
+                has_flg_waveform=has_flg,
+                skipped_reason=reason,
+            )
+
+        # 1. Fetch FLG waveform row
+        waveform_row = (
+            (
+                await self._db.execute(
+                    select(models.Waveform).filter_by(
+                        session_id=session.id, waveform_type=_FLG_WAVEFORM_TYPE
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if waveform_row is None:
+            return _skip("no_flg_waveform", has_flg=False)
+
+        # 2. Look up latest OK analysis via BreathService public helper
+        breath_svc = BreathService(self._db, self._profile_id)
+        status, _algo, ar_id = await breath_svc.latest_analysis_for_session(session.id)
+        if status != AnalysisStatus.OK or ar_id is None:
+            return _skip("no_analysis", has_flg=True)
+
+        # 3. Fetch leak-valid breaths with all required fields
+        breath_stmt = (
+            select(models.Breath)
+            .where(
+                models.Breath.analysis_result_id == ar_id,
+                models.Breath.leak_valid.is_(True),
+                models.Breath.mid_insp_flattening.is_not(None),
+                models.Breath.flatness_index.is_not(None),
+                models.Breath.start_offset_s.is_not(None),
+                models.Breath.end_offset_s.is_not(None),
+            )
+            .order_by(models.Breath.breath_number)
+        )
+        breaths = (await self._db.execute(breath_stmt)).scalars().all()
+        if not breaths:
+            return _skip("no_valid_breaths", has_flg=True)
+
+        # 4. Guard NULL data_blob before deserialization
+        if waveform_row.data_blob is None:
+            return _skip("no_flg_samples", has_flg=True)
+
+        # 5. Check sample count before deserialization
+        sample_count = waveform_row.sample_count or 0
+        if sample_count == 0:
+            return _skip("no_flg_samples", has_flg=True)
+
+        flg_timestamps, flg_values = deserialize_waveform_blob(
+            waveform_row.data_blob, sample_count
+        )
+        # Mask out the rare −0.01 mask-off sentinel and any non-finite values;
+        # clamp remaining to [0, 1].
+        valid_mask = (flg_values >= 0.0) & np.isfinite(flg_values)
+        flg_timestamps = flg_timestamps[valid_mask]
+        flg_values = np.clip(flg_values[valid_mask], 0.0, 1.0)
+
+        # 6. Align breaths to FLG
+        starts = np.array([b.start_offset_s for b in breaths], dtype=np.float64)
+        ends = np.array([b.end_offset_s for b in breaths], dtype=np.float64)
+        mid_insp = np.array([b.mid_insp_flattening for b in breaths], dtype=np.float64)
+        flatness = np.array([b.flatness_index for b in breaths], dtype=np.float64)
+
+        breath_flg = average_waveform_over_breaths(
+            starts,
+            ends,
+            flg_timestamps.astype(np.float64),
+            flg_values.astype(np.float64),
+        )
+
+        # Direct severity: 1 − mid_insp_flattening
+        flattening_severity = 1.0 - mid_insp
+
+        # Drop NaN (no FLG samples in window)
+        valid = ~np.isnan(breath_flg)
+        if valid.sum() == 0:
+            return _skip("no_aligned_pairs", has_flg=True)
+
+        flg_valid = breath_flg[valid]
+        flat_sev_valid = flattening_severity[valid]
+        flatness_valid = flatness[valid]
+
+        n_compared = int(valid.sum())
+
+        # 7. Metrics
+        spr_flat_r, spr_flat_p = spearman_or_none(flat_sev_valid, flg_valid)
+        spr_fi_r, spr_fi_p = spearman_or_none(flatness_valid, flg_valid)
+
+        labels_t25 = flg_valid >= 0.25
+        labels_t50 = flg_valid >= 0.50
+        auc_t25 = _auc_mwu(flat_sev_valid, labels_t25)
+        auc_t50 = _auc_mwu(flat_sev_valid, labels_t50)
+
+        # device_flg_95th uses all session FLG samples (full-session population);
+        # snore_fl_95th uses only the breath-aligned subset — intentionally asymmetric.
+        snore_95th = _percentile95(flat_sev_valid)
+        device_95th = _percentile95(flg_values)
+
+        return FlSessionValidation(
+            session_id=session.id,
+            date=date_str,
+            duration_hours=duration_hours,
+            parser_version=parser_version,
+            has_flg_waveform=True,
+            skipped_reason=None,
+            n_breaths_compared=n_compared,
+            low_sample_warning=n_compared < 20,
+            spearman_flattening_r=spr_flat_r,
+            spearman_flattening_p=spr_flat_p,
+            spearman_flatness_r=spr_fi_r,
+            spearman_flatness_p=spr_fi_p,
+            auc_t25=auc_t25,
+            auc_t50=auc_t50,
+            snore_fl_95th=snore_95th,
+            device_flg_95th=device_95th,
+        )
+
+    @staticmethod
+    def _calculate_aggregate(
+        sessions: list[FlSessionValidation],
+    ) -> FlAggregateMetrics:
+        compared = [s for s in sessions if s.skipped_reason is None]
+        skipped_no_flg = sum(
+            1 for s in sessions if s.skipped_reason == "no_flg_waveform"
+        )
+        skipped_no_analysis = sum(
+            1 for s in sessions if s.skipped_reason == "no_analysis"
+        )
+        skipped_no_breaths = sum(
+            1 for s in sessions if s.skipped_reason == "no_valid_breaths"
+        )
+
+        flat_rs = [
+            s.spearman_flattening_r
+            for s in compared
+            if s.spearman_flattening_r is not None
+        ]
+        fi_rs = [
+            s.spearman_flatness_r for s in compared if s.spearman_flatness_r is not None
+        ]
+        auc25s = [s.auc_t25 for s in compared if s.auc_t25 is not None]
+        auc50s = [s.auc_t50 for s in compared if s.auc_t50 is not None]
+
+        # Cross-night Spearman on (snore_fl_95th, device_flg_95th) pairs
+        pairs = [
+            (s.snore_fl_95th, s.device_flg_95th)
+            for s in compared
+            if s.snore_fl_95th is not None and s.device_flg_95th is not None
+        ]
+        cross_r: float | None = None
+        cross_p: float | None = None
+        if len(pairs) >= 3:
+            snore_95ths = np.array([p[0] for p in pairs])
+            device_95ths = np.array([p[1] for p in pairs])
+            cross_r, cross_p = spearman_or_none(snore_95ths, device_95ths)
+
+        return FlAggregateMetrics(
+            total_sessions=len(sessions),
+            sessions_compared=len(compared),
+            sessions_skipped_no_flg=skipped_no_flg,
+            sessions_skipped_no_analysis=skipped_no_analysis,
+            sessions_skipped_no_valid_breaths=skipped_no_breaths,
+            mean_spearman_flattening_r=mean_or_none(flat_rs),
+            mean_spearman_flatness_r=mean_or_none(fi_rs),
+            mean_auc_t25=mean_or_none(auc25s),
+            mean_auc_t50=mean_or_none(auc50s),
+            cross_night_spearman_r=cross_r,
+            cross_night_spearman_p=cross_p,
+        )

@@ -61,6 +61,7 @@ def _register_commands() -> None:
     from snore.cli.commands.stats import stats
     from snore.cli.commands.upgrade import upgrade
     from snore.cli.commands.validate import validate
+    from snore.cli.commands.validate_fl import validate_fl
     from snore.cli.groups.analysis import analysis
     from snore.cli.groups.completions import completions
     from snore.cli.groups.db import db
@@ -78,6 +79,7 @@ def _register_commands() -> None:
     cli.add_command(import_data, name="import")
     cli.add_command(stats)
     cli.add_command(validate)
+    cli.add_command(validate_fl, name="validate-fl")
     cli.add_command(serve)
     cli.add_command(mcp)
 

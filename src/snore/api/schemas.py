@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from snore.services.schemas import (
     DayDetail,
@@ -31,6 +31,7 @@ __all__ = [
     "AnalysisDeleteRequest",
     "BatchAnalysisRequest",
     "ValidationRequest",
+    "FlValidationRequest",
     "EventItem",
     "DayDetail",
     "DayListItem",
@@ -148,6 +149,17 @@ class ValidationRequest(BaseModel):
     from_date: date
     to_date: date
     mode: AnalysisMode = "aasm"
+
+
+class FlValidationRequest(BaseModel):
+    from_date: date
+    to_date: date
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> FlValidationRequest:
+        if self.to_date < self.from_date:
+            raise ValueError("to_date must be >= from_date")
+        return self
 
 
 class AnalysisJobStatus(BaseModel):
