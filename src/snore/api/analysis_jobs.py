@@ -556,8 +556,10 @@ def shutdown(timeout: float = 10.0) -> None:
             job.try_cancel()
         _queue.clear()
         _condition.notify_all()  # Wake all idle workers so they see the stop event.
+    deadline = time.monotonic() + timeout
     for t in _worker_threads:
-        t.join(timeout=timeout)
+        remaining = max(0.0, deadline - time.monotonic())
+        t.join(timeout=remaining)
     _worker_threads[:] = [t for t in _worker_threads if t.is_alive()]
     if not _worker_threads:
         _stop_events.clear()
