@@ -21,47 +21,85 @@
 
         <!-- Summary Cards -->
         <div v-if="summary && !loading" class="summary-row">
-            <StatCard label="Days with Data" :value="summary.days_with_data" :decimals="0" />
+            <StatCard
+                label="Days with Data"
+                :value="summary.days_with_data"
+                :decimals="0"
+                glossary-key="days_with_data"
+            />
             <div class="stat-card-ahi">
-                <StatCard label="Avg AHI" :value="summary.avg_ahi" :decimals="1" />
+                <StatCard
+                    label="Avg AHI"
+                    :value="summary.avg_ahi"
+                    :decimals="1"
+                    glossary-key="ahi"
+                />
                 <Badge
                     v-if="summary.effectiveness !== 'unknown'"
                     v-bind="effectivenessBadgeAttrs(summary.effectiveness)"
                     class="effectiveness-badge"
                 >
-                    {{ summary.effectiveness }}
+                    {{ summary.effectiveness }}<InfoHint glossary-key="effectiveness" />
                 </Badge>
                 <span
                     v-if="summary.ahi_trend_direction"
                     class="trend-badge"
                     :class="'trend-' + summary.ahi_trend_direction"
                 >
-                    {{ summary.ahi_trend_direction }}
+                    {{ summary.ahi_trend_direction }}<InfoHint glossary-key="ahi_trend" />
                 </span>
             </div>
-            <StatCard label="Avg Hours" :value="summary.avg_hours" unit="hrs" :decimals="1" />
-            <StatCard label="Avg Leak" :value="summary.avg_leak" unit="L/min" :decimals="1" />
+            <StatCard
+                label="Avg Hours"
+                :value="summary.avg_hours"
+                unit="hrs"
+                :decimals="1"
+                glossary-key="usage"
+            />
+            <StatCard
+                label="Avg Leak"
+                :value="summary.avg_leak"
+                unit="L/min"
+                :decimals="1"
+                glossary-key="leak"
+            />
         </div>
         <div v-if="summary && !loading" class="summary-row">
-            <StatCard label="Avg SpO₂" :value="summary.avg_spo2" unit="%" :decimals="1" />
-            <StatCard label="Avg Pulse" :value="summary.avg_pulse" unit="bpm" :decimals="0" />
+            <StatCard
+                label="Avg SpO₂"
+                :value="summary.avg_spo2"
+                unit="%"
+                :decimals="1"
+                glossary-key="spo2"
+            />
+            <StatCard
+                label="Avg Pulse"
+                :value="summary.avg_pulse"
+                unit="bpm"
+                :decimals="0"
+                glossary-key="pulse"
+            />
             <StatCard
                 label="Avg Pressure"
                 :value="summary.avg_pressure"
                 unit="cmH₂O"
                 :decimals="1"
+                glossary-key="pressure"
             />
             <StatCard
                 label="Avg Resp Rate"
                 :value="summary.avg_respiratory_rate"
                 unit="br/min"
                 :decimals="1"
+                glossary-key="resp_rate"
             />
         </div>
         <div v-else-if="!loading" class="no-data">No therapy data available.</div>
 
         <div v-if="summary?.event_counts?.length" class="section-card">
-            <h2>Event Breakdown</h2>
+            <h2>
+                Event Breakdown <InfoHint label="Event Types"><EventTypeLegend /></InfoHint>
+            </h2>
             <div class="event-breakdown">
                 <div v-for="ec in summary.event_counts" :key="ec.event_type" class="event-item">
                     <Badge
@@ -88,7 +126,32 @@
 
         <!-- Calendar Heatmap -->
         <div v-if="days.length" class="section-card">
-            <h2>Usage Calendar</h2>
+            <h2>
+                Usage Calendar
+                <InfoHint label="AHI Color Scale">
+                    <ul class="space-y-1 text-xs">
+                        <li
+                            v-for="entry in AHI_COLOR_SCALE"
+                            :key="entry.label"
+                            class="flex items-center gap-1.5"
+                        >
+                            <span
+                                class="h-3 w-3 shrink-0 rounded-sm"
+                                :style="{ background: entry.color }"
+                            />
+                            <span>{{ entry.label }}</span>
+                        </li>
+                        <li class="flex items-center gap-1.5">
+                            <span class="h-3 w-3 shrink-0 rounded-sm bg-muted" />
+                            <span class="text-muted-foreground">No data</span>
+                        </li>
+                    </ul>
+                    <p class="text-xs text-muted-foreground mt-2">
+                        Note: this display scale is stricter than the common clinical convention
+                        (&lt;5 normal, 5–15 mild, 15–30 moderate, &gt;30 severe).
+                    </p>
+                </InfoHint>
+            </h2>
             <CalendarHeatmap :days="days" @day-click="onDayClick" />
         </div>
 
@@ -100,7 +163,9 @@
                     <TableRow>
                         <TableHead>Date</TableHead>
                         <TableHead class="w-[90px]">Duration</TableHead>
-                        <TableHead class="w-[80px]">AHI</TableHead>
+                        <TableHead class="w-[80px] whitespace-nowrap"
+                            >AHI <InfoHint glossary-key="ahi"
+                        /></TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -134,6 +199,8 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import StatCard from '@/components/StatCard.vue'
+import InfoHint from '@/components/InfoHint.vue'
+import EventTypeLegend from '@/components/EventTypeLegend.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import CalendarHeatmap from '@/components/CalendarHeatmap.vue'
 import { getSummary, getTrends } from '@/api/stats'
@@ -141,6 +208,7 @@ import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateShort } from '@/utils/formatting'
+import { AHI_COLOR_SCALE } from '@/utils/ahiScale'
 import { EVENT_COLORS } from '@/types'
 import type { SessionListItem } from '@/types'
 

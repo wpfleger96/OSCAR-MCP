@@ -11,12 +11,22 @@
                 <TableRow>
                     <TableHead>Period</TableHead>
                     <TableHead class="w-[90px]">Days Used</TableHead>
-                    <TableHead class="w-[90px]">Avg Hours</TableHead>
-                    <TableHead class="w-[90px]">Avg AHI</TableHead>
+                    <TableHead class="w-[90px] whitespace-nowrap"
+                        >Avg Hours <InfoHint glossary-key="usage"
+                    /></TableHead>
+                    <TableHead class="w-[90px] whitespace-nowrap"
+                        >Avg AHI <InfoHint glossary-key="ahi"
+                    /></TableHead>
                     <TableHead class="w-[100px]">Median AHI</TableHead>
-                    <TableHead class="w-[110px]">Avg Pressure</TableHead>
-                    <TableHead class="w-[90px]">Avg Leak</TableHead>
-                    <TableHead class="w-[90px]">Avg SpO₂</TableHead>
+                    <TableHead class="w-[110px] whitespace-nowrap"
+                        >Avg Pressure <InfoHint glossary-key="pressure"
+                    /></TableHead>
+                    <TableHead class="w-[90px] whitespace-nowrap"
+                        >Avg Leak <InfoHint glossary-key="leak"
+                    /></TableHead>
+                    <TableHead class="w-[90px] whitespace-nowrap"
+                        >Avg SpO₂ <InfoHint glossary-key="spo2"
+                    /></TableHead>
                 </TableRow>
             </TableHeader>
             <TableBody>
@@ -68,6 +78,7 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
+import InfoHint from '@/components/InfoHint.vue'
 import type { PeriodStatistics } from '@/types'
 import { ahiClass, formatDateMonthDay } from '@/utils/formatting'
 

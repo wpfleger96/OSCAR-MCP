@@ -4,7 +4,7 @@ Comprehensive collection of research papers, clinical guidelines, and technical 
 
 ## Contents
 
-**Total: 9 PDFs | 7 Research Papers + 2 Clinical Guidelines**
+**Total: 9 PDFs | 7 Research Papers + 2 Clinical Guidelines | 1 Image Reference Subdirectory**
 
 ### Research Papers (Open Access)
 
@@ -24,6 +24,12 @@ Comprehensive collection of research papers, clinical guidelines, and technical 
 |------|-------------|-------------|
 | Clinical_Practice_Guideline_for_Diagnostic_Testing_for_Adult_Obstructive_Sleep.pdf | AASM | Diagnostic testing guidelines for adult OSA |
 | OSCAR_The_Guide_Apnea_Board_Wiki.pdf | Apnea Board Community | Comprehensive OSCAR software user guide |
+
+### Image Reference
+
+| Directory | Source | Description |
+|-----------|--------|-------------|
+| `flow_limitation/` | OSCAR — The Guide (Apnea Board Wiki) | Developer-only screenshots of the 7 inspiratory waveform classes; must not be imported by `ui/` or included in the build |
 
 ## Usage
 
