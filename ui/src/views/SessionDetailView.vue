@@ -76,6 +76,7 @@
                     :values="waveformData.values"
                     :unit="waveformData.unit"
                     :label="selectedType"
+                    :waveform-type="selectedType"
                     :events="selectedType === 'flow' ? events : undefined"
                     @zoom="handleZoom"
                 />
@@ -371,6 +372,18 @@
                             :decimals="1"
                         />
                         <StatCard
+                            label="SpO₂ Median"
+                            :value="session.statistics.spo2_median"
+                            unit="%"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            label="SpO₂ 95th"
+                            :value="session.statistics.spo2_95th"
+                            unit="%"
+                            :decimals="1"
+                        />
+                        <StatCard
                             label="SpO₂ Below 90%"
                             :value="session.statistics.spo2_time_below_90"
                             unit="s"
@@ -432,21 +445,36 @@
                             :decimals="1"
                         />
                         <StatCard
+                            v-if="session.statistics.respiratory_rate_95th != null"
+                            label="Resp Rate 95th"
+                            :value="session.statistics.respiratory_rate_95th"
+                            unit="br/min"
+                            :decimals="1"
+                        />
+                        <!-- STR tidal-volume stats are in L on the device; convert to mL for display. -->
+                        <StatCard
                             label="Tidal Volume Mean"
-                            :value="session.statistics.tidal_volume_mean"
+                            :value="tvToMl(session.statistics.tidal_volume_mean)"
                             unit="mL"
                             :decimals="0"
                             glossary-key="tidal_volume"
                         />
                         <StatCard
                             label="Tidal Volume Min"
-                            :value="session.statistics.tidal_volume_min"
+                            :value="tvToMl(session.statistics.tidal_volume_min)"
                             unit="mL"
                             :decimals="0"
                         />
                         <StatCard
                             label="Tidal Volume Max"
-                            :value="session.statistics.tidal_volume_max"
+                            :value="tvToMl(session.statistics.tidal_volume_max)"
+                            unit="mL"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            v-if="session.statistics.tidal_volume_95th != null"
+                            label="Tidal Volume 95th"
+                            :value="tvToMl(session.statistics.tidal_volume_95th)"
                             unit="mL"
                             :decimals="0"
                         />
@@ -467,6 +495,253 @@
                             label="Min Ventilation Max"
                             :value="session.statistics.minute_ventilation_max"
                             unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            v-if="session.statistics.minute_ventilation_95th != null"
+                            label="Min Ventilation 95th"
+                            :value="session.statistics.minute_ventilation_95th"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <!-- Device Indices (UAI, AI, RIN, CSR — device-conditional, may be NULL) -->
+            <Collapsible
+                v-if="hasDeviceIndices"
+                v-model:open="deviceIndicesOpen"
+                class="stats-collapsible"
+            >
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Device Indices
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': deviceIndicesOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            v-if="session.statistics.uai != null"
+                            label="UAI"
+                            :value="session.statistics.uai"
+                            unit="events/hr"
+                            :decimals="2"
+                            glossary-key="uai"
+                        />
+                        <StatCard
+                            v-if="session.statistics.ai != null"
+                            label="AI"
+                            :value="session.statistics.ai"
+                            unit="events/hr"
+                            :decimals="2"
+                            glossary-key="ai_str"
+                        />
+                        <StatCard
+                            v-if="session.statistics.rin != null"
+                            label="RIN"
+                            :value="session.statistics.rin"
+                            unit="events/hr"
+                            :decimals="2"
+                            glossary-key="rin"
+                        />
+                        <StatCard
+                            v-if="session.statistics.csr_pct != null"
+                            label="CSR"
+                            :value="session.statistics.csr_pct"
+                            unit="%"
+                            :decimals="1"
+                            glossary-key="csr"
+                        />
+                        <StatCard
+                            v-if="session.statistics.spont_cyc_pct != null"
+                            label="Spont Cyc"
+                            :value="session.statistics.spont_cyc_pct"
+                            unit="%"
+                            :decimals="1"
+                            glossary-key="spont_cyc_pct"
+                        />
+                        <StatCard
+                            v-if="session.statistics.mask_events != null"
+                            label="Mask Events"
+                            :value="session.statistics.mask_events"
+                            :decimals="0"
+                            glossary-key="mask_events_str"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <!-- Flow & Pressure Percentiles (from STR blower-side signals) -->
+            <Collapsible
+                v-if="hasFlowPressure"
+                v-model:open="flowPressureOpen"
+                class="stats-collapsible"
+            >
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Flow & Pressure Percentiles
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': flowPressureOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            v-if="session.statistics.flow_5th != null"
+                            label="Flow 5th"
+                            :value="session.statistics.flow_5th"
+                            unit="L/min"
+                            :decimals="1"
+                            glossary-key="flow_5th"
+                        />
+                        <StatCard
+                            v-if="session.statistics.flow_95th != null"
+                            label="Flow 95th"
+                            :value="session.statistics.flow_95th"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            v-if="session.statistics.blow_press_5th != null"
+                            label="Blow Press 5th"
+                            :value="session.statistics.blow_press_5th"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            v-if="session.statistics.blow_press_95th != null"
+                            label="Blow Press 95th"
+                            :value="session.statistics.blow_press_95th"
+                            unit="cmH₂O"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            v-if="session.statistics.blow_flow_median != null"
+                            label="Blow Flow Median"
+                            :value="session.statistics.blow_flow_median"
+                            unit="L/min"
+                            :decimals="1"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <!-- I:E Ratio & Inspiratory Time (VAuto only) -->
+            <Collapsible v-if="hasIeTi" v-model:open="ieTiOpen" class="stats-collapsible">
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        I:E Ratio & Ti
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': ieTiOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            v-if="session.statistics.ie_ratio_median != null"
+                            label="I:E Ratio Median"
+                            :value="session.statistics.ie_ratio_median"
+                            unit="%"
+                            :decimals="0"
+                            glossary-key="ie_ratio_stat"
+                        />
+                        <StatCard
+                            v-if="session.statistics.ie_ratio_95th != null"
+                            label="I:E Ratio 95th"
+                            :value="session.statistics.ie_ratio_95th"
+                            unit="%"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            v-if="session.statistics.ie_ratio_max != null"
+                            label="I:E Ratio Max"
+                            :value="session.statistics.ie_ratio_max"
+                            unit="%"
+                            :decimals="0"
+                        />
+                        <StatCard
+                            v-if="session.statistics.ti_median != null"
+                            label="Ti Median"
+                            :value="session.statistics.ti_median"
+                            unit="s"
+                            :decimals="2"
+                            glossary-key="ti_stat"
+                        />
+                        <StatCard
+                            v-if="session.statistics.ti_95th != null"
+                            label="Ti 95th"
+                            :value="session.statistics.ti_95th"
+                            unit="s"
+                            :decimals="2"
+                        />
+                        <StatCard
+                            v-if="session.statistics.ti_max != null"
+                            label="Ti Max"
+                            :value="session.statistics.ti_max"
+                            unit="s"
+                            :decimals="2"
+                        />
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+
+            <!-- Climate & Humidifier (present only when humidifier is active) -->
+            <Collapsible v-if="hasClimate" v-model:open="climateOpen" class="stats-collapsible">
+                <CollapsibleTrigger as-child>
+                    <button class="collapsible-header">
+                        Climate & Humidifier
+                        <ChevronDown
+                            class="h-4 w-4 transition-transform"
+                            :class="{ 'rotate-180': climateOpen }"
+                        />
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                    <div class="stats-grid">
+                        <StatCard
+                            v-if="session.statistics.amb_humidity_median != null"
+                            label="Amb Humidity Median"
+                            :value="session.statistics.amb_humidity_median"
+                            unit="%"
+                            :decimals="1"
+                            glossary-key="amb_humidity"
+                        />
+                        <StatCard
+                            v-if="session.statistics.hum_temp_median != null"
+                            label="Hum Temp Median"
+                            :value="session.statistics.hum_temp_median"
+                            unit="°C"
+                            :decimals="1"
+                            glossary-key="hum_temp"
+                        />
+                        <StatCard
+                            v-if="session.statistics.htube_temp_median != null"
+                            label="HTube Temp Median"
+                            :value="session.statistics.htube_temp_median"
+                            unit="°C"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            v-if="session.statistics.htube_pow_median != null"
+                            label="HTube Power Median"
+                            :value="session.statistics.htube_pow_median"
+                            unit="W"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            v-if="session.statistics.hum_pow_median != null"
+                            label="Hum Power Median"
+                            :value="session.statistics.hum_pow_median"
+                            unit="W"
                             :decimals="1"
                         />
                     </div>
@@ -551,7 +826,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, toRef } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, toRef } from 'vue'
 import { useRoute } from 'vue-router'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -583,7 +858,68 @@ const pressureOpen = ref(false)
 const leakOpen = ref(false)
 const oximetryOpen = ref(false)
 const ventilationOpen = ref(false)
+const deviceIndicesOpen = ref(false)
+const flowPressureOpen = ref(false)
+const ieTiOpen = ref(false)
+const climateOpen = ref(false)
 const provenanceOpen = ref(false)
+
+// STR tidal-volume stats are stored in L; convert to mL for display.
+function tvToMl(val: number | null | undefined): number | null {
+    return val != null ? val * 1000 : null
+}
+
+// Conditional section visibility — collapses that only appear when the device
+// reported at least one of the enclosed fields for this session.
+const hasDeviceIndices = computed(() => {
+    const s = session.value?.statistics
+    if (!s) return false
+    return (
+        s.uai != null ||
+        s.ai != null ||
+        s.rin != null ||
+        s.csr_pct != null ||
+        s.spont_cyc_pct != null ||
+        s.mask_events != null
+    )
+})
+
+const hasFlowPressure = computed(() => {
+    const s = session.value?.statistics
+    if (!s) return false
+    return (
+        s.flow_5th != null ||
+        s.flow_95th != null ||
+        s.blow_press_5th != null ||
+        s.blow_press_95th != null ||
+        s.blow_flow_median != null
+    )
+})
+
+const hasIeTi = computed(() => {
+    const s = session.value?.statistics
+    if (!s) return false
+    return (
+        s.ie_ratio_median != null ||
+        s.ie_ratio_95th != null ||
+        s.ie_ratio_max != null ||
+        s.ti_median != null ||
+        s.ti_95th != null ||
+        s.ti_max != null
+    )
+})
+
+const hasClimate = computed(() => {
+    const s = session.value?.statistics
+    if (!s) return false
+    return (
+        s.amb_humidity_median != null ||
+        s.hum_temp_median != null ||
+        s.htube_temp_median != null ||
+        s.htube_pow_median != null ||
+        s.hum_pow_median != null
+    )
+})
 
 const sessionIdRef = toRef(props, 'sessionId')
 const {

@@ -17,6 +17,7 @@ const props = defineProps<{
     values: number[]
     unit: string
     label: string
+    waveformType?: string
     events?: EventItem[]
     syncKey?: uPlot.SyncPubSub
 }>()
@@ -94,6 +95,14 @@ function createChart(): void {
         },
         scales: {
             x: { time: false },
+            // Pin y-axis for channels that have a known fixed range so a quiet
+            // night doesn't auto-scale to a misleadingly wide or narrow extent.
+            y:
+                props.waveformType === 'fl'
+                    ? { min: 0, max: 1 }
+                    : props.waveformType === 'snore'
+                      ? { min: 0, max: 5 }
+                      : {},
         },
         axes: [
             {
