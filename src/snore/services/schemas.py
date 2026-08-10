@@ -247,6 +247,8 @@ class SessionStatistics(BaseModel):
     spo2_mean: float | None = None
     spo2_min: float | None = None
     spo2_max: float | None = None
+    spo2_median: float | None = None
+    spo2_95th: float | None = None
     spo2_time_below_90: int | None = None
     pulse_mean: float | None = None
     pulse_min: float | None = None
@@ -254,12 +256,37 @@ class SessionStatistics(BaseModel):
     respiratory_rate_mean: float | None = None
     respiratory_rate_min: float | None = None
     respiratory_rate_max: float | None = None
+    respiratory_rate_95th: float | None = None
     tidal_volume_mean: float | None = None
     tidal_volume_min: float | None = None
     tidal_volume_max: float | None = None
+    tidal_volume_95th: float | None = None
     minute_ventilation_mean: float | None = None
     minute_ventilation_min: float | None = None
     minute_ventilation_max: float | None = None
+    minute_ventilation_95th: float | None = None
+    uai: float | None = None
+    ai: float | None = None
+    rin: float | None = None
+    csr_pct: float | None = None
+    spont_cyc_pct: float | None = None
+    ie_ratio_median: float | None = None
+    ie_ratio_95th: float | None = None
+    ie_ratio_max: float | None = None
+    ti_median: float | None = None
+    ti_95th: float | None = None
+    ti_max: float | None = None
+    flow_5th: float | None = None
+    flow_95th: float | None = None
+    blow_press_5th: float | None = None
+    blow_press_95th: float | None = None
+    blow_flow_median: float | None = None
+    amb_humidity_median: float | None = None
+    hum_temp_median: float | None = None
+    htube_temp_median: float | None = None
+    htube_pow_median: float | None = None
+    hum_pow_median: float | None = None
+    mask_events: float | None = None
 
 
 class SessionSetting(BaseModel):

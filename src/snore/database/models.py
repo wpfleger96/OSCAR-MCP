@@ -629,12 +629,53 @@ class Statistics(Base):
     spo2_min: Mapped[float | None] = mapped_column(Float)
     spo2_max: Mapped[float | None] = mapped_column(Float)
     spo2_mean: Mapped[float | None] = mapped_column(Float)
+    spo2_median: Mapped[float | None] = mapped_column(Float)
+    spo2_95th: Mapped[float | None] = mapped_column(Float)
     spo2_time_below_90: Mapped[int | None] = mapped_column(Integer)
     pulse_min: Mapped[float | None] = mapped_column(Float)
     pulse_max: Mapped[float | None] = mapped_column(Float)
     pulse_mean: Mapped[float | None] = mapped_column(Float)
 
     usage_hours: Mapped[float | None] = mapped_column(Float)
+
+    # --- STR daily summary extras ---
+    # Apnea indices
+    uai: Mapped[float | None] = mapped_column(Float)
+    ai: Mapped[float | None] = mapped_column(Float)
+    # APAP-only
+    rin: Mapped[float | None] = mapped_column(Float)
+    csr_pct: Mapped[float | None] = mapped_column(Float)
+    # VAuto-only
+    spont_cyc_pct: Mapped[float | None] = mapped_column(Float)
+    # Respiratory rate extras (95th only; max already present above)
+    respiratory_rate_95th: Mapped[float | None] = mapped_column(Float)
+    # Tidal volume extras (95th only; max already present above)
+    tidal_volume_95th: Mapped[float | None] = mapped_column(Float)
+    # Minute ventilation extras (95th only; max already present above)
+    minute_ventilation_95th: Mapped[float | None] = mapped_column(Float)
+    # I:E ratio stats (VAuto-only)
+    ie_ratio_median: Mapped[float | None] = mapped_column(Float)
+    ie_ratio_95th: Mapped[float | None] = mapped_column(Float)
+    ie_ratio_max: Mapped[float | None] = mapped_column(Float)
+    # Inspiratory time stats (VAuto-only)
+    ti_median: Mapped[float | None] = mapped_column(Float)
+    ti_95th: Mapped[float | None] = mapped_column(Float)
+    ti_max: Mapped[float | None] = mapped_column(Float)
+    # Flow percentiles
+    flow_5th: Mapped[float | None] = mapped_column(Float)
+    flow_95th: Mapped[float | None] = mapped_column(Float)
+    # Blow-side pressure/flow
+    blow_press_5th: Mapped[float | None] = mapped_column(Float)
+    blow_press_95th: Mapped[float | None] = mapped_column(Float)
+    blow_flow_median: Mapped[float | None] = mapped_column(Float)
+    # Climate / humidifier stats
+    amb_humidity_median: Mapped[float | None] = mapped_column(Float)
+    hum_temp_median: Mapped[float | None] = mapped_column(Float)
+    htube_temp_median: Mapped[float | None] = mapped_column(Float)
+    htube_pow_median: Mapped[float | None] = mapped_column(Float)
+    hum_pow_median: Mapped[float | None] = mapped_column(Float)
+    # Mask events (count of mask-on events per session)
+    mask_events: Mapped[float | None] = mapped_column(Float)
 
     session = relationship("Session", back_populates="statistics", lazy="raise")
 
