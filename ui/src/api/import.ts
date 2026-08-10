@@ -31,6 +31,13 @@ export function isAnchorFile(entry: FileEntry): boolean {
     return ANCHOR_FILE_RE.test(name)
 }
 
+export function isImportableFile(entry: FileEntry): boolean {
+    if (isAnchorFile(entry)) return true
+    if (!DATALOG_RE.test(entry.path)) return false
+    const basename = entry.path.split('/').pop() ?? ''
+    return /\.edf$/i.test(basename) && !basename.startsWith('.')
+}
+
 interface PrecheckFileEntry {
     path: string
     size: number

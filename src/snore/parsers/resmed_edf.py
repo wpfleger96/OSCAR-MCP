@@ -806,11 +806,14 @@ class ResmedEDFParser(DeviceParser):
 
         night_groups = self._group_session_files(datalog_dir)
 
-        total_segments = sum(len(segments) for segments in night_groups.values())
-        logger.debug(
-            f"Found {len(night_groups)} nights with {total_segments} total segments "
-            f"(avg {total_segments / len(night_groups):.1f} segments per night)"
-        )
+        if night_groups:
+            total_segments = sum(len(segments) for segments in night_groups.values())
+            logger.debug(
+                f"Found {len(night_groups)} nights with {total_segments} total segments "
+                f"(avg {total_segments / len(night_groups):.1f} segments per night)"
+            )
+        else:
+            logger.debug("No session files found in DATALOG directory")
 
         if sort_by == "date-asc":
             night_items = sorted(night_groups.items(), key=lambda x: x[0])

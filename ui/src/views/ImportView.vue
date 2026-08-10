@@ -67,12 +67,17 @@
                         <template v-if="forceUploadAll">
                             Uploading all {{ fileEntries.length }} files (dedupe skipped)
                         </template>
+                        <template v-else-if="uploadCount === 0">
+                            All {{ sessionEntries.length }} session files already on server
+                        </template>
                         <template v-else>
-                            {{ skippedCount }} of {{ fileEntries.length }} files already on server —
-                            will upload {{ uploadCount }} files ({{ formatBytes(uploadBytes) }})
+                            {{ skippedCount }} of {{ sessionEntries.length }} session files already
+                            on server — will upload {{ uploadCount }} files ({{
+                                formatBytes(uploadBytes)
+                            }})
                         </template>
                     </p>
-                    <label class="dedupe-skip-label">
+                    <label v-if="uploadCount > 0" class="dedupe-skip-label">
                         <input
                             v-model="forceUploadAll"
                             type="checkbox"
@@ -83,7 +88,10 @@
                 </template>
                 <div class="card-actions">
                     <Button variant="outline" @click="resetUpload">Change folder</Button>
-                    <Button @click="handleImport">
+                    <Button
+                        :disabled="skippedCount > 0 && uploadCount === 0 && !forceUploadAll"
+                        @click="handleImport"
+                    >
                         <Upload class="mr-2 h-4 w-4" />
                         Import
                     </Button>
@@ -131,6 +139,7 @@ import {
     importFiles,
     precheckFiles,
     isAnchorFile,
+    isImportableFile,
     type FileEntry,
     type ChunkedImportProgress,
 } from '@/api/import'
@@ -182,13 +191,21 @@ const hasResMedStructure = computed(
         fileEntries.value.some((e) => /(^|\/)DATALOG\//i.test(e.path)),
 )
 
+const sessionEntries = computed(() =>
+    fileEntries.value.filter((e) => !isAnchorFile(e) && isImportableFile(e)),
+)
 const skippedEntries = computed(() =>
     fileEntries.value.filter((e) => skippablePaths.value.has(e.path) && !isAnchorFile(e)),
 )
 const skippedCount = computed(() => skippedEntries.value.length)
 const skippedBytes = computed(() => skippedEntries.value.reduce((s, e) => s + e.file.size, 0))
-const uploadCount = computed(() => fileEntries.value.length - skippedCount.value)
-const uploadBytes = computed(() => totalSize.value - skippedBytes.value)
+const newSessionCount = computed(() => sessionEntries.value.length - skippedCount.value)
+const uploadCount = computed(() => (newSessionCount.value > 0 ? newSessionCount.value : 0))
+const uploadBytes = computed(() => {
+    if (newSessionCount.value <= 0) return 0
+    const sessionBytes = sessionEntries.value.reduce((s, e) => s + e.file.size, 0)
+    return sessionBytes - skippedBytes.value
+})
 
 function runPrecheck(): void {
     precheckGeneration++
@@ -328,10 +345,22 @@ async function handleImport() {
             ? { count: skipped.length, bytes: skipped.reduce((s, e) => s + e.file.size, 0) }
             : null
 
-    const entriesToUpload =
-        skipSetValid && skippablePaths.value.size > 0
-            ? fileEntries.value.filter((e) => !skippablePaths.value.has(e.path) || isAnchorFile(e))
-            : fileEntries.value
+    const importable = fileEntries.value.filter(isImportableFile)
+    let entriesToUpload: FileEntry[]
+    if (skipSetValid && skippablePaths.value.size > 0) {
+        const newSessions = importable.filter(
+            (e) => !isAnchorFile(e) && !skippablePaths.value.has(e.path),
+        )
+        if (newSessions.length === 0) {
+            resetUpload()
+            return
+        }
+        entriesToUpload = importable.filter(
+            (e) => !skippablePaths.value.has(e.path) || isAnchorFile(e),
+        )
+    } else {
+        entriesToUpload = importable
+    }
 
     // Do NOT call setActiveProfile() here — it increments profileKey and
     // would unmount this view before the upload begins.
