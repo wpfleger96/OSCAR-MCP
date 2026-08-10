@@ -779,39 +779,29 @@ class TestP2UploadLifecycle:
             load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
         )
 
-    def test_mid_copy_413_leaves_no_snore_upload_dir(
-        self, api_client, monkeypatch, tmp_path
-    ):
-        """Per-file 413 fired AFTER mkdtemp must remove the snore-upload-* parent.
+    def test_mid_copy_413_leaves_no_spool_dir(self, api_client, monkeypatch, tmp_path):
+        """Per-file 413 fired AFTER spool dir creation must remove it.
 
-        The previous test sent a 50-byte file against a 10-byte cap, which was
-        rejected by the UploadFile.size pre-check BEFORE mkdtemp() — so no dir
-        was ever created and the fix could be deleted without the test failing.
-
-        This version:
-        - Uses a large max_file_bytes so the size pre-check passes and mkdtemp
-          IS called before _copy_chunked runs.
-        - Patches _copy_chunked to raise _FileSizeExceeded immediately, so the
-          413 fires AFTER mkdtemp but BEFORE ownership transfer — the path the
-          finally-cleanup fix guards.
-        - Redirects tempfile.mkdtemp to a test-private directory (tmp_path) so
-          the assertion is xdist-safe and never races another worker's uploads.
-
-        SNORE_MULTIUSER_PLAN.md §Upload:191-198 (abort + tempdir cleanup).
+        Uses a large max_file_bytes so the size pre-check passes and the spool
+        dir IS created before _copy_chunked runs.  Patches _copy_chunked to
+        raise _FileSizeExceeded immediately.  Redirects the upload spool dir
+        to tmp_path so the assertion is xdist-safe.
         """
-        import tempfile
-
         import snore.api.routers.import_data as import_mod
 
-        from snore.api.config import load_config, set_config  # noqa: PLC0415
+        from snore.api.config import (  # noqa: PLC0415
+            load_config,
+            set_config,
+        )
         from snore.api.routers.import_data import _FileSizeExceeded  # noqa: PLC0415
 
-        set_config(
-            load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
-        )
+        spool_dir = tmp_path / "spool"
+        spool_dir.mkdir()
 
-        # Large max_file_bytes: the UploadFile.size pre-check passes and we reach
-        # _copy_chunked, meaning mkdtemp() has already been called.
+        cfg = load_config(auth_mode_override="local", bind_host_override="127.0.0.1")
+        cfg = type(cfg)(**{**cfg.__dict__, "upload_spool_dir": spool_dir})
+        set_config(cfg)
+
         monkeypatch.setattr(
             import_mod,
             "_get_upload_limits",
@@ -819,23 +809,6 @@ class TestP2UploadLifecycle:
         )
         monkeypatch.setattr(import_mod, "enqueue_for_execution", lambda *a, **kw: None)
 
-        # Redirect snore-upload-* dirs to test-private tmp_path (xdist-safe).
-        created_dirs: list[Path] = []
-        original_mkdtemp = tempfile.mkdtemp
-
-        def tracked_mkdtemp(
-            prefix: str = "tmp", suffix: str = "", dir: str | None = None
-        ) -> str:
-            if prefix == "snore-upload-":
-                path = original_mkdtemp(prefix=prefix, suffix=suffix, dir=str(tmp_path))
-                created_dirs.append(Path(path))
-                return path
-            return original_mkdtemp(prefix=prefix, suffix=suffix, dir=dir)
-
-        monkeypatch.setattr(tempfile, "mkdtemp", tracked_mkdtemp)
-
-        # _copy_chunked raises _FileSizeExceeded immediately so the 413 fires after
-        # mkdtemp but before ownership transfer — the exact regression target.
         def failing_copy(src_file: object, dest: object, max_bytes: int) -> None:
             raise _FileSizeExceeded()
 
@@ -847,17 +820,12 @@ class TestP2UploadLifecycle:
         )
         assert resp.status_code == 413, f"Expected 413, got {resp.status_code}"
 
-        # The tracked dir must have been created (otherwise the fix was bypassed
-        # at a stage before mkdtemp, and this test has no coverage).
-        assert created_dirs, (
-            "tempfile.mkdtemp was never called — test never reached the copy phase. "
-            "Check the size pre-check logic."
+        # The spool dir should have been created and then cleaned up.
+        remaining = list(spool_dir.iterdir())
+        assert not remaining, (
+            f"Spool dir leaked after 413: {remaining}\n"
+            "The finally-cleanup fix was removed or bypassed."
         )
-        for d in created_dirs:
-            assert not d.exists(), (
-                f"snore-upload-* dir leaked after 413: {d}\n"
-                "The finally-cleanup fix was removed or bypassed."
-            )
 
     def test_mid_copy_413_releases_slot(self, api_client, monkeypatch):
         """Slot count returns to zero after a 413 upload rejection.

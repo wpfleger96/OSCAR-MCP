@@ -255,7 +255,7 @@ class TestUploadBackupEnabled:
 
 
 class TestStaleTempDirCleanup:
-    """_cleanup_stale_upload_tempdirs removes snore-upload-* dirs older than the threshold."""
+    """_cleanup_stale_upload_spool_dirs removes snore-upload-* dirs older than the threshold."""
 
     def test_stale_upload_dir_is_removed(self, tmp_path, monkeypatch):
         """A snore-upload-* dir old enough is deleted at startup."""
@@ -264,7 +264,7 @@ class TestStaleTempDirCleanup:
 
         from snore.api.app import (  # noqa: PLC0415
             _STALE_UPLOAD_TMPDIR_AGE_SECONDS,
-            _cleanup_stale_upload_tempdirs,
+            _cleanup_stale_upload_spool_dirs,
         )
 
         stale = tmp_path / "snore-upload-stale"
@@ -277,7 +277,7 @@ class TestStaleTempDirCleanup:
         os.utime(stale, (old_mtime, old_mtime))
 
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
-        _cleanup_stale_upload_tempdirs()
+        _cleanup_stale_upload_spool_dirs()
 
         assert not stale.exists(), "Stale snore-upload-* dir must be removed at startup"
 
@@ -285,13 +285,13 @@ class TestStaleTempDirCleanup:
         """A snore-upload-* dir created recently is NOT deleted."""
         import tempfile  # noqa: PLC0415
 
-        from snore.api.app import _cleanup_stale_upload_tempdirs  # noqa: PLC0415
+        from snore.api.app import _cleanup_stale_upload_spool_dirs  # noqa: PLC0415
 
         fresh = tmp_path / "snore-upload-fresh"
         fresh.mkdir()
 
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
-        _cleanup_stale_upload_tempdirs()
+        _cleanup_stale_upload_spool_dirs()
 
         assert fresh.exists(), (
             "Recent snore-upload-* dir must NOT be removed at startup"
@@ -305,7 +305,7 @@ class TestStaleTempDirCleanup:
 
         from snore.api.app import (  # noqa: PLC0415
             _STALE_UPLOAD_TMPDIR_AGE_SECONDS,
-            _cleanup_stale_upload_tempdirs,
+            _cleanup_stale_upload_spool_dirs,
         )
 
         other = tmp_path / "unrelated-tmpdir"
@@ -314,7 +314,7 @@ class TestStaleTempDirCleanup:
         os.utime(other, (old_mtime, old_mtime))
 
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
-        _cleanup_stale_upload_tempdirs()
+        _cleanup_stale_upload_spool_dirs()
 
         assert other.exists(), "Non-snore-upload dirs must never be removed"
 
