@@ -4,7 +4,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 
 from snore.api.deps import DateRangeParams, PaginationParams, service_dep
-from snore.api.schemas import DayDetail, DayListItem, PaginatedResponse
+from snore.api.schemas import (
+    DateListResponse,
+    DayDetail,
+    DayListItem,
+    PaginatedResponse,
+)
 from snore.services import DayService
 
 router = APIRouter()
@@ -29,6 +34,12 @@ async def list_days(
     return PaginatedResponse(
         items=items, total=total, limit=pagination.limit, offset=pagination.offset
     )
+
+
+@router.get("/dates", response_model=DateListResponse)
+async def list_dates(service: DayServiceDep) -> DateListResponse:
+    dates = await service.list_dates()
+    return DateListResponse(dates=dates)
 
 
 @router.get("/{day_date}", response_model=DayDetail)

@@ -4,17 +4,17 @@
 
         <!-- Filter Panel -->
         <div class="filter-bar">
-            <input
-                type="date"
-                :value="fromDate ? formatIso(fromDate) : ''"
-                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                @input="onFromDateChange"
+            <DatePickerInput
+                v-model="fromDate"
+                :is-date-disabled="isDateDisabled"
+                :min-value="minValue"
+                :max-value="maxValue"
             />
-            <input
-                type="date"
-                :value="toDate ? formatIso(toDate) : ''"
-                class="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                @input="onToDateChange"
+            <DatePickerInput
+                v-model="toDate"
+                :is-date-disabled="isDateDisabled"
+                :min-value="minValue"
+                :max-value="maxValue"
             />
             <Select v-model="selectedDeviceStr">
                 <SelectTrigger class="w-[200px]">
@@ -259,11 +259,14 @@ import {
     getBulkDeletePreview,
 } from '@/api/sessions'
 import { getDevices } from '@/api/devices'
-import { ahiClass, formatDateTime, formatIso, parseLocalDate } from '@/utils/formatting'
+import { ahiClass, formatDateTime } from '@/utils/formatting'
 import type { SessionListItem, DeletePreview, DeviceInfo } from '@/types'
 import { useAuth } from '@/composables/useAuth'
+import { useAvailableDates } from '@/composables/useAvailableDates'
+import DatePickerInput from '@/components/DatePickerInput.vue'
 
 const { canWrite } = useAuth()
+const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
 
 const router = useRouter()
 const route = useRoute()
@@ -276,10 +279,8 @@ const pageSize = 25
 const selectedIds = ref<Set<number>>(new Set())
 
 // Filters
-const fromDate = ref<Date | null>(
-    route.query.from ? parseLocalDate(route.query.from as string) : null,
-)
-const toDate = ref<Date | null>(route.query.to ? parseLocalDate(route.query.to as string) : null)
+const fromDate = ref<string>((route.query.from as string) ?? '')
+const toDate = ref<string>((route.query.to as string) ?? '')
 const selectedDevice = ref<string | null>(null)
 const includeDisabled = ref(false)
 type SessionSortBy = 'date-asc' | 'date-desc' | 'session-id' | 'duration'
@@ -302,7 +303,7 @@ const deviceOptions = computed(() =>
 )
 
 const hasFilters = computed(
-    () => fromDate.value != null || toDate.value != null || selectedDevice.value != null,
+    () => fromDate.value !== '' || toDate.value !== '' || selectedDevice.value != null,
 )
 
 const allOnPageSelected = computed(
@@ -334,16 +335,6 @@ const deleteTargetId = ref<number | null>(null)
 const bulkDeleteIds = ref<number[]>([])
 const deleteMessage = ref('')
 
-function onFromDateChange(event: Event): void {
-    const input = event.target as HTMLInputElement
-    fromDate.value = input.value ? parseLocalDate(input.value) : null
-}
-
-function onToDateChange(event: Event): void {
-    const input = event.target as HTMLInputElement
-    toDate.value = input.value ? parseLocalDate(input.value) : null
-}
-
 async function fetchPage(newOffset: number): Promise<void> {
     loading.value = true
     error.value = null
@@ -353,8 +344,8 @@ async function fetchPage(newOffset: number): Promise<void> {
             offset: newOffset,
             sort_by: sortBy.value,
             include_disabled: includeDisabled.value || undefined,
-            from_date: fromDate.value ? formatIso(fromDate.value) : undefined,
-            to_date: toDate.value ? formatIso(toDate.value) : undefined,
+            from_date: fromDate.value || undefined,
+            to_date: toDate.value || undefined,
             device: selectedDevice.value ?? undefined,
         })
         sessions.value = result.items
@@ -369,8 +360,8 @@ async function fetchPage(newOffset: number): Promise<void> {
 }
 
 function clearFilters(): void {
-    fromDate.value = null
-    toDate.value = null
+    fromDate.value = ''
+    toDate.value = ''
     selectedDevice.value = null
 }
 
@@ -442,6 +433,7 @@ async function executeDelete(): Promise<void> {
 watch([fromDate, toDate, selectedDevice, includeDisabled, sortBy], () => void fetchPage(0))
 
 onMounted(async () => {
+    void loadDates()
     await fetchPage(0)
     try {
         devices.value = await getDevices()

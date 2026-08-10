@@ -15,3 +15,5 @@ export const getDays = apiGet<PaginatedResponse<DayListItem>, [params?: DaysPara
 )
 
 export const getDay = apiGet<DayDetail, [date: string]>((date) => `/days/${date}`)
+
+export const getDates = apiGet<{ dates: string[] }>('/days/dates')

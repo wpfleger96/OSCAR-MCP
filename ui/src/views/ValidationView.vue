@@ -5,11 +5,21 @@
         <div v-if="!result" class="space-y-4 max-w-md">
             <div class="space-y-2">
                 <label class="text-sm font-medium">From Date</label>
-                <input v-model="fromDate" type="date" required class="date-input" />
+                <DatePickerInput
+                    v-model="fromDate"
+                    :is-date-disabled="isDateDisabled"
+                    :min-value="minValue"
+                    :max-value="maxValue"
+                />
             </div>
             <div class="space-y-2">
                 <label class="text-sm font-medium">To Date</label>
-                <input v-model="toDate" type="date" required class="date-input" />
+                <DatePickerInput
+                    v-model="toDate"
+                    :is-date-disabled="isDateDisabled"
+                    :min-value="minValue"
+                    :max-value="maxValue"
+                />
             </div>
             <div class="space-y-2">
                 <label class="text-sm font-medium">Mode</label>
@@ -154,7 +164,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatCard from '@/components/StatCard.vue'
 import InfoHint from '@/components/InfoHint.vue'
@@ -178,8 +188,15 @@ import { Loader2, AlertTriangle } from '@lucide/vue'
 import { formatDateShort } from '@/utils/formatting'
 import { runValidation } from '@/api/validation'
 import { useAuth } from '@/composables/useAuth'
+import { useAvailableDates } from '@/composables/useAvailableDates'
+import DatePickerInput from '@/components/DatePickerInput.vue'
 
 const { canWrite } = useAuth()
+const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
+
+onMounted(() => {
+    void loadDates()
+})
 import type { ValidationReport, SessionValidation } from '@/types'
 
 const fromDate = ref('')

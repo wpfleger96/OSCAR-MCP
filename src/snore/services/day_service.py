@@ -57,6 +57,16 @@ class DayService:
         items = [DayListItem.model_validate(d) for d in rows]
         return items, total
 
+    async def list_dates(self) -> list[date]:
+        query = (
+            select(models.Day.date)
+            .join(models.Device, models.Day.device_id == models.Device.id)
+            .where(self._profile_filter())
+            .order_by(models.Day.date)
+        )
+        rows = (await self.db_session.execute(query)).scalars().all()
+        return list(rows)
+
     async def get_day(self, day_date: date) -> DayDetail:
         """Return detailed day record with session IDs.
 
