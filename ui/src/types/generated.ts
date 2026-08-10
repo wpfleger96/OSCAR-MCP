@@ -1443,6 +1443,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/validate/fl': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Run Fl Validation */
+        post: operations['run_fl_validation_api_v1_validate_fl_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -2389,6 +2406,196 @@ export interface components {
             event_type: string
             /** Percentage */
             percentage: number
+        }
+        /**
+         * FlAggregateMetrics
+         * @description Aggregate FL validation metrics across multiple sessions.
+         */
+        FlAggregateMetrics: {
+            /**
+             * Cross Night Spearman P
+             * @description p-value for cross_night_spearman_r
+             */
+            cross_night_spearman_p?: number | null
+            /**
+             * Cross Night Spearman R
+             * @description Cross-night Spearman r of (snore_fl_95th, device_flg_95th) pairs; None if fewer than 3 paired nights
+             */
+            cross_night_spearman_r?: number | null
+            /**
+             * Mean Auc T25
+             * @description Mean AUC at FLG threshold 0.25
+             */
+            mean_auc_t25?: number | null
+            /**
+             * Mean Auc T50
+             * @description Mean AUC at FLG threshold 0.50
+             */
+            mean_auc_t50?: number | null
+            /**
+             * Mean Spearman Flatness R
+             * @description Mean Spearman r (flatness_index) over compared sessions
+             */
+            mean_spearman_flatness_r?: number | null
+            /**
+             * Mean Spearman Flattening R
+             * @description Mean Spearman r (flattening_severity) over compared sessions
+             */
+            mean_spearman_flattening_r?: number | null
+            /**
+             * Sessions Compared
+             * @description Sessions with metrics computed
+             */
+            sessions_compared: number
+            /**
+             * Sessions Skipped No Analysis
+             * @description Sessions skipped: no completed analysis result
+             */
+            sessions_skipped_no_analysis: number
+            /**
+             * Sessions Skipped No Flg
+             * @description Sessions skipped: no FLG waveform row
+             */
+            sessions_skipped_no_flg: number
+            /**
+             * Sessions Skipped No Valid Breaths
+             * @description Sessions skipped: no leak-valid breaths with required fields
+             */
+            sessions_skipped_no_valid_breaths: number
+            /**
+             * Total Sessions
+             * @description Sessions in the requested date range
+             */
+            total_sessions: number
+        }
+        /**
+         * FlSessionValidation
+         * @description Validation results for a single session's FL signal comparison.
+         */
+        FlSessionValidation: {
+            /**
+             * Auc T25
+             * @description AUC (Mann-Whitney U / n_pos*n_neg) discriminating device FLG >= 0.25 using flattening_severity as score; None if either class empty
+             */
+            auc_t25?: number | null
+            /**
+             * Auc T50
+             * @description AUC discriminating device FLG >= 0.50 using flattening_severity; None if either class empty
+             */
+            auc_t50?: number | null
+            /**
+             * Date
+             * @description Session date (YYYY-MM-DD)
+             */
+            date: string
+            /**
+             * Device Flg 95Th
+             * @description 95th percentile of masked FLG samples (values in [0, 1]) over the full session
+             */
+            device_flg_95th?: number | null
+            /**
+             * Duration Hours
+             * @description Session duration in hours
+             */
+            duration_hours: number
+            /**
+             * Has Flg Waveform
+             * @description Whether a device FLG waveform row exists for this session
+             */
+            has_flg_waveform: boolean
+            /**
+             * Low Sample Warning
+             * @description True when n_breaths_compared < 20
+             * @default false
+             */
+            low_sample_warning: boolean
+            /**
+             * N Breaths Compared
+             * @description Number of (breath, FLG) pairs actually compared after dropping NaN (zero-sample) alignment windows
+             * @default 0
+             */
+            n_breaths_compared: number
+            /**
+             * Parser Version
+             * @description Waveform parser/import version tag
+             */
+            parser_version: string
+            /**
+             * Session Id
+             * @description Database session ID
+             */
+            session_id: number
+            /**
+             * Skipped Reason
+             * @description Why this session was excluded from comparison. Possible values: 'no_flg_waveform' — no device FLG waveform row; 'no_analysis' — no completed analysis result; 'no_valid_breaths' — no leak-valid breaths with required fields; 'no_flg_samples' — waveform row exists but data_blob is None or sample_count is 0; 'no_aligned_pairs' — all breath windows had zero FLG samples after alignment; 'error' — unhandled exception during session validation; None — session was fully compared.
+             */
+            skipped_reason?: string | null
+            /**
+             * Snore Fl 95Th
+             * @description 95th percentile of flattening_severity (1 − mid_insp_flattening) over leak-valid breaths; direct severity orientation
+             */
+            snore_fl_95th?: number | null
+            /**
+             * Spearman Flatness P
+             * @description p-value for spearman_flatness_r
+             */
+            spearman_flatness_p?: number | null
+            /**
+             * Spearman Flatness R
+             * @description Spearman r between flatness_index (direct severity) and breath-averaged device FLG; None if n < 3 or either side constant
+             */
+            spearman_flatness_r?: number | null
+            /**
+             * Spearman Flattening P
+             * @description p-value for spearman_flattening_r
+             */
+            spearman_flattening_p?: number | null
+            /**
+             * Spearman Flattening R
+             * @description Spearman r between flattening_severity (1 − mid_insp_flattening) and breath-averaged device FLG; None if n < 3 or either side constant
+             */
+            spearman_flattening_r?: number | null
+        }
+        /**
+         * FlValidationReport
+         * @description Complete FL signal validation report.
+         */
+        FlValidationReport: {
+            /** @description Aggregate metrics */
+            aggregate: components['schemas']['FlAggregateMetrics']
+            /**
+             * Date Range End
+             * @description End date of the requested range
+             */
+            date_range_end: string
+            /**
+             * Date Range Start
+             * @description Start date of the requested range
+             */
+            date_range_start: string
+            /**
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             */
+            report_date: string
+            /**
+             * Sessions
+             * @description Per-session results
+             */
+            sessions: components['schemas']['FlSessionValidation'][]
+        }
+        /** FlValidationRequest */
+        FlValidationRequest: {
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
         }
         /** GoogleInviteInitRequest */
         GoogleInviteInitRequest: {
@@ -5927,6 +6134,39 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    run_fl_validation_api_v1_validate_fl_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['FlValidationRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['FlValidationReport']
                 }
             }
             /** @description Validation Error */
