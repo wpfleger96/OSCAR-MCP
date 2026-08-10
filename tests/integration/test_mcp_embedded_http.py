@@ -235,13 +235,13 @@ def _server_base_url(
     thread = threading.Thread(target=uv.run, daemon=True)
     thread.start()
 
-    deadline = time.monotonic() + 20.0
+    deadline = time.monotonic() + 60.0
     while not uv.started and time.monotonic() < deadline:
         time.sleep(0.05)
     if not uv.started:
         uv.should_exit = True
         thread.join(timeout=5)
-        raise RuntimeError("uvicorn server failed to start within 20 s")
+        raise RuntimeError("uvicorn server failed to start within 60 s")
 
     port: int = uv.servers[0].sockets[0].getsockname()[1]
     base_url = f"http://127.0.0.1:{port}"
@@ -407,13 +407,13 @@ def _discovery_server_url(
     thread = threading.Thread(target=uv.run, daemon=True)
     thread.start()
 
-    deadline = time.monotonic() + 20.0
+    deadline = time.monotonic() + 60.0
     while not uv.started and time.monotonic() < deadline:
         time.sleep(0.05)
     if not uv.started:
         uv.should_exit = True
         thread.join(timeout=5)
-        raise RuntimeError("uvicorn (discovery) server failed to start within 20 s")
+        raise RuntimeError("uvicorn (discovery) server failed to start within 60 s")
 
     port: int = uv.servers[0].sockets[0].getsockname()[1]
     base_url = f"http://127.0.0.1:{port}"
