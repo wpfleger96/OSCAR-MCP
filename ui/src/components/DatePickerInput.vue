@@ -1,10 +1,12 @@
 <script lang="ts" setup>
 import { ref, computed } from 'vue'
-import { CalendarDate } from '@internationalized/date'
 import type { DateValue } from 'reka-ui'
 import { CalendarIcon } from '@lucide/vue'
 import { Calendar } from '@/components/ui/calendar'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { strToCalendarDate, calendarDateToStr } from '@/composables/useAvailableDates'
+
+defineOptions({ inheritAttrs: false })
 
 const props = withDefaults(
     defineProps<{
@@ -13,6 +15,7 @@ const props = withDefaults(
         isDateDisabled?: (date: DateValue) => boolean
         minValue?: DateValue
         maxValue?: DateValue
+        class?: string
     }>(),
     { placeholder: 'Pick a date' },
 )
@@ -20,15 +23,6 @@ const props = withDefaults(
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 
 const open = ref(false)
-
-function strToCalendarDate(s: string): CalendarDate {
-    const [y, m, d] = s.split('-').map(Number)
-    return new CalendarDate(y, m, d)
-}
-
-function calendarDateToStr(d: DateValue): string {
-    return `${d.year}-${String(d.month).padStart(2, '0')}-${String(d.day).padStart(2, '0')}`
-}
 
 const calendarValue = computed(() =>
     props.modelValue ? strToCalendarDate(props.modelValue) : undefined,
@@ -48,28 +42,30 @@ function onSelect(val: DateValue | undefined) {
 </script>
 
 <template>
-    <Popover v-model:open="open">
-        <PopoverTrigger as-child>
-            <button
-                type="button"
-                class="date-picker-trigger"
-                :class="{ 'text-muted-foreground': !modelValue }"
-            >
-                <CalendarIcon class="h-4 w-4 shrink-0 opacity-50" />
-                {{ displayValue }}
-            </button>
-        </PopoverTrigger>
-        <PopoverContent class="w-auto p-0" align="start">
-            <Calendar
-                :model-value="calendarValue"
-                layout="month-and-year"
-                :is-date-disabled="isDateDisabled"
-                :min-value="minValue"
-                :max-value="maxValue"
-                @update:model-value="onSelect"
-            />
-        </PopoverContent>
-    </Popover>
+    <div :class="props.class">
+        <Popover v-model:open="open">
+            <PopoverTrigger as-child>
+                <button
+                    type="button"
+                    class="date-picker-trigger"
+                    :class="{ 'text-muted-foreground': !modelValue }"
+                >
+                    <CalendarIcon class="h-4 w-4 shrink-0 opacity-50" />
+                    {{ displayValue }}
+                </button>
+            </PopoverTrigger>
+            <PopoverContent class="w-auto p-0" align="start">
+                <Calendar
+                    :model-value="calendarValue"
+                    layout="month-and-year"
+                    :is-date-disabled="isDateDisabled"
+                    :min-value="minValue"
+                    :max-value="maxValue"
+                    @update:model-value="onSelect"
+                />
+            </PopoverContent>
+        </Popover>
+    </div>
 </template>
 
 <style scoped>

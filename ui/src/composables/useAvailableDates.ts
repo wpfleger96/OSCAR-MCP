@@ -10,9 +10,13 @@ const maxDateStr = ref<string | null>(null)
 const loaded = ref(false)
 const loading = ref(false)
 
-function strToCalendarDate(s: string): CalendarDate {
+export function strToCalendarDate(s: string): CalendarDate {
     const [y, m, d] = s.split('-').map(Number)
     return new CalendarDate(y, m, d)
+}
+
+export function calendarDateToStr(d: DateValue): string {
+    return `${d.year}-${String(d.month).padStart(2, '0')}-${String(d.day).padStart(2, '0')}`
 }
 
 export function useAvailableDates() {

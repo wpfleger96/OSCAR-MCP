@@ -51,6 +51,7 @@ export type DataRange = Schemas['DataRange']
 // Days
 export type DayListItem = Schemas['DayListItem']
 export type DayDetail = Schemas['DayDetail']
+export type DateListResponse = Schemas['DateListResponse']
 
 // RX
 export type RxPeriodResponse = Schemas['RxPeriodResponse']

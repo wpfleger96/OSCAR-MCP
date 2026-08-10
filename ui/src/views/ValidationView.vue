@@ -190,6 +190,7 @@ import { runValidation } from '@/api/validation'
 import { useAuth } from '@/composables/useAuth'
 import { useAvailableDates } from '@/composables/useAvailableDates'
 import DatePickerInput from '@/components/DatePickerInput.vue'
+import type { ValidationReport, SessionValidation } from '@/types'
 
 const { canWrite } = useAuth()
 const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
@@ -197,7 +198,6 @@ const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDate
 onMounted(() => {
     void loadDates()
 })
-import type { ValidationReport, SessionValidation } from '@/types'
 
 const fromDate = ref('')
 const toDate = ref('')

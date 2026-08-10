@@ -60,6 +60,7 @@ class DayService:
     async def list_dates(self) -> list[date]:
         query = (
             select(models.Day.date)
+            .distinct()
             .join(models.Device, models.Day.device_id == models.Device.id)
             .where(self._profile_filter())
             .order_by(models.Day.date)
