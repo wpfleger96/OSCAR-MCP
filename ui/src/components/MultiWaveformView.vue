@@ -50,6 +50,7 @@
                 :values="chart.data.values"
                 :unit="chart.data.unit"
                 :label="WAVEFORM_LABELS[chart.type] ?? chart.type"
+                :waveform-type="chart.type"
                 :events="chart.type === 'flow' ? events : undefined"
                 :sync-key="syncKey"
                 @zoom="onZoom"

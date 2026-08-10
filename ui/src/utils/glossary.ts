@@ -221,4 +221,78 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         label: 'F1 Score',
         short: 'Harmonic mean of sensitivity and precision; balances missed events against over-detection.',
     },
+
+    // ── New device-channel labels ──────────────────────────────────────────
+    fl_device: {
+        label: 'Flow Limitation (device)',
+        short: "ResMed's proprietary per-breath severity index for flow limitation, 0 (none) to 1 (severe).",
+        long: "This is distinct from SNORE's computed flow-limitation classes. The device reports a continuous 0–1 score derived from its own internal algorithm; SNORE's FL classes are based on inspiratory flow-shape analysis.",
+    },
+    snore_device: {
+        label: 'Snore (device)',
+        short: 'ResMed device snore index, 0 (absent) to 5 (severe), sampled once per breath.',
+        long: 'A unitless severity score derived from the high-frequency vibration component of mask pressure. Not equivalent to decibel snore measurements.',
+    },
+    ie_ratio_waveform: {
+        label: 'I:E Ratio',
+        short: 'Instantaneous inspiratory-to-expiratory time ratio (expressed as a percentage, where 100 = 1:1).',
+    },
+    ti_waveform: {
+        label: 'Inspiratory Time',
+        short: 'Duration of the inspiratory phase of each breath, in seconds.',
+    },
+    pressure_hr_waveform: {
+        label: 'Mask Pressure (25 Hz)',
+        short: '25 Hz mask-pressure signal providing finer time resolution than the standard 2 Hz pressure channel.',
+        long: 'Useful for detecting brief snore vibrations and inspiratory flow-limitation shapes that are averaged away in the lower-resolution channel.',
+    },
+    trigger_cycle: {
+        label: 'Trigger/Cycle (raw codes)',
+        short: 'Raw numeric event codes (0–16) logged by the device firmware for breath trigger and cycle transitions.',
+        long: 'These are undecoded manufacturer-internal event codes. They are stored as-is and have not been mapped to named states. Consult ResMed documentation or OSCAR source for code-to-state mappings.',
+    },
+
+    // ── STR daily statistics ───────────────────────────────────────────────
+    uai: {
+        label: 'UAI',
+        short: 'Unintentional Apnea Index reported by the device firmware; apneas per hour (device-computed).',
+    },
+    ai_str: {
+        label: 'AI',
+        short: 'Apnea Index reported by the device; total apneas (OA + CA) per hour of therapy.',
+    },
+    rin: {
+        label: 'RIN',
+        short: 'Respiratory Intensity Index; device-reported measure of respiratory event intensity (events/hr).',
+    },
+    spont_cyc_pct: {
+        label: 'Spont Cyc %',
+        short: 'Percentage of breaths that cycled spontaneously (patient-triggered expiration) in VAuto/bilevel modes.',
+    },
+    mask_events_str: {
+        label: 'Mask Events',
+        short: 'Number of mask-on events logged by the device during the session.',
+    },
+    flow_5th: {
+        label: 'Flow 5th Percentile',
+        short: '5th percentile of instantaneous flow. Typically negative because expiratory flow is represented as a negative value.',
+        long: 'This value is expected to be negative for healthy breathing — it represents the lower tail of the flow distribution where expiratory flow dominates. A large negative value is normal, not an error.',
+    },
+    ie_ratio_stat: {
+        label: 'I:E Ratio',
+        short: 'Daily I:E ratio percentile from the STR summary (percent; 100 = 1:1, 50 = 1:2). VAuto devices only.',
+        long: 'Values above 100 indicate inspiration longer than expiration (I > E), which is normal on bilevel and VAuto devices.',
+    },
+    ti_stat: {
+        label: 'Inspiratory Time (Ti)',
+        short: 'Inspiratory phase duration percentile from the STR summary, in seconds. VAuto devices only.',
+    },
+    amb_humidity: {
+        label: 'Ambient Humidity',
+        short: 'Median ambient relative humidity recorded by the device humidifier sensor, in percent.',
+    },
+    hum_temp: {
+        label: 'Humidifier Temperature',
+        short: 'Median humidifier chamber temperature, in °C.',
+    },
 }
