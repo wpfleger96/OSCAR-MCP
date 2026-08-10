@@ -465,7 +465,7 @@ def _cleanup_stale_upload_spool_dirs(
 
     for parent, require_prefix in scan_dirs:
         try:
-            entries = list(parent.iterdir())
+            entries = parent.iterdir()
         except OSError:
             continue
         for entry in entries:
@@ -503,14 +503,15 @@ async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
 
     from sqlalchemy import select, update  # noqa: PLC0415
 
+    from snore.api.import_jobs import ACTIVE_STATES, JobState  # noqa: PLC0415
     from snore.database import models  # noqa: PLC0415
     from snore.database.session import session_scope  # noqa: PLC0415
 
+    non_terminal = [s.value for s in ACTIVE_STATES]
     resume_candidates: list[tuple[Path, int, int | None]] = []
     now = datetime.now(UTC)
     try:
         async with session_scope(immediate=True) as db:
-            non_terminal = ["pending_upload", "pending", "running"]
             # Collect resume candidates before marking everything failed.
             rows = (
                 await db.execute(
@@ -533,7 +534,7 @@ async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
                 update(models.ImportJobRecord)
                 .where(models.ImportJobRecord.state.in_(non_terminal))
                 .values(
-                    state="failed",
+                    state=JobState.FAILED.value,
                     error_message="Server restarted while job was in progress",
                     finished_at=now,
                     updated_at=now,
@@ -563,6 +564,7 @@ async def _recover_orphaned_analysis_jobs() -> set[int]:
 
     from sqlalchemy import select, update  # noqa: PLC0415
 
+    from snore.api.analysis_jobs import AnalysisJobState  # noqa: PLC0415
     from snore.database import models  # noqa: PLC0415
     from snore.database.session import session_scope  # noqa: PLC0415
 
@@ -575,7 +577,10 @@ async def _recover_orphaned_analysis_jobs() -> set[int]:
                 (
                     await db.execute(
                         select(models.AnalysisJobRecord.profile_id)
-                        .where(models.AnalysisJobRecord.state == "running")
+                        .where(
+                            models.AnalysisJobRecord.state
+                            == AnalysisJobState.RUNNING.value
+                        )
                         .distinct()
                     )
                 )
@@ -586,9 +591,9 @@ async def _recover_orphaned_analysis_jobs() -> set[int]:
 
             result = await db.execute(
                 update(models.AnalysisJobRecord)
-                .where(models.AnalysisJobRecord.state == "running")
+                .where(models.AnalysisJobRecord.state == AnalysisJobState.RUNNING.value)
                 .values(
-                    state="failed",
+                    state=AnalysisJobState.FAILED.value,
                     error_message="Server restarted while job was in progress",
                     finished_at=now,
                     updated_at=now,
@@ -628,8 +633,7 @@ def _startup_resume_imports(
                 temp_dir=spool_path,
             )
             job._state = job._state.__class__("pending")
-            # Count the files in the spool directory.
-            job._file_count = sum(1 for f in spool_path.rglob("*") if f.is_file())
+            job._file_count = sum(1 for f in spool_path.iterdir() if f.is_file())
             # Register in the in-memory store without checking admission caps —
             # startup resume should not be refused by caps.
             from snore.api.import_jobs import _jobs, _lock  # noqa: PLC0415

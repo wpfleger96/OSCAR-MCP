@@ -203,7 +203,9 @@ async def list_analysis_jobs(
                 models.AnalysisJobRecord.owner_user_id == actor.user_id,
                 models.AnalysisJobRecord.owner_user_id.is_(None),
             ),
-            models.AnalysisJobRecord.state.in_(["succeeded", "failed", "cancelled"]),
+            models.AnalysisJobRecord.state.in_(
+                [s.value for s in analysis_jobs.TERMINAL_STATES]
+            ),
         )
         .order_by(models.AnalysisJobRecord.created_at.desc())
         .limit(50)
