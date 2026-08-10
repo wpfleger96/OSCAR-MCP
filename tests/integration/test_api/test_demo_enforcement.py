@@ -41,8 +41,9 @@ DEMO_ALLOWED_MUTATING = {
     # Read-only previews / queries — no data is mutated.
     "POST /api/v1/sessions/delete-preview",
     "POST /api/v1/import/precheck",
-    # FL signal validation is read-only (no writes performed).
+    # Signal validation endpoints are read-only (no writes performed).
     "POST /api/v1/validate/fl",
+    "POST /api/v1/validate/breaths",
     # Local-only route: protected by require_local_only (→ 403 in multiuser
     # where demo users actually live). In local mode (test default) it passes
     # require_local_only but demo users don't exist in practice.

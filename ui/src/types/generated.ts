@@ -1443,6 +1443,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/validate/breaths': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Run Breath Trends Validation */
+        post: operations['run_breath_trends_validation_api_v1_validate_breaths_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/validate/fl': {
         parameters: {
             query?: never
@@ -1893,6 +1910,125 @@ export interface components {
             /** To Date */
             to_date?: string | null
         }
+        /**
+         * BreathTrendsAggregateMetrics
+         * @description Aggregate breath-trends validation metrics across multiple sessions.
+         */
+        BreathTrendsAggregateMetrics: {
+            /** @description Aggregate for the I:E ratio channel */
+            ie_ratio: components['schemas']['ChannelAggregateMetrics']
+            /** @description Aggregate for the RR channel */
+            rr: components['schemas']['ChannelAggregateMetrics']
+            /**
+             * Sessions Compared
+             * @description Sessions with analysis and valid breaths (skipped_reason is None)
+             */
+            sessions_compared: number
+            /**
+             * Sessions Skipped No Analysis
+             * @description Sessions skipped: no completed analysis result
+             */
+            sessions_skipped_no_analysis: number
+            /**
+             * Sessions Skipped No Valid Breaths
+             * @description Sessions skipped: no leak-valid breaths with timing columns
+             */
+            sessions_skipped_no_valid_breaths: number
+            /** @description Aggregate for the Ti channel */
+            ti: components['schemas']['ChannelAggregateMetrics']
+            /**
+             * Total Sessions
+             * @description Sessions in the requested date range
+             */
+            total_sessions: number
+            /** @description Aggregate for the TV channel */
+            tv: components['schemas']['ChannelAggregateMetrics']
+        }
+        /**
+         * BreathTrendsSessionValidation
+         * @description Breath-trends validation results for a single session.
+         */
+        BreathTrendsSessionValidation: {
+            /**
+             * Channels
+             * @description Per-channel comparison results keyed by channel name ('rr', 'tv', 'ti', 'ie_ratio').  Empty when skipped_reason is set.
+             */
+            channels?: {
+                [key: string]: components['schemas']['ChannelComparison']
+            }
+            /**
+             * Date
+             * @description Session date (YYYY-MM-DD)
+             */
+            date: string
+            /**
+             * Duration Hours
+             * @description Session duration in hours
+             */
+            duration_hours: number
+            /**
+             * N Breaths
+             * @description Count of leak-valid breaths with timing columns fetched for this session.  This is the count BEFORE per-channel alignment filtering, so it is an upper bound across all channels; the authoritative per-channel count is each channel's `n_pairs`.  Intentionally differs from FL's `n_breaths_compared`, which counts breaths used in the FL comparison.
+             * @default 0
+             */
+            n_breaths: number
+            /**
+             * Parser Version
+             * @description Waveform parser/import version tag
+             */
+            parser_version: string
+            /**
+             * Session Id
+             * @description Database session ID
+             */
+            session_id: number
+            /**
+             * Skipped Reason
+             * @description Why the whole session was excluded: 'no_analysis' | 'no_valid_breaths' | 'error' | None.  'no_analysis' — no completed analysis result for this session.  'no_valid_breaths' — analysis exists but no leak-valid breaths with timing columns.  'error' — unhandled exception during session validation; details in logs.
+             */
+            skipped_reason?: string | null
+        }
+        /**
+         * BreathTrendsValidationReport
+         * @description Complete breath-trends validation report.
+         */
+        BreathTrendsValidationReport: {
+            /** @description Aggregate metrics */
+            aggregate: components['schemas']['BreathTrendsAggregateMetrics']
+            /**
+             * Date Range End
+             * @description End date of the requested range
+             */
+            date_range_end: string
+            /**
+             * Date Range Start
+             * @description Start date of the requested range
+             */
+            date_range_start: string
+            /**
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             */
+            report_date: string
+            /**
+             * Sessions
+             * @description Per-session results
+             */
+            sessions: components['schemas']['BreathTrendsSessionValidation'][]
+        }
+        /** BreathTrendsValidationRequest */
+        BreathTrendsValidationRequest: {
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
+        }
         /** BulkDeletePreviewRequest */
         BulkDeletePreviewRequest: {
             /**
@@ -1908,6 +2044,69 @@ export interface components {
             session_ids?: number[] | null
             /** To Date */
             to_date?: string | null
+        }
+        /**
+         * ChannelAggregateMetrics
+         * @description Per-channel aggregate metrics across the validated date range.
+         */
+        ChannelAggregateMetrics: {
+            /**
+             * Mean Bias
+             * @description Mean of per-session mean_bias over sessions with data
+             */
+            mean_bias?: number | null
+            /**
+             * Mean Median Abs Error
+             * @description Mean of per-session median_abs_error over sessions with data
+             */
+            mean_median_abs_error?: number | null
+            /**
+             * Mean Spearman R
+             * @description Mean Spearman r over sessions with a non-None spearman_r
+             */
+            mean_spearman_r?: number | null
+            /**
+             * Sessions With Data
+             * @description Sessions where this channel has at least one aligned pair
+             */
+            sessions_with_data: number
+        }
+        /**
+         * ChannelComparison
+         * @description Comparison metrics for one device trend channel in one session.
+         */
+        ChannelComparison: {
+            /**
+             * Mean Bias
+             * @description Mean (SNORE − device) in native units; None if n_pairs == 0
+             */
+            mean_bias?: number | null
+            /**
+             * Median Abs Error
+             * @description Median |SNORE − device| in native units (bpm / mL / s / pp); None if n_pairs == 0
+             */
+            median_abs_error?: number | null
+            /**
+             * N Pairs
+             * @description Number of (SNORE, device) pairs after dropping NaN and zero-device windows
+             * @default 0
+             */
+            n_pairs: number
+            /**
+             * Skipped Reason
+             * @description Why this channel was excluded: 'channel_not_recorded' | None. 'channel_not_recorded' means no device waveform row exists for this channel in this session (normal for ti/ie_ratio on APAP sessions).
+             */
+            skipped_reason?: string | null
+            /**
+             * Spearman P
+             * @description p-value for spearman_r
+             */
+            spearman_p?: number | null
+            /**
+             * Spearman R
+             * @description Spearman r between SNORE per-breath value and device breath-window average; None if n < 3 or either side is constant
+             */
+            spearman_r?: number | null
         }
         /** CreateInviteRequest */
         CreateInviteRequest: {
@@ -3472,10 +3671,22 @@ export interface components {
         SessionStatistics: {
             /** Ahi */
             ahi?: number | null
+            /** Ai */
+            ai?: number | null
+            /** Amb Humidity Median */
+            amb_humidity_median?: number | null
+            /** Blow Flow Median */
+            blow_flow_median?: number | null
+            /** Blow Press 5Th */
+            blow_press_5th?: number | null
+            /** Blow Press 95Th */
+            blow_press_95th?: number | null
             /** Cai */
             cai?: number | null
             /** Central Apneas */
             central_apneas?: number | null
+            /** Csr Pct */
+            csr_pct?: number | null
             /** Epap 95Th */
             epap_95th?: number | null
             /** Epap Max */
@@ -3486,12 +3697,30 @@ export interface components {
             epap_median?: number | null
             /** Epap Min */
             epap_min?: number | null
+            /** Flow 5Th */
+            flow_5th?: number | null
+            /** Flow 95Th */
+            flow_95th?: number | null
             /** Flow Limitations */
             flow_limitations?: number | null
             /** Hi */
             hi?: number | null
+            /** Htube Pow Median */
+            htube_pow_median?: number | null
+            /** Htube Temp Median */
+            htube_temp_median?: number | null
+            /** Hum Pow Median */
+            hum_pow_median?: number | null
+            /** Hum Temp Median */
+            hum_temp_median?: number | null
             /** Hypopneas */
             hypopneas?: number | null
+            /** Ie Ratio 95Th */
+            ie_ratio_95th?: number | null
+            /** Ie Ratio Max */
+            ie_ratio_max?: number | null
+            /** Ie Ratio Median */
+            ie_ratio_median?: number | null
             /** Ipap 95Th */
             ipap_95th?: number | null
             /** Ipap Max */
@@ -3510,6 +3739,10 @@ export interface components {
             leak_min?: number | null
             /** Leak Percentile 70 */
             leak_percentile_70?: number | null
+            /** Mask Events */
+            mask_events?: number | null
+            /** Minute Ventilation 95Th */
+            minute_ventilation_95th?: number | null
             /** Minute Ventilation Max */
             minute_ventilation_max?: number | null
             /** Minute Ventilation Mean */
@@ -3542,26 +3775,46 @@ export interface components {
             rei?: number | null
             /** Reras */
             reras?: number | null
+            /** Respiratory Rate 95Th */
+            respiratory_rate_95th?: number | null
             /** Respiratory Rate Max */
             respiratory_rate_max?: number | null
             /** Respiratory Rate Mean */
             respiratory_rate_mean?: number | null
             /** Respiratory Rate Min */
             respiratory_rate_min?: number | null
+            /** Rin */
+            rin?: number | null
+            /** Spo2 95Th */
+            spo2_95th?: number | null
             /** Spo2 Max */
             spo2_max?: number | null
             /** Spo2 Mean */
             spo2_mean?: number | null
+            /** Spo2 Median */
+            spo2_median?: number | null
             /** Spo2 Min */
             spo2_min?: number | null
             /** Spo2 Time Below 90 */
             spo2_time_below_90?: number | null
+            /** Spont Cyc Pct */
+            spont_cyc_pct?: number | null
+            /** Ti 95Th */
+            ti_95th?: number | null
+            /** Ti Max */
+            ti_max?: number | null
+            /** Ti Median */
+            ti_median?: number | null
+            /** Tidal Volume 95Th */
+            tidal_volume_95th?: number | null
             /** Tidal Volume Max */
             tidal_volume_max?: number | null
             /** Tidal Volume Mean */
             tidal_volume_mean?: number | null
             /** Tidal Volume Min */
             tidal_volume_min?: number | null
+            /** Uai */
+            uai?: number | null
             /** Usage Hours */
             usage_hours?: number | null
         }
@@ -6134,6 +6387,39 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    run_breath_trends_validation_api_v1_validate_breaths_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['BreathTrendsValidationRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['BreathTrendsValidationReport']
                 }
             }
             /** @description Validation Error */
