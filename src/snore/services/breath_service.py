@@ -1186,6 +1186,19 @@ class BreathService:
             return AnalysisStatus.STALE_VERSION, algo
         return AnalysisStatus.OK, algo
 
+    async def latest_analysis_for_session(
+        self, session_id: int
+    ) -> tuple[AnalysisStatus, AlgoVersions | None, int | None]:
+        """Supported public lookup for validation modules.
+
+        Returns (status, algo_versions, analysis_result_id) for the latest run.
+        Ownership is assumed: the session must belong to ``self._profile_id`` —
+        callers are responsible for ensuring that via a profile-scoped query.
+
+        Returns (NOT_RUN, None, None) when no run exists.
+        """
+        return await self._latest_analysis_for_session(session_id)
+
     # ------------------------------------------------------------------
     # Single range-aware resolver (replaces _resolve_device, _resolve_session_for_date,
     # and _fetch_day_sessions — all callers must use _resolve_range)
