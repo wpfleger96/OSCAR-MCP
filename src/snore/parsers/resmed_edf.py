@@ -47,10 +47,16 @@ from snore.parsers.base import (
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
 from snore.parsers.event_labels import EVENT_TYPE_MAP, FILTERED_ANNOTATIONS
-from snore.parsers.formats.edf import EDFReader
+from snore.parsers.formats.edf import (
+    EDFDiscontinuousReader,
+    EDFReader,
+    get_edf_record_count,
+    is_discontinuous_edf,
+)
 from snore.parsers.unified import (
     DeviceInfo,
     RespiratoryEvent,
+    RespiratoryEventType,
     TherapyMode,
     TherapySettings,
     UnifiedSession,
@@ -61,6 +67,13 @@ from snore.parsers.unified import (
 from snore.utils.parse_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
+
+# STR summary stats whose 5th-percentile values can legitimately be negative.
+# Flow.5 (5th-percentile flow) is negative on all sessions because the 5th
+# percentile of the respiratory flow signal captures expiratory flow.  All
+# other STR summary stats are non-negative by definition; negative raw values
+# indicate unused STR day slots (sentinel) and are dropped.
+_STR_NEGATIVE_OK_STATS: frozenset[str] = frozenset({"flow_5th"})
 
 
 def _slice_str_cache(
@@ -191,13 +204,55 @@ class ResmedEDFParser(DeviceParser):
         ("Leak.50", "Leak Med"): "leak_median",
         ("Leak.95", "Leak 95"): "leak_95th",
         ("Leak.Max", "Leak Max"): "leak_max",
+        ("Leak.70",): "leak_percentile_70",
         ("RespRate.50", "RR Med"): "respiratory_rate_mean",
+        ("RespRate.95", "RR 95"): "respiratory_rate_95th",
+        ("RespRate.Max", "RR Max"): "respiratory_rate_max",
         ("TidVol.50", "Tid Vol Med"): "tidal_volume_mean",
+        ("TidVol.95", "Tid Vol 95"): "tidal_volume_95th",
+        ("TidVol.Max", "Tid Vol Max"): "tidal_volume_max",
         ("MinVent.50", "Min Vent Med"): "minute_ventilation_mean",
+        ("MinVent.95", "Min Vent 95"): "minute_ventilation_95th",
+        ("MinVent.Max", "Min Vent Max"): "minute_ventilation_max",
+        # I:E ratio — VAuto only (S11 label / OSCAR legacy label)
+        ("IERatio.50", "I:E Med"): "ie_ratio_median",
+        ("IERatio.95", "I:E 95"): "ie_ratio_95th",
+        ("IERatio.Max", "I:E Max"): "ie_ratio_max",
+        # Inspiratory time percentiles — VAuto only
+        ("Ti.50",): "ti_median",
+        ("Ti.95",): "ti_95th",
+        ("Ti.Max",): "ti_max",
+        # Flow percentiles (both device types)
+        ("Flow.5",): "flow_5th",
+        ("Flow.95",): "flow_95th",
+        # Blow-side pressure and flow (both device types)
+        ("BlowPress.5",): "blow_press_5th",
+        ("BlowPress.95",): "blow_press_95th",
+        ("BlowFlow.50",): "blow_flow_median",
+        # Climate / humidifier stats (both device types)
+        ("AmbHumidity.50",): "amb_humidity_median",
+        ("HumTemp.50",): "hum_temp_median",
+        ("HTubeTemp.50",): "htube_temp_median",
+        ("HTubePow.50",): "htube_pow_median",
+        ("HumPow.50",): "hum_pow_median",
+        # SpO2 daily summaries (both device types)
+        ("SpO2.50",): "spo2_median",
+        ("SpO2.95",): "spo2_95th",
+        ("SpO2.Max",): "spo2_max",
+        # Apnea indices
         ("AHI", "AHI"): "ahi",
         ("OAI", "OAI"): "oai",
         ("CAI", "CAI"): "cai",
         ("HI", "HI"): "hi",
+        ("AI",): "ai",
+        ("UAI",): "uai",
+        # APAP-only stats
+        ("RIN",): "rin",
+        ("CSR",): "csr_pct",
+        # VAuto-only spontaneous cycle percentage
+        ("SpontCyc%",): "spont_cyc_pct",
+        # Mask events count (mask-on events per session)
+        ("MaskEvents",): "mask_events",
     }
 
     # S9/10-basis EPR type map — keyed on the post-normalization value that both
@@ -1342,12 +1397,15 @@ class ResmedEDFParser(DeviceParser):
         )
 
         eve_files = []
+        csl_files = []
         for segment_id, files in sorted_segments:
             if "EVE" in files:
                 eve_files.append(files["EVE"])
                 logger.debug(
                     f"Found EVE file for segment {segment_id}: {files['EVE'].name}"
                 )
+            if "CSL" in files:
+                csl_files.append(files["CSL"])
 
         segment_sessions = []
         for segment_id, files in sorted_segments:
@@ -1385,6 +1443,8 @@ class ResmedEDFParser(DeviceParser):
                     f"Parsing {len(eve_files)} EVE file(s) for night {night_date}"
                 )
                 self._parse_eve_files_for_night(eve_files, session)
+            if csl_files:
+                self._parse_csl_files_for_night(csl_files, session)
             return session
 
         logger.debug(f"Merging {len(segment_sessions)} segments for night {night_date}")
@@ -1526,6 +1586,9 @@ class ResmedEDFParser(DeviceParser):
             logger.debug(f"Parsing {len(eve_files)} EVE file(s) for night {night_date}")
             self._parse_eve_files_for_night(eve_files, merged_session)
 
+        if csl_files:
+            self._parse_csl_files_for_night(csl_files, merged_session)
+
         return merged_session
 
     @staticmethod
@@ -1623,6 +1686,11 @@ class ResmedEDFParser(DeviceParser):
 
                 for stat_name, value in summaries.items():
                     if hasattr(stats, stat_name):
+                        # spo2_max is also derived from SA2 waveform data when an
+                        # oximeter is connected; the higher-fidelity per-sample
+                        # computation takes precedence over the STR daily summary.
+                        if stat_name == "spo2_max" and stats.spo2_max is not None:
+                            continue
                         setattr(stats, stat_name, value)
 
                 if summaries:
@@ -2324,6 +2392,96 @@ class ResmedEDFParser(DeviceParser):
                 f"all filtered out)"
             )
 
+    def _parse_csl_files_for_night(
+        self, csl_files: list[Path], session: UnifiedSession
+    ) -> None:
+        """Parse CSL.edf (Compliance Summary Log) files and add CSR spans as PB events.
+
+        CSL files contain "CSR Start" / "CSR End" annotation pairs that bracket
+        Cheyne-Stokes respiration episodes.  Each paired span becomes a
+        ``PERIODIC_BREATHING`` ``RespiratoryEvent`` on the session.
+
+        Mirrors OSCAR's ``LoadCSL`` (resmed_loader.cpp :3660-3748):
+        - "Recording starts" and empty annotations are skipped.
+        - Unpaired "CSR End" (no preceding "CSR Start") is skipped.
+        - Spans whose start timestamp falls outside the session window are dropped.
+        - Files with zero annotation records are silently skipped (AirSense 11
+          emits empty CSL stubs with no actual events).
+
+        Args:
+            csl_files: Paths to CSL EDF+ files for this night's segments.
+            session: The merged session to attach events to.
+        """
+        total_pb_added = 0
+
+        for csl_file in csl_files:
+            try:
+                record_count = get_edf_record_count(csl_file)
+                if record_count == 0:
+                    logger.debug(f"Skipping zero-record CSL file: {csl_file.name}")
+                    continue
+
+                if is_discontinuous_edf(csl_file):
+                    with EDFDiscontinuousReader(csl_file) as edf:
+                        annotations = edf.read_annotations()
+                        csl_start_time = edf.get_header().start_datetime
+                else:
+                    with EDFReader(csl_file) as edf:
+                        annotations = edf.read_annotations()
+                        csl_start_time = edf.get_header().start_datetime
+
+                csr_start_dt = None  # wall-clock start of the current CSR span
+
+                for annotation in annotations:
+                    for text in annotation.annotations:
+                        if not text or text == "Recording starts":
+                            continue
+
+                        if text == "CSR Start":
+                            csr_start_dt = annotation.to_datetime(csl_start_time)
+
+                        elif text == "CSR End":
+                            if csr_start_dt is None:
+                                logger.debug(
+                                    f"CSL {csl_file.name}: orphan 'CSR End' at "
+                                    f"{annotation.onset_time:.1f}s — skipped"
+                                )
+                                continue
+
+                            csr_end_dt = annotation.to_datetime(csl_start_time)
+                            duration_s = (csr_end_dt - csr_start_dt).total_seconds()
+
+                            if session.start_time <= csr_start_dt <= session.end_time:
+                                event = RespiratoryEvent(
+                                    event_type=RespiratoryEventType.PERIODIC_BREATHING,
+                                    start_time=csr_start_dt,
+                                    duration_seconds=max(0.0, duration_s),
+                                )
+                                session.add_event(event)
+                                total_pb_added += 1
+
+                            csr_start_dt = None
+
+                        else:
+                            logger.debug(
+                                f"CSL {csl_file.name}: unknown annotation '{text}'"
+                            )
+
+                if csr_start_dt is not None:
+                    logger.debug(
+                        f"CSL {csl_file.name}: unclosed 'CSR Start' at end of file"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Failed to parse CSL file {csl_file.name}: {e}")
+                continue
+
+        if total_pb_added > 0:
+            logger.debug(
+                f"Added {total_pb_added} PB (CSR) event(s) from {len(csl_files)} "
+                f"CSL file(s) for session starting {session.start_time}"
+            )
+
     def _parse_str_settings(
         self, str_file: Path, session_date: date, is_eleven_series: bool | None = None
     ) -> TherapySettings | None:
@@ -2550,9 +2708,14 @@ class ResmedEDFParser(DeviceParser):
                         data, _ = edf.read_signal(matched_signal)
                         for record_idx in range(min(num_records, len(data))):
                             value = float(data[record_idx])
-                            # Skip sentinel values: ResMed writes negative values
-                            # on no-usage days; all physical stats are non-negative.
-                            if not (value >= 0):
+                            # NaN always means an unused STR slot — skip for all stats.
+                            if math.isnan(value):
+                                continue
+                            # Skip negative sentinel values on no-usage days.
+                            # Exception: flow_5th (5th-percentile of flow) is
+                            # legitimately negative for expiratory flow — accept
+                            # any finite negative value for that stat only.
+                            if value < 0 and stat_name not in _STR_NEGATIVE_OK_STATS:
                                 continue
                             record_date = record_dates[record_idx]
                             if record_date not in all_summaries:

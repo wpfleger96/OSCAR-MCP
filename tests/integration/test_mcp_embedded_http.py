@@ -183,7 +183,12 @@ def _server_base_url(
 
     The actual port is OS-assigned (port=0) to avoid TOCTOU races.
     """
+    import asyncio  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
     import snore.api.mcp_embed as _mcp_embed  # noqa: PLC0415
+
+    from snore.database.session import cleanup_database  # noqa: PLC0415
 
     db_path = str(tmp_path_factory.mktemp("embedded_mcp") / "test_embedded.db")
 
@@ -198,8 +203,6 @@ def _server_base_url(
         return _verifier_ref
 
     _mcp_embed._make_mcp_auth_provider = _fake_auth_provider
-
-    import os  # noqa: PLC0415
 
     # Stash and set environment for this server's create_app() / load_config() call.
     _saved = {}
@@ -217,6 +220,9 @@ def _server_base_url(
 
     from snore.api.config import reset_config  # noqa: PLC0415
 
+    # A previous server in the same worker may have left _engine set.  Clear it
+    # so init_database_from_url below runs Alembic migrations on this fresh db.
+    asyncio.run(cleanup_database())
     reset_config()
 
     from snore.api.app import create_app  # noqa: PLC0415
@@ -254,6 +260,9 @@ def _server_base_url(
     finally:
         uv.should_exit = True
         thread.join(timeout=15)
+        # Clear the database engine so subsequent modules in the same worker
+        # start fresh rather than seeing _engine set to this module's db.
+        asyncio.run(cleanup_database())
         # Restore environment and auth provider.
         for k, v in _saved.items():
             if v is None:

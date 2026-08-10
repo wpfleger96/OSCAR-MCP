@@ -208,6 +208,12 @@ class SessionStatistics(BaseModel):
     spo2_min: float | None = Field(default=None, description="Min SpO2 (%)")
     spo2_max: float | None = Field(default=None, description="Max SpO2")
     spo2_mean: float | None = Field(default=None, description="Mean SpO2")
+    spo2_median: float | None = Field(
+        default=None, description="Median SpO2 (from STR)"
+    )
+    spo2_95th: float | None = Field(
+        default=None, description="95th percentile SpO2 (from STR)"
+    )
     spo2_time_below_90: int | None = Field(
         default=None, description="Time below 90% (seconds)"
     )
@@ -218,6 +224,85 @@ class SessionStatistics(BaseModel):
 
     usage_hours: float | None = Field(
         default=None, ge=0, description="Usage time (hours)"
+    )
+
+    # --- STR daily summary extras ---
+    uai: float | None = Field(
+        default=None, ge=0, description="Unclassified Apnea Index (from STR)"
+    )
+    ai: float | None = Field(
+        default=None, ge=0, description="Apnea Index — all apneas (from STR)"
+    )
+    rin: float | None = Field(
+        default=None, ge=0, description="RIN (APAP-only, from STR)"
+    )
+    csr_pct: float | None = Field(
+        default=None, ge=0, description="Cheyne-Stokes % time (APAP-only, from STR)"
+    )
+    spont_cyc_pct: float | None = Field(
+        default=None, ge=0, description="Spontaneous cycle % (VAuto-only, from STR)"
+    )
+    respiratory_rate_95th: float | None = Field(
+        default=None, description="95th percentile respiratory rate (from STR)"
+    )
+    tidal_volume_95th: float | None = Field(
+        default=None, description="95th percentile tidal volume (from STR)"
+    )
+    minute_ventilation_95th: float | None = Field(
+        default=None, description="95th percentile minute ventilation (from STR)"
+    )
+    ie_ratio_median: float | None = Field(
+        default=None, description="Median I:E ratio (VAuto-only, from STR)"
+    )
+    ie_ratio_95th: float | None = Field(
+        default=None, description="95th percentile I:E ratio (VAuto-only, from STR)"
+    )
+    ie_ratio_max: float | None = Field(
+        default=None, description="Max I:E ratio (VAuto-only, from STR)"
+    )
+    ti_median: float | None = Field(
+        default=None, description="Median inspiratory time in s (VAuto-only, from STR)"
+    )
+    ti_95th: float | None = Field(
+        default=None,
+        description="95th percentile inspiratory time in s (VAuto-only, from STR)",
+    )
+    ti_max: float | None = Field(
+        default=None,
+        description="Max inspiratory time in s (VAuto-only, from STR)",
+    )
+    flow_5th: float | None = Field(
+        default=None, description="5th percentile flow (from STR)"
+    )
+    flow_95th: float | None = Field(
+        default=None, description="95th percentile flow (from STR)"
+    )
+    blow_press_5th: float | None = Field(
+        default=None, description="5th percentile blow pressure (from STR)"
+    )
+    blow_press_95th: float | None = Field(
+        default=None, description="95th percentile blow pressure (from STR)"
+    )
+    blow_flow_median: float | None = Field(
+        default=None, description="Median blow flow (from STR)"
+    )
+    amb_humidity_median: float | None = Field(
+        default=None, description="Median ambient humidity (from STR)"
+    )
+    hum_temp_median: float | None = Field(
+        default=None, description="Median humidifier temperature (from STR)"
+    )
+    htube_temp_median: float | None = Field(
+        default=None, description="Median heated tube temperature (from STR)"
+    )
+    htube_pow_median: float | None = Field(
+        default=None, description="Median heated tube power (from STR)"
+    )
+    hum_pow_median: float | None = Field(
+        default=None, description="Median humidifier power (from STR)"
+    )
+    mask_events: float | None = Field(
+        default=None, ge=0, description="Mask-on event count (from STR)"
     )
 
 
