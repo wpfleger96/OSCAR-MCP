@@ -25,10 +25,15 @@
                 label="Days with Data"
                 :value="summary.days_with_data"
                 :decimals="0"
-                hintKey="days_with_data"
+                glossary-key="days_with_data"
             />
             <div class="stat-card-ahi">
-                <StatCard label="Avg AHI" :value="summary.avg_ahi" :decimals="1" hintKey="ahi" />
+                <StatCard
+                    label="Avg AHI"
+                    :value="summary.avg_ahi"
+                    :decimals="1"
+                    glossary-key="ahi"
+                />
                 <Badge
                     v-if="summary.effectiveness !== 'unknown'"
                     v-bind="effectivenessBadgeAttrs(summary.effectiveness)"
@@ -49,14 +54,14 @@
                 :value="summary.avg_hours"
                 unit="hrs"
                 :decimals="1"
-                hintKey="usage"
+                glossary-key="usage"
             />
             <StatCard
                 label="Avg Leak"
                 :value="summary.avg_leak"
                 unit="L/min"
                 :decimals="1"
-                hintKey="leak"
+                glossary-key="leak"
             />
         </div>
         <div v-if="summary && !loading" class="summary-row">
@@ -65,28 +70,28 @@
                 :value="summary.avg_spo2"
                 unit="%"
                 :decimals="1"
-                hintKey="spo2"
+                glossary-key="spo2"
             />
             <StatCard
                 label="Avg Pulse"
                 :value="summary.avg_pulse"
                 unit="bpm"
                 :decimals="0"
-                hintKey="pulse"
+                glossary-key="pulse"
             />
             <StatCard
                 label="Avg Pressure"
                 :value="summary.avg_pressure"
                 unit="cmH₂O"
                 :decimals="1"
-                hintKey="pressure"
+                glossary-key="pressure"
             />
             <StatCard
                 label="Avg Resp Rate"
                 :value="summary.avg_respiratory_rate"
                 unit="br/min"
                 :decimals="1"
-                hintKey="resp_rate"
+                glossary-key="resp_rate"
             />
         </div>
         <div v-else-if="!loading" class="no-data">No therapy data available.</div>
@@ -125,27 +130,26 @@
                 Usage Calendar
                 <InfoHint label="AHI Color Scale">
                     <ul class="space-y-1 text-xs">
-                        <li class="flex items-center gap-1.5">
-                            <span class="h-3 w-3 shrink-0 rounded-sm" style="background: #22c55e" />
-                            <span>AHI &lt; 5 — Good</span>
-                        </li>
-                        <li class="flex items-center gap-1.5">
-                            <span class="h-3 w-3 shrink-0 rounded-sm" style="background: #eab308" />
-                            <span>AHI 5–9 — Mild</span>
-                        </li>
-                        <li class="flex items-center gap-1.5">
-                            <span class="h-3 w-3 shrink-0 rounded-sm" style="background: #f97316" />
-                            <span>AHI 10–14 — Moderate</span>
-                        </li>
-                        <li class="flex items-center gap-1.5">
-                            <span class="h-3 w-3 shrink-0 rounded-sm" style="background: #ef4444" />
-                            <span>AHI ≥ 15 — Severe</span>
+                        <li
+                            v-for="entry in AHI_COLOR_SCALE"
+                            :key="entry.label"
+                            class="flex items-center gap-1.5"
+                        >
+                            <span
+                                class="h-3 w-3 shrink-0 rounded-sm"
+                                :style="{ background: entry.color }"
+                            />
+                            <span>{{ entry.label }}</span>
                         </li>
                         <li class="flex items-center gap-1.5">
                             <span class="h-3 w-3 shrink-0 rounded-sm bg-muted" />
                             <span class="text-muted-foreground">No data</span>
                         </li>
                     </ul>
+                    <p class="text-xs text-muted-foreground mt-2">
+                        Note: this display scale is stricter than the common clinical convention
+                        (&lt;5 normal, 5–15 mild, 15–30 moderate, &gt;30 severe).
+                    </p>
                 </InfoHint>
             </h2>
             <CalendarHeatmap :days="days" @day-click="onDayClick" />
@@ -204,6 +208,7 @@ import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateShort } from '@/utils/formatting'
+import { AHI_COLOR_SCALE } from '@/utils/ahiScale'
 import { EVENT_COLORS } from '@/types'
 import type { SessionListItem } from '@/types'
 

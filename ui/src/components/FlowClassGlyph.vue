@@ -17,6 +17,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+// Coordinate system: viewBox 0 0 60 30, baseline y=27, plateau level y≈10,
+// peak apex y≈2, x spans one inspiration (0=start, 60=end). New classes
+// should be authored within these bounds to render consistently at all sizes.
 const GLYPH_PATHS: Record<number, string> = {
     // Class 1: sinusoidal — smooth, symmetric bell
     1: 'M 0 27 C 15 2 45 2 60 27',

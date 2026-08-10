@@ -47,7 +47,7 @@
                     "
                     unit="%"
                     :decimals="1"
-                    hint-key="sensitivity"
+                    glossary-key="sensitivity"
                 />
                 <StatCard
                     label="Avg Apnea F1"
@@ -58,7 +58,7 @@
                     "
                     unit="%"
                     :decimals="1"
-                    hint-key="f1"
+                    glossary-key="f1"
                 />
                 <StatCard
                     label="Avg Hypopnea Sensitivity"
@@ -69,7 +69,7 @@
                     "
                     unit="%"
                     :decimals="1"
-                    hint-key="sensitivity"
+                    glossary-key="sensitivity"
                 />
                 <StatCard
                     label="Avg Hypopnea F1"
@@ -80,7 +80,7 @@
                     "
                     unit="%"
                     :decimals="1"
-                    hint-key="f1"
+                    glossary-key="f1"
                 />
                 <StatCard
                     label="Sessions Validated"
@@ -193,6 +193,14 @@ function pct(value: number | null | undefined): string {
     return value != null ? `${(value * 100).toFixed(1)}%` : '---'
 }
 
+function csvCell(value: unknown): string {
+    const s = String(value ?? '')
+    // Neutralize formula injection: prefix cells starting with =, +, -, or @
+    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s
+    // Wrap in double quotes, escape embedded double quotes as ""
+    return `"${safe.replaceAll('"', '""')}"`
+}
+
 function isLowSensitivity(session: SessionValidation): boolean {
     return session.apnea_sensitivity < 0.7 || session.hypopnea_sensitivity < 0.7
 }
@@ -245,7 +253,7 @@ function downloadCsv(): void {
         s.hypopnea_f1.toFixed(2),
         s.notes ?? '',
     ])
-    const csv = [headers, ...rows].map((r) => r.join(',')).join('\n')
+    const csv = [headers, ...rows].map((r) => r.map(csvCell).join(',')).join('\n')
     const filename = `validation-report-${fromDate.value}-${toDate.value}.csv`
     downloadBlob(csv, filename, 'text/csv')
 }

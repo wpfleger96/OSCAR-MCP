@@ -23,7 +23,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watchEffect } from 'vue'
 import { Info } from '@lucide/vue'
 import { GLOSSARY } from '@/utils/glossary'
 import {
@@ -47,4 +47,12 @@ const entry = computed(() => (props.glossaryKey ? (GLOSSARY[props.glossaryKey] ?
 const resolvedLabel = computed(() => props.label ?? entry.value?.label ?? '')
 const resolvedShort = computed(() => props.short ?? entry.value?.short ?? '')
 const resolvedLong = computed(() => props.long ?? entry.value?.long ?? '')
+
+if (import.meta.env.DEV) {
+    watchEffect(() => {
+        if (props.glossaryKey && !entry.value && !props.label) {
+            console.warn(`[InfoHint] No glossary entry found for key: "${props.glossaryKey}"`)
+        }
+    })
+}
 </script>

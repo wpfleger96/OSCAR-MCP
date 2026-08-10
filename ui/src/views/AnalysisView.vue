@@ -36,26 +36,26 @@
                 :value="analysis.session_duration_hours"
                 unit="hrs"
                 :decimals="1"
-                hint-key="session_duration_hours"
+                glossary-key="session_duration_hours"
             />
             <StatCard
                 label="Total Breaths"
                 :value="analysis.total_breaths"
                 :decimals="0"
-                hint-key="total_breaths"
+                glossary-key="total_breaths"
             />
             <StatCard
                 label="Machine Events"
                 :value="analysis.machine_events?.length ?? 0"
                 :decimals="0"
-                hint-key="machine_events"
+                glossary-key="machine_events"
             />
             <StatCard
                 v-if="analysis.pulse_change_count != null"
                 label="Pulse Changes"
                 :value="analysis.pulse_change_count"
                 :decimals="0"
-                hint-key="pulse_change_count"
+                glossary-key="pulse_change_count"
             />
         </div>
 
@@ -204,20 +204,20 @@
                     :value="flowAnalysis!.flow_limitation_index * 100"
                     unit="%"
                     :decimals="1"
-                    hint-key="flow_limitation_index"
+                    glossary-key="flow_limitation_index"
                 />
                 <StatCard
                     label="Total Breaths"
                     :value="flowAnalysis!.total_breaths"
                     :decimals="0"
-                    hint-key="total_breaths"
+                    glossary-key="total_breaths"
                 />
                 <StatCard
                     label="Avg Confidence"
                     :value="flowAnalysis!.average_confidence * 100"
                     unit="%"
                     :decimals="1"
-                    hint-key="avg_confidence"
+                    glossary-key="avg_confidence"
                 />
             </div>
             <Table>
@@ -259,11 +259,7 @@
                                             >Class {{ cls.classNum }}: {{ cls.name }}</PopoverTitle
                                         >
                                     </PopoverHeader>
-                                    <span
-                                        class="text-xs px-1.5 py-0.5 rounded-full font-medium"
-                                        :class="severityClass(cls.severity)"
-                                        >{{ cls.severity }}</span
-                                    >
+                                    <SeverityBadge :severity="cls.severity" />
                                     <p class="text-sm text-muted-foreground">
                                         {{ FLOW_LIMITATION_CLASSES[cls.classNum]?.description }}
                                     </p>
@@ -322,11 +318,7 @@
                                     <span class="font-medium"
                                         >Class {{ num }}: {{ info.name }}</span
                                     >
-                                    <span
-                                        class="text-xs px-1.5 py-0.5 rounded-full font-medium"
-                                        :class="severityClass(info.severity)"
-                                        >{{ info.severity }}</span
-                                    >
+                                    <SeverityBadge :severity="info.severity" />
                                 </div>
                                 <p class="text-muted-foreground text-xs">{{ info.description }}</p>
                             </div>
@@ -344,19 +336,19 @@
                     label="Machine Events"
                     :value="comparison.machine_event_count"
                     :decimals="0"
-                    hint-key="machine_events"
+                    glossary-key="machine_events"
                 />
                 <StatCard
                     label="Programmatic Events"
                     :value="comparison.programmatic_event_count"
                     :decimals="0"
-                    hint-key="programmatic_events"
+                    glossary-key="programmatic_events"
                 />
                 <StatCard
                     label="False Negatives"
                     :value="comparison.false_negatives?.length ?? 0"
                     :decimals="0"
-                    hint-key="false_negatives"
+                    glossary-key="false_negatives"
                 />
                 <StatCard
                     label="False Positives"
@@ -365,7 +357,7 @@
                         (comparison.false_positives_hypopnea?.length ?? 0)
                     "
                     :decimals="0"
-                    hint-key="false_positives"
+                    glossary-key="false_positives"
                 />
             </div>
 
@@ -494,6 +486,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import StatCard from '@/components/StatCard.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import FlowClassGlyph from '@/components/FlowClassGlyph.vue'
+import SeverityBadge from '@/components/SeverityBadge.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
 import { getWaveformCompare } from '@/api/waveforms'
 import { useAuth } from '@/composables/useAuth'
@@ -644,25 +637,6 @@ const allFalsePositives = computed(() =>
         ...(comparison.value?.false_positives_hypopnea ?? []),
     ].sort((a, b) => a.start_time - b.start_time),
 )
-
-function severityClass(severity: string): string {
-    switch (severity) {
-        case 'normal':
-            return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-        case 'mild':
-            return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
-        case 'mild-moderate':
-            return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
-        case 'moderate':
-            return 'bg-orange-200 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300'
-        case 'moderate-severe':
-            return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-        case 'severe':
-            return 'bg-red-200 text-red-800 dark:bg-red-900/40 dark:text-red-300'
-        default:
-            return 'bg-muted text-muted-foreground'
-    }
-}
 
 watch(selectedMode, () => {
     eventsPage.value = 0

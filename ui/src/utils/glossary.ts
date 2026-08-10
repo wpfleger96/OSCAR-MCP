@@ -130,6 +130,10 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         label: 'SpO₂',
         short: 'Blood oxygen saturation from the pulse oximeter, in percent.',
     },
+    spo2_drop: {
+        label: 'SpO₂ Drop',
+        short: 'Decrease in blood oxygen saturation during the event window.',
+    },
     spo2_below_90: {
         label: 'SpO₂ Below 90%',
         short: 'Total time with oxygen saturation under 90%.',
@@ -152,7 +156,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     },
     peak_fl: {
         label: 'Peak Flow Limitation',
-        short: 'Highest flow-limitation value the device reported during the event window (0–1 scale).',
+        short: 'Highest flow-limitation score recorded during the event window (0–1 scale).',
     },
     usage: {
         label: 'Usage',
@@ -182,7 +186,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     flow_limitation_index: {
         label: 'Flow Limitation Index',
         short: 'Severity-weighted share of breaths showing flow limitation.',
-        long: 'Each breath’s class carries a weight from 0.0 (Class 1, normal) to 1.0 (Class 7, plateau); the index is the mean weight across all breaths.',
+        long: "Each breath's class weight (0.0 for Class 1 up to 1.0 for Class 7) is multiplied by its classification confidence, then averaged across all breaths.",
     },
     false_negatives: {
         label: 'False Negatives',

@@ -20,27 +20,32 @@
                 :value="data.total_therapy_hours ?? null"
                 unit="hr"
                 :decimals="1"
-                hintKey="usage"
+                glossary-key="usage"
             />
-            <StatCard label="AHI" :value="data.ahi ?? null" :decimals="1" hintKey="ahi" />
+            <StatCard label="AHI" :value="data.ahi ?? null" :decimals="1" glossary-key="ahi" />
             <StatCard label="Sessions" :value="data.session_count" :decimals="0" />
-            <StatCard label="OAI" :value="data.oai ?? null" :decimals="2" hintKey="oai" />
-            <StatCard label="CAI" :value="data.cai ?? null" :decimals="2" hintKey="cai" />
-            <StatCard label="HI" :value="data.hi ?? null" :decimals="2" hintKey="hi" />
+            <StatCard label="OAI" :value="data.oai ?? null" :decimals="2" glossary-key="oai" />
+            <StatCard label="CAI" :value="data.cai ?? null" :decimals="2" glossary-key="cai" />
+            <StatCard label="HI" :value="data.hi ?? null" :decimals="2" glossary-key="hi" />
             <StatCard
                 label="Obstructive Apneas"
                 :value="data.obstructive_apneas"
                 :decimals="0"
-                hintKey="obstructive_apneas"
+                glossary-key="obstructive_apneas"
             />
             <StatCard
                 label="Central Apneas"
                 :value="data.central_apneas"
                 :decimals="0"
-                hintKey="central_apneas"
+                glossary-key="central_apneas"
             />
-            <StatCard label="Hypopneas" :value="data.hypopneas" :decimals="0" hintKey="hypopneas" />
-            <StatCard label="RERAs" :value="data.reras" :decimals="0" hintKey="reras" />
+            <StatCard
+                label="Hypopneas"
+                :value="data.hypopneas"
+                :decimals="0"
+                glossary-key="hypopneas"
+            />
+            <StatCard label="RERAs" :value="data.reras" :decimals="0" glossary-key="reras" />
         </div>
 
         <!-- Pressure group -->
@@ -56,7 +61,7 @@
                 :value="data.avg_pressure"
                 unit="cmH₂O"
                 :decimals="1"
-                hintKey="pressure"
+                glossary-key="pressure"
             />
             <StatCard
                 v-if="data.pressure_min != null"
@@ -99,7 +104,7 @@
                 :value="data.epap_mean"
                 unit="cmH₂O"
                 :decimals="1"
-                hintKey="epap"
+                glossary-key="epap"
             />
             <StatCard
                 v-if="data.epap_min != null"
@@ -142,7 +147,7 @@
                 :value="data.avg_leak"
                 unit="L/min"
                 :decimals="1"
-                hintKey="leak"
+                glossary-key="leak"
             />
             <StatCard
                 v-if="data.leak_min != null"
@@ -178,7 +183,7 @@
                 :value="data.avg_spo2"
                 unit="%"
                 :decimals="1"
-                hintKey="spo2"
+                glossary-key="spo2"
             />
             <StatCard
                 v-if="data.spo2_min != null"

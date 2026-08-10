@@ -2,8 +2,8 @@
     <div class="stat-card">
         <div class="stat-label">
             {{ label
-            }}<span v-if="hintKey" class="ml-1 normal-case"
-                ><InfoHint :glossary-key="hintKey"
+            }}<span v-if="glossaryKey" class="ml-1 normal-case"
+                ><InfoHint :glossary-key="glossaryKey"
             /></span>
         </div>
         <div class="stat-value">
@@ -26,7 +26,7 @@ defineProps<{
     value: number | null | undefined
     unit?: string
     decimals?: number
-    hintKey?: string
+    glossaryKey?: string
 }>()
 </script>
 

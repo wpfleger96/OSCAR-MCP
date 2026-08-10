@@ -31,6 +31,7 @@
 import { computed } from 'vue'
 import type { DayListItem } from '@/types'
 import { parseLocalDate } from '@/utils/formatting'
+import { ahiColorClass } from '@/utils/ahiScale'
 
 const props = defineProps<{
     days: DayListItem[]
@@ -42,17 +43,6 @@ defineEmits<{
 }>()
 
 const monthsBack = computed(() => props.monthsBack ?? 6)
-
-// Deliberately distinct from the global ahiClass() in utils/formatting.ts: this
-// version uses a 4-level scale (adds cell--moderate) and returns component-scoped
-// CSS class names (cell--*) rather than the global severity tokens.
-function ahiClass(ahi: number | null): string {
-    if (ahi == null) return 'cell--empty'
-    if (ahi < 5) return 'cell--good'
-    if (ahi < 10) return 'cell--mild'
-    if (ahi < 15) return 'cell--moderate'
-    return 'cell--severe'
-}
 
 const dayMap = computed(() => {
     const map = new Map<string, DayListItem>()
@@ -74,7 +64,7 @@ const cells = computed(() => {
     while (cur <= end) {
         const iso = cur.toISOString().slice(0, 10)
         const day = dayMap.value.get(iso)
-        result.push({ date: iso, ahi: day?.ahi ?? null, class: ahiClass(day?.ahi ?? null) })
+        result.push({ date: iso, ahi: day?.ahi ?? null, class: ahiColorClass(day?.ahi ?? null) })
         cur.setDate(cur.getDate() + 1)
     }
     return result
