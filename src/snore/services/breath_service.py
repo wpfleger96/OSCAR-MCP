@@ -409,6 +409,8 @@ class DistributionMetric(StrEnum):
     FLATNESS_INDEX = "flatness_index"
     TIDAL_VOLUME_ML = "tidal_volume_ml"
     IE_RATIO = "ie_ratio"
+    DEVICE_FLG = "device_flg"
+    SNORE = "snore"
 
 
 class DistributionStats(BaseModel):
@@ -450,6 +452,18 @@ class EpochBreathStats(BaseModel):
     # RERA scan actually ran (rera_proxy_count is non-null); None otherwise.
     rera_proxy_version: str | None = None
     rx_settings: dict[str, str]
+    # Device waveform channel distributions (samples, not breaths; n_breaths
+    # field carries sample count).  Null when the channel was not recorded.
+    device_flg: DistributionStats = Field(
+        default_factory=lambda: DistributionStats(
+            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+        )
+    )
+    snore_dist: DistributionStats = Field(
+        default_factory=lambda: DistributionStats(
+            median=None, iqr=None, p95=None, n_breaths=0, n_nights=0
+        )
+    )
 
 
 class CompareEpochsResult(BaseModel):
@@ -867,6 +881,23 @@ class NightlyAnalysisSummary(BaseModel):
     # None when no breath has a determinate leak_valid value.
     leak_above_24_pct: float | None = None
     leak_above_24_pct_reason: NullReason | None = None
+
+    # Device-recorded flow-limitation channel (raw FL waveform "fl", 0–1 unitless).
+    # Negative sentinel values (−0.01 from digital −1 at mask-off) are filtered before
+    # aggregation; zeros are legitimate data.
+    # None + reason when the channel was not recorded for this night.
+    device_flg_median: float | None = None
+    device_flg_95th: float | None = None
+    device_flg_max: float | None = None
+    device_flg_reason: NullReason | None = None
+
+    # Device-recorded snore channel (raw "snore", 0–5 unitless).
+    # snore_pct_time: fraction of samples (0–1) where snore > 0.5.
+    # None + reason when the channel was not recorded.
+    snore_median: float | None = None
+    snore_95th: float | None = None
+    snore_pct_time: float | None = None
+    snore_reason: NullReason | None = None
 
 
 class NightlyRangeSummary(BaseModel):
@@ -2575,6 +2606,18 @@ class BreathService:
         requested = set(metrics) if metrics is not None else set(DistributionMetric)
         epoch_stats = []
 
+        # Bulk-fetch waveform channel values for all contributing sessions across
+        # all epochs in one query, then slice per epoch below.
+        all_contrib_session_ids: list[int] = [
+            sid for ed in epoch_resolved for sid, _ in ed["contributing_sessions"]
+        ]
+        (
+            all_fl_by_sess,
+            all_snore_by_sess,
+        ) = await BreathService._fetch_waveform_channel_vals(
+            self._db, all_contrib_session_ids
+        )
+
         for ed in epoch_resolved:
             epoch = ed["epoch"]
             contributing_sessions = ed["contributing_sessions"]
@@ -2682,6 +2725,41 @@ class BreathService:
                     )
                     rera_count += _count_fl_run_reras(brows_all)
 
+            # Device waveform channel distributions for this epoch.
+            # Contributing session IDs (OK analysis only; same sessions used for
+            # breath-level distributions, ensuring apples-to-apples comparison).
+            # Waveform data was bulk-fetched before the loop; slice to this epoch's sessions.
+            epoch_fl_by_sess = all_fl_by_sess
+            epoch_snore_by_sess = all_snore_by_sess
+
+            epoch_fl_all: list[float] = []
+            epoch_snore_all: list[float] = []
+            epoch_fl_nights = 0
+            epoch_snore_nights = 0
+            # Group by session for per-night counting — each unique date with at
+            # least one sample counts as one night.
+            fl_nights_set: set[int] = set()
+            snore_nights_set: set[int] = set()
+            for sid, _ in contributing_sessions:
+                if sid in epoch_fl_by_sess:
+                    # Filter negative sentinel values and non-finite values.
+                    valid_fl = [
+                        v for v in epoch_fl_by_sess[sid] if v >= 0 and math.isfinite(v)
+                    ]
+                    epoch_fl_all.extend(valid_fl)
+                    if valid_fl:
+                        fl_nights_set.add(sid)
+                if sid in epoch_snore_by_sess:
+                    valid_sn = [v for v in epoch_snore_by_sess[sid] if math.isfinite(v)]
+                    epoch_snore_all.extend(valid_sn)
+                    if valid_sn:
+                        snore_nights_set.add(sid)
+            # Use unique session count as night proxy (good enough for cross-epoch compare).
+            # Note: this is a session-proxy count, not a deduplicated calendar-date count —
+            # a multi-session night contributes once per contributing session.
+            epoch_fl_nights = len(fl_nights_set)
+            epoch_snore_nights = len(snore_nights_set)
+
             epoch_stats.append(
                 EpochBreathStats(
                     label=epoch.label,
@@ -2711,6 +2789,16 @@ class BreathService:
                         RERA_PROXY_ALGO_VERSION if rera_count is not None else None
                     ),
                     rx_settings=all_rx[0] if all_rx else {},
+                    device_flg=_distrib(
+                        epoch_fl_all, len(epoch_fl_all), epoch_fl_nights
+                    )
+                    if DistributionMetric.DEVICE_FLG in requested
+                    else _null_dist,
+                    snore_dist=_distrib(
+                        epoch_snore_all, len(epoch_snore_all), epoch_snore_nights
+                    )
+                    if DistributionMetric.SNORE in requested
+                    else _null_dist,
                 )
             )
 
@@ -2795,6 +2883,67 @@ class BreathService:
         return AnalysisStatus.OK, algo
 
     @staticmethod
+    async def _fetch_waveform_channel_vals(
+        db: AsyncSession,
+        session_ids: list[int],
+    ) -> tuple[dict[int, list[float]], dict[int, list[float]]]:
+        """Fetch and deserialize fl and snore waveform values for a set of sessions.
+
+        Returns (fl_vals_by_session, snore_vals_by_session).  Each map goes
+        session_id → list of raw float values including any negative sentinel values;
+        callers are responsible for applying filters (e.g. the fl >= 0 guard in
+        compare_epochs and _build_nightly_summary).  Snore zeros are legitimate
+        data and are retained.  Sessions without a channel row are absent from the
+        respective dict.
+
+        This is pure I/O + light compute (numpy deserialization); no analysis
+        state is consulted.
+        """
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.analysis.data.waveform_loader import (  # noqa: PLC0415
+            deserialize_waveform_blob,
+        )
+        from snore.database import models  # noqa: PLC0415
+
+        fl_by_sess: dict[int, list[float]] = {}
+        snore_by_sess: dict[int, list[float]] = {}
+
+        if not session_ids:
+            return fl_by_sess, snore_by_sess
+
+        wf_rows = (
+            (
+                await db.execute(
+                    select(models.Waveform).where(
+                        models.Waveform.session_id.in_(session_ids),
+                        models.Waveform.waveform_type.in_(["fl", "snore"]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        for wf in wf_rows:
+            if not wf.data_blob or not wf.sample_count:
+                continue
+            try:
+                _ts, vals = deserialize_waveform_blob(wf.data_blob, wf.sample_count)
+            except ValueError:
+                continue
+            sid = int(wf.session_id)
+            if wf.waveform_type == "fl":
+                # Retain raw values including any negative sentinels.
+                # The caller (_build_nightly_summary) applies the >= 0 filter.
+                fl_by_sess[sid] = [float(v) for v in vals]
+            elif wf.waveform_type == "snore":
+                # Zeros are legitimate snore data — retain all values.
+                snore_by_sess[sid] = [float(v) for v in vals]
+
+        return fl_by_sess, snore_by_sess
+
+    @staticmethod
     def _build_nightly_summary(
         *,
         therapy_date: date,
@@ -2806,6 +2955,8 @@ class BreathService:
         ],
         breath_rows_by_ar_id: dict[int, list[Any]],
         compliance_threshold_hours: float,
+        fl_vals_by_session: dict[int, list[float]] | None = None,
+        snore_vals_by_session: dict[int, list[float]] | None = None,
     ) -> NightlyAnalysisSummary:
         """Build a NightlyAnalysisSummary from pre-fetched data. No I/O."""
         import statistics  # noqa: PLC0415
@@ -2848,6 +2999,53 @@ class BreathService:
         )
         day_ahi = day_row.ahi if day_row is not None else None
 
+        # Device waveform aggregates — independent of analysis, aggregated over all
+        # sessions of the night (not just OK sessions).
+        _fl_by_sess = fl_vals_by_session or {}
+        _sn_by_sess = snore_vals_by_session or {}
+
+        fl_all: list[float] = []
+        snore_all: list[float] = []
+        for s in day_sessions:
+            # Filter negative sentinel values (−0.01 from digital −1 at mask-off) and
+            # non-finite values before aggregating.  Zeros are legitimate — retain them.
+            fl_all.extend(
+                v for v in _fl_by_sess.get(int(s.id), []) if v >= 0 and math.isfinite(v)
+            )
+            snore_all.extend(
+                v for v in _sn_by_sess.get(int(s.id), []) if math.isfinite(v)
+            )
+
+        device_flg_median: float | None
+        device_flg_95th: float | None
+        device_flg_max: float | None
+        device_flg_reason: NullReason | None
+        if fl_all:
+            _sorted_fl = sorted(fl_all)
+            _n_fl = len(_sorted_fl)
+            device_flg_median = float(statistics.median(_sorted_fl))
+            device_flg_95th = _sorted_fl[min(int(_n_fl * 0.95), _n_fl - 1)]
+            device_flg_max = _sorted_fl[-1]
+            device_flg_reason = None
+        else:
+            device_flg_median = device_flg_95th = device_flg_max = None
+            device_flg_reason = NullReason.CHANNEL_ABSENT
+
+        snore_median: float | None
+        snore_95th: float | None
+        snore_pct_time: float | None
+        snore_reason: NullReason | None
+        if snore_all:
+            _sorted_sn = sorted(snore_all)
+            _n_sn = len(_sorted_sn)
+            snore_median = float(statistics.median(_sorted_sn))
+            snore_95th = _sorted_sn[min(int(_n_sn * 0.95), _n_sn - 1)]
+            snore_pct_time = sum(1 for v in snore_all if v > 0.5) / _n_sn
+            snore_reason = None
+        else:
+            snore_median = snore_95th = snore_pct_time = None
+            snore_reason = NullReason.CHANNEL_ABSENT
+
         if not ok_sessions:
             return NightlyAnalysisSummary(
                 therapy_date=therapy_date,
@@ -2880,6 +3078,14 @@ class BreathService:
                 rdi_reason=NullReason.NOT_AVAILABLE,
                 leak_above_24_pct=None,
                 leak_above_24_pct_reason=NullReason.NOT_AVAILABLE,
+                device_flg_median=device_flg_median,
+                device_flg_95th=device_flg_95th,
+                device_flg_max=device_flg_max,
+                device_flg_reason=device_flg_reason,
+                snore_median=snore_median,
+                snore_95th=snore_95th,
+                snore_pct_time=snore_pct_time,
+                snore_reason=snore_reason,
             )
 
         # MIXED_VERSION within a day is handled by _reduce_day_status; under current
@@ -3047,6 +3253,14 @@ class BreathService:
             rdi_reason=rdi_reason,
             leak_above_24_pct=leak_above_24_pct,
             leak_above_24_pct_reason=leak_above_24_pct_reason,
+            device_flg_median=device_flg_median,
+            device_flg_95th=device_flg_95th,
+            device_flg_max=device_flg_max,
+            device_flg_reason=device_flg_reason,
+            snore_median=snore_median,
+            snore_95th=snore_95th,
+            snore_pct_time=snore_pct_time,
+            snore_reason=snore_reason,
         )
 
     async def get_nightly_summary(
@@ -3109,6 +3323,13 @@ class BreathService:
                 )
                 breath_rows_by_ar_id[ar_id] = list(breath_rows)
 
+        # Fetch device fl and snore waveform blobs for all day sessions
+        day_session_ids = [s.id for s in day_sessions]
+        (
+            fl_vals_by_session,
+            snore_vals_by_session,
+        ) = await BreathService._fetch_waveform_channel_vals(self._db, day_session_ids)
+
         return self._build_nightly_summary(
             therapy_date=therapy_date,
             device_id=resolved_device_id,
@@ -3117,6 +3338,8 @@ class BreathService:
             ar_classification=ar_classification,
             breath_rows_by_ar_id=breath_rows_by_ar_id,
             compliance_threshold_hours=compliance_threshold_hours,
+            fl_vals_by_session=fl_vals_by_session,
+            snore_vals_by_session=snore_vals_by_session,
         )
 
     async def get_nightly_range_summary(
@@ -3257,6 +3480,12 @@ class BreathService:
             for row in breath_result:
                 breath_rows_by_ar_id[row.analysis_result_id].append(row)
 
+        # Bulk fetch fl and snore waveform values for all sessions in range
+        (
+            fl_vals_by_session,
+            snore_vals_by_session,
+        ) = await BreathService._fetch_waveform_channel_vals(self._db, all_session_ids)
+
         # Per-night builder loop (nights without sessions are skipped)
         nights: list[NightlyAnalysisSummary] = []
         days_compliant = 0
@@ -3272,6 +3501,8 @@ class BreathService:
                     ar_classification=ar_classification,
                     breath_rows_by_ar_id=breath_rows_by_ar_id,
                     compliance_threshold_hours=compliance_threshold_hours,
+                    fl_vals_by_session=fl_vals_by_session,
+                    snore_vals_by_session=snore_vals_by_session,
                 )
                 nights.append(summary)
                 if summary.is_compliant:

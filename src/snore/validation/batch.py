@@ -72,11 +72,30 @@ class BatchValidator:
 
         logger.info(f"Found {len(sessions)} sessions between {date_from} and {date_to}")
 
+        # Bulk-fetch all Statistics rows for the session set in one query.
+        session_ids = [s.id for s in sessions]
+        stats_by_session_id: dict[int, models.Statistics] = {}
+        if session_ids:
+            stat_rows = (
+                (
+                    await self.db_session.execute(
+                        select(models.Statistics).where(
+                            models.Statistics.session_id.in_(session_ids)
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            stats_by_session_id = {int(r.session_id): r for r in stat_rows}
+
         session_validations = []
 
         for session in sessions:
             try:
-                validation = await self._validate_session(session.id, mode)
+                validation = await self._validate_session(
+                    session.id, mode, stats_by_session_id
+                )
                 if validation:
                     session_validations.append(validation)
             except Exception as e:
@@ -94,7 +113,10 @@ class BatchValidator:
         )
 
     async def _validate_session(
-        self, session_id: int, mode: str
+        self,
+        session_id: int,
+        mode: str,
+        stats_by_session_id: dict[int, models.Statistics],
     ) -> SessionValidation | None:
         """
         Validate a single session.
@@ -102,6 +124,8 @@ class BatchValidator:
         Args:
             session_id: Session ID to validate
             mode: Detection mode
+            stats_by_session_id: Pre-fetched Statistics rows keyed by session_id;
+                avoids a per-session query inside the validation loop.
 
         Returns:
             SessionValidation or None if validation fails
@@ -146,6 +170,10 @@ class BatchValidator:
         if apnea_val.sensitivity < 0.6 or hypopnea_val.sensitivity < 0.6:
             notes = "Low sensitivity - investigate this session"
 
+        # Device-reported nightly indices from pre-fetched Statistics map.
+        # Null-safe: APAP and vAuto record different index subsets.
+        stats_row = stats_by_session_id.get(session_id)
+
         return SessionValidation(
             session_id=session_id,
             date=session.start_time.strftime("%Y-%m-%d"),
@@ -160,6 +188,11 @@ class BatchValidator:
             hypopnea_precision=hypopnea_val.precision,
             hypopnea_f1=hypopnea_val.f1_score,
             notes=notes,
+            device_ahi=stats_row.ahi if stats_row is not None else None,
+            device_oai=stats_row.oai if stats_row is not None else None,
+            device_cai=stats_row.cai if stats_row is not None else None,
+            device_hi=stats_row.hi if stats_row is not None else None,
+            device_uai=stats_row.uai if stats_row is not None else None,
         )
 
     def _calculate_aggregate(

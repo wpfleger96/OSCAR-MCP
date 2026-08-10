@@ -224,6 +224,17 @@ async def get_nightly_summary(
         leak_above_24_pct: float | None = None
         leak_above_24_pct_reason: str | None = None
 
+        # Device waveform aggregates — carried directly from bs_night (present when
+        # the channel was recorded, regardless of analysis status).
+        device_flg_median: float | None = None
+        device_flg_95th: float | None = None
+        device_flg_max: float | None = None
+        device_flg_reason: str | None = None
+        snore_median_val: float | None = None
+        snore_95th_val: float | None = None
+        snore_pct_time_val: float | None = None
+        snore_reason: str | None = None
+
         if bs_night is not None:
             # rera_proxy: raw count from service (not divided by hours)
             if bs_night.rera_count is not None:
@@ -265,6 +276,23 @@ async def get_nightly_summary(
 
             leak_above_24_pct = bs_night.leak_above_24_pct
             leak_above_24_pct_reason = str_or_none(bs_night.leak_above_24_pct_reason)
+
+            # Device waveform aggregates
+            if bs_night.device_flg_median is not None:
+                device_flg_median = round(bs_night.device_flg_median, 4)
+            if bs_night.device_flg_95th is not None:
+                device_flg_95th = round(bs_night.device_flg_95th, 4)
+            if bs_night.device_flg_max is not None:
+                device_flg_max = round(bs_night.device_flg_max, 4)
+            device_flg_reason = str_or_none(bs_night.device_flg_reason)
+
+            if bs_night.snore_median is not None:
+                snore_median_val = round(bs_night.snore_median, 4)
+            if bs_night.snore_95th is not None:
+                snore_95th_val = round(bs_night.snore_95th, 4)
+            if bs_night.snore_pct_time is not None:
+                snore_pct_time_val = round(bs_night.snore_pct_time, 4)
+            snore_reason = str_or_none(bs_night.snore_reason)
         else:
             rera_index_reason = "analysis_not_run"
             rdi_reason = "analysis_not_run"
@@ -276,6 +304,8 @@ async def get_nightly_summary(
             ti_median_reason = "analysis_not_run"
             ie_ratio_reason = "analysis_not_run"
             leak_above_24_pct_reason = "analysis_not_run"
+            device_flg_reason = "no_sessions"
+            snore_reason = "no_sessions"
 
         usage_h = day.total_therapy_hours
 
@@ -323,6 +353,14 @@ async def get_nightly_summary(
                 mv_mean_lpm=stats.minute_ventilation_mean if stats else None,
                 spo2_mean_pct=day.spo2_mean,
                 device_id=day.device_id,
+                device_flg_median=device_flg_median,
+                device_flg_95th=device_flg_95th,
+                device_flg_max=device_flg_max,
+                device_flg_reason=device_flg_reason,
+                snore_median=snore_median_val,
+                snore_95th=snore_95th_val,
+                snore_pct_time=snore_pct_time_val,
+                snore_reason=snore_reason,
             )
         )
 

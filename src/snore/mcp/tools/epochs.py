@@ -94,7 +94,8 @@ async def compare_epochs(
             if m not in valid_names:
                 raise ValidationError(
                     f"Unknown metric {m!r}. Valid metrics: "
-                    "mid_insp_flattening, flatness_index, tidal_volume_ml, ie_ratio"
+                    "mid_insp_flattening, flatness_index, tidal_volume_ml, ie_ratio, "
+                    "device_flg, snore"
                 )
         parsed_metrics = [DistributionMetric(m) for m in metrics]
 
@@ -134,6 +135,8 @@ async def compare_epochs(
             rera_reason=str_or_none(s.rera_reason),
             rera_proxy_version=s.rera_proxy_version,
             rx_settings=s.rx_settings,
+            device_flg=_map_distribution(s.device_flg),
+            snore_dist=_map_distribution(s.snore_dist),
         )
         for s in result.epochs
     ]
@@ -183,12 +186,19 @@ def register(mcp: FastMCP) -> None:
                 ``date_end`` — epoch end in YYYY-MM-DD format (inclusive).
                 ``device_id`` — optional; all epochs must target the same device.
             metrics: Optional subset of distribution metrics to compute.  Defaults
-                to all four: ``"mid_insp_flattening"``, ``"flatness_index"``,
-                ``"tidal_volume_ml"``, ``"ie_ratio"``.
+                to all six: ``"mid_insp_flattening"``, ``"flatness_index"``,
+                ``"tidal_volume_ml"``, ``"ie_ratio"``, ``"device_flg"``
+                (device-reported flow limitation, 0–1 unitless),
+                ``"snore"`` (device-reported snore level, 0–5 unitless).
 
         Returns:
             CompareEpochsResponse.  Each entry in ``epochs`` contains distributions
             and coverage metadata (``nights_with_data``, ``nights_missing_analysis``).
+            Device-FL (``device_flg``) and snore (``snore_dist``) distributions
+            aggregate only analysis-OK sessions — the same set used for breath
+            distributions — so ``device_flg_median`` here may differ from
+            ``get_nightly_summary``, which uses all enabled sessions regardless of
+            analysis status.
             ``flow_class_distribution`` keys are strings (``"0"``, ``"1"``, ...) because
             JSON object keys are always strings.
             ``rx_settings`` holds representative therapy settings observed for the epoch.

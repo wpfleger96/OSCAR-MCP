@@ -219,6 +219,7 @@ class NullReason(StrEnum):
     UNVALIDATED_DEVICE = "unvalidated_device"
     TABLE_MISSING = "table_missing"
     RX_CHANGED_WITHIN_EPOCH = "rx_changed_within_epoch"
+    NO_SESSIONS = "no_sessions"
 
 
 class TimezoneStatus(StrEnum):
