@@ -2,10 +2,11 @@ from datetime import datetime, time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.types import AnalysisResult
 from snore.api import analysis_jobs
-from snore.api.deps import DateRangeParams, PaginationParams, service_dep
+from snore.api.deps import DateRangeParams, PaginationParams, get_db, service_dep
 from snore.api.errors import NotFoundError
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import (
@@ -178,15 +179,58 @@ async def run_batch_analysis(
 
 
 @router.get("/analysis/jobs", response_model=AnalysisJobsListResponse)
-async def list_analysis_jobs(actor: RequireAuth) -> AnalysisJobsListResponse:
-    from snore.api.schemas import AnalysisJobStatus  # noqa: PLC0415
+async def list_analysis_jobs(
+    actor: RequireAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AnalysisJobsListResponse:
+    from sqlalchemy import or_, select  # noqa: PLC0415
 
-    return AnalysisJobsListResponse(
-        jobs=[
-            AnalysisJobStatus.model_validate(aj.to_dict())
-            for aj in analysis_jobs.list_jobs(owner_user_id=actor.user_id)
-        ]
+    from snore.api.schemas import AnalysisJobStatus  # noqa: PLC0415
+    from snore.database import models  # noqa: PLC0415
+
+    result: list[AnalysisJobStatus] = []
+    in_memory_ids: set[str] = set()
+
+    for aj in analysis_jobs.list_jobs(owner_user_id=actor.user_id):
+        in_memory_ids.add(aj.job_id)
+        result.append(AnalysisJobStatus.model_validate(aj.to_dict()))
+
+    # Historical terminal records from the database.
+    stmt = (
+        select(models.AnalysisJobRecord)
+        .where(
+            or_(
+                models.AnalysisJobRecord.owner_user_id == actor.user_id,
+                models.AnalysisJobRecord.owner_user_id.is_(None),
+            ),
+            models.AnalysisJobRecord.state.in_(
+                [s.value for s in analysis_jobs.TERMINAL_STATES]
+            ),
+        )
+        .order_by(models.AnalysisJobRecord.created_at.desc())
+        .limit(50)
     )
+    for rec in (await db.execute(stmt)).scalars():
+        if rec.job_id in in_memory_ids:
+            continue
+        result.append(
+            AnalysisJobStatus(
+                job_id=rec.job_id,
+                state=rec.state,
+                source=rec.source,
+                session_count=len(rec.session_ids_json) if rec.session_ids_json else 0,
+                progress_completed=rec.progress_completed,
+                progress_total=rec.progress_total,
+                error_message=rec.error_message,
+                created_at=rec.created_at.timestamp(),
+                started_at=rec.started_at.timestamp() if rec.started_at else None,
+                finished_at=rec.finished_at.timestamp() if rec.finished_at else None,
+                owner_user_id=rec.owner_user_id,
+            )
+        )
+
+    result.sort(key=lambda j: j.created_at, reverse=True)
+    return AnalysisJobsListResponse(jobs=result)
 
 
 @router.delete("/analysis/jobs/{job_id}", status_code=204)

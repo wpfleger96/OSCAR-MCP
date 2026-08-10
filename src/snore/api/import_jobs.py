@@ -725,7 +725,8 @@ def shutdown(timeout: float = 10.0) -> list[str]:
     for them).  The currently RUNNING job (if any) is cancelled cooperatively
     and its cleanup is handled by the run_callback's finally block.
     """
-    global _import_worker_thread, _import_stop_event
+    global _import_worker_thread, _import_stop_event, _shutdown_in_progress
+    _shutdown_in_progress = True
 
     # Signal the worker to stop after finishing the current job (if any).
     if _import_stop_event is not None:
@@ -738,11 +739,10 @@ def shutdown(timeout: float = 10.0) -> list[str]:
         _import_queue.clear()
         _import_condition.notify_all()
 
-    # Cancel and clean up each drained PENDING job.  run_callback never ran
-    # for these, so we are responsible for cleanup_files + release_capacity.
+    # Cancel drained PENDING jobs.  Spool files are preserved during shutdown
+    # so a subsequent server start can resume them.
     for job, _ in drained:
         job.try_cancel()
-        job.cleanup_files()
         job.release_capacity()
 
     # Cancel any job that is still non-terminal (e.g. currently RUNNING or a
@@ -779,6 +779,11 @@ _import_condition: threading.Condition = threading.Condition()
 
 _import_worker_thread: threading.Thread | None = None
 _import_stop_event: threading.Event | None = None
+_shutdown_in_progress: bool = False
+
+
+def is_shutdown_in_progress() -> bool:
+    return _shutdown_in_progress
 
 
 def enqueue_for_execution(job: ImportJob, profile_raw_root: Path | None) -> None:

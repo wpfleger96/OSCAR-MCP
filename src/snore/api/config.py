@@ -85,6 +85,11 @@ Environment variables
     RSS.  Operators tuning memory should consider both ``SNORE_COMPUTE_MAX_WORKERS``
     and ``SNORE_PARSE_MAX_WORKERS`` together.
 
+``SNORE_UPLOAD_SPOOL_DIR``
+    Directory for durable upload staging files.  Defaults to
+    ``~/.snore/spool/``.  Must be on a persistent volume in Docker so
+    uploaded files survive container restarts.
+
 ``SNORE_BOOTSTRAP_ADMIN_EMAIL``
     Optional.  Multiuser mode only.  When no active admin user exists at
     startup, automatically creates a 7-day admin invite for this address and
@@ -103,11 +108,13 @@ from __future__ import annotations
 import ipaddress
 import os
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 from snore.auth.actor import AuthMode
 from snore.auth.emails import normalize_email
+from snore.constants import DEFAULT_UPLOAD_SPOOL_DIR
 
 
 class ConfigError(ValueError):
@@ -181,6 +188,7 @@ class AppConfig:
         1, (os.cpu_count() or 2) // 2
     )  # Parse process pool size (device-data parsing).
     bootstrap_admin_email: str | None = None
+    upload_spool_dir: Path = field(default_factory=lambda: DEFAULT_UPLOAD_SPOOL_DIR)
 
     @property
     def is_multiuser(self) -> bool:
@@ -337,6 +345,11 @@ def load_config(
         "SNORE_PARSE_MAX_WORKERS", max(1, (os.cpu_count() or 2) // 2)
     )
 
+    raw_spool_dir = os.environ.get("SNORE_UPLOAD_SPOOL_DIR", "").strip()
+    upload_spool_dir = (
+        Path(raw_spool_dir) if raw_spool_dir else DEFAULT_UPLOAD_SPOOL_DIR
+    )
+
     raw_bootstrap_email = os.environ.get("SNORE_BOOTSTRAP_ADMIN_EMAIL", "").strip()
     bootstrap_admin_email = (
         normalize_email(raw_bootstrap_email) if raw_bootstrap_email else None
@@ -416,6 +429,7 @@ def load_config(
         compute_max_workers=compute_max_workers,
         parse_max_workers=parse_max_workers,
         bootstrap_admin_email=bootstrap_admin_email,
+        upload_spool_dir=upload_spool_dir,
     )
 
 

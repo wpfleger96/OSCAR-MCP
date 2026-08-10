@@ -21,6 +21,7 @@ import time
 import uuid
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum, StrEnum
 
 from snore.api.import_jobs import JOB_TTL_SECONDS
@@ -102,6 +103,7 @@ class AnalysisJob:
     primary_mode: str | None = None
     store_results: bool = True
     created_at: float = field(default_factory=time.monotonic)
+    created_at_wall: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     _state: AnalysisJobState = field(
         default=AnalysisJobState.QUEUED, init=False, repr=False
@@ -110,7 +112,9 @@ class AnalysisJob:
     _progress_total: int = field(default=0, init=False, repr=False)
     _error_message: str | None = field(default=None, init=False, repr=False)
     _started_at: float | None = field(default=None, init=False, repr=False)
+    _started_at_wall: datetime | None = field(default=None, init=False, repr=False)
     _finished_at: float | None = field(default=None, init=False, repr=False)
+    _finished_at_wall: datetime | None = field(default=None, init=False, repr=False)
     _cancel_flag: bool = field(default=False, init=False, repr=False)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
@@ -156,6 +160,16 @@ class AnalysisJob:
         with self._lock:
             return self._finished_at
 
+    @property
+    def started_at_wall(self) -> datetime | None:
+        with self._lock:
+            return self._started_at_wall
+
+    @property
+    def finished_at_wall(self) -> datetime | None:
+        with self._lock:
+            return self._finished_at_wall
+
     def try_start(self) -> bool:
         """Atomically transition QUEUED → RUNNING, or QUEUED → CANCELLED if cancel was set.
 
@@ -166,9 +180,11 @@ class AnalysisJob:
             if self._cancel_flag:
                 self._state = AnalysisJobState.CANCELLED
                 self._finished_at = time.monotonic()
+                self._finished_at_wall = datetime.now(UTC)
                 return False
             self._state = AnalysisJobState.RUNNING
             self._started_at = time.monotonic()
+            self._started_at_wall = datetime.now(UTC)
             return True
 
     def finish(self, succeeded: bool, error_message: str | None = None) -> None:
@@ -188,6 +204,7 @@ class AnalysisJob:
                 self._state = AnalysisJobState.FAILED
                 self._error_message = error_message
             self._finished_at = time.monotonic()
+            self._finished_at_wall = datetime.now(UTC)
 
     def try_cancel(self) -> bool:
         """Set the cancel flag; if QUEUED, immediately transition to CANCELLED.
@@ -202,6 +219,7 @@ class AnalysisJob:
             if self._state == AnalysisJobState.QUEUED:
                 self._state = AnalysisJobState.CANCELLED
                 self._finished_at = time.monotonic()
+                self._finished_at_wall = datetime.now(UTC)
             return True
 
     def update_progress(self, done: int, total: int | None) -> None:
@@ -242,6 +260,13 @@ class AnalysisJob:
                 "created_at": self.created_at,
                 "started_at": self._started_at,
                 "finished_at": self._finished_at,
+                "created_at_wall": self.created_at_wall.isoformat(),
+                "started_at_wall": self._started_at_wall.isoformat()
+                if self._started_at_wall
+                else None,
+                "finished_at_wall": self._finished_at_wall.isoformat()
+                if self._finished_at_wall
+                else None,
             }
 
 
@@ -365,6 +390,53 @@ def _reap_terminal() -> None:
             logger.debug("Reaped terminal analysis job %s", jid)
 
 
+async def _upsert_analysis_record(job: AnalysisJob) -> None:
+    """Upsert the current job state to the database for crash-recovery durability."""
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert  # noqa: PLC0415
+
+    from snore.database.models import AnalysisJobRecord  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
+
+    now = datetime.now(UTC)
+    finished = job.finished_at_wall if job.is_terminal else None
+
+    stmt = (
+        sqlite_insert(AnalysisJobRecord)
+        .values(
+            job_id=job.job_id,
+            source=job.source.value,
+            profile_id=job.profile_id,
+            owner_user_id=job.owner_user_id,
+            session_ids_json=job.session_ids,
+            modes=job.modes,
+            primary_mode=job.primary_mode,
+            store_results=job.store_results,
+            state=job.state.value,
+            progress_completed=job.progress_completed,
+            progress_total=job.progress_total,
+            error_message=job.error_message,
+            created_at=job.created_at_wall,
+            started_at=job.started_at_wall,
+            finished_at=finished,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=["job_id"],
+            set_={
+                "state": job.state.value,
+                "progress_completed": job.progress_completed,
+                "progress_total": job.progress_total,
+                "error_message": job.error_message,
+                "started_at": job.started_at_wall,
+                "finished_at": finished,
+                "updated_at": now,
+            },
+        )
+    )
+    async with session_scope(immediate=True) as db:
+        await db.execute(stmt)
+
+
 async def _run_analysis(job: AnalysisJob) -> None:
     from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
@@ -386,15 +458,26 @@ async def _run_analysis(job: AnalysisJob) -> None:
 
 def _execute_job(job: AnalysisJob) -> None:
     if not job.try_start():
-        # Cancel arrived before RUNNING transition — job is already CANCELLED.
         return
     try:
+        asyncio.run(_upsert_analysis_record(job))
+    except Exception:
+        logger.exception(
+            "Failed to persist RUNNING state for analysis job %s", job.job_id
+        )
+    try:
         asyncio.run(_run_analysis(job))
-        # finish() checks the cancel flag: sets CANCELLED if requested, SUCCEEDED otherwise.
         job.finish(succeeded=True)
     except Exception as exc:
         logger.exception("Analysis job %s failed", job.job_id)
         job.finish(succeeded=False, error_message=str(exc))
+    finally:
+        try:
+            asyncio.run(_upsert_analysis_record(job))
+        except Exception:
+            logger.exception(
+                "Failed to persist terminal state for analysis job %s", job.job_id
+            )
 
 
 def _worker_loop(stop_event: threading.Event, condition: threading.Condition) -> None:

@@ -25,7 +25,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 # Tables managed by other migrations or excluded from the chain.
-_EXCLUDE = frozenset({"import_job_records", "breaths"})
+_EXCLUDE = frozenset({"import_job_records", "breaths", "analysis_job_records"})
 
 
 def upgrade() -> None:

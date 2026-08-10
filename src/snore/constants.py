@@ -357,6 +357,9 @@ DEFAULT_DATABASE_PATH = str(Path.home() / ".snore" / "snore.db")
 # Raw file backup directory
 DEFAULT_RAW_BACKUP_DIR = Path.home() / ".snore" / "raw"
 
+# Upload staging spool directory (durable across restarts)
+DEFAULT_UPLOAD_SPOOL_DIR = Path.home() / ".snore" / "spool"
+
 # Logging configuration
 DEFAULT_LOG_DIR = Path.home() / ".snore" / "logs"
 DEFAULT_LOG_FILE = "snore.log"
