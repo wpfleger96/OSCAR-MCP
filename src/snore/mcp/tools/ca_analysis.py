@@ -34,7 +34,12 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.mcp.schemas import CaAnalysisResponse, CaDetailSchema, tz_fields
+from snore.mcp.schemas import (
+    CaAnalysisResponse,
+    CaDetailSchema,
+    localize_wall_clock,
+    tz_fields,
+)
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
 from snore.mcp.tools._helpers import str_or_none
@@ -124,7 +129,9 @@ def ca_response_from_raw(
     ca_events = [
         CaDetailSchema(
             session_id=ev.session_id,
-            session_start_wall_clock=ev.session_start_wall_clock.isoformat(),
+            session_start_wall_clock=localize_wall_clock(
+                ev.session_start_wall_clock, ev.timezone_status, ev.timezone_name
+            ),
             **tz_fields(ev),
             offset_seconds=ev.offset_seconds,
             duration_seconds=ev.duration_seconds,

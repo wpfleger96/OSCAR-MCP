@@ -221,6 +221,8 @@ async def get_nightly_summary(
         ti_median_reason: str | None = None
         ie_ratio: float | None = None
         ie_ratio_reason: str | None = None
+        leak_above_24_pct: float | None = None
+        leak_above_24_pct_reason: str | None = None
 
         if bs_night is not None:
             # rera_proxy: raw count from service (not divided by hours)
@@ -260,6 +262,9 @@ async def get_nightly_summary(
             if bs_night.ie_ratio_median is not None:
                 ie_ratio = round(bs_night.ie_ratio_median, 3)
             ie_ratio_reason = str_or_none(bs_night.ie_ratio_reason)
+
+            leak_above_24_pct = bs_night.leak_above_24_pct
+            leak_above_24_pct_reason = str_or_none(bs_night.leak_above_24_pct_reason)
         else:
             rera_index_reason = "analysis_not_run"
             rdi_reason = "analysis_not_run"
@@ -270,6 +275,7 @@ async def get_nightly_summary(
             rera_proxy_reason = "analysis_not_run"
             ti_median_reason = "analysis_not_run"
             ie_ratio_reason = "analysis_not_run"
+            leak_above_24_pct_reason = "analysis_not_run"
 
         usage_h = day.total_therapy_hours
 
@@ -306,8 +312,8 @@ async def get_nightly_summary(
                 epap_median_cmh2o=day.epap_median,
                 leak_median_lpm=day.leak_median,
                 leak_95th_lpm=day.leak_95th,
-                leak_above_24_pct=None,
-                leak_above_24_pct_reason="not_available",
+                leak_above_24_pct=leak_above_24_pct,
+                leak_above_24_pct_reason=leak_above_24_pct_reason,
                 rr_mean_bpm=stats.respiratory_rate_mean if stats else None,
                 tv_mean_ml=(
                     round(stats.tidal_volume_mean * 1000, 1)

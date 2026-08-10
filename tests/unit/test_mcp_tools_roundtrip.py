@@ -47,6 +47,8 @@ class TestGetDataOverviewRoundtrip:
         assert payload["devices"] == []
         assert payload["total_sessions"] == 0
         assert payload["analysis_run"] is False
+        assert payload["timezone_status"] == "unknown"
+        assert payload["timezone_name"] is None
 
     async def test_single_device_appears_in_overview(
         self, mock_db_session: Any, mcp_client_factory: Any
@@ -65,6 +67,10 @@ class TestGetDataOverviewRoundtrip:
         mock_device.manufacturer = "ResMed"
         mock_device.model = "AirCurve 11"
         mock_device.serial_number = "SN123"
+
+        # Query 0: BreathService.resolve_timezone() — select(Profile.timezone)
+        tz_result = MagicMock()
+        tz_result.scalar_one_or_none.return_value = None  # no timezone declared
 
         # Query 1: analysis session count
         count_result = MagicMock()
@@ -88,6 +94,7 @@ class TestGetDataOverviewRoundtrip:
 
         mock_db_session.execute = AsyncMock(
             side_effect=[
+                tz_result,
                 count_result,
                 stats_result,
                 mode_result,
@@ -117,6 +124,8 @@ class TestGetDataOverviewRoundtrip:
         payload = json.loads(result.content[0].text)
         assert len(payload["devices"]) == 1
         assert payload["devices"][0]["manufacturer"] == "ResMed"
+        assert payload["timezone_status"] == "unknown"
+        assert payload["timezone_name"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,8 @@ import io
 
 from typing import TYPE_CHECKING
 
+from snore.mcp.schemas import localize_wall_clock
+
 if TYPE_CHECKING:
     from snore.services.breath_service import WaveformWindow
 
@@ -24,7 +26,11 @@ def _build_suptitle(window: WaveformWindow) -> str:
     so it can be tested directly without rendering a full PNG.
     """
     if window.session_id > 0:
-        wall_clock_str = window.session_start_wall_clock.isoformat()
+        wall_clock_str = localize_wall_clock(
+            window.session_start_wall_clock,
+            window.timezone_status,
+            window.timezone_name,
+        )
         title_parts = [
             f"Session {window.session_id}",
             wall_clock_str,
@@ -42,6 +48,19 @@ def _build_suptitle(window: WaveformWindow) -> str:
         )
 
     return "  |  ".join(title_parts)
+
+
+# Descriptive y-axis labels for channels where the default "type (unit)" string
+# would omit important signal-processing context.  Unmapped channels fall back to
+# the default f"{channel_type} ({unit})" format.
+_CHANNEL_LABELS: dict[str, str] = {
+    # Both pressure channels are 0.5 Hz duty-cycle averages from PLD.edf — the
+    # rendered value reads ~time-weighted mean of IPAP/EPAP, not the instantaneous
+    # bilevel square wave.  The label makes this explicit so readers don't mistake
+    # the trace for the instantaneous delivered pressure.
+    "pressure": "mask pressure (cmH2O, 0.5 Hz avg)",
+    "therapy_pressure": "therapy pressure (cmH2O, 0.5 Hz avg)",
+}
 
 
 def render_waveform_window(window: WaveformWindow) -> bytes:
@@ -83,7 +102,10 @@ def render_waveform_window(window: WaveformWindow) -> bytes:
             ax = fig.add_subplot(n, 1, idx)
             ax.plot(ch.offset_seconds, ch.values, linewidth=0.8)
 
-            y_label = f"{ch.channel_type} ({ch.unit})" if ch.unit else ch.channel_type
+            y_label = _CHANNEL_LABELS.get(
+                ch.channel_type,
+                f"{ch.channel_type} ({ch.unit})" if ch.unit else ch.channel_type,
+            )
             ax.set_ylabel(y_label, fontsize=8)
             ax.tick_params(labelsize=7)
 

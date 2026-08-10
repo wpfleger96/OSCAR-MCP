@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
-from snore.mcp.schemas import DataOverviewResponse, DeviceInfo
+from snore.mcp.schemas import DataOverviewResponse, DeviceInfo, tz_fields
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.services.device_service import DeviceService
@@ -31,11 +31,15 @@ async def get_data_overview(
     All queries are scoped through Device.profile_id so no cross-profile data
     leaks into the response.
     """
+    from snore.services.breath_service import BreathService  # noqa: PLC0415
+
     device_svc = DeviceService(db_session, profile_id)
     raw_devices = await device_svc.list_devices()
+    bs = BreathService(db_session, profile_id)
+    tz = await bs.resolve_timezone()
 
     if not raw_devices:
-        return DataOverviewResponse(devices=[])
+        return DataOverviewResponse(devices=[], **tz_fields(tz))
 
     # Analysis status — run once; derive both the bool flag and the count from
     # the same query to avoid two round-trips over the same three-join path.
@@ -202,6 +206,7 @@ async def get_data_overview(
         available_event_types=list(event_types),
         analysis_run=analysis_run,
         analysis_session_count=analysis_session_count,
+        **tz_fields(tz),
     )
 
 

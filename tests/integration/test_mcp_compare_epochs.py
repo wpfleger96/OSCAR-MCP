@@ -5,7 +5,8 @@ Exercises the full stack: compare_epochs adapter → BreathService → SQLite.
 Scenarios covered:
   1. Two homogeneous epochs → per-epoch distributions populated.
   2. RX change mid-epoch → all epochs nulled with rx_changed_within_epoch.
-  3. Cross-epoch algorithm identity mismatch → all nulled with algo_version_mismatch.
+  3. Cross-epoch algorithm identity mismatch → distributions still populated;
+     version_warnings non-empty (non-blocking warning, not a hard refusal).
   4. Mixed primary_mode within one epoch → rera_proxy_count null + rera_reason
      primary_mode_mismatch; FL distributions still populated.
   5. Epoch over a range with no data → no_data_in_range; night without OK
@@ -264,12 +265,12 @@ class TestCompareEpochsRxViolation:
 
 
 class TestCompareEpochsAlgoMismatch:
-    async def test_cross_epoch_algo_mismatch_nulls_all_epochs(
+    async def test_cross_epoch_algo_mismatch_warns_but_populates_distributions(
         self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """Sessions in different epochs that classify OK but with different algorithm
-        identities on a CROSS_VERSION_REFUSAL_KEY trigger algo_version_mismatch and
-        null all epoch distributions."""
+        identities on a CROSS_VERSION_REFUSAL_KEY produce non-null distributions AND
+        non-empty version_warnings — algo mismatch is no longer a hard refusal."""
         from snore.analysis.shared.versioning import (  # noqa: PLC0415
             AlgorithmIdentity,
             AlgoVersions,
@@ -332,9 +333,19 @@ class TestCompareEpochsAlgoMismatch:
                 ],
             )
 
-        assert result.null_reason == "algo_version_mismatch"
-        assert all(s.null_reason == "algo_version_mismatch" for s in result.epochs)
+        # No longer a hard refusal: distributions are populated
+        assert result.null_reason is None
         assert len(result.epochs) == 2
+        assert all(s.null_reason is None for s in result.epochs)
+        # Distributions contain the breath data
+        assert result.epochs[0].mid_insp_flattening.n_breaths == 1
+        assert result.epochs[1].mid_insp_flattening.n_breaths == 1
+        # version_warnings is non-empty with a message about segmenter
+        assert len(result.version_warnings) > 0
+        assert any("segmenter" in w for w in result.version_warnings)
+        # The warning mentions both versions
+        segmenter_warning = next(w for w in result.version_warnings if "segmenter" in w)
+        assert "old_segmenter_v0" in segmenter_warning
 
 
 class TestCompareEpochsMixedPrimaryMode:

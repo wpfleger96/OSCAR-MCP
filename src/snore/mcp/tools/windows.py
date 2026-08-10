@@ -21,7 +21,12 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.mcp.errors import ValidationError
-from snore.mcp.schemas import FindWindowsResponse, WindowRow, tz_fields
+from snore.mcp.schemas import (
+    FindWindowsResponse,
+    WindowRow,
+    localize_wall_clock,
+    tz_fields,
+)
 from snore.mcp.tools._capabilities import build_device_capabilities
 from snore.mcp.tools._coverage import map_session_coverage
 from snore.mcp.tools._helpers import str_or_none
@@ -58,7 +63,7 @@ async def find_windows(
         db_session: Async database session.
         therapy_date: The therapy date to query.
         profile_id: Profile scope — all ownership checks are in the service.
-        criterion: Window selection criterion (one of the three WindowCriterion values).
+        criterion: Window selection criterion (one of the WindowCriterion values).
         n: Number of windows to return (1–50; pre-validated by server wrapper).
         device_id: Optional device filter; required when multiple devices share a date.
         include_unknown_leak: Include breaths with unknown leak validity (leak_valid=None).
@@ -66,11 +71,14 @@ async def find_windows(
         min_window_breaths: Minimum breaths per formed window.
         context_breaths_before: Context breaths before the anchor breath.
         context_breaths_after: Context breaths after the anchor breath.
-        context_seconds: Window half-width in seconds (ca_centered only).
-        min_fl_run_length: Minimum FL-class run length (fl_run_ending_in_recovery only).
+        context_seconds: Window half-width in seconds for ca_centered and
+            rera_proxy_centered — both extend ±context_seconds from the anchor.
+        min_fl_run_length: Minimum FL-class run length (fl_run_ending_in_recovery
+            and rera_proxy_centered).
         fl_class_threshold: Minimum flow_class value to count as flow-limited.
         recovery_amplitude_margin: Peak-flow margin over the FL-run mean for the
-            self-contained recovery criterion (fl_run_ending_in_recovery only).
+            self-contained recovery criterion (fl_run_ending_in_recovery and
+            rera_proxy_centered).
     """
     from snore.services.breath_service import (  # noqa: PLC0415
         BreathService,
@@ -84,7 +92,8 @@ async def find_windows(
     except ValueError:
         raise ValidationError(
             f"Unknown criterion {criterion!r}. Valid criteria: "
-            "worst_flattening_leak_valid, ca_centered, fl_run_ending_in_recovery"
+            "worst_flattening_leak_valid, ca_centered, fl_run_ending_in_recovery, "
+            "rera_proxy_centered"
         ) from None
 
     opts = WindowCriterionOptions(
@@ -121,7 +130,9 @@ async def find_windows(
         WindowRow(
             criterion=str(w.criterion),
             session_id=w.session_id,
-            session_start_wall_clock=w.session_start_wall_clock.isoformat(),
+            session_start_wall_clock=localize_wall_clock(
+                w.session_start_wall_clock, w.timezone_status, w.timezone_name
+            ),
             **tz_fields(w),
             window_start_offset=w.window_start_offset,
             window_end_offset=w.window_end_offset,
@@ -206,6 +217,14 @@ def register(mcp: FastMCP) -> None:
                     self-contained v2 criterion: flow class drops to <=2 with peak
                     flow >= ``(1 + recovery_amplitude_margin)`` x the run mean);
                     requires uniform primary_mode across sessions.
+                ``"rera_proxy_centered"`` — context window of ±(``context_seconds``/2)
+                    centered on the recovery breath of each detected RERA-proxy event
+                    (FL run → recovery breath); ranked by FL run length descending.
+                    Accepts ``context_seconds``, ``min_fl_run_length``,
+                    ``fl_class_threshold``, ``recovery_amplitude_margin``.
+                    Pass ``session_id`` + ``window_start_offset`` / ``window_end_offset``
+                    to ``render_window`` for visual inspection.
+                    Requires uniform primary_mode across sessions.
             n: Number of windows to return (1–50, default 5).
             device_id: Filter to a specific device.  Required when multiple devices
                        have data for the same date.
@@ -217,14 +236,17 @@ def register(mcp: FastMCP) -> None:
             context_breaths_before: Context breaths before the anchor (default 3).
             context_breaths_after: Context breaths after the anchor (default 3).
             context_seconds: Context window duration in seconds (default 120.0).
-                Only relevant for ``ca_centered``.
+                Only relevant for ``ca_centered`` and ``rera_proxy_centered``.
             min_fl_run_length: Minimum FL-class run length (default 2).
-                Only relevant for ``fl_run_ending_in_recovery``.
+                Only relevant for ``fl_run_ending_in_recovery`` and
+                ``rera_proxy_centered``.
             fl_class_threshold: Minimum flow class to count as FL (default 4).
-                Only relevant for ``fl_run_ending_in_recovery``.
+                Only relevant for ``fl_run_ending_in_recovery`` and
+                ``rera_proxy_centered``.
             recovery_amplitude_margin: Fractional peak-flow margin over the FL-run
                 mean for the self-contained recovery criterion (default 0.20).
-                Only relevant for ``fl_run_ending_in_recovery``.
+                Only relevant for ``fl_run_ending_in_recovery`` and
+                ``rera_proxy_centered``.
 
         Returns:
             FindWindowsResponse.  ``windows`` is ordered worst-first.
@@ -238,10 +260,12 @@ def register(mcp: FastMCP) -> None:
         Refusal semantics (successful responses with empty ``windows`` list):
             ``null_reason: "algo_version_mismatch"`` — the day has sessions analysed
                 with different algorithm versions; FL-ranked criteria
-                (``worst_flattening_leak_valid``, ``fl_run_ending_in_recovery``)
-                refuse comparison.  ``ca_centered`` is unaffected — it still works.
+                (``worst_flattening_leak_valid``, ``fl_run_ending_in_recovery``,
+                ``rera_proxy_centered``) refuse comparison.
+                ``ca_centered`` is unaffected — it still works.
             ``null_reason: "primary_mode_mismatch"`` — sessions differ in primary mode;
-                only ``fl_run_ending_in_recovery`` refuses; other criteria are unaffected.
+                ``fl_run_ending_in_recovery`` and ``rera_proxy_centered`` refuse; other
+                criteria are unaffected.
             ``null_reason: "analysis_not_run"`` — no analysis results for this date.
 
         Error conditions:

@@ -204,19 +204,18 @@
 
                 <form v-else class="stacked-form" @submit.prevent="saveTimezone">
                     <div class="field-group">
-                        <label for="profile-timezone" class="field-label">IANA timezone</label>
-                        <input
+                        <label for="profile-timezone" class="field-label">Timezone</label>
+                        <select
                             id="profile-timezone"
                             v-model="tzValue"
-                            type="text"
-                            list="tz-datalist"
-                            class="field-input"
-                            placeholder="e.g. America/New_York"
+                            class="field-select"
                             :disabled="isDemo || tzSaving"
-                        />
-                        <datalist id="tz-datalist">
-                            <option v-for="tz in timezoneOptions" :key="tz" :value="tz" />
-                        </datalist>
+                        >
+                            <option value="">Select timezone…</option>
+                            <option v-for="tz in timezoneOptions" :key="tz" :value="tz">
+                                {{ tz }}
+                            </option>
+                        </select>
                     </div>
 
                     <p v-if="!tzBaseline && detectedTimezone" class="tz-suggestion">
