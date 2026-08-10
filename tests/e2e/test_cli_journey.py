@@ -23,7 +23,7 @@ def test_import_creates_populated_database(snore, fresh_db_path, resmed_sd):
     assert "Sessions: 1" in stats.stdout
     # The fixture night carries machine events and waveforms.
     assert "Events: 13" in stats.stdout
-    assert "Waveforms: 6" in stats.stdout
+    assert "Waveforms: 11" in stats.stdout
 
 
 def test_reimport_is_idempotent(snore, imported_db, resmed_sd):

@@ -52,6 +52,7 @@ UNIT_PRESSURE_DISPLAY = "cmH₂O"
 UNIT_PERCENT = "%"
 UNIT_BPM = "bpm"
 UNIT_ML = "mL"
+UNIT_SECONDS = "seconds"
 
 
 # ============================================================================

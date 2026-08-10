@@ -5717,6 +5717,10 @@ export interface operations {
                     | 'pulse'
                     | 'fl'
                     | 'snore'
+                    | 'ie_ratio'
+                    | 'ti'
+                    | 'pressure_hr'
+                    | 'trigger_cycle'
             }
             cookie?: never
         }

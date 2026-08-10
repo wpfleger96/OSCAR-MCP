@@ -24,6 +24,10 @@ VALID_WAVEFORM_TYPES = Literal[
     "pulse",
     "fl",
     "snore",
+    "ie_ratio",
+    "ti",
+    "pressure_hr",
+    "trigger_cycle",
 ]
 
 

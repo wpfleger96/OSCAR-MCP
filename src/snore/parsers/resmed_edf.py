@@ -33,8 +33,10 @@ from snore.constants import (
     PARSER_MAX_SEARCH_DEPTH,
     UNIT_BPM,
     UNIT_FLOW,
+    UNIT_ML,
     UNIT_PERCENT,
     UNIT_PRESSURE,
+    UNIT_SECONDS,
 )
 from snore.parsers.base import (
     DeviceParser,
@@ -134,6 +136,7 @@ class ResmedEDFParser(DeviceParser):
     FILE_TYPE_SA2 = "_SA2.edf"  # Statistics
     FILE_TYPE_EVE = "_EVE.edf"  # Events
     FILE_TYPE_CSL = "_CSL.edf"  # Compliance
+    FILE_TYPE_TCV = "_TCV.edf"  # VAuto trigger/cycle events
 
     STR_SETTINGS_MAP = {
         "Mode": "mode",
@@ -361,7 +364,7 @@ class ResmedEDFParser(DeviceParser):
         """Return ResMed parser metadata."""
         return ParserMetadata(
             parser_id="resmed_edf",
-            parser_version="1.0.0",
+            parser_version="1.1.0",
             manufacturer="ResMed",
             supported_formats=["EDF+", "EDF"],
             supported_models=[
@@ -1437,6 +1440,11 @@ class ResmedEDFParser(DeviceParser):
                             + segment_start_offset
                         )
 
+                        # Capture sample counts before concatenation for the
+                        # weighted-mean calculation below.
+                        existing_n = len(merged_waveform.values)
+                        segment_n = len(segment_waveform.values)
+
                         merged_waveform.timestamps = np.concatenate(
                             [merged_waveform.timestamps, adjusted_timestamps]
                         )
@@ -1444,15 +1452,48 @@ class ResmedEDFParser(DeviceParser):
                             [merged_waveform.values, segment_waveform.values]
                         )
 
-                        merged_waveform.min_value = float(
-                            np.min(merged_waveform.values)
-                        )
-                        merged_waveform.max_value = float(
-                            np.max(merged_waveform.values)
-                        )
-                        merged_waveform.mean_value = float(
-                            np.mean(merged_waveform.values)
-                        )
+                        # Combine stats from each segment's pre-computed values
+                        # rather than recomputing from the raw concatenated blob.
+                        # Raw values retain out-of-range sentinels that
+                        # _read_waveform intentionally stores in the waveform
+                        # blob, so a naive np.min/max/mean over the blob would
+                        # corrupt stats (e.g. FlowLim -0.01 sentinel from a
+                        # mask-off digital −1 value).
+                        if (
+                            merged_waveform.min_value is not None
+                            and segment_waveform.min_value is not None
+                        ):
+                            merged_waveform.min_value = min(
+                                merged_waveform.min_value, segment_waveform.min_value
+                            )
+                        elif segment_waveform.min_value is not None:
+                            merged_waveform.min_value = segment_waveform.min_value
+
+                        if (
+                            merged_waveform.max_value is not None
+                            and segment_waveform.max_value is not None
+                        ):
+                            merged_waveform.max_value = max(
+                                merged_waveform.max_value, segment_waveform.max_value
+                            )
+                        elif segment_waveform.max_value is not None:
+                            merged_waveform.max_value = segment_waveform.max_value
+
+                        # Sample-count-weighted mean; weights use total sample
+                        # counts since valid-sample counts are not tracked separately
+                        # — this is a mild approximation but strictly better than
+                        # the previous sentinel-polluted recompute.
+                        if (
+                            merged_waveform.mean_value is not None
+                            and segment_waveform.mean_value is not None
+                        ):
+                            total_n = existing_n + segment_n
+                            merged_waveform.mean_value = (
+                                merged_waveform.mean_value * existing_n
+                                + segment_waveform.mean_value * segment_n
+                            ) / total_n
+                        elif segment_waveform.mean_value is not None:
+                            merged_waveform.mean_value = segment_waveform.mean_value
                     else:
                         merged_session.add_waveform(segment_waveform)
 
@@ -1558,6 +1599,9 @@ class ResmedEDFParser(DeviceParser):
 
         if "PLD" in files:
             self._parse_pressure_leak(files["PLD"], session)
+
+        if "TCV" in files:
+            self._parse_tcv(files["TCV"], session)
 
         if str_settings_cache:
             therapy_day = self._therapy_date(session.start_time)
@@ -1689,7 +1733,12 @@ class ResmedEDFParser(DeviceParser):
     def _parse_breathing_waveforms(
         self, file_path: Path, session: UnifiedSession
     ) -> None:
-        """Parse BRP breathing waveform file."""
+        """Parse BRP breathing waveform file.
+
+        Note: on some older firmware, TrigCycEvt.40ms resides in the BRP file
+        rather than a separate TCV file (OSCAR resmed_loader.cpp:3902).  SNORE
+        does not read TrigCycEvt from BRP; see docs/manufacturers/resmed.md.
+        """
         from .formats.edf import get_edf_record_count
 
         try:
@@ -1710,8 +1759,8 @@ class ResmedEDFParser(DeviceParser):
             )
 
             with EDFReader(file_path) as edf:
-                # BRP typically contains Flow Rate signal
-                # ResMed uses names like "Flow", "Flow.40ms", "FlowRate"
+                # BRP contains Flow Rate and high-rate Mask Pressure.
+                # ResMed uses names like "Flow", "Flow.40ms", "FlowRate".
                 flow_signal = self._find_signal(edf, ["Flow"])
 
                 if flow_signal:
@@ -1724,13 +1773,28 @@ class ResmedEDFParser(DeviceParser):
                     )
                     if result is None:
                         logger.warning(f"No data in flow signal {flow_signal}")
-                        return
+                    else:
+                        waveform, data = result
+                        session.add_waveform(waveform)
+                        logger.debug(
+                            f"Parsed {len(data)} flow samples from {file_path.name}"
+                        )
 
-                    waveform, data = result
-                    session.add_waveform(waveform)
-                    logger.debug(
-                        f"Parsed {len(data)} flow samples from {file_path.name}"
+                # High-rate mask pressure ("Press.40ms" on AirSense/AirCurve).
+                # This function only sees BRP files, so "Press" is unambiguous here.
+                press_signal = self._find_signal(edf, ["Press.40ms", "Press"])
+                if press_signal:
+                    result = self._read_waveform(
+                        edf,
+                        press_signal,
+                        WaveformType.PRESSURE_HR,
+                        UNIT_PRESSURE,
                     )
+                    if result is not None:
+                        session.add_waveform(result[0])
+                        logger.debug(
+                            f"Parsed {len(result[1])} hi-res pressure samples from {file_path.name}"
+                        )
 
         except Exception as e:
             logger.warning(f"Failed to parse breathing waveforms: {e}")
@@ -1745,6 +1809,7 @@ class ResmedEDFParser(DeviceParser):
         *,
         valid_range: tuple[float, float] | None = None,
         convert_lps_to_lpm: bool = False,
+        scale_factor: float | None = None,
     ) -> tuple[WaveformData, np.ndarray] | None:
         """
         Read an EDF signal and build a WaveformData with min/max/mean stats.
@@ -1753,16 +1818,44 @@ class ResmedEDFParser(DeviceParser):
             edf: Open EDF reader
             signal: Signal label to read
             waveform_type: Waveform type for the resulting WaveformData
-            default_unit: Unit to use when the EDF physical dimension is empty
+            default_unit: Unit to use when the EDF physical dimension is empty,
+                and the definitive output unit when scale_factor is provided
             valid_range: Optional (low, high) inclusive range; stats are
-                computed over the valid subset while the full array is stored
-            convert_lps_to_lpm: Convert L/s data to L/min when applicable
+                computed over the valid subset while the full array is stored.
+                Checked against the post-conversion values.
+            convert_lps_to_lpm: Convert L/s data to L/min by multiplying by 60.
+                Mutually exclusive with scale_factor.
+            scale_factor: Multiply all samples by this factor; default_unit is
+                used as the output unit.  Mutually exclusive with convert_lps_to_lpm.
+
+        Raises:
+            ValueError: If both convert_lps_to_lpm and scale_factor are provided.
 
         Returns:
             (waveform, valid_data) tuple, or None if the signal has no
             (valid) data. valid_data is the subset used for stats.
         """
+        if convert_lps_to_lpm and scale_factor is not None:
+            raise ValueError(
+                "convert_lps_to_lpm and scale_factor are mutually exclusive"
+            )
+
         data, info = edf.read_signal(signal)
+        unit = info.physical_dimension or default_unit
+
+        # Normalize SI abbreviation to the canonical constant so unit strings
+        # are consistent across firmware versions (some write "s", others "seconds").
+        if unit == "s":
+            unit = UNIT_SECONDS
+
+        # Apply unit conversions before range filtering so valid_range is
+        # checked against the final physical values.
+        if convert_lps_to_lpm and unit == "L/s":
+            data = data * 60.0
+            unit = UNIT_FLOW
+        elif scale_factor is not None:
+            data = data * scale_factor
+            unit = default_unit
 
         if valid_range is not None:
             low, high = valid_range
@@ -1773,12 +1866,6 @@ class ResmedEDFParser(DeviceParser):
             if len(data) == 0:
                 return None
             valid_data = data
-
-        unit = info.physical_dimension or default_unit
-        if convert_lps_to_lpm and unit == "L/s":
-            data = data * 60.0
-            valid_data = data
-            unit = UNIT_FLOW
 
         min_value, max_value, mean_value = extract_basic_stats(valid_data)
         waveform = WaveformData(
@@ -1913,11 +2000,142 @@ class ResmedEDFParser(DeviceParser):
                     else:
                         session.add_waveform(result[0])
 
+                # Flow limitation index: dimensionless score 0–1 from the
+                # device's FL algorithm. Imported as the device reference for
+                # FL validation (see FL validation workstream).
+                flow_lim_signal = self._find_signal(
+                    edf, ["FlowLim.2s", "FlowLim", "FFL Index"]
+                )
+                if flow_lim_signal:
+                    result = self._read_waveform(
+                        edf,
+                        flow_lim_signal,
+                        WaveformType.FLOW_LIMITATION,
+                        "",
+                        valid_range=(0.0, 1.0),
+                    )
+                    if result is not None:
+                        session.add_waveform(result[0])
+
+                snore_signal = self._find_signal(edf, ["Snore.2s", "Snore"])
+                if snore_signal:
+                    result = self._read_waveform(
+                        edf,
+                        snore_signal,
+                        WaveformType.SNORE,
+                        "",
+                        valid_range=(0.0, 5.0),
+                    )
+                    if result is not None:
+                        session.add_waveform(result[0])
+
+                rr_signal = self._find_signal(edf, ["RespRate.2s", "RespRate"])
+                if rr_signal:
+                    result = self._read_waveform(
+                        edf,
+                        rr_signal,
+                        WaveformType.RESPIRATORY_RATE,
+                        UNIT_BPM,
+                        valid_range=(0.0, 90.0),
+                    )
+                    if result is not None:
+                        session.add_waveform(result[0])
+
+                # TidVol is stored in L on the device; scale to mL for the
+                # unified model (valid_range is applied after conversion).
+                tidvol_signal = self._find_signal(edf, ["TidVol.2s", "TidVol"])
+                if tidvol_signal:
+                    result = self._read_waveform(
+                        edf,
+                        tidvol_signal,
+                        WaveformType.TIDAL_VOLUME,
+                        UNIT_ML,
+                        valid_range=(0.0, 4000.0),
+                        scale_factor=1000.0,
+                    )
+                    if result is not None:
+                        session.add_waveform(result[0])
+
+                # IERatio and Ti are VAuto-only; absent on APAP/CPAP devices —
+                # _find_signal returns None and the block is skipped silently.
+                ie_ratio_signal = self._find_signal(edf, ["IERatio.2s", "IERatio"])
+                if ie_ratio_signal:
+                    result = self._read_waveform(
+                        edf,
+                        ie_ratio_signal,
+                        WaveformType.IE_RATIO,
+                        UNIT_PERCENT,
+                        valid_range=(0.0, 400.0),
+                    )
+                    if result is not None:
+                        session.add_waveform(result[0])
+
+                # Use _find_signal_excluding so bare "Ti" does not accidentally
+                # match "TidVol" (substring collision) when the volume signal
+                # was already claimed above.
+                # R5Ti.2s and Ti.2s may both appear on some devices (e.g. 37051);
+                # prefer R5Ti.2s when present (OSCAR resmed_loader.cpp:4173).
+                ti_signal = self._find_signal_excluding(
+                    edf,
+                    ["R5Ti.2s", "Ti.2s", "Ti"],
+                    exclude={tidvol_signal} if tidvol_signal else set(),
+                )
+                if ti_signal:
+                    result = self._read_waveform(
+                        edf,
+                        ti_signal,
+                        WaveformType.TI,
+                        UNIT_SECONDS,
+                        valid_range=(0.0, 10.0),
+                    )
+                    if result is not None:
+                        session.add_waveform(result[0])
+
                 logger.debug(f"Parsed pressure/leak from {file_path.name}")
 
         except Exception as e:
             logger.warning(f"Failed to parse pressure/leak: {e}")
             session.data_quality_notes.append(f"PLD parsing failed: {e}")
+
+    def _parse_tcv(self, file_path: Path, session: UnifiedSession) -> None:
+        """Parse TCV trigger/cycle event file (VAuto devices only).
+
+        TrigCycEvt.40ms contains proprietary integer codes (0–16) that encode
+        ResMed's internal trigger and cycle event markers. OSCAR never decoded
+        these codes; they are imported verbatim for future research use.
+        Files may be absent on AirSense (APAP/CPAP) devices — the caller
+        guards against calling this method with a missing file.
+        """
+        from .formats.edf import get_edf_record_count
+
+        try:
+            record_count = get_edf_record_count(file_path)
+            if record_count == 0:
+                logger.debug(f"TCV file {file_path.name} has 0 data records")
+                return
+
+            with EDFReader(file_path) as edf:
+                tcv_signal = self._find_signal(edf, ["TrigCycEvt"])
+                if tcv_signal is None:
+                    logger.debug(f"No TrigCycEvt signal in {file_path.name}")
+                    return
+
+                result = self._read_waveform(
+                    edf,
+                    tcv_signal,
+                    WaveformType.TRIGGER_CYCLE,
+                    "",
+                    valid_range=(0.0, 16.0),
+                )
+                if result is not None:
+                    session.add_waveform(result[0])
+                    logger.debug(
+                        f"Parsed {len(result[1])} TrigCycEvt samples from {file_path.name}"
+                    )
+
+        except Exception as e:
+            logger.warning(f"Failed to parse TCV: {e}")
+            session.data_quality_notes.append(f"TCV parsing failed: {e}")
 
     def _parse_events(self, file_path: Path, session: UnifiedSession) -> None:
         """Parse EVE events file."""

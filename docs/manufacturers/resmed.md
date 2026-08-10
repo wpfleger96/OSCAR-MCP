@@ -22,17 +22,20 @@ Backup/
 | Type | Purpose | Format | Sample Rate | Per-Segment |
 |------|---------|--------|-------------|-------------|
 | **STR** | Device settings | EDF | N/A | No (all-time) |
-| **BRP** | Breathing flow waveform | EDF+C | ~25 Hz | Yes |
-| **PLD** | Pressure & leak waveforms | EDF+C | ~0.5 Hz | Yes |
+| **BRP** | Breathing flow + pressure waveforms | EDF+C | ~25 Hz | Yes |
+| **PLD** | Pressure, leak & respiratory trends | EDF+C | ~0.5 Hz | Yes |
 | **SA2** | SpO2 & pulse waveforms | EDF+C | 1 Hz | Yes |
 | **EVE** | Respiratory events | EDF+C/D | N/A | Yes* |
 | **CSL** | Compliance summary | EDF+ | N/A | Yes |
+| **TCV** | Trigger/cycle event codes (VAuto only) | EDF+C | ~25 Hz | Yes |
 
 *EVE files contain all-day events; must filter by session timestamps after parsing.
+†TCV files are absent on AirSense (APAP/CPAP) devices; silently skipped.
 
 ### BRP - Breathing Waveforms
-- **Signals**: Flow Rate ("Flow", "Flow.40ms")
-- **Units**: L/min (auto-converted from L/s)
+- **Signals**:
+  - Flow Rate ("Flow.40ms", "Flow") — L/s on device, auto-converted to L/min
+  - Mask Pressure hi-rate ("Press.40ms", "Press") — cmH2O at 25 Hz
 - **Typical Rate**: 25 Hz (40ms intervals)
 
 ### PLD - Pressure & Leak
@@ -40,9 +43,20 @@ Backup/
   - Therapy Pressure ("Press.2s")
   - Mask Pressure ("MaskPress.2s")
   - EPAP ("EPRPress.2s", "Exp Pres" on older models)
-  - Leak Rate ("Leak.2s")
-- **Units**: cmH2O (pressure), L/min (leak)
+  - Leak Rate ("Leak.2s") — L/s on device, auto-converted to L/min
+  - Minute Ventilation ("MinVent.2s") — L/min
+  - Flow Limitation Index ("FlowLim.2s", "FlowLim", "FFL Index") — dimensionless 0–1
+  - Snore Index ("Snore.2s", "Snore") — dimensionless
+  - Respiratory Rate ("RespRate.2s", "RespRate") — bpm
+  - Tidal Volume ("TidVol.2s", "TidVol") — L on device, stored as mL
+  - I:E Ratio ("IERatio.2s", "IERatio") — % (VAuto only)
+  - Inspiratory Time ("Ti.2s", "Ti") — seconds (VAuto only)
 - **Typical Rate**: 0.5 Hz (2-second intervals, noted by ".2s" suffix)
+
+### TCV - Trigger/Cycle Events (VAuto only)
+- **Signals**: TrigCycEvt.40ms — proprietary integer codes 0–16
+- **Note**: Codes are undecoded (OSCAR never decoded them); imported verbatim for research
+- **Typical Rate**: 25 Hz (40ms intervals)
 
 ### SA2 - Oximetry Statistics
 - **Signals**:
@@ -142,3 +156,19 @@ ResMed identified by:
 - AirCurve 10 (S, VAuto, ASV)
 - AirCurve 11 VAuto
 - S9 (AutoSet, Elite, VPAP Auto)
+
+## Known Divergences from OSCAR
+
+### PLD computed-channel initialization samples
+
+OSCAR skips the first 10 samples (20 s at 0.5 Hz) of the PLD computed channels
+(RespRate, TidVol, Ti, IERatio) as device-initialization artifacts
+(OSCAR `resmed_loader.cpp:4293`).  SNORE imports all samples without trimming and
+leaves artifact handling to downstream analysis.
+
+### TrigCycEvt on older firmware (BRP vs TCV)
+
+On some older firmware (per commented-out OSCAR code, `resmed_loader.cpp:3902`),
+`TrigCycEvt.40ms` may reside in the BRP file rather than a separate TCV file.
+SNORE currently reads `TrigCycEvt.40ms` only from TCV files; sessions from such
+devices will not have a `trigger_cycle` waveform.  This is a known coverage gap.
