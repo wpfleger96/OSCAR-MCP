@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.database import models
-from snore.services.profile_service import ProfileNotFoundError, ProfileService
+from snore.services.profile_service import (
+    InvalidTimezoneError,
+    ProfileNotFoundError,
+    ProfileService,
+)
 
 router = APIRouter()
 
@@ -121,7 +125,7 @@ async def update_profile(
             status_code=409,
             detail=f"A profile named '{body.name}' already exists",
         ) from err
-    except ValueError as err:
+    except InvalidTimezoneError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
     default_id = await _get_default_profile_id(db, actor.user_id)
     return ProfileResponse(

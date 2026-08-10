@@ -59,6 +59,10 @@ class ProfileLastError(Exception):
     """Raised when attempting to delete the last profile."""
 
 
+class InvalidTimezoneError(Exception):
+    """Raised when an unrecognized IANA timezone is provided."""
+
+
 class ProfileService:
     """Profile lifecycle management (non-deletion operations).
 
@@ -118,14 +122,16 @@ class ProfileService:
         self, user_id: int, profile_id: int, timezone: str | None
     ) -> models.Profile:
         """Set or clear the IANA timezone for a profile."""
+        profile = await self._get_live(user_id, profile_id)
         if timezone is not None:
             from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
 
             try:
                 ZoneInfo(timezone)
             except (ZoneInfoNotFoundError, ValueError) as exc:
-                raise ValueError(f"Unknown IANA timezone: {timezone!r}") from exc
-        profile = await self._get_live(user_id, profile_id)
+                raise InvalidTimezoneError(
+                    f"Unknown IANA timezone: {timezone!r}"
+                ) from exc
         profile.timezone = timezone
         return profile
 
