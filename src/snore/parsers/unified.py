@@ -57,6 +57,12 @@ class WaveformType(Enum):
     PULSE = "pulse"  # BPM
     FLOW_LIMITATION = "fl"  # arbitrary units
     SNORE = "snore"  # arbitrary units
+    IE_RATIO = "ie_ratio"  # % (inspiratory-to-expiratory ratio, VAuto)
+    TI = "ti"  # seconds (inspiratory time, VAuto)
+    PRESSURE_HR = "pressure_hr"  # cmH2O (high-rate mask pressure from BRP, 25 Hz)
+    TRIGGER_CYCLE = (
+        "trigger_cycle"  # raw codes 0–16 (VAuto trigger/cycle events, verbatim)
+    )
 
 
 class TherapyMode(Enum):

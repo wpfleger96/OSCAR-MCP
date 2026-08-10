@@ -32,7 +32,7 @@ def test_multi_night_import_shape(snore, multi_night_db):
     assert _count_from_stats(stats, "Days") == 5
     # Events and waveforms populate across the real nights (not just one).
     assert _count_from_stats(stats, "Events") == 28
-    assert _count_from_stats(stats, "Waveforms") == 30
+    assert _count_from_stats(stats, "Waveforms") == 55
     assert "2024-06-21 to 2025-10-25" in stats
 
 
