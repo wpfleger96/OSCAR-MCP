@@ -2846,6 +2846,8 @@ export interface components {
             is_default: boolean
             /** Name */
             name: string
+            /** Timezone */
+            timezone?: string | null
             /** User Id */
             user_id: number
         }
@@ -2908,6 +2910,8 @@ export interface components {
             default?: boolean | null
             /** Name */
             name?: string | null
+            /** Timezone */
+            timezone?: string | null
         }
         /** ResetRequest */
         ResetRequest: {

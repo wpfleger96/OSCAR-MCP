@@ -138,3 +138,124 @@ class TestProfileResponseFields:
         defaults = [p for p in profiles if p["is_default"]]
         assert len(defaults) == 1, f"Expected exactly 1 default, got: {defaults}"
         assert defaults[0]["id"] == second_id
+
+
+class TestProfileTimezone:
+    """Profile timezone API tests — set, clear, validate, list."""
+
+    def test_list_includes_timezone_field(self, api_client):
+        """GET /profiles/ items include a 'timezone' key (null by default)."""
+        response = api_client.get("/api/v1/profiles/")
+        profiles = response.json()
+        assert len(profiles) >= 1
+        for p in profiles:
+            assert "timezone" in p, f"timezone field missing from profile {p}"
+
+    def test_patch_timezone_sets_value(self, api_client):
+        """PATCH with a valid IANA timezone sets it on the profile."""
+        profiles = api_client.get("/api/v1/profiles/").json()
+        profile_id = profiles[0]["id"]
+        response = api_client.patch(
+            f"/api/v1/profiles/{profile_id}",
+            json={"timezone": "America/New_York"},
+        )
+        assert response.status_code == 200
+        assert response.json()["timezone"] == "America/New_York"
+
+    def test_patch_timezone_null_clears(self, api_client):
+        """PATCH with timezone=null clears a previously set timezone."""
+        profiles = api_client.get("/api/v1/profiles/").json()
+        profile_id = profiles[0]["id"]
+        # Set first
+        setup = api_client.patch(
+            f"/api/v1/profiles/{profile_id}", json={"timezone": "Europe/London"}
+        )
+        assert setup.status_code == 200
+        assert setup.json()["timezone"] == "Europe/London"
+        # Now clear
+        response = api_client.patch(
+            f"/api/v1/profiles/{profile_id}", json={"timezone": None}
+        )
+        assert response.status_code == 200
+        assert response.json()["timezone"] is None
+
+    def test_patch_invalid_timezone_returns_422(self, api_client):
+        """PATCH with an unrecognized timezone string returns 422."""
+        profiles = api_client.get("/api/v1/profiles/").json()
+        profile_id = profiles[0]["id"]
+        response = api_client.patch(
+            f"/api/v1/profiles/{profile_id}",
+            json={"timezone": "Not/A/Real/Zone"},
+        )
+        assert response.status_code == 422
+
+    def test_patch_name_and_timezone_together(self, api_client):
+        """PATCH can update name and timezone in a single request."""
+        created = api_client.post(
+            "/api/v1/profiles/", json={"name": "TzMultiTest"}
+        ).json()
+        profile_id = created["id"]
+        response = api_client.patch(
+            f"/api/v1/profiles/{profile_id}",
+            json={"name": "TzMultiRenamed", "timezone": "America/Los_Angeles"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "TzMultiRenamed"
+        assert body["timezone"] == "America/Los_Angeles"
+
+    def test_patch_name_and_default_together(self, api_client):
+        """PATCH can update name and set-default in a single request."""
+        created = api_client.post(
+            "/api/v1/profiles/", json={"name": "ComboOriginal"}
+        ).json()
+        profile_id = created["id"]
+        response = api_client.patch(
+            f"/api/v1/profiles/{profile_id}",
+            json={"name": "ComboRenamed", "default": True},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "ComboRenamed"
+        assert body["is_default"] is True
+
+    def test_rename_plus_invalid_timezone_rolls_back(self, api_client):
+        """PATCH with valid name + invalid timezone returns 422 and rolls back rename."""
+        created = api_client.post(
+            "/api/v1/profiles/", json={"name": "AtomicTest"}
+        ).json()
+        profile_id = created["id"]
+        response = api_client.patch(
+            f"/api/v1/profiles/{profile_id}",
+            json={"name": "AtomicRenamed", "timezone": "Not/Real"},
+        )
+        assert response.status_code == 422
+        # Verify the rename was rolled back
+        fetched = next(
+            p
+            for p in api_client.get("/api/v1/profiles/").json()
+            if p["id"] == profile_id
+        )
+        assert fetched["name"] == "AtomicTest"
+
+    def test_invalid_timezone_on_nonexistent_profile_returns_404(self, api_client):
+        """PATCH with invalid timezone on a nonexistent profile returns 404, not 422."""
+        response = api_client.patch(
+            "/api/v1/profiles/999999",
+            json={"timezone": "Not/Real"},
+        )
+        assert response.status_code == 404
+
+    def test_timezone_persists_after_set(self, api_client):
+        """After setting timezone via PATCH, GET /profiles/ returns it."""
+        profiles = api_client.get("/api/v1/profiles/").json()
+        profile_id = profiles[0]["id"]
+        api_client.patch(
+            f"/api/v1/profiles/{profile_id}", json={"timezone": "Asia/Tokyo"}
+        )
+        updated = next(
+            p
+            for p in api_client.get("/api/v1/profiles/").json()
+            if p["id"] == profile_id
+        )
+        assert updated["timezone"] == "Asia/Tokyo"
