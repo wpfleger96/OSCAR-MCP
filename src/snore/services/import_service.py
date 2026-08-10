@@ -240,6 +240,13 @@ class ImportService:
                         else:
                             emit(f"Backed up to {backup_result.backup_root}")
                             parse_root = backup_result.backup_root
+                            if backup_result.files_failed:
+                                msg = (
+                                    f"Backup partial: {backup_result.files_failed} "
+                                    "file(s) could not be copied"
+                                )
+                                warnings.append(msg)
+                                emit(msg)
                     except Exception as exc:
                         raise RuntimeError(
                             f"Backup failed: {exc}\nUse backup=False to skip backup."
