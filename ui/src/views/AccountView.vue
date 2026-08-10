@@ -192,6 +192,54 @@
                 </form>
             </div>
 
+            <!-- Timezone card -->
+            <div class="section-card">
+                <h2>Timezone</h2>
+                <p class="field-hint">Applies to: {{ activeProfileName }}</p>
+
+                <div v-if="tzLoading" class="loading-state">
+                    <Loader2 class="h-4 w-4 animate-spin" />
+                    <span>Loading…</span>
+                </div>
+
+                <form v-else class="stacked-form" @submit.prevent="saveTimezone">
+                    <div class="field-group">
+                        <label for="profile-timezone" class="field-label">IANA timezone</label>
+                        <input
+                            id="profile-timezone"
+                            v-model="tzValue"
+                            type="text"
+                            list="tz-datalist"
+                            class="field-input"
+                            placeholder="e.g. America/New_York"
+                            :disabled="isDemo || tzSaving"
+                        />
+                        <datalist id="tz-datalist">
+                            <option v-for="tz in timezoneOptions" :key="tz" :value="tz" />
+                        </datalist>
+                    </div>
+
+                    <p v-if="!tzBaseline && detectedTimezone" class="tz-suggestion">
+                        Detected: {{ detectedTimezone }}
+                        <button
+                            type="button"
+                            class="action-btn action-btn--ghost"
+                            @click="applyDetectedTimezone"
+                        >
+                            Use this
+                        </button>
+                    </p>
+
+                    <p v-if="tzError" role="alert" class="form-error">{{ tzError }}</p>
+                    <p v-if="tzSuccess" class="form-success">{{ tzSuccess }}</p>
+
+                    <Button type="submit" class="self-start" :disabled="isDemo || tzSaving">
+                        <Loader2 v-if="tzSaving" class="h-4 w-4 animate-spin" />
+                        <span v-else>Save timezone</span>
+                    </Button>
+                </form>
+            </div>
+
             <!-- Danger zone card — hidden for demo accounts -->
             <div v-if="!isDemo" class="section-card danger-zone-card">
                 <h2>Danger Zone</h2>
@@ -235,7 +283,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
@@ -252,13 +300,14 @@ import {
     updatePreferences,
     deleteMyData,
 } from '@/api/me'
+import { listProfiles, setProfileTimezone } from '@/api/profiles'
 import type { components } from '@/types/generated'
 import type { AxiosError } from 'axios'
 
 type UserPreferences = components['schemas']['UserPreferences']
 
 const router = useRouter()
-const { role, refreshStatus, clearAuth } = useAuth()
+const { role, refreshStatus, clearAuth, activeProfileId, profiles } = useAuth()
 const isDemo = computed(() => role.value === 'demo')
 const { setDateFormat } = useDateFormat()
 
@@ -413,6 +462,92 @@ async function savePreferences() {
     }
 }
 
+// ── Profile Timezone ──────────────────────────────────────────────────────────
+
+const activeProfileName = computed(
+    () => profiles.value.find((p) => p.id === activeProfileId.value)?.name ?? 'active profile',
+)
+
+const timezoneOptions = computed<string[]>(() => {
+    try {
+        const intl = Intl as typeof Intl & { supportedValuesOf?: (key: string) => string[] }
+        return intl.supportedValuesOf?.('timeZone') ?? []
+    } catch {
+        return []
+    }
+})
+
+const detectedTimezone = computed<string | null>(() => {
+    try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone ?? null
+    } catch {
+        return null
+    }
+})
+
+const tzValue = ref('')
+const tzBaseline = ref<string | null>(null)
+const tzLoading = ref(true)
+const tzSaving = ref(false)
+const tzError = ref<string | null>(null)
+const tzSuccess = ref<string | null>(null)
+
+async function loadProfileTimezone() {
+    if (!activeProfileId.value) return
+    tzLoading.value = true
+    tzError.value = null
+    try {
+        const allProfiles = await listProfiles()
+        const active = allProfiles.find((p) => p.id === activeProfileId.value)
+        const tz = active?.timezone ?? null
+        tzValue.value = tz ?? ''
+        tzBaseline.value = tz
+    } catch (e: unknown) {
+        tzError.value = e instanceof Error ? e.message : 'Failed to load timezone'
+    } finally {
+        tzLoading.value = false
+    }
+}
+
+watch(activeProfileId, () => {
+    loadProfileTimezone()
+})
+
+async function saveTimezone() {
+    if (isDemo.value || !activeProfileId.value) return
+    tzError.value = null
+    tzSuccess.value = null
+
+    const newTz = tzValue.value.trim() || null
+    if (newTz === tzBaseline.value) {
+        tzSuccess.value = 'No changes to save'
+        return
+    }
+
+    tzSaving.value = true
+    try {
+        const result = await setProfileTimezone(activeProfileId.value, newTz)
+        const tz = result.timezone ?? null
+        tzValue.value = tz ?? ''
+        tzBaseline.value = tz
+        tzSuccess.value = newTz ? 'Timezone saved' : 'Timezone cleared'
+    } catch (e: unknown) {
+        tzError.value = e instanceof Error ? e.message : 'Failed to save timezone'
+    } finally {
+        tzSaving.value = false
+    }
+}
+
+function applyDetectedTimezone() {
+    if (detectedTimezone.value) {
+        tzValue.value = detectedTimezone.value
+    }
+}
+
+onMounted(() => {
+    loadProfileTimezone()
+})
+
 // ── Delete all my data ────────────────────────────────────────────────────────
 
 const deleteDataDialogOpen = ref(false)
@@ -546,5 +681,39 @@ async function handleDeleteData(): Promise<void> {
     color: var(--color-muted-foreground);
     margin: 0;
     max-width: 36ch;
+}
+
+.field-hint {
+    font-size: 0.8rem;
+    color: var(--color-muted-foreground);
+    margin: 0 0 0.75rem;
+}
+
+.tz-suggestion {
+    font-size: 0.8rem;
+    color: var(--color-muted-foreground);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+}
+
+.action-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0.125rem 0.5rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    color: var(--color-foreground);
+}
+
+.action-btn--ghost {
+    border-color: transparent;
+    color: var(--color-primary);
+}
+
+.action-btn--ghost:hover {
+    background: hsl(from var(--color-primary) h s l / 0.08);
 }
 </style>
