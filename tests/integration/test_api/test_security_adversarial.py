@@ -1403,13 +1403,18 @@ class TestP2InviteTokenNotInUrl:
         SNORE_MULTIUSER_PLAN.md:233.
         """
         import json
+        import socket
         import time
         import urllib.error
         import urllib.request
 
         token = uuid.uuid4().hex
         google_token = uuid.uuid4().hex
-        port = 18772
+
+        # Allocate an ephemeral port to avoid collisions under parallel xdist/CI runs.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+            _s.bind(("127.0.0.1", 0))
+            port = _s.getsockname()[1]
 
         env = os.environ.copy()
         env["SNORE_AUTH_MODE"] = "multiuser"
@@ -1429,50 +1434,52 @@ class TestP2InviteTokenNotInUrl:
             env=env,
         )
 
+        server_started = False
         output = ""
         try:
-            # Poll until server is ready.
-            for _ in range(40):
+            # Poll until server is ready; allow up to ~60 s for loaded CI runners.
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
                 try:
                     urllib.request.urlopen(
                         f"http://127.0.0.1:{port}/api/v1/auth/status", timeout=1
                     )
+                    server_started = True
                     break
                 except Exception:
                     time.sleep(0.3)
-            else:
-                pytest.fail("Server did not start within timeout")
 
-            base_url = f"http://127.0.0.1:{port}"
+            if server_started:
+                base_url = f"http://127.0.0.1:{port}"
 
-            # Test 1: POST /auth/invites/lookup — token in body (not URL).
-            req = urllib.request.Request(
-                f"{base_url}/api/v1/auth/invites/lookup",
-                data=json.dumps({"token": token}).encode(),
-                headers={
-                    "Content-Type": "application/json",
-                    "Origin": base_url,
-                },
-            )
-            try:
-                urllib.request.urlopen(req, timeout=5)
-            except urllib.error.HTTPError:
-                pass  # valid=false → 200 is fine; any 4xx is also acceptable
+                # Test 1: POST /auth/invites/lookup — token in body (not URL).
+                req = urllib.request.Request(
+                    f"{base_url}/api/v1/auth/invites/lookup",
+                    data=json.dumps({"token": token}).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": base_url,
+                    },
+                )
+                try:
+                    urllib.request.urlopen(req, timeout=5)
+                except urllib.error.HTTPError:
+                    pass  # valid=false → 200 is fine; any 4xx is also acceptable
 
-            # Test 2: POST /auth/invites/google — token in body (not URL).
-            # Uses a different token so any leak is unambiguous.
-            req2 = urllib.request.Request(
-                f"{base_url}/api/v1/auth/invites/google",
-                data=json.dumps({"token": google_token}).encode(),
-                headers={
-                    "Content-Type": "application/json",
-                    "Origin": base_url,
-                },
-            )
-            try:
-                urllib.request.urlopen(req2, timeout=5)
-            except urllib.error.HTTPError:
-                pass  # 400 (invalid invite) is expected; just checking logs
+                # Test 2: POST /auth/invites/google — token in body (not URL).
+                # Uses a different token so any leak is unambiguous.
+                req2 = urllib.request.Request(
+                    f"{base_url}/api/v1/auth/invites/google",
+                    data=json.dumps({"token": google_token}).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": base_url,
+                    },
+                )
+                try:
+                    urllib.request.urlopen(req2, timeout=5)
+                except urllib.error.HTTPError:
+                    pass  # 400 (invalid invite) is expected; just checking logs
 
         finally:
             proc.terminate()
@@ -1481,6 +1488,12 @@ class TestP2InviteTokenNotInUrl:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 output, _ = proc.communicate()
+
+        if not server_started:
+            pytest.fail(
+                f"Server did not start within timeout (~60 s).\n"
+                f"--- server output ---\n{output}"
+            )
 
         # The raw tokens must NOT appear anywhere in the server output.
         assert token not in output, (
