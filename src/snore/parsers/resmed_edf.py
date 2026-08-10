@@ -806,11 +806,14 @@ class ResmedEDFParser(DeviceParser):
 
         night_groups = self._group_session_files(datalog_dir)
 
-        total_segments = sum(len(segments) for segments in night_groups.values())
-        logger.debug(
-            f"Found {len(night_groups)} nights with {total_segments} total segments "
-            f"(avg {total_segments / len(night_groups):.1f} segments per night)"
-        )
+        if night_groups:
+            total_segments = sum(len(segments) for segments in night_groups.values())
+            logger.debug(
+                f"Found {len(night_groups)} nights with {total_segments} total segments "
+                f"(avg {total_segments / len(night_groups):.1f} segments per night)"
+            )
+        else:
+            logger.debug("No session files found in DATALOG directory")
 
         if sort_by == "date-asc":
             night_items = sorted(night_groups.items(), key=lambda x: x[0])
@@ -976,6 +979,7 @@ class ResmedEDFParser(DeviceParser):
         nights_copied: dict[date, list[Path]] = {}
         total_files_copied = 0
         total_files_skipped = 0
+        files_failed = 0
 
         if datalog_src.is_dir():
             grouped = group_session_files(datalog_src)
@@ -998,7 +1002,17 @@ class ResmedEDFParser(DeviceParser):
                         total_files_skipped += 1
                         continue
 
-                    self._safe_copy(src_file, dest_file)
+                    try:
+                        self._safe_copy(src_file, dest_file)
+                    except OSError as exc:
+                        logger.warning(
+                            "Backup: failed to copy %s → %s: %s",
+                            src_file.name,
+                            dest_file,
+                            exc,
+                        )
+                        files_failed += 1
+                        continue
                     copied_files.append(dest_file)
                     total_files_copied += 1
 
@@ -1007,7 +1021,8 @@ class ResmedEDFParser(DeviceParser):
 
             logger.debug(
                 f"DATALOG backup: {total_files_copied} copied, "
-                f"{total_files_skipped} skipped across {len(nights_copied)} nights"
+                f"{total_files_skipped} skipped, {files_failed} failed "
+                f"across {len(nights_copied)} nights"
             )
 
         return RawFileManifest(
@@ -1016,6 +1031,7 @@ class ResmedEDFParser(DeviceParser):
             source_root=dest_root,
             files_copied=total_files_copied + len(device_files_copied),
             files_skipped=total_files_skipped,
+            files_failed=files_failed,
         )
 
     def get_raw_file_manifest(
@@ -1222,6 +1238,11 @@ class ResmedEDFParser(DeviceParser):
             # Preserve mtime/atime manually instead.
             st = src.stat()
             os.utime(dest, (st.st_atime, st.st_mtime))
+        except FileNotFoundError:
+            # WSL2: dest can be transiently invisible to stat() when a
+            # concurrent reader (e.g. /precheck backup walk) holds the
+            # directory open. Content is already written; skip metadata.
+            logger.debug("copystat ENOENT on %s; skipping metadata", dest.name)
 
     @staticmethod
     def _files_match(src: Path, dest: Path) -> bool:

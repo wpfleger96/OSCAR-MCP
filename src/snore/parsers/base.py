@@ -70,6 +70,9 @@ class RawFileManifest:
     files_skipped: int = 0
     """Number of files that were skipped (already existed with matching size/mtime)."""
 
+    files_failed: int = 0
+    """Number of files where the copy failed (I/O or metadata error)."""
+
     @property
     def total_files(self) -> int:
         """Total number of files across device files and all nights."""

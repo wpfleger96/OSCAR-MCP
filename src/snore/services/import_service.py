@@ -21,7 +21,7 @@ from snore.services.schemas import ImportResult, ImportSource, ImportSourceResul
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ImportService", "safe_relative_path"]
+__all__ = ["ImportService", "normalize_datalog_suffix", "safe_relative_path"]
 
 
 def safe_relative_path(filename: str) -> str | None:
@@ -36,6 +36,24 @@ def safe_relative_path(filename: str) -> str | None:
         and not (len(clean) == 2 and clean[1] == ":")
     ]
     return "/".join(safe) or None
+
+
+def normalize_datalog_suffix(path: str) -> str | None:
+    """Return the DATALOG-relative suffix of *path*, lowercased, or None.
+
+    Client paths carry an arbitrary selection-root prefix (e.g. "SDCARD/")
+    that varies by OS and SD-card mount point. FAT filesystems are
+    case-insensitive, so the suffix is lowercased for reliable comparison.
+
+    Example:
+        "SDCARD/DATALOG/2024/20240101_010000_BRP.edf"
+        → "datalog/2024/20240101_010000_brp.edf"
+    """
+    parts = path.replace("\\", "/").split("/")
+    for i, part in enumerate(parts):
+        if part.lower() == "datalog":
+            return "/".join(parts[i:]).lower()
+    return None
 
 
 class ImportService:
@@ -222,6 +240,13 @@ class ImportService:
                         else:
                             emit(f"Backed up to {backup_result.backup_root}")
                             parse_root = backup_result.backup_root
+                            if backup_result.files_failed:
+                                msg = (
+                                    f"Backup partial: {backup_result.files_failed} "
+                                    "file(s) could not be copied"
+                                )
+                                warnings.append(msg)
+                                emit(msg)
                     except Exception as exc:
                         raise RuntimeError(
                             f"Backup failed: {exc}\nUse backup=False to skip backup."
