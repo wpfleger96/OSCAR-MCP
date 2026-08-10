@@ -11,8 +11,20 @@
 
         <!-- Filter bar -->
         <div class="filter-bar">
-            <input v-model="fromDate" type="date" class="date-input" />
-            <input v-model="toDate" type="date" class="date-input" />
+            <DatePickerInput
+                v-model="fromDate"
+                placeholder="From date"
+                :is-date-disabled="isDateDisabled"
+                :min-value="minValue"
+                :max-value="maxValue"
+            />
+            <DatePickerInput
+                v-model="toDate"
+                placeholder="To date"
+                :is-date-disabled="isDateDisabled"
+                :min-value="minValue"
+                :max-value="maxValue"
+            />
             <Toggle v-model:pressed="analyzedOnly" variant="outline"> Analyzed Only </Toggle>
             <Button v-if="canWrite" variant="outline" size="sm" @click="batchDialogOpen = true">
                 <Play class="mr-2 h-4 w-4" />
@@ -104,18 +116,22 @@
                             <div class="grid grid-cols-2 gap-3">
                                 <div>
                                     <label class="text-sm font-medium">From</label>
-                                    <input
+                                    <DatePickerInput
                                         v-model="batchFrom"
-                                        type="date"
-                                        class="mt-1 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                                        class="mt-1 w-full"
+                                        :is-date-disabled="isDateDisabled"
+                                        :min-value="minValue"
+                                        :max-value="maxValue"
                                     />
                                 </div>
                                 <div>
                                     <label class="text-sm font-medium">To</label>
-                                    <input
+                                    <DatePickerInput
                                         v-model="batchTo"
-                                        type="date"
-                                        class="mt-1 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                                        class="mt-1 w-full"
+                                        :is-date-disabled="isDateDisabled"
+                                        :min-value="minValue"
+                                        :max-value="maxValue"
                                     />
                                 </div>
                             </div>
@@ -207,6 +223,7 @@ import {
 import PaginationBar from '@/components/PaginationBar.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import AnalysisJobsBanner from '@/components/AnalysisJobsBanner.vue'
+import DatePickerInput from '@/components/DatePickerInput.vue'
 import { Loader2, AlertTriangle, Play, Trash2 } from '@lucide/vue'
 import {
     getAnalysisSessions,
@@ -220,8 +237,10 @@ import {
 import { formatDateShort } from '@/utils/formatting'
 import type { AnalysisListItem, AnalysisDeletePreview } from '@/types'
 import { useAuth } from '@/composables/useAuth'
+import { useAvailableDates } from '@/composables/useAvailableDates'
 
 const { canWrite } = useAuth()
+const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
 
 const sessions = ref<AnalysisListItem[]>([])
 const loading = ref(true)
@@ -394,6 +413,7 @@ async function executeDelete(): Promise<void> {
 watch([fromDate, toDate, analyzedOnly], () => void fetchPage(0))
 
 onMounted(() => {
+    void loadDates()
     void fetchJobs()
     void fetchPage(0)
 })

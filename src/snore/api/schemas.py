@@ -47,6 +47,7 @@ __all__ = [
     "LinkedAnalysisSummary",
     "PipelineJobStatus",
     "PipelineJobsListResponse",
+    "DateListResponse",
 ]
 
 
@@ -222,3 +223,7 @@ class PipelineJobStatus(BaseModel):
 
 class PipelineJobsListResponse(BaseModel):
     jobs: list[PipelineJobStatus]
+
+
+class DateListResponse(BaseModel):
+    dates: list[date]

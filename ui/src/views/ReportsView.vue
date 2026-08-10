@@ -24,11 +24,21 @@
             <div class="filter-grid">
                 <div class="filter-field">
                     <label>From</label>
-                    <input v-model="fromA" type="date" class="date-input" />
+                    <DatePickerInput
+                        v-model="fromA"
+                        :is-date-disabled="isDateDisabled"
+                        :min-value="minValue"
+                        :max-value="maxValue"
+                    />
                 </div>
                 <div class="filter-field">
                     <label>To</label>
-                    <input v-model="toA" type="date" class="date-input" />
+                    <DatePickerInput
+                        v-model="toA"
+                        :is-date-disabled="isDateDisabled"
+                        :min-value="minValue"
+                        :max-value="maxValue"
+                    />
                 </div>
             </div>
             <div class="preset-row">
@@ -49,11 +59,21 @@
             <div class="filter-grid">
                 <div class="filter-field">
                     <label>From</label>
-                    <input v-model="fromB" type="date" class="date-input" />
+                    <DatePickerInput
+                        v-model="fromB"
+                        :is-date-disabled="isDateDisabled"
+                        :min-value="minValue"
+                        :max-value="maxValue"
+                    />
                 </div>
                 <div class="filter-field">
                     <label>To</label>
-                    <input v-model="toB" type="date" class="date-input" />
+                    <DatePickerInput
+                        v-model="toB"
+                        :is-date-disabled="isDateDisabled"
+                        :min-value="minValue"
+                        :max-value="maxValue"
+                    />
                 </div>
             </div>
             <div class="preset-row">
@@ -130,7 +150,11 @@ import { downloadBlob } from '@/api/export'
 import { getRxHistory } from '@/api/rx'
 import { formatBytes } from '@/utils/formatting'
 import type { RxPeriodResponse } from '@/types'
+import { useAvailableDates } from '@/composables/useAvailableDates'
+import DatePickerInput from '@/components/DatePickerInput.vue'
 import ErrorState from '@/components/ErrorState.vue'
+
+const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
 
 const reportType = ref<'summary' | 'comparison'>('summary')
 
@@ -155,6 +179,7 @@ const presets = [
 ]
 
 onMounted(async () => {
+    void loadDates()
     try {
         rxPeriods.value = await getRxHistory()
     } catch {

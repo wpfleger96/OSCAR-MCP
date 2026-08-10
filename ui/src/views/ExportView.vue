@@ -25,11 +25,21 @@
             <div class="filter-grid">
                 <div class="filter-field">
                     <label>From Date</label>
-                    <input v-model="fromDate" type="date" class="date-input" />
+                    <DatePickerInput
+                        v-model="fromDate"
+                        :is-date-disabled="isDateDisabled"
+                        :min-value="minValue"
+                        :max-value="maxValue"
+                    />
                 </div>
                 <div class="filter-field">
                     <label>To Date</label>
-                    <input v-model="toDate" type="date" class="date-input" />
+                    <DatePickerInput
+                        v-model="toDate"
+                        :is-date-disabled="isDateDisabled"
+                        :min-value="minValue"
+                        :max-value="maxValue"
+                    />
                 </div>
                 <div class="filter-field">
                     <label>Device</label>
@@ -107,7 +117,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Toggle } from '@/components/ui/toggle'
 import {
@@ -123,7 +133,11 @@ import { getDevices } from '@/api/devices'
 import { exportCsv, exportJson, exportRaw, downloadBlob } from '@/api/export'
 import type { CsvExportParams, RawExportParams, ExportParams } from '@/api/export'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { useAvailableDates } from '@/composables/useAvailableDates'
+import DatePickerInput from '@/components/DatePickerInput.vue'
 import ErrorState from '@/components/ErrorState.vue'
+
+const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
 
 const format = ref('csv')
 const fromDate = ref('')
@@ -140,6 +154,10 @@ const {
     error: devicesError,
     reload: reloadDevices,
 } = useApiLoad(() => getDevices(), 'Failed to load devices')
+
+onMounted(() => {
+    void loadDates()
+})
 
 async function handleExport(): Promise<void> {
     if (fromDate.value && toDate.value && fromDate.value > toDate.value) {
