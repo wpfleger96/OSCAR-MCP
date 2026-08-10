@@ -130,7 +130,7 @@ def ca_response_from_raw(
         CaDetailSchema(
             session_id=ev.session_id,
             session_start_wall_clock=localize_wall_clock(
-                ev.session_start_wall_clock, str(ev.timezone_status), ev.timezone_name
+                ev.session_start_wall_clock, ev.timezone_status, ev.timezone_name
             ),
             **tz_fields(ev),
             offset_seconds=ev.offset_seconds,

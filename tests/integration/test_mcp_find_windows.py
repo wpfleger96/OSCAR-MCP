@@ -769,7 +769,7 @@ class TestReraProxyCentered:
         self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:
         """rera_proxy_centered returns a window centered on the recovery breath's
-        start_offset_s (±context_seconds/2), clamped to [0, last_breath.end_offset_s].
+        start_offset_s (±context_seconds), clamped to [0, last_breath.end_offset_s].
 
         Fixture: breaths 0–4 with breath spacing of 5s (each breath spans 5s).
           breath 0: start=0.0,  end=4.0  (normal)
@@ -778,9 +778,9 @@ class TestReraProxyCentered:
           breath 3: start=15.0, end=19.0 (recovery, is_recovery_breath=True)
           breath 4: start=20.0, end=24.0 (normal)
 
-        With default context_seconds=120.0 (half=60.0):
-          win_start = max(0.0, 15.0 - 60.0) = 0.0  [clamped]
-          win_end   = min(24.0, 15.0 + 60.0) = 24.0 [clamped]
+        With default context_seconds=120.0:
+          win_start = max(0.0, 15.0 - 120.0) = 0.0  [clamped]
+          win_end   = min(24.0, 15.0 + 120.0) = 24.0 [clamped]
           anchor_event_offset = 15.0
           fl_run_length = 2
         """
@@ -831,12 +831,12 @@ class TestReraProxyCentered:
     ) -> None:
         """Window is not clamped when the recovery breath is far from both ends.
 
-        Fixture: 50 breaths (spacing 5s each), FL run at breaths 20-21,
-        recovery at breath 22. Last breath ends at 254.0.
-          rec_offset = 22 * 5 = 110.0
-          half = 60.0 (context_seconds=120.0 default)
-          win_start = max(0.0, 110.0 - 60.0) = 50.0  [not clamped]
-          win_end   = min(254.0, 110.0 + 60.0) = 170.0 [not clamped]
+        Fixture: 60 breaths (spacing 5s each), FL run at breaths 30-31,
+        recovery at breath 32. Last breath ends at 299.0.
+          rec_offset = 32 * 5 = 160.0
+          context_seconds = 120.0 (default)
+          win_start = max(0.0, 160.0 - 120.0) = 40.0  [not clamped]
+          win_end   = min(299.0, 160.0 + 120.0) = 280.0 [not clamped]
         """
         from snore.mcp.tools.windows import find_windows  # noqa: PLC0415
 
@@ -845,11 +845,11 @@ class TestReraProxyCentered:
         _, sess = await _make_day_session(async_db_session, device, target_date)
         ar = await _make_analysis_result(async_db_session, sess)
 
-        for i in range(50):
-            if i in (20, 21):
+        for i in range(60):
+            if i in (30, 31):
                 fc = 5
                 is_rec = None
-            elif i == 22:
+            elif i == 32:
                 fc = 1
                 is_rec = True
             else:
@@ -876,10 +876,10 @@ class TestReraProxyCentered:
         assert result.null_reason is None
         assert len(result.windows) == 1
         w = result.windows[0]
-        rec_offset = 22 * 5.0  # breath_number=22, start_offset_s = 110.0
+        rec_offset = 32 * 5.0  # breath_number=32, start_offset_s = 160.0
         assert w.anchor_event_offset == pytest.approx(rec_offset)
-        assert w.window_start_offset == pytest.approx(rec_offset - 60.0)
-        assert w.window_end_offset == pytest.approx(rec_offset + 60.0)
+        assert w.window_start_offset == pytest.approx(rec_offset - 120.0)
+        assert w.window_end_offset == pytest.approx(rec_offset + 120.0)
 
     async def test_rera_proxy_centered_irrelevant_option_rejected(
         self, async_db_session: AsyncSession, async_test_profile: Any
@@ -937,3 +937,85 @@ class TestReraProxyCentered:
             )
 
         assert "rera_proxy_centered" in str(exc_info.value)
+
+    async def test_mixed_primary_mode_refuses_rera_proxy_centered(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Two OK sessions with the same identity but different primary_mode
+        → rera_proxy_centered returns null_reason='primary_mode_mismatch'.
+
+        Uses patch.object on _latest_analysis_for_session so both sessions appear OK
+        but with different primary_mode metadata (aasm vs aasm_relaxed).
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.analysis.shared.versioning import (  # noqa: PLC0415
+            AlgorithmIdentity,
+            AlgoVersions,
+            AnalysisRunMetadata,
+        )
+        from snore.mcp.tools.windows import find_windows  # noqa: PLC0415
+        from snore.services.breath_service import (  # noqa: PLC0415
+            AnalysisStatus,
+            BreathService,
+        )
+
+        target_date = date(2024, 7, 5)
+        device = await _make_device(async_db_session, async_test_profile.id)
+
+        day, sess1 = await _make_day_session(async_db_session, device, target_date)
+        ar1 = await _make_analysis_result(async_db_session, sess1)
+        await _make_breath(async_db_session, ar1, sess1, breath_number=0, flow_class=5)
+        await _make_breath(
+            async_db_session,
+            ar1,
+            sess1,
+            breath_number=1,
+            flow_class=1,
+            is_recovery_breath=True,
+        )
+
+        sess2 = await _add_session_to_day(async_db_session, device, day)
+        ar2 = await _make_analysis_result(async_db_session, sess2)
+        await _make_breath(async_db_session, ar2, sess2, breath_number=0, flow_class=5)
+        await _make_breath(
+            async_db_session,
+            ar2,
+            sess2,
+            breath_number=1,
+            flow_class=1,
+            is_recovery_breath=True,
+        )
+
+        identity = AlgorithmIdentity.current()
+        algo_a = AlgoVersions(
+            identity=identity,
+            run=AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"]),
+        )
+        algo_b = AlgoVersions(
+            identity=identity,
+            run=AnalysisRunMetadata(
+                primary_mode="aasm_relaxed", modes=["aasm_relaxed"]
+            ),
+        )
+
+        async def _mock_latest(self_svc: Any, session_id: int) -> Any:
+            if session_id == sess1.id:
+                return (AnalysisStatus.OK, algo_a, ar1.id)
+            if session_id == sess2.id:
+                return (AnalysisStatus.OK, algo_b, ar2.id)
+            return (AnalysisStatus.NOT_RUN, None, None)
+
+        await async_db_session.flush()
+        with patch.object(BreathService, "_latest_analysis_for_session", _mock_latest):
+            result = await find_windows(
+                async_db_session,
+                target_date,
+                profile_id=async_test_profile.id,
+                criterion="rera_proxy_centered",
+                n=5,
+                device_id=device.id,
+            )
+
+        assert result.windows == []
+        assert result.null_reason == "primary_mode_mismatch"

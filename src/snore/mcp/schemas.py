@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict
 
@@ -47,7 +47,10 @@ def tz_fields(source: Any) -> dict[str, Any]:
 def localize_wall_clock(dt: datetime, tz_status: str, tz_name: str | None) -> str:
     """Naive device wall-clock -> ISO 8601. Offset-qualified when the profile timezone is known."""
     if tz_status == "user_declared" and tz_name:
-        return dt.replace(tzinfo=ZoneInfo(tz_name)).isoformat()
+        try:
+            return dt.replace(tzinfo=ZoneInfo(tz_name)).isoformat()
+        except (ZoneInfoNotFoundError, ValueError):
+            pass  # corrupted profile timezone: degrade to naive rather than break every tool
     return dt.isoformat()
 
 
@@ -230,8 +233,10 @@ class EventRow(BaseModel):
     """A single respiratory event with inline context.
 
     Timestamp contract (A6):
-    - ``start_time_wall_clock``: device wall-clock, offset-free ISO 8601 (tier 2).
-    - ``session_start_wall_clock``: per-event session anchor, offset-free ISO 8601 (tier 2).
+    - ``start_time_wall_clock``: device wall-clock; offset-qualified when
+      ``timezone_status == "user_declared"``, else naive (tier 2).
+    - ``session_start_wall_clock``: per-event session anchor; offset-qualified when
+      ``timezone_status == "user_declared"``, else naive (tier 2).
     - ``timezone_status``: ``"unknown"``, or ``"user_declared"`` when the profile
       declares an IANA timezone (carried in ``timezone_name``).
     - ``offset_seconds``: position from this event's session start (tier 3).
@@ -240,11 +245,9 @@ class EventRow(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     session_id: int  # session that produced this event (per-event anchor)
-    session_start_wall_clock: (
-        str  # offset-free ISO 8601 device wall-clock for this event's session
-    )
+    session_start_wall_clock: str  # ISO 8601 wall-clock; offset-qualified when timezone_status == "user_declared", else naive (tier 2)
     event_type: str
-    start_time_wall_clock: str  # offset-free ISO 8601 device wall-clock (tier 2)
+    start_time_wall_clock: str  # ISO 8601 wall-clock; offset-qualified when timezone_status == "user_declared", else naive (tier 2)
     timezone_status: str = "unknown"  # "unknown" | "user_declared"
     timezone_name: str | None = None  # IANA name when user_declared
     offset_seconds: float  # seconds from this event's Session.start_time (tier 3)
@@ -513,7 +516,8 @@ class CompareEpochsResponse(BaseModel):
     epochs: list[EpochStats] = []
     null_reason: str | None = None
     rx_violations: list[EpochRxViolationRow] = []
-    # Per-field warnings when algorithm identity fields differ across epochs.
+    # Per-field warnings when algorithm identity fields differ across epochs; also
+    # includes a warning when rera_proxy_version differs across epochs.
     # Non-empty means distributions were computed across sessions with different
     # algorithm versions — callers should review before drawing conclusions.
     version_warnings: list[str] = []
@@ -545,7 +549,7 @@ class WaveformWindowResponse(BaseModel):
 
     session_id: int | None = None  # null when no session on the date
     session_start_wall_clock: str | None = (
-        None  # tier-2 naive ISO; null when session_id null
+        None  # ISO 8601 wall-clock; offset-qualified when timezone_status == "user_declared", else naive (tier 2); null when session_id null
     )
     timezone_status: str = "unknown"
     timezone_name: str | None = None  # IANA name when user_declared
@@ -562,7 +566,7 @@ class CaDetailSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     session_id: int
-    session_start_wall_clock: str  # tier-2 naive ISO
+    session_start_wall_clock: str  # ISO 8601 wall-clock; offset-qualified when timezone_status == "user_declared", else naive (tier 2)
     timezone_status: str = "unknown"
     timezone_name: str | None = None  # IANA name when user_declared
     offset_seconds: float  # tier-3 CA start from session start

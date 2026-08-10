@@ -101,7 +101,9 @@ class AlgorithmIdentity(BaseModel):
         return cls()
 
 
-# Fields whose mismatch blocks cross-epoch comparisons.
+# Fields whose mismatch triggers different behavior per call site: find_windows
+# hard-refuses for all criteria except ca_centered; compare_epochs emits
+# non-blocking version_warnings (distributions are still computed).
 # trigger_cycle and validity_flags are intentionally excluded: neither feeds a
 # cross-epoch distribution (trigger/cycle labels are per-breath experimental
 # metadata; ramp_active/mask_off validity flags gate rows, not aggregates), so

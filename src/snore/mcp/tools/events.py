@@ -120,12 +120,12 @@ async def get_events(
                 session_id=ev.session_id,
                 session_start_wall_clock=localize_wall_clock(
                     ev.session_start_wall_clock,
-                    str(ev.timezone_status),
+                    ev.timezone_status,
                     ev.timezone_name,
                 ),
                 event_type=ev.event_type,
                 start_time_wall_clock=localize_wall_clock(
-                    ev.event_start_wall_clock, str(ev.timezone_status), ev.timezone_name
+                    ev.event_start_wall_clock, ev.timezone_status, ev.timezone_name
                 ),
                 **tz_fields(ev),
                 offset_seconds=ev.offset_seconds,
@@ -145,7 +145,7 @@ async def get_events(
         anchor_session_id: int | None = contextual_events[0].session_id
         anchor_session_start: str | None = localize_wall_clock(
             contextual_events[0].session_start_wall_clock,
-            str(contextual_events[0].timezone_status),
+            contextual_events[0].timezone_status,
             contextual_events[0].timezone_name,
         )
     else:

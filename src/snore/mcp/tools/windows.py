@@ -71,12 +71,14 @@ async def find_windows(
         min_window_breaths: Minimum breaths per formed window.
         context_breaths_before: Context breaths before the anchor breath.
         context_breaths_after: Context breaths after the anchor breath.
-        context_seconds: Window half-width in seconds (ca_centered); full window
-            duration for rera_proxy_centered (window = ±context_seconds/2).
-        min_fl_run_length: Minimum FL-class run length (fl_run_ending_in_recovery only).
+        context_seconds: Window half-width in seconds for ca_centered and
+            rera_proxy_centered — both extend ±context_seconds from the anchor.
+        min_fl_run_length: Minimum FL-class run length (fl_run_ending_in_recovery
+            and rera_proxy_centered).
         fl_class_threshold: Minimum flow_class value to count as flow-limited.
         recovery_amplitude_margin: Peak-flow margin over the FL-run mean for the
-            self-contained recovery criterion (fl_run_ending_in_recovery only).
+            self-contained recovery criterion (fl_run_ending_in_recovery and
+            rera_proxy_centered).
     """
     from snore.services.breath_service import (  # noqa: PLC0415
         BreathService,
@@ -129,7 +131,7 @@ async def find_windows(
             criterion=str(w.criterion),
             session_id=w.session_id,
             session_start_wall_clock=localize_wall_clock(
-                w.session_start_wall_clock, str(w.timezone_status), w.timezone_name
+                w.session_start_wall_clock, w.timezone_status, w.timezone_name
             ),
             **tz_fields(w),
             window_start_offset=w.window_start_offset,
@@ -258,8 +260,9 @@ def register(mcp: FastMCP) -> None:
         Refusal semantics (successful responses with empty ``windows`` list):
             ``null_reason: "algo_version_mismatch"`` — the day has sessions analysed
                 with different algorithm versions; FL-ranked criteria
-                (``worst_flattening_leak_valid``, ``fl_run_ending_in_recovery``)
-                refuse comparison.  ``ca_centered`` is unaffected — it still works.
+                (``worst_flattening_leak_valid``, ``fl_run_ending_in_recovery``,
+                ``rera_proxy_centered``) refuse comparison.
+                ``ca_centered`` is unaffected — it still works.
             ``null_reason: "primary_mode_mismatch"`` — sessions differ in primary mode;
                 ``fl_run_ending_in_recovery`` and ``rera_proxy_centered`` refuse; other
                 criteria are unaffected.

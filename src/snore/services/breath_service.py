@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1895,29 +1895,26 @@ class BreathService:
             windows=windows,
         )
 
-    async def _find_worst_flattening_windows(
+    async def _iter_session_breaths(
         self,
         session_ids: list[int],
         session_starts: dict[int, datetime],
         ar_by_session: dict[int, int | None],
         ar_status_by_session: dict[int, AnalysisStatus],
-        n: int,
-        opts: WindowCriterionOptions,
-    ) -> list[WindowResult]:
-        """Build WORST_FLATTENING_LEAK_VALID windows per §6 construction rule."""
+    ) -> AsyncIterator[tuple[int, int, AnalysisStatus, Sequence[Any], datetime]]:
+        """Yield (sid, ar_id, ar_status, breath_rows, session_start) per OK session.
+
+        Skips sessions without an OK analysis result and sessions with no breath rows.
+        """
         from sqlalchemy import select  # noqa: PLC0415
 
         from snore.database import models  # noqa: PLC0415
 
-        tz_status, tz_name = await self.resolve_timezone()
-        candidates: list[WindowResult] = []
         for sid in session_ids:
             ar_id = ar_by_session.get(sid)
             ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
             if ar_id is None or ar_status != AnalysisStatus.OK:
                 continue
-
-            # Fetch all breaths for this session ordered by breath_number
             breath_rows = (
                 (
                     await self._db.execute(
@@ -1931,7 +1928,29 @@ class BreathService:
             )
             if not breath_rows:
                 continue
+            yield sid, ar_id, ar_status, breath_rows, session_starts[sid]
 
+    async def _find_worst_flattening_windows(
+        self,
+        session_ids: list[int],
+        session_starts: dict[int, datetime],
+        ar_by_session: dict[int, int | None],
+        ar_status_by_session: dict[int, AnalysisStatus],
+        n: int,
+        opts: WindowCriterionOptions,
+    ) -> list[WindowResult]:
+        """Build WORST_FLATTENING_LEAK_VALID windows per §6 construction rule."""
+        tz_status, tz_name = await self.resolve_timezone()
+        candidates: list[WindowResult] = []
+        async for (
+            sid,
+            ar_id,
+            ar_status,
+            breath_rows,
+            session_start,
+        ) in self._iter_session_breaths(
+            session_ids, session_starts, ar_by_session, ar_status_by_session
+        ):
             # Filter eligible anchors per §6 step 1
             eligible_indices: list[int] = []
             for i, b in enumerate(breath_rows):
@@ -1952,7 +1971,6 @@ class BreathService:
                 reverse=True,
             )
 
-            session_start = session_starts[sid]
             for anchor_idx in eligible_indices:
                 # §6 step 3: form candidate window
                 start_idx = max(0, anchor_idx - opts.context_breaths_before)
@@ -2072,33 +2090,17 @@ class BreathService:
         """Build FL_RUN_ENDING_IN_RECOVERY windows — RERA-proxy: runs of ≥N consecutive
         FL breaths ending in a recovery breath (analysis-time flag OR the
         self-contained v2 criterion; see _iter_fl_run_recoveries)."""
-        from sqlalchemy import select  # noqa: PLC0415
-
-        from snore.database import models  # noqa: PLC0415
-
         tz_status, tz_name = await self.resolve_timezone()
         candidates: list[WindowResult] = []
-        for sid in session_ids:
-            ar_id = ar_by_session.get(sid)
-            ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
-            if ar_id is None or ar_status != AnalysisStatus.OK:
-                continue
-
-            breath_rows = (
-                (
-                    await self._db.execute(
-                        select(models.Breath)
-                        .where(models.Breath.analysis_result_id == ar_id)
-                        .order_by(models.Breath.breath_number)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if not breath_rows:
-                continue
-
-            session_start = session_starts[sid]
+        async for (
+            sid,
+            ar_id,
+            ar_status,
+            breath_rows,
+            session_start,
+        ) in self._iter_session_breaths(
+            session_ids, session_starts, ar_by_session, ar_status_by_session
+        ):
             # Scan for FL runs ending in recovery breath — the same iterator
             # backs _count_fl_run_reras, so windows and counts identify
             # exactly the same events.
@@ -2150,36 +2152,19 @@ class BreathService:
         n: int,
         opts: WindowCriterionOptions,
     ) -> list[WindowResult]:
-        """Build RERA_PROXY_CENTERED windows — context window of ±(context_seconds/2)
+        """Build RERA_PROXY_CENTERED windows — context window of ±context_seconds
         centered on the recovery breath of each RERA-proxy event, ranked by run length."""
-        from sqlalchemy import select  # noqa: PLC0415
-
-        from snore.database import models  # noqa: PLC0415
-
         tz_status, tz_name = await self.resolve_timezone()
-        half = opts.context_seconds / 2.0
         candidates: list[WindowResult] = []
-        for sid in session_ids:
-            ar_id = ar_by_session.get(sid)
-            ar_status = ar_status_by_session.get(sid, AnalysisStatus.NOT_RUN)
-            if ar_id is None or ar_status != AnalysisStatus.OK:
-                continue
-
-            breath_rows = (
-                (
-                    await self._db.execute(
-                        select(models.Breath)
-                        .where(models.Breath.analysis_result_id == ar_id)
-                        .order_by(models.Breath.breath_number)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if not breath_rows:
-                continue
-
-            session_start = session_starts[sid]
+        async for (
+            sid,
+            ar_id,
+            ar_status,
+            breath_rows,
+            session_start,
+        ) in self._iter_session_breaths(
+            session_ids, session_starts, ar_by_session, ar_status_by_session
+        ):
             last_end = breath_rows[-1].end_offset_s
             for run_start, run_last, recovery_idx in _iter_fl_run_recoveries(
                 breath_rows,
@@ -2190,7 +2175,7 @@ class BreathService:
                 rec_b = breath_rows[recovery_idx]
                 rec_offset = rec_b.start_offset_s
                 fl_run = breath_rows[run_start : run_last + 1]
-                fl_length = run_last - run_start + 1
+                fl_length = len(fl_run)
                 run_start_offset = fl_run[0].start_offset_s
                 run_end_offset = fl_run[-1].end_offset_s
                 candidates.append(
@@ -2200,8 +2185,10 @@ class BreathService:
                         session_start_wall_clock=session_start,
                         timezone_status=tz_status,
                         timezone_name=tz_name,
-                        window_start_offset=max(0.0, rec_offset - half),
-                        window_end_offset=min(last_end, rec_offset + half),
+                        window_start_offset=max(0.0, rec_offset - opts.context_seconds),
+                        window_end_offset=min(
+                            last_end, rec_offset + opts.context_seconds
+                        ),
                         reason_summary=(
                             f"rera_proxy: fl_run [{run_start_offset:.1f}-{run_end_offset:.1f}]s,"
                             f" recovery at {rec_offset:.1f}s"
@@ -2503,10 +2490,9 @@ class BreathService:
         version_warnings: list[str] = []
         if len(all_identities_combined) > 1:
             cross_keys = CROSS_VERSION_REFUSAL_KEYS
+            all_dumps = [id_.model_dump() for id_ in all_identities_combined]
             for k in sorted(cross_keys):
-                all_vals_for_key = sorted(
-                    {id_.model_dump()[k] for id_ in all_identities_combined}
-                )
+                all_vals_for_key = sorted({d[k] for d in all_dumps})
                 if len(all_vals_for_key) > 1:
                     vals_str = ", ".join(f"'{v}'" for v in all_vals_for_key)
                     version_warnings.append(

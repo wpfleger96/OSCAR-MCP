@@ -153,7 +153,7 @@ def waveform_response_from_raw(raw: RawWaveformWindow) -> WaveformWindowResponse
     session_start_wall_clock = (
         localize_wall_clock(
             window.session_start_wall_clock,
-            str(window.timezone_status),
+            window.timezone_status,
             window.timezone_name,
         )
         if window.session_id > 0

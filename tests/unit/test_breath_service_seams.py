@@ -4809,6 +4809,95 @@ class TestNightlySummaryFlClassGe4Pct:
 
 
 # ---------------------------------------------------------------------------
+# leak_above_24_pct on NightlyAnalysisSummary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNightlySummaryLeakAbove24Pct:
+    """leak_above_24_pct on per-night NightlyAnalysisSummary.
+
+    Denominator = breaths with determinate leak_valid (True or False).
+    Numerator   = breaths with leak_valid is False (leak > 24 L/min).
+    None breaths are excluded from both.
+    Result is rounded to 1 decimal.
+    """
+
+    async def test_mixed_leak_valid_values_pct_excludes_none(self, async_db_session):
+        """3 True, 1 False, 2 None → denominator=4, numerator=1, pct=25.0."""
+        therapy_date = date(2025, 7, 20)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"leak_valid": True},
+                {"leak_valid": True},
+                {"leak_valid": True},
+                {"leak_valid": False},
+                {"leak_valid": None},
+                {"leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.leak_above_24_pct == 25.0
+        assert night.leak_above_24_pct_reason is None
+
+    async def test_all_leak_valid_true_pct_is_zero(self, async_db_session):
+        """All breaths leak_valid=True → 0 numerator → leak_above_24_pct == 0.0."""
+        therapy_date = date(2025, 7, 21)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"leak_valid": True},
+                {"leak_valid": True},
+                {"leak_valid": True},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.leak_above_24_pct == 0.0
+        assert night.leak_above_24_pct_reason is None
+
+    async def test_all_leak_valid_none_pct_is_null_with_not_available_reason(
+        self, async_db_session
+    ):
+        """All breaths leak_valid=None → denominator=0 → leak_above_24_pct is None with NOT_AVAILABLE."""
+        therapy_date = date(2025, 7, 22)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"leak_valid": None},
+                {"leak_valid": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.leak_above_24_pct is None
+        assert night.leak_above_24_pct_reason == NullReason.NOT_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
 # rera_index, rdi, and DURATION_ZERO fields on NightlyAnalysisSummary
 # ---------------------------------------------------------------------------
 

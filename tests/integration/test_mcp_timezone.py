@@ -247,3 +247,40 @@ class TestUserDeclaredTimezone:
         assert ev.timezone_name is None
         _assert_naive(ev.start_time_wall_clock)
         _assert_naive(ev.session_start_wall_clock)
+
+
+class TestCorruptedTimezoneGracefulDegradation:
+    """A corrupted profile timezone degrades to naive timestamps instead of raising."""
+
+    async def test_invalid_iana_zone_degrades_to_naive(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Profile with invalid IANA timezone: get_events returns naive timestamps, no error."""
+        from snore.mcp.tools.events import get_events  # noqa: PLC0415
+
+        async_test_profile.timezone = "Not/AZone"
+        await async_db_session.flush()
+
+        target_date = date(2024, 8, 18)
+        device = await _make_device(async_db_session, async_test_profile.id)
+        _, sess = await _make_day_session(async_db_session, device, target_date)
+        async_db_session.add(
+            Event(
+                session_id=sess.id,
+                event_type="OA",
+                start_time=sess.start_time,
+                duration_seconds=10.0,
+            )
+        )
+        await async_db_session.flush()
+
+        result = await get_events(
+            async_db_session, target_date, profile_id=async_test_profile.id
+        )
+
+        # The bad zone name propagates through to timezone_name (it's the raw profile value),
+        # but wall-clock strings fall back to naive rather than raising ZoneInfoNotFoundError.
+        assert result.timezone_status == "user_declared"
+        ev = result.events[0]
+        _assert_naive(ev.start_time_wall_clock)
+        _assert_naive(ev.session_start_wall_clock)

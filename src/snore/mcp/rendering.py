@@ -28,7 +28,7 @@ def _build_suptitle(window: WaveformWindow) -> str:
     if window.session_id > 0:
         wall_clock_str = localize_wall_clock(
             window.session_start_wall_clock,
-            str(window.timezone_status),
+            window.timezone_status,
             window.timezone_name,
         )
         title_parts = [

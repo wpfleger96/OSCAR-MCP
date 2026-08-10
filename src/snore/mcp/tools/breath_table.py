@@ -130,13 +130,13 @@ async def get_breath_table(
     if dto.rows:
         top_session_start = localize_wall_clock(
             dto.rows[0].session_start_wall_clock,
-            str(dto.rows[0].timezone_status),
+            dto.rows[0].timezone_status,
             dto.rows[0].timezone_name,
         )
     elif dto.bins:
         top_session_start = localize_wall_clock(
             dto.bins[0].session_start_wall_clock,
-            str(dto.bins[0].timezone_status),
+            dto.bins[0].timezone_status,
             dto.bins[0].timezone_name,
         )
     else:
@@ -153,7 +153,7 @@ async def get_breath_table(
             session_id=r.session_id,
             breath_number=r.breath_number,
             session_start_wall_clock=localize_wall_clock(
-                r.session_start_wall_clock, str(r.timezone_status), r.timezone_name
+                r.session_start_wall_clock, r.timezone_status, r.timezone_name
             ),
             **tz_fields(r),
             start_offset_seconds=r.start_offset_seconds,
@@ -190,7 +190,7 @@ async def get_breath_table(
     bins = [
         BreathTableBin(
             session_start_wall_clock=localize_wall_clock(
-                b.session_start_wall_clock, str(b.timezone_status), b.timezone_name
+                b.session_start_wall_clock, b.timezone_status, b.timezone_name
             ),
             **tz_fields(b),
             bin_start_offset=b.bin_start_offset,
