@@ -77,6 +77,10 @@ class AlgorithmIdentity(BaseModel):
     # The bump to 4 is mandatory: pydantic validation back-fills missing fields
     # from defaults, so without it legacy rows lacking validity_flags would
     # compare equal to the current identity and silently stay OK.
+    #
+    # RELEASE NOTE: bumping format_version marks every stored AnalysisResult
+    # STALE_VERSION — the next batch analysis re-processes all sessions.
+    # Call this out explicitly in release notes whenever format_version is bumped.
     format_version: int = 4
     segmenter: str = SEGMENTER_ALGO_VERSION
     fl_classifier: str = FL_CLASSIFIER_ALGO_VERSION
@@ -163,10 +167,13 @@ class AlgoVersions(BaseModel):
 
     @classmethod
     def from_stored(cls, raw: dict[str, Any]) -> AlgoVersions | None:
-        """Parse stored engine_versions_json.  Returns None for legacy flat rows."""
-        if "identity" not in raw:
-            return None  # legacy flat row → STALE_VERSION
-        return cls.model_validate(raw)
+        """Parse stored engine_versions_json.  Returns None for legacy/malformed rows."""
+        if not isinstance(raw, dict) or "identity" not in raw:
+            return None  # legacy flat row or None/non-dict input → STALE_VERSION
+        try:
+            return cls.model_validate(raw)
+        except Exception:
+            return None  # nested but unparseable → classify as stale
 
 
 # ---------------------------------------------------------------------------

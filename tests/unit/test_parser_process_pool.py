@@ -13,7 +13,7 @@ import pickle
 
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -106,8 +106,7 @@ def test_resmed_broken_pool_raises_runtime_error():
         patch.object(
             parser, "_filter_night_items", side_effect=lambda items, *a: items
         ),
-        patch.object(parser, "_preload_str_settings", return_value={}),
-        patch.object(parser, "_preload_str_summaries", return_value={}),
+        patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.resmed_edf.get_pool", return_value=broken_pool),
     ):
@@ -179,8 +178,7 @@ def test_resmed_generator_close_cancels_pending():
         patch.object(
             parser, "_filter_night_items", side_effect=lambda items, *a: items
         ),
-        patch.object(parser, "_preload_str_settings", return_value={}),
-        patch.object(parser, "_preload_str_summaries", return_value={}),
+        patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
     ):
@@ -247,8 +245,7 @@ def test_resmed_broken_pool_from_future_result_raises_runtime_error():
         patch.object(
             parser, "_filter_night_items", side_effect=lambda items, *a: items
         ),
-        patch.object(parser, "_preload_str_settings", return_value={}),
-        patch.object(parser, "_preload_str_summaries", return_value={}),
+        patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
     ):
@@ -284,3 +281,117 @@ def test_oscar_broken_pool_from_future_result_raises_runtime_error():
                     None,
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# STR cache slicing: parallel path submits per-night slices, not full caches
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_submits_per_night_str_cache_slices():
+    """Each pool.submit call receives a single-entry cache slice for its night.
+
+    Before the fix, every future received the full multi-night dict —
+    O(nights²) pickle cost.  After the fix each future receives at most one
+    entry.
+    """
+    from snore.parsers.resmed_edf import ResmedEDFParser
+
+    parser = ResmedEDFParser()
+    d1 = date(2025, 1, 1)
+    d2 = date(2025, 1, 2)
+    nights = [("20250101", {}), ("20250102", {})]
+
+    full_settings = {d1: {"pressure_min": 4.0}, d2: {"pressure_min": 6.0}}
+    full_summaries = {d1: {"ahi": 1.0}, d2: {"ahi": 2.0}}
+
+    # Pre-resolved futures that return None (nights skipped, no sessions yielded).
+    f1, f2 = Future(), Future()
+    f1.set_result(None)
+    f2.set_result(None)
+
+    mock_pool = MagicMock()
+    mock_pool.submit.side_effect = [f1, f2]
+
+    with (
+        patch.object(
+            parser, "_discover_session_files", return_value=(Path("/data"), nights)
+        ),
+        patch.object(
+            parser, "_filter_night_items", side_effect=lambda items, *a: items
+        ),
+        patch.object(
+            parser, "_load_str_caches", return_value=(full_settings, full_summaries)
+        ),
+        patch.object(parser, "get_device_info", return_value=MagicMock()),
+        patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
+    ):
+        list(parser.parse_sessions(Path("/data"), parallel=True))
+
+    calls = mock_pool.submit.call_args_list
+    assert len(calls) == 2
+
+    # pool.submit(callable, night_date, segments, device_info, path,
+    #             str_settings_cache, str_summaries_cache, ...)
+    # args indices:  [0]       [1]        [2]       [3]      [4]
+    #                [5]=settings  [6]=summaries
+    for call_obj in calls:
+        a = call_obj.args
+        night_key = datetime.strptime(a[1], "%Y%m%d").date()
+        settings_arg = a[5]
+        summaries_arg = a[6]
+
+        assert settings_arg == {night_key: full_settings[night_key]}, (
+            f"Expected single-entry settings slice for {night_key}; got {settings_arg}"
+        )
+        assert summaries_arg == {night_key: full_summaries[night_key]}, (
+            f"Expected single-entry summaries slice for {night_key}; got {summaries_arg}"
+        )
+
+
+def test_absent_str_entry_submits_none_cache():
+    """A night with no STR entry gets None (not an empty dict) as its cache slice."""
+    from snore.parsers.resmed_edf import ResmedEDFParser
+
+    parser = ResmedEDFParser()
+    d_known = date(2025, 1, 2)
+    nights = [("20250101", {}), ("20250102", {})]
+
+    # Only d_known has an STR entry; 20250101 is absent.
+    full_settings = {d_known: {"pressure_min": 6.0}}
+
+    f1, f2 = Future(), Future()
+    f1.set_result(None)
+    f2.set_result(None)
+
+    mock_pool = MagicMock()
+    mock_pool.submit.side_effect = [f1, f2]
+
+    with (
+        patch.object(
+            parser, "_discover_session_files", return_value=(Path("/data"), nights)
+        ),
+        patch.object(
+            parser, "_filter_night_items", side_effect=lambda items, *a: items
+        ),
+        patch.object(parser, "_load_str_caches", return_value=(full_settings, None)),
+        patch.object(parser, "get_device_info", return_value=MagicMock()),
+        patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
+    ):
+        list(parser.parse_sessions(Path("/data"), parallel=True))
+
+    calls = mock_pool.submit.call_args_list
+    assert len(calls) == 2
+
+    by_night = {call_obj.args[1]: call_obj.args for call_obj in calls}
+
+    # Night with no STR entry → None passed for both caches.
+    args_missing = by_night["20250101"]
+    assert args_missing[5] is None, (
+        "Missing STR entry should pass None, not an empty dict"
+    )
+    assert args_missing[6] is None
+
+    # Night with an entry → single-entry slice.
+    args_present = by_night["20250102"]
+    assert args_present[5] == {d_known: {"pressure_min": 6.0}}

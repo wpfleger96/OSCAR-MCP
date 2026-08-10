@@ -40,23 +40,20 @@ from snore.api.analysis_jobs import (
 def clean_analysis_jobs():
     """Stop leaked workers and reset global analysis job state around each test.
 
-    shutdown() must run BEFORE the handles are nulled: clearing
-    _worker_threads/_stop_event while threads are alive orphans daemons that
-    keep draining the shared module-level queue, poisoning every later test
-    in the same process (jobs picked up instantly, queue never fills,
-    patched-executor jobs stolen by workers running the real executor).
+    shutdown() stops every worker generation registered in the module —
+    including workers leaked by other test files sharing this process (e.g.
+    an API lifespan that never finished its teardown) — and prunes exited
+    threads itself. Do NOT rebind jobs._worker_threads here: dropping the
+    registry would orphan any thread that outlived the join timeout, and an
+    orphan with an unset stop event steals jobs from the shared queue.
     """
     jobs.shutdown(timeout=5.0)
     jobs._all_jobs.clear()
     jobs._queue.clear()
-    jobs._worker_threads = []
-    jobs._stop_event = None
     yield
     jobs.shutdown(timeout=5.0)
     jobs._all_jobs.clear()
     jobs._queue.clear()
-    jobs._worker_threads = []
-    jobs._stop_event = None
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +358,7 @@ def test_to_dict_fields_and_no_profile_id():
     assert "created_at" in d
     assert d["started_at"] is None
     assert d["finished_at"] is None
+    assert d["eta_seconds"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -450,8 +448,8 @@ def test_get_job_concurrency_returns_configured_value():
         reset_config()
 
 
-def test_get_job_concurrency_returns_max_queued_when_config_value_is_none():
-    """analysis_job_concurrency=None (unset env var) resolves to MAX_QUEUED."""
+def test_default_job_concurrency_resolves_to_four_when_config_value_is_none():
+    """analysis_job_concurrency=None (unset env var) resolves to the module default (4)."""
     from snore.api.config import AppConfig, reset_config, set_config
     from snore.auth.actor import AuthMode
 
@@ -478,6 +476,40 @@ def test_get_job_concurrency_returns_max_queued_when_config_value_is_none():
     )
     set_config(cfg)
     try:
+        assert _get_job_concurrency() == 4
+        assert _get_job_concurrency() == _DEFAULT_ANALYSIS_JOB_CONCURRENCY
+    finally:
+        reset_config()
+
+
+def test_explicit_job_concurrency_clamps_to_max_queued():
+    """An explicit analysis_job_concurrency value above MAX_QUEUED is clamped."""
+    from snore.api.config import AppConfig, reset_config, set_config
+    from snore.auth.actor import AuthMode
+
+    cfg = AppConfig(
+        auth_mode=AuthMode.LOCAL,
+        session_secret="",
+        public_base_url="",
+        public_origin=None,
+        bind_host="127.0.0.1",
+        trusted_proxies=frozenset(),
+        dev_origins=frozenset(),
+        cors_origins=["http://localhost:5173"],
+        google_client_id="",
+        google_client_secret="",
+        oauth_attempt_ttl_seconds=600,
+        pre_auth_cookie_ttl_seconds=600,
+        max_upload_bytes=512 * 1024 * 1024,
+        max_file_bytes=256 * 1024 * 1024,
+        max_upload_files=10_000,
+        max_jobs_per_user=3,
+        max_jobs_global=10,
+        analysis_max_workers=4,
+        analysis_job_concurrency=MAX_QUEUED + 5,
+    )
+    set_config(cfg)
+    try:
         assert _get_job_concurrency() == MAX_QUEUED
     finally:
         reset_config()
@@ -501,7 +533,7 @@ def test_get_job_concurrency_falls_back_to_default_when_config_raises(monkeypatc
 
 
 def test_two_jobs_run_concurrently():
-    """Under the default concurrency (MAX_QUEUED), both jobs reach RUNNING before either finishes."""
+    """Under the default concurrency (4 workers >= 2 jobs), both jobs reach RUNNING before either finishes."""
     import threading
 
     from unittest.mock import patch
@@ -523,8 +555,8 @@ def test_two_jobs_run_concurrently():
         release.wait(timeout=5.0)
         job.finish(succeeded=True)
 
-    # No _get_job_concurrency patch: the default (MAX_QUEUED) allows all admitted
-    # jobs to start immediately, so 2 jobs trivially run concurrently.
+    # No _get_job_concurrency patch: the default (4 workers) is >= 2 jobs, so
+    # both run concurrently without waiting for one another.
     with patch("snore.api.analysis_jobs._execute_job", side_effect=fake_execute):
         job1 = enqueue(profile_id=1, session_ids=[1], source=AnalysisJobSource.BATCH)
         job2 = enqueue(profile_id=1, session_ids=[2], source=AnalysisJobSource.BATCH)
@@ -538,7 +570,7 @@ def test_two_jobs_run_concurrently():
                 "job2 never reached RUNNING concurrently with job1"
             )
         finally:
-            release.set()
+            release.set()  # unblock any blocked fake_execute before stopping
             stop_event.set()
             with jobs._condition:
                 jobs._condition.notify_all()
@@ -598,6 +630,7 @@ def test_serial_when_concurrency_one():
                 "job2 never started after job1 finished"
             )
         finally:
+            release_job1.set()  # unblock fake_execute if the test body failed early
             stop_event.set()
             with jobs._condition:
                 jobs._condition.notify_all()
@@ -612,8 +645,6 @@ def test_serial_when_concurrency_one():
 
 def test_shutdown_joins_all_worker_threads():
     """shutdown() waits for all analysis-job-worker-* threads to exit."""
-    import threading
-
     from unittest.mock import patch
 
     with patch("snore.api.analysis_jobs._get_job_concurrency", return_value=3):
@@ -624,9 +655,72 @@ def test_shutdown_joins_all_worker_threads():
 
     shutdown(timeout=5.0)
 
-    alive = [
-        t for t in threading.enumerate() if t.name.startswith("analysis-job-worker")
-    ]
-    assert not alive, (
-        f"Worker threads still alive after shutdown: {[t.name for t in alive]}"
+    # Assert that the threads this test started are all dead — not a global scan,
+    # which would be flaky if a prior test leaked a thread.
+    assert not any(t.is_alive() for t in threads), (
+        f"Worker threads still alive after shutdown: {[t.name for t in threads if t.is_alive()]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 14. to_dict() eta_seconds: None when not started or no progress; positive mid-run
+# ---------------------------------------------------------------------------
+
+
+def test_to_dict_eta_seconds_none_when_not_started():
+    """eta_seconds is None for a job that has not started yet."""
+    job = _enqueue_one()
+    d = job.to_dict()
+    assert d["eta_seconds"] is None
+
+
+def test_to_dict_eta_seconds_none_when_no_progress():
+    """eta_seconds is None while RUNNING but progress_completed is still zero."""
+    job = _enqueue_one()
+    job.try_start()
+    # No update_progress call — completed stays at 0.
+    d = job.to_dict()
+    assert d["state"] == "running"
+    assert d["eta_seconds"] is None
+
+
+def test_to_dict_eta_seconds_positive_mid_run():
+    """eta_seconds is a positive integer when the job is running with measurable progress."""
+    job = _enqueue_one(session_ids=list(range(10)))
+    job.try_start()
+    # Backdate started_at by 5 seconds so the rate estimate is non-trivial.
+    with job._lock:
+        job._started_at = time.monotonic() - 5.0
+    job.update_progress(done=5, total=10)
+
+    d = job.to_dict()
+    assert d["state"] == "running"
+    eta = d["eta_seconds"]
+    assert isinstance(eta, int), f"expected int, got {type(eta)}"
+    assert eta > 0, f"expected positive ETA, got {eta}"
+
+
+def test_to_dict_eta_seconds_none_after_completion():
+    """eta_seconds is None once the job transitions out of RUNNING."""
+    job = _enqueue_one(session_ids=list(range(10)))
+    job.try_start()
+    job.update_progress(done=5, total=10)
+    job.finish(succeeded=True)
+
+    d = job.to_dict()
+    assert d["state"] == "succeeded"
+    assert d["eta_seconds"] is None
+
+
+def test_to_dict_eta_seconds_zero_when_overcompleted():
+    """eta_seconds is 0, not negative, when progress_completed exceeds progress_total."""
+    job = _enqueue_one(session_ids=list(range(10)))
+    job.try_start()
+    # Simulate a race where completed overshoots total.
+    with job._lock:
+        job._started_at = time.monotonic() - 5.0
+    job.update_progress(done=12, total=10)
+
+    d = job.to_dict()
+    assert d["state"] == "running"
+    assert d["eta_seconds"] == 0

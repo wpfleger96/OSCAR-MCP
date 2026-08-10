@@ -67,7 +67,7 @@ from snore.parsers.unified import (
     WaveformData,
     extract_basic_stats,
 )
-from snore.utils.process_pool import cancel_pending, get_pool
+from snore.utils.parse_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -527,7 +527,7 @@ class OscarDeviceParser(DeviceParser):
         except BrokenProcessPool as exc:
             raise RuntimeError(
                 f"Parser worker process crashed: {exc}. "
-                "Reduce SNORE_COMPUTE_MAX_WORKERS if memory is constrained."
+                "Reduce SNORE_PARSE_MAX_WORKERS if memory is constrained."
             ) from exc
         finally:
             cancel_pending(futures)

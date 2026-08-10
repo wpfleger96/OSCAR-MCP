@@ -99,6 +99,7 @@ class ImportService:
         date_to: str | None = None,
         parallel: bool = True,
         dry_run: bool = False,
+        force_cleanup: bool = False,
         progress_callback: Callable[[str], None] | None = None,
         cancel_predicate: Callable[[], bool] | None = None,
         profile_id: int,
@@ -112,6 +113,9 @@ class ImportService:
             cancel_predicate: Optional callable that returns True when the caller
                 has requested cancellation.  Checked between sources and at each
                 batch boundary inside ``SessionImporter``.
+            force_cleanup: If True (and not dry_run), remove orphaned child-table
+                records before importing.  Defaults to False; on-demand cleanup is
+                available via ``snore db cleanup-orphans``.
             profile_id:  Resolved profile ID — required.  All devices and sessions
                          created during this import are owned by this profile.
         """
@@ -161,12 +165,15 @@ class ImportService:
                     "<ZONE>' and re-run the import."
                 ) from exc
 
-        if not dry_run:
+        # force_cleanup is retained for programmatic callers and tests; the
+        # intended user-facing path is `snore db cleanup-orphans`.
+        if not dry_run and force_cleanup:
             async with write_gate():
                 async with session_scope(immediate=True) as db_session:
-                    orphaned = await SessionImporter.cleanup_orphaned_records(
+                    cleanup_counts = await SessionImporter.cleanup_orphaned_records(
                         db_session
                     )
+                    orphaned = sum(cleanup_counts.values())
                     if orphaned > 0:
                         emit(f"Cleaned up {orphaned} orphaned records from database")
 
