@@ -9,6 +9,9 @@
  *   - The form's Custom option covers anything missing from this catalog.
  */
 
+// Keep MaskStyle values in sync with: src/snore/api/schemas.py (MaskStyle enum),
+// DB CHECK constraints in migrations 008/009, and
+// src/snore/services/mask_epoch_service.py (normalization map).
 export type MaskStyle = 'pillows' | 'nasal' | 'full_face'
 
 export interface MaskModel {
@@ -176,4 +179,26 @@ export function findBrand(name: string): MaskBrand | undefined {
 
 export function findModel(brandName: string, modelName: string): MaskModel | undefined {
     return findBrand(brandName)?.models.find((m) => m.name === modelName)
+}
+
+// UI display order: nasal → full_face → pillows.
+export const STYLE_OPTIONS: { value: MaskStyle; label: string }[] = [
+    { value: 'nasal', label: 'Nasal' },
+    { value: 'full_face', label: 'Full Face' },
+    { value: 'pillows', label: 'Pillows' },
+]
+
+export function styleLabel(style: string | null | undefined): string {
+    if (!style) return ''
+    return STYLE_OPTIONS.find((o) => o.value === style)?.label ?? style
+}
+
+export function maskEntryName(entry: {
+    brand?: string | null
+    model?: string | null
+    style?: string | null
+}): string {
+    const parts = [entry.brand, entry.model].filter(Boolean)
+    if (parts.length) return parts.join(' ')
+    return styleLabel(entry.style) || 'unspecified mask'
 }

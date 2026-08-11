@@ -59,6 +59,7 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { formatDateFull } from '@/utils/formatting'
+import { styleLabel } from '@/utils/maskOptions'
 import type { MaskLogEntryResponse } from '@/types'
 
 defineProps<{
@@ -71,14 +72,4 @@ const emit = defineEmits<{
     edit: [entry: MaskLogEntryResponse]
     delete: [entry: MaskLogEntryResponse]
 }>()
-
-const STYLE_LABELS: Record<string, string> = {
-    nasal: 'Nasal',
-    full_face: 'Full Face',
-    pillows: 'Pillows',
-}
-
-function styleLabel(style: string): string {
-    return STYLE_LABELS[style] ?? style
-}
 </script>

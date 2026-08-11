@@ -1,0 +1,216 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { defineComponent } from 'vue'
+
+// All vi.mock calls must appear before any component import.
+
+vi.mock('@/composables/useAuth')
+
+vi.mock('@/api/equipment', () => ({
+    getMaskLog: vi.fn(),
+    createMaskLogEntry: vi.fn(),
+    updateMaskLogEntry: vi.fn(),
+    deleteMaskLogEntry: vi.fn(),
+}))
+
+// Return dates as-is so test assertions can use ISO strings directly.
+vi.mock('@/utils/formatting', () => ({
+    formatDateFull: (d: string) => d,
+}))
+
+vi.mock('@/components/ui/button', () => ({
+    Button: { template: '<button v-bind="$attrs"><slot /></button>' },
+}))
+
+vi.mock('@/components/ui/select', () => ({
+    Select: defineComponent({
+        props: ['modelValue'],
+        emits: ['update:model-value'],
+        template: '<div><slot /></div>',
+    }),
+    SelectContent: { template: '<div><slot /></div>' },
+    SelectItem: { props: ['value'], template: '<div><slot /></div>' },
+    SelectTrigger: { template: '<div><slot /></div>' },
+    SelectValue: { props: ['placeholder'], template: '<span />' },
+}))
+
+vi.mock('@lucide/vue', () => ({
+    Loader2: { template: '<svg />' },
+}))
+
+vi.mock('@/components/DatePickerInput.vue', () => ({
+    default: { template: '<input />' },
+}))
+
+vi.mock('@/components/DeleteConfirmDialog.vue', () => ({
+    default: { template: '<div class="delete-dialog-stub" />' },
+}))
+
+vi.mock('@/components/ErrorState.vue', () => ({
+    default: { template: '<div class="error-state-stub" />' },
+}))
+
+// Stub MaskEntryTable to expose each entry as a div keyed by entry id.
+// This lets tests assert which entries land inside which epoch card without
+// coupling to MaskEntryTable's own rendering logic.
+vi.mock('@/components/MaskEntryTable.vue', () => ({
+    default: defineComponent({
+        name: 'MaskEntryTable',
+        props: {
+            entries: { type: Array, default: () => [] },
+            canWrite: Boolean,
+            saving: Boolean,
+        },
+        template: `
+            <div class="mask-entry-table-stub">
+                <div
+                    v-for="e in entries"
+                    :key="e.id"
+                    class="entry-row"
+                    :data-entry-id="String(e.id)"
+                />
+            </div>
+        `,
+    }),
+}))
+
+import { makeAuthMock } from './helpers/mockUseAuth'
+import { useAuth } from '@/composables/useAuth'
+import { getMaskLog } from '@/api/equipment'
+import MaskLogManager from '@/components/MaskLogManager.vue'
+import type { MaskEpochResponse, MaskLogEntryResponse } from '@/types'
+
+// --- Fixtures ---
+
+function makeEntry(overrides: Partial<MaskLogEntryResponse> = {}): MaskLogEntryResponse {
+    return {
+        id: 1,
+        brand: 'ResMed',
+        model: 'AirFit P10',
+        style: 'pillows',
+        start_date: null,
+        size: null,
+        notes: null,
+        ...overrides,
+    }
+}
+
+function makeEpoch(overrides: Partial<MaskEpochResponse> = {}): MaskEpochResponse {
+    return {
+        mask_type: 'PillowMask',
+        style: 'pillows',
+        start_date: '2025-01-01',
+        end_date: '2025-06-30',
+        days_count: 180,
+        device_id: 1,
+        device_name: 'AirSense 11',
+        ...overrides,
+    }
+}
+
+// --- Helpers ---
+
+function setupAuthMock() {
+    vi.mocked(useAuth).mockReturnValue(makeAuthMock() as never)
+}
+
+async function mountManager(epochs: MaskEpochResponse[] = []) {
+    const wrapper = mount(MaskLogManager, { props: { epochs } })
+    await flushPromises()
+    return wrapper
+}
+
+// --- Tests ---
+
+describe('MaskLogManager', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        setupAuthMock()
+    })
+
+    it('test_entry_within_epoch_range_renders_inside_epoch_card', async () => {
+        const epoch = makeEpoch({ start_date: '2025-01-01', end_date: '2025-06-30' })
+        const entry = makeEntry({ id: 10, start_date: '2025-03-15' })
+        vi.mocked(getMaskLog).mockResolvedValue([entry])
+
+        const wrapper = await mountManager([epoch])
+
+        const cards = wrapper.findAll('.epoch-card')
+        expect(cards).toHaveLength(1)
+        expect(cards[0].find('[data-entry-id="10"]').exists()).toBe(true)
+    })
+
+    it('test_entry_with_null_start_date_renders_under_other_entries_heading', async () => {
+        const epoch = makeEpoch({ start_date: '2025-01-01', end_date: '2025-06-30' })
+        const entry = makeEntry({ id: 20, start_date: null })
+        vi.mocked(getMaskLog).mockResolvedValue([entry])
+
+        const wrapper = await mountManager([epoch])
+
+        // Entry is not inside any epoch card.
+        const cards = wrapper.findAll('.epoch-card')
+        expect(cards.every((c) => !c.find('[data-entry-id="20"]').exists())).toBe(true)
+        // "Other entries" heading is shown because epochs exist but the entry
+        // has no date and therefore cannot be bucketed into any epoch.
+        expect(wrapper.find('.other-entries-heading').exists()).toBe(true)
+        // The entry is still rendered (in the other-entries table).
+        expect(wrapper.find('[data-entry-id="20"]').exists()).toBe(true)
+    })
+
+    it('test_dated_entry_outside_all_epoch_ranges_renders_under_other_entries_heading', async () => {
+        const epoch = makeEpoch({ start_date: '2025-01-01', end_date: '2025-06-30' })
+        const entry = makeEntry({ id: 30, start_date: '2026-01-01' })
+        vi.mocked(getMaskLog).mockResolvedValue([entry])
+
+        const wrapper = await mountManager([epoch])
+
+        // Entry falls after the epoch's end_date — no match.
+        const cards = wrapper.findAll('.epoch-card')
+        expect(cards.every((c) => !c.find('[data-entry-id="30"]').exists())).toBe(true)
+        expect(wrapper.find('.other-entries-heading').exists()).toBe(true)
+        expect(wrapper.find('[data-entry-id="30"]').exists()).toBe(true)
+    })
+
+    it('test_overlapping_epochs_entry_appears_only_in_first_epoch_in_array_order', async () => {
+        const epoch1 = makeEpoch({
+            start_date: '2025-01-01',
+            end_date: '2025-06-30',
+            device_id: 1,
+            device_name: 'Device A',
+        })
+        const epoch2 = makeEpoch({
+            start_date: '2025-03-01',
+            end_date: '2025-09-30',
+            device_id: 2,
+            device_name: 'Device B',
+        })
+        // 2025-04-15 falls inside both epoch ranges.
+        const entry = makeEntry({ id: 40, start_date: '2025-04-15' })
+        vi.mocked(getMaskLog).mockResolvedValue([entry])
+
+        const wrapper = await mountManager([epoch1, epoch2])
+
+        const cards = wrapper.findAll('.epoch-card')
+        expect(cards).toHaveLength(2)
+        // Entry lands in the FIRST matching epoch (epoch1).
+        expect(cards[0].find('[data-entry-id="40"]').exists()).toBe(true)
+        // Entry does NOT duplicate into epoch2.
+        expect(cards[1].find('[data-entry-id="40"]').exists()).toBe(false)
+        // No "Other entries" heading since the entry was bucketed into an epoch.
+        expect(wrapper.find('.other-entries-heading').exists()).toBe(false)
+    })
+
+    it('test_zero_epochs_renders_no_epoch_cards_and_no_other_entries_heading', async () => {
+        const entry = makeEntry({ id: 50, start_date: '2025-03-15' })
+        vi.mocked(getMaskLog).mockResolvedValue([entry])
+
+        const wrapper = await mountManager([])
+
+        // No epoch structure at all.
+        expect(wrapper.findAll('.epoch-card')).toHaveLength(0)
+        // Heading only appears when epochs exist; with zero epochs it must be absent.
+        expect(wrapper.find('.other-entries-heading').exists()).toBe(false)
+        // Entry is still displayed in the plain (non-epoch) table.
+        expect(wrapper.find('[data-entry-id="50"]').exists()).toBe(true)
+    })
+})

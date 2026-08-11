@@ -1062,6 +1062,7 @@ export const maskLogFixture: MaskLogEntryResponse[] = [
 
 export const maskEpochsFixture: MaskEpochResponse[] = [
     {
+        device_id: 1,
         mask_type: 'Nasal',
         style: 'nasal',
         start_date: '2025-05-10',
@@ -1070,6 +1071,7 @@ export const maskEpochsFixture: MaskEpochResponse[] = [
         device_name: 'ResMed AirSense 11 AutoSet',
     },
     {
+        device_id: 1,
         mask_type: 'Pillows',
         style: 'pillows',
         start_date: '2025-11-02',

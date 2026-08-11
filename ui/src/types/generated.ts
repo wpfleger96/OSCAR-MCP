@@ -3089,11 +3089,14 @@ export interface components {
          * @description A contiguous run of nights sharing one device-reported mask type.
          *
          *     style is the normalized mask_log-style value (None when the device value is
-         *     unrecognized).
+         *     unrecognized).  device_id identifies the reporting device for multi-device
+         *     installs.
          */
         MaskEpochResponse: {
             /** Days Count */
             days_count: number
+            /** Device Id */
+            device_id: number | null
             /** Device Name */
             device_name: string | null
             /**
@@ -3111,7 +3114,10 @@ export interface components {
             /** Style */
             style: string | null
         }
-        /** MaskLogCreateRequest */
+        /**
+         * MaskLogCreateRequest
+         * @description POST body: all fields are optional — an entirely empty create is accepted.
+         */
         MaskLogCreateRequest: {
             /** Brand */
             brand?: string | null

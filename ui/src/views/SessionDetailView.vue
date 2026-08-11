@@ -50,19 +50,7 @@
             v-if="session.active_mask || maskTypeFromSettings"
             class="mask-info text-sm text-muted-foreground"
         >
-            <span v-if="session.active_mask">
-                Mask: {{ maskDisplayName
-                }}<template v-if="session.active_mask.size"
-                    >, size {{ session.active_mask.size }}</template
-                ><template v-if="session.active_mask.style || session.active_mask.start_date">
-                    ({{ styleLabel(session.active_mask.style)
-                    }}<template v-if="session.active_mask.style && session.active_mask.start_date"
-                        >, </template
-                    ><template v-if="session.active_mask.start_date"
-                        >since {{ formatDateFull(session.active_mask.start_date) }}</template
-                    >)</template
-                >
-            </span>
+            <span v-if="session.active_mask">Mask: {{ maskInfoLine }}</span>
             <span v-if="session.active_mask && maskTypeFromSettings">·</span>
             <span v-if="maskTypeFromSettings">Device type: {{ maskTypeFromSettings }}</span>
         </div>
@@ -868,6 +856,7 @@ import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { useWaveformData } from '@/composables/useWaveformData'
 import { ahiClass, formatDateWithWeekday, formatDateFull, formatDateTime } from '@/utils/formatting'
+import { maskEntryName, styleLabel } from '@/utils/maskOptions'
 import type { SessionDetail, EventItem } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
@@ -896,21 +885,17 @@ const maskTypeFromSettings = computed(
     () => session.value?.settings?.find((s) => s.key === 'mask_type')?.value ?? null,
 )
 
-const styleLabelMap: Record<string, string> = {
-    pillows: 'Pillows',
-    nasal: 'Nasal',
-    full_face: 'Full Face',
-}
-
-function styleLabel(style: string | null | undefined): string {
-    if (!style) return ''
-    return styleLabelMap[style] ?? style
-}
-
-const maskDisplayName = computed(() => {
+const maskInfoLine = computed(() => {
     const m = session.value?.active_mask
     if (!m) return ''
-    return [m.brand, m.model].filter(Boolean).join(' ')
+    const hasName = !!(m.brand || m.model)
+    let line = maskEntryName(m)
+    if (m.size) line += `, size ${m.size}`
+    const parens: string[] = []
+    if (hasName && m.style) parens.push(styleLabel(m.style))
+    if (m.start_date) parens.push(`since ${formatDateFull(m.start_date)}`)
+    if (parens.length) line += ` (${parens.join(', ')})`
+    return line
 })
 
 // STR tidal-volume stats are stored in L; convert to mL for display.

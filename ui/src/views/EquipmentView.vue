@@ -108,8 +108,7 @@
                         </div>
                         <div v-else class="settings-groups">
                             <div
-                                v-for="cat in categorizeSettings(device.current_settings)
-                                    .categories"
+                                v-for="cat in categorizedSettings.get(device.id)?.categories"
                                 :key="cat.label"
                                 class="settings-group"
                             >
@@ -126,14 +125,13 @@
                                 </dl>
                             </div>
                             <div
-                                v-if="categorizeSettings(device.current_settings).other.length"
+                                v-if="categorizedSettings.get(device.id)?.other.length"
                                 class="settings-group"
                             >
                                 <h4 class="settings-group-label">Other settings</h4>
                                 <dl class="settings-list">
                                     <div
-                                        v-for="entry in categorizeSettings(device.current_settings)
-                                            .other"
+                                        v-for="entry in categorizedSettings.get(device.id)?.other"
                                         :key="entry.key"
                                         class="setting-row"
                                     >
@@ -216,7 +214,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import { ChevronDown, HardDrive, Loader2 } from '@lucide/vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import ErrorState from '@/components/ErrorState.vue'
@@ -246,7 +244,17 @@ const epochs = computed(() => epochsData.value ?? [])
 const settingsOpen = reactive<Record<number, boolean>>({})
 const historyOpen = reactive<Record<number, boolean>>({})
 
-import { watch } from 'vue'
+// Computed once per devices change instead of three times per render per device.
+const categorizedSettings = computed(
+    () =>
+        new Map(
+            devices.value.map((d) => [
+                d.id,
+                d.current_settings ? categorizeSettings(d.current_settings) : null,
+            ]),
+        ),
+)
+
 watch(devices, (devs) => {
     for (const d of devs) {
         if (!(d.id in settingsOpen)) settingsOpen[d.id] = true

@@ -11,17 +11,21 @@
         <template v-else>
             <!-- Epoch cards (from device data) -->
             <div v-if="epochs.length > 0" class="epoch-list">
-                <div v-for="(epoch, i) in epochs" :key="i" class="epoch-card">
+                <div
+                    v-for="card in epochCards"
+                    :key="`${card.epoch.device_id ?? 'none'}:${card.epoch.start_date}`"
+                    class="epoch-card"
+                >
                     <div class="epoch-header">
                         <div class="epoch-info">
-                            <span class="epoch-style">{{ epochStyleLabel(epoch) }}</span>
+                            <span class="epoch-style">{{ epochStyleLabel(card.epoch) }}</span>
                             <span class="epoch-dates">
-                                {{ formatDateFull(epoch.start_date) }} –
-                                {{ formatDateFull(epoch.end_date) }}
+                                {{ formatDateFull(card.epoch.start_date) }} –
+                                {{ formatDateFull(card.epoch.end_date) }}
                             </span>
-                            <span class="epoch-nights">{{ epoch.days_count }} nights</span>
-                            <span v-if="epoch.device_name" class="epoch-device">
-                                {{ epoch.device_name }}
+                            <span class="epoch-nights">{{ card.epoch.days_count }} nights</span>
+                            <span v-if="card.epoch.device_name" class="epoch-device">
+                                {{ card.epoch.device_name }}
                             </span>
                         </div>
                         <Button
@@ -29,14 +33,14 @@
                             size="sm"
                             variant="outline"
                             :disabled="saving"
-                            @click="prefillFromEpoch(epoch)"
+                            @click="prefillFromEpoch(card.epoch)"
                         >
                             Add details
                         </Button>
                     </div>
-                    <div v-if="(entriesByEpoch.get(epoch) ?? []).length > 0" class="epoch-entries">
+                    <div v-if="card.entries.length > 0" class="epoch-entries">
                         <MaskEntryTable
-                            :entries="entriesByEpoch.get(epoch) ?? []"
+                            :entries="card.entries"
                             :can-write="canWrite"
                             :saving="saving"
                             @edit="startEdit"
@@ -292,8 +296,10 @@ import {
     CUSTOM_VALUE,
     MASK_CATALOG,
     SIZES_BY_STYLE,
+    STYLE_OPTIONS,
     findBrand,
     findModel,
+    styleLabel,
     type MaskStyle,
 } from '@/utils/maskOptions'
 
@@ -311,25 +317,12 @@ const {
 // API returns entries oldest-first; show most recent first.
 const masks = computed<MaskLogEntryResponse[]>(() => [...(maskData.value ?? [])].reverse())
 
-// --- Style options (Nasal first, then Full Face, then Pillows) ---
-
-const STYLE_OPTIONS: { value: MaskStyle; label: string }[] = [
-    { value: 'nasal', label: 'Nasal' },
-    { value: 'full_face', label: 'Full Face' },
-    { value: 'pillows', label: 'Pillows' },
-]
-
 // Sentinel for the unset style Select option.
 const STYLE_UNSET = '__style_none__'
 
-function styleLabel(style: string): string {
-    return STYLE_OPTIONS.find((o) => o.value === style)?.label ?? style
-}
-
 function epochStyleLabel(epoch: MaskEpochResponse): string {
-    if (epoch.style) return styleLabel(epoch.style)
     // Device reported an unrecognized mask type — show it verbatim.
-    return epoch.mask_type
+    return styleLabel(epoch.style) || epoch.mask_type
 }
 
 // --- Per-field catalog/custom mode ---
@@ -535,6 +528,9 @@ async function handleSubmit() {
 // --- Epoch entry grouping ---
 
 // Single pass over entries: bucket each into its first matching epoch or the "other" list.
+// Tie-break: an entry whose start_date falls inside multiple epochs (possible when two devices'
+// date ranges overlap) lands in the FIRST epoch in chronological array order — deliberate,
+// so entries do not duplicate across cards.
 const epochGrouping = computed(() => {
     const byEpoch = new Map<MaskEpochResponse, MaskLogEntryResponse[]>(
         props.epochs.map((e) => [e, []]),
@@ -555,7 +551,14 @@ const epochGrouping = computed(() => {
     return { byEpoch, other }
 })
 
-const entriesByEpoch = computed(() => epochGrouping.value.byEpoch)
+// Flat list of {epoch, entries} cards for stable keying and single Map lookup per render.
+const epochCards = computed(() =>
+    props.epochs.map((epoch) => ({
+        epoch,
+        entries: epochGrouping.value.byEpoch.get(epoch) ?? [],
+    })),
+)
+
 const otherEntries = computed(() => epochGrouping.value.other)
 
 // --- Delete ---

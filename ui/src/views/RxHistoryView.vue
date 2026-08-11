@@ -197,6 +197,7 @@ import { getMaskLog } from '@/api/equipment'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
 import { settingLabel, formatSettingValue } from '@/utils/deviceSettings'
+import { maskEntryName, styleLabel } from '@/utils/maskOptions'
 import type { MaskLogEntryResponse, RxPeriodResponse, RxSettingChange } from '@/types'
 import ErrorState from '@/components/ErrorState.vue'
 
@@ -247,27 +248,9 @@ function summarizeSettings(settings: Record<string, string>): string {
 
 // --- Mask log ---
 
-type MaskStyle = 'pillows' | 'nasal' | 'full_face'
-
-const STYLE_OPTIONS: { value: MaskStyle; label: string }[] = [
-    { value: 'pillows', label: 'Pillows' },
-    { value: 'nasal', label: 'Nasal' },
-    { value: 'full_face', label: 'Full Face' },
-]
-
-function styleLabel(style: string | null | undefined): string {
-    if (!style) return ''
-    return STYLE_OPTIONS.find((o) => o.value === style)?.label ?? style
-}
-
 function maskSummary(entry: MaskLogEntryResponse): string {
-    const nameParts = [entry.brand, entry.model].filter(Boolean)
-    const hasName = nameParts.length > 0
-    const name = hasName
-        ? nameParts.join(' ')
-        : entry.style
-          ? styleLabel(entry.style)
-          : 'unspecified mask'
+    const hasName = !!(entry.brand || entry.model)
+    const name = maskEntryName(entry)
     const details: string[] = []
     if (hasName && entry.style) details.push(styleLabel(entry.style))
     if (entry.size) details.push(`size ${entry.size}`)
