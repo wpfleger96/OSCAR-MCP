@@ -12,10 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.analysis.rx_tracker import (
     TIMELINE_KEYS,
     RxTracker,
+    _describe_mask,
     _diff_settings,
     changed_setting_keys,
+    merge_changes_with_mask_log,
 )
 from snore.database.models import Day, Device, Session, Setting
+from snore.services.schemas import MaskLogEntryResponse
 
 
 async def _create_device(
@@ -1093,3 +1096,135 @@ class TestTimelineKeys:
         assert result.days_count == 6
         assert result.start_date == base
         assert "mask_type" not in result.settings
+
+
+def _make_mask_entry(**kwargs: object) -> MaskLogEntryResponse:
+    """Build a MaskLogEntryResponse with sensible defaults, overridable per-test."""
+    defaults: dict[str, object] = {
+        "id": 1,
+        "brand": "ResMed",
+        "model": "AirFit P10",
+        "style": "pillows",
+        "start_date": date(2025, 6, 1),
+        "size": None,
+        "notes": None,
+    }
+    defaults.update(kwargs)
+    return MaskLogEntryResponse.model_validate(defaults)
+
+
+class TestDescribeMask:
+    """Tests for _describe_mask() with the new nullable brand/model/style contract."""
+
+    def test_full_brand_and_model_no_size(self):
+        entry = _make_mask_entry(brand="ResMed", model="AirFit P10", style="pillows", size=None)
+        assert _describe_mask(entry) == "ResMed AirFit P10"
+
+    def test_full_brand_and_model_with_size(self):
+        entry = _make_mask_entry(brand="ResMed", model="AirFit P10", style="pillows", size="M")
+        assert _describe_mask(entry) == "ResMed AirFit P10 (M)"
+
+    def test_brand_only_no_model(self):
+        entry = _make_mask_entry(brand="ResMed", model=None, style="pillows", size=None)
+        assert _describe_mask(entry) == "ResMed"
+
+    def test_model_only_no_brand(self):
+        entry = _make_mask_entry(brand=None, model="AirFit P10", style="pillows", size=None)
+        assert _describe_mask(entry) == "AirFit P10"
+
+    def test_style_fallback_when_no_brand_or_model(self):
+        entry = _make_mask_entry(brand=None, model=None, style="pillows", size=None)
+        assert _describe_mask(entry) == "pillows"
+
+    def test_style_fallback_with_size(self):
+        entry = _make_mask_entry(brand=None, model=None, style="pillows", size="M")
+        assert _describe_mask(entry) == "pillows (M)"
+
+    def test_unspecified_mask_when_all_none(self):
+        entry = _make_mask_entry(brand=None, model=None, style=None, size=None)
+        assert _describe_mask(entry) == "unspecified mask"
+
+    def test_model_only_with_size(self):
+        entry = _make_mask_entry(brand=None, model="AirFit P10", style="pillows", size="S")
+        assert _describe_mask(entry) == "AirFit P10 (S)"
+
+
+class TestMergeChangesWithMaskLog:
+    """Tests for merge_changes_with_mask_log() with null-date entries skipped."""
+
+    def test_null_date_entry_skipped_entirely(self):
+        """An entry with start_date=None is excluded from the merged timeline."""
+        null_entry = _make_mask_entry(
+            id=1, brand="ResMed", model="AirFit P10", style="pillows",
+            start_date=None,
+        )
+        window_start = date(2025, 6, 1)
+        window_end = date(2025, 6, 30)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[],
+            mask_entries=[null_entry],
+            start=window_start,
+            end=window_end,
+        )
+
+        assert result == []
+
+    def test_null_date_entry_does_not_perturb_prev_desc(self):
+        """A null-date entry sandwiched before a dated entry leaves prev_desc unaffected.
+
+        The dated entry after the null-date entry should see the last DATED
+        entry's description as old_value, as if the null-date entry never existed.
+        """
+        first_dated = _make_mask_entry(
+            id=1, brand="ResMed", model="AirFit P10", style="pillows",
+            start_date=date(2025, 5, 1),
+        )
+        null_entry = _make_mask_entry(
+            id=2, brand="Philips", model="DreamWear", style="nasal",
+            start_date=None,
+        )
+        second_dated = _make_mask_entry(
+            id=3, brand="Fisher & Paykel", model="Evora", style="full_face",
+            start_date=date(2025, 6, 15),
+        )
+        window_start = date(2025, 6, 1)
+        window_end = date(2025, 6, 30)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[],
+            mask_entries=[first_dated, null_entry, second_dated],
+            start=window_start,
+            end=window_end,
+        )
+
+        # Only second_dated falls in the window; old_value must come from
+        # first_dated (the last dated entry before the window), NOT from
+        # null_entry which is skipped entirely.
+        assert len(result) == 1
+        assert result[0].new_value == "Fisher & Paykel Evora"
+        assert result[0].old_value == "ResMed AirFit P10"
+
+    def test_first_dated_entry_after_null_has_none_old_value(self):
+        """When no prior dated entry exists, old_value is None even if a null-date entry precedes."""
+        null_entry = _make_mask_entry(
+            id=1, brand="Philips", model="DreamWear", style="nasal",
+            start_date=None,
+        )
+        dated = _make_mask_entry(
+            id=2, brand="ResMed", model="AirFit P10", style="pillows",
+            start_date=date(2025, 6, 10),
+        )
+        window_start = date(2025, 6, 1)
+        window_end = date(2025, 6, 30)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[],
+            mask_entries=[null_entry, dated],
+            start=window_start,
+            end=window_end,
+        )
+
+        assert len(result) == 1
+        assert result[0].new_value == "ResMed AirFit P10"
+        assert result[0].old_value is None

@@ -9,11 +9,20 @@ from snore.api.schemas import (
     MaskLogEntryResponse,
     MaskLogUpdateRequest,
 )
-from snore.services import MaskLogService
+from snore.services import MaskEpochService, MaskLogService
+from snore.services.schemas import MaskEpochResponse
 
 router = APIRouter()
 
 MaskLogServiceDep = Annotated[MaskLogService, Depends(service_dep(MaskLogService))]
+MaskEpochServiceDep = Annotated[MaskEpochService, Depends(service_dep(MaskEpochService))]
+
+
+@router.get("/masks/epochs", response_model=list[MaskEpochResponse])
+async def list_mask_epochs(
+    service: MaskEpochServiceDep,
+) -> list[MaskEpochResponse]:
+    return await service.list_epochs()
 
 
 @router.get("/masks", response_model=list[MaskLogEntryResponse])

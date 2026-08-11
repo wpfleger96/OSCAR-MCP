@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
@@ -42,13 +42,16 @@ class MaskLogService:
         return entry
 
     async def list_entries(self) -> list[MaskLogEntryResponse]:
-        """List all mask log entries for this profile ordered by start date."""
+        """List all mask log entries for this profile ordered by start date (NULLs last)."""
         entries = (
             (
                 await self.db_session.execute(
                     select(models.MaskLogEntry)
                     .where(models.MaskLogEntry.profile_id == self.profile_id)
-                    .order_by(models.MaskLogEntry.start_date, models.MaskLogEntry.id)
+                    .order_by(
+                        nulls_last(models.MaskLogEntry.start_date),
+                        models.MaskLogEntry.id,
+                    )
                 )
             )
             .scalars()
@@ -59,10 +62,10 @@ class MaskLogService:
     async def create_entry(
         self,
         *,
-        brand: str,
-        model: str,
-        style: str,
-        start_date: date,
+        brand: str | None = None,
+        model: str | None = None,
+        style: str | None = None,
+        start_date: date | None = None,
         size: str | None = None,
         notes: str | None = None,
     ) -> MaskLogEntryResponse:

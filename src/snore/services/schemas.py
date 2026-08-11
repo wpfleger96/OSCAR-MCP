@@ -29,8 +29,9 @@ __all__ = [
     "SettingsChange",
     "DeviceUsageSummary",
     "DeviceDetail",
-    # Mask equipment log schema (consumed by MaskLogService and API routers)
+    # Mask equipment log schemas (consumed by MaskLogService and API routers)
     "MaskLogEntryResponse",
+    "MaskEpochResponse",
     # RX / Day / Event schemas (consumed by RxService, DayService, and API routers)
     "DayListItem",
     "DayDetail",
@@ -298,12 +299,27 @@ class MaskLogEntryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    brand: str
-    model: str
+    brand: str | None = None
+    model: str | None = None
     size: str | None = None
-    style: str
-    start_date: date
+    style: str | None = None
+    start_date: date | None = None
     notes: str | None = None
+
+
+class MaskEpochResponse(BaseModel):
+    """A contiguous run of nights sharing one device-reported mask type.
+
+    style is the normalized mask_log-style value (None when the device value is
+    unrecognized).
+    """
+
+    mask_type: str
+    style: str | None
+    start_date: date
+    end_date: date
+    days_count: int
+    device_name: str | None
 
 
 class SessionSetting(BaseModel):

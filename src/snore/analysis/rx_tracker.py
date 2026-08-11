@@ -69,9 +69,13 @@ def _diff_settings(
 
 
 def _describe_mask(entry: MaskLogEntryResponse) -> str:
-    """Return "Brand Model (size)", omitting the parens when size is null."""
-    desc = f"{entry.brand} {entry.model}"
-    return f"{desc} ({entry.size})" if entry.size else desc
+    """Return a human-readable mask name, handling nullable brand/model/style.
+
+    Builds the name from the non-null parts of brand and model; falls back to
+    style, then "unspecified mask".  Appends "(size)" when size is set.
+    """
+    name = " ".join(p for p in (entry.brand, entry.model) if p) or entry.style or "unspecified mask"
+    return f"{name} ({entry.size})" if entry.size else name
 
 
 def merge_changes_with_mask_log(
@@ -88,6 +92,9 @@ def merge_changes_with_mask_log(
     included.  ``mask_entries`` must be the FULL (start_date, id)-ordered log,
     not pre-windowed, so the first in-range entry's old_value can come from
     the latest entry before the range (None for the first entry ever logged).
+
+    Mask log entries with a null start_date are skipped and do not appear in
+    the output or affect the prev_desc running state.
 
     Returns entries sorted by (date, source, device_id, key).
     """
@@ -107,6 +114,10 @@ def merge_changes_with_mask_log(
 
     prev_desc: str | None = None
     for entry in mask_entries:
+        # Entries without a start_date cannot be placed on the timeline; skip
+        # entirely so they don't affect prev_desc either.
+        if entry.start_date is None:
+            continue
         desc = _describe_mask(entry)
         if start <= entry.start_date <= end:
             merged.append(

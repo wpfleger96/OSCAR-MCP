@@ -157,3 +157,191 @@ class TestGetActiveEntryForDate:
         result = await service.get_active_entry_for_date(date(2025, 6, 15))
 
         assert result is None
+
+
+class TestCreateEntryAllOptional:
+    """Tests for create_entry() with all identity fields now optional."""
+
+    async def test_all_none_create_entry_round_trips(
+        self, async_db_session, async_test_profile
+    ):
+        """Creating an entry with all identity fields None persists and returns them as None."""
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        result = await service.create_entry(
+            brand=None,
+            model=None,
+            style=None,
+            start_date=None,
+        )
+
+        assert result.id is not None
+        assert result.brand is None
+        assert result.model is None
+        assert result.style is None
+        assert result.start_date is None
+        assert result.size is None
+        assert result.notes is None
+
+    async def test_partial_create_brand_only_round_trips(
+        self, async_db_session, async_test_profile
+    ):
+        """Creating an entry with only brand set returns brand and nulls for the rest."""
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        result = await service.create_entry(
+            brand="ResMed",
+            model=None,
+            style=None,
+            start_date=None,
+        )
+
+        assert result.brand == "ResMed"
+        assert result.model is None
+        assert result.style is None
+        assert result.start_date is None
+
+
+class TestGetActiveEntryNullDate:
+    """Tests that null-start_date entries are never considered active for any date."""
+
+    async def test_null_start_date_entry_never_returned_as_active(
+        self, async_db_session, async_test_profile
+    ):
+        """An entry with start_date=None is never returned by get_active_entry_for_date."""
+        entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=None,
+        )
+        async_db_session.add(entry)
+        await async_db_session.flush()
+
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        result = await service.get_active_entry_for_date(date(2025, 6, 15))
+
+        assert result is None
+
+    async def test_null_date_entry_invisible_even_as_only_entry(
+        self, async_db_session, async_test_profile
+    ):
+        """Null-date entry as the only entry: any target_date returns None."""
+        entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand=None,
+            model=None,
+            style=None,
+            start_date=None,
+        )
+        async_db_session.add(entry)
+        await async_db_session.flush()
+
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        # Query both the distant past and far future — null-date entry must not appear.
+        assert await service.get_active_entry_for_date(date(2000, 1, 1)) is None
+        assert await service.get_active_entry_for_date(date(2099, 12, 31)) is None
+
+    async def test_null_date_entry_does_not_shadow_earlier_dated_entry(
+        self, async_db_session, async_test_profile
+    ):
+        """With a null-date entry and a dated entry, the dated entry is still returned."""
+        dated_entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 6, 1),
+        )
+        null_entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="Philips",
+            model="DreamWear",
+            style="nasal",
+            start_date=None,
+        )
+        async_db_session.add(dated_entry)
+        async_db_session.add(null_entry)
+        await async_db_session.flush()
+
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        result = await service.get_active_entry_for_date(date(2025, 6, 15))
+
+        assert result is not None
+        assert result.brand == "ResMed"
+        assert result.model == "AirFit P10"
+
+
+class TestListEntriesOrdering:
+    """Tests for list_entries() ORDER BY start_date NULLS LAST ordering."""
+
+    async def test_null_start_date_entries_ordered_last(
+        self, async_db_session, async_test_profile
+    ):
+        """Entries with null start_date appear after all dated entries."""
+        dated_early = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 3, 1),
+        )
+        dated_late = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="Philips",
+            model="DreamWear",
+            style="nasal",
+            start_date=date(2025, 6, 1),
+        )
+        null_entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="Fisher & Paykel",
+            model="Evora",
+            style="full_face",
+            start_date=None,
+        )
+        # Insert in non-date order to confirm ordering comes from SQL, not insert order.
+        async_db_session.add(null_entry)
+        async_db_session.add(dated_late)
+        async_db_session.add(dated_early)
+        await async_db_session.flush()
+
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        results = await service.list_entries()
+
+        assert len(results) == 3
+        assert results[0].start_date == date(2025, 3, 1)
+        assert results[1].start_date == date(2025, 6, 1)
+        assert results[2].start_date is None
+
+    async def test_multiple_null_start_date_entries_ordered_by_id(
+        self, async_db_session, async_test_profile
+    ):
+        """Multiple null-date entries are ordered by id as the tiebreak."""
+        first_null = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=None,
+        )
+        async_db_session.add(first_null)
+        await async_db_session.flush()
+
+        second_null = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="Philips",
+            model="DreamWear",
+            style="nasal",
+            start_date=None,
+        )
+        async_db_session.add(second_null)
+        await async_db_session.flush()
+
+        assert second_null.id > first_null.id
+
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        results = await service.list_entries()
+
+        assert len(results) == 2
+        assert results[0].id == first_null.id
+        assert results[1].id == second_null.id
