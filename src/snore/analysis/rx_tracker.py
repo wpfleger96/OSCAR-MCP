@@ -74,7 +74,11 @@ def _describe_mask(entry: MaskLogEntryResponse) -> str:
     Builds the name from the non-null parts of brand and model; falls back to
     style, then "unspecified mask".  Appends "(size)" when size is set.
     """
-    name = " ".join(p for p in (entry.brand, entry.model) if p) or entry.style or "unspecified mask"
+    name = (
+        " ".join(p for p in (entry.brand, entry.model) if p)
+        or entry.style
+        or "unspecified mask"
+    )
     return f"{name} ({entry.size})" if entry.size else name
 
 

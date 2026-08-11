@@ -124,9 +124,7 @@ class TestMaskLogValidation:
         assert response.status_code == 422
 
     @pytest.mark.parametrize("field", ["brand", "model", "style", "start_date"])
-    def test_patch_null_clears_field_returns_200(
-        self, api_client, test_profile, field
-    ):
+    def test_patch_null_clears_field_returns_200(self, api_client, test_profile, field):
         response = api_client.post(MASKS_URL, json=_create_entry_payload())
         entry_id = response.json()["id"]
 
@@ -352,9 +350,7 @@ class TestMaskLogOptionalFields:
         assert response.status_code == 200
         assert response.json()[field] is None
 
-    def test_list_orders_null_start_date_entries_last(
-        self, api_client, test_profile
-    ):
+    def test_list_orders_null_start_date_entries_last(self, api_client, test_profile):
         # Create two dated entries and one with no start_date.
         for start_date in ("2025-06-15", "2025-06-01"):
             resp = api_client.post(
@@ -389,9 +385,7 @@ class TestMaskEpochsEndpoint:
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_two_mask_types_two_epochs(
-        self, api_client, db_session, test_profile
-    ):
+    def test_two_mask_types_two_epochs(self, api_client, db_session, test_profile):
         """Two distinct mask_type values produce two separate epochs."""
         device = _create_device(db_session, test_profile.id)
         base = date(2025, 6, 1)
@@ -400,13 +394,17 @@ class TestMaskEpochsEndpoint:
         # Epoch 1: Pillows on days 0–2
         for i in range(3):
             _create_day_with_settings(
-                db_session, device, base + timedelta(days=i),
+                db_session,
+                device,
+                base + timedelta(days=i),
                 settings={**rx, "mask_type": "Pillows"},
             )
         # Epoch 2: Nasal on days 3–4
         for i in range(3, 5):
             _create_day_with_settings(
-                db_session, device, base + timedelta(days=i),
+                db_session,
+                device,
+                base + timedelta(days=i),
                 settings={**rx, "mask_type": "Nasal"},
             )
 
@@ -439,7 +437,9 @@ class TestMaskEpochsEndpoint:
         base = date(2025, 7, 1)
         for i in range(2):
             _create_day_with_settings(
-                db_session, device, base + timedelta(days=i),
+                db_session,
+                device,
+                base + timedelta(days=i),
                 settings={"mask_type": "Unknown"},
             )
 
@@ -460,17 +460,23 @@ class TestMaskEpochsEndpoint:
 
         # Day 0: Nasal
         _create_day_with_settings(
-            db_session, device, base,
+            db_session,
+            device,
+            base,
             settings={"mask_type": "Nasal"},
         )
         # Day 1: no mask_type setting (only other settings, no mask_type key)
         _create_day_with_settings(
-            db_session, device, base + timedelta(days=1),
+            db_session,
+            device,
+            base + timedelta(days=1),
             settings={"mode": "CPAP"},
         )
         # Day 2: Nasal again — same as day 0, should bridge
         _create_day_with_settings(
-            db_session, device, base + timedelta(days=2),
+            db_session,
+            device,
+            base + timedelta(days=2),
             settings={"mask_type": "Nasal"},
         )
 
@@ -489,7 +495,9 @@ class TestMaskEpochsEndpoint:
     ):
         device = _create_device(db_session, test_profile.id)
         _create_day_with_settings(
-            db_session, device, date(2025, 9, 1),
+            db_session,
+            device,
+            date(2025, 9, 1),
             settings={"mask_type": "Full Face"},
         )
 
@@ -506,7 +514,9 @@ class TestMaskEpochsEndpoint:
         foreign_profile = _create_foreign_profile(db_session)
         foreign_device = _create_device(db_session, foreign_profile.id)
         _create_day_with_settings(
-            db_session, foreign_device, date(2025, 6, 1),
+            db_session,
+            foreign_device,
+            date(2025, 6, 1),
             settings={"mask_type": "Pillows"},
         )
 
