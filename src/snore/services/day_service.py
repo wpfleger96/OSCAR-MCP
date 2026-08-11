@@ -94,6 +94,10 @@ class DayService:
         rows = (await self.db_session.execute(stmt)).scalars().all()
 
         if not rows:
+            if device_id is not None:
+                raise NotFoundError(
+                    f"No data found for device_id={device_id} on date {day_date}"
+                )
             raise NotFoundError(f"No data found for date {day_date}")
 
         if len(rows) > 1:

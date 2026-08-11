@@ -13,7 +13,7 @@ import click
 
 from snore.cli.decorators import (
     actor_options,
-    date_range_options_required,
+    date_range_options,
     db_option,
 )
 from snore.cli.decorators import (
@@ -33,7 +33,7 @@ from snore.cli.display import (
 
 
 @click.command()
-@date_range_options_required
+@date_range_options
 @click.option(
     "--mode",
     "-m",
@@ -61,8 +61,8 @@ from snore.cli.display import (
 @db_option
 @actor_options
 def validate(
-    date_from: datetime,
-    date_to: datetime,
+    date_from: datetime | None,
+    date_to: datetime | None,
     mode: str,
     export: str | None,
     integrity: bool,
@@ -77,7 +77,7 @@ def validate(
     Validates SNORE's detection against machine events for sessions in the specified
     date range, and displays aggregate metrics.
 
-    Use --integrity to run a structural data-integrity check instead.
+    Use --integrity to run a structural data-integrity check instead (dates not required).
     """
     if db and not Path(db).expanduser().exists():
         raise click.ClickException(f"Database not found: {db}")
@@ -88,6 +88,9 @@ def validate(
     if integrity:
         asyncio.run(_run_integrity(db, actor_user, actor_profile, device_id))
         return
+
+    if date_from is None or date_to is None:
+        raise click.UsageError("--from and --to are required unless --integrity is set")
 
     if date_from > date_to:
         raise click.ClickException("--from date must be before or equal to --to date")

@@ -172,6 +172,7 @@ class TestOverlapGuardReplacement:
                 day_id,
                 new_id,
                 extra_day_ids,
+                _deleted,
             ) = await importer._import_single_session(async_db_session, incoming)
 
         assert was_imported is True
@@ -200,6 +201,7 @@ class TestOverlapGuardReplacement:
                 day_id,
                 new_id,
                 extra_day_ids,
+                _deleted,
             ) = await importer._import_single_session(async_db_session, incoming)
 
         assert was_imported is True
@@ -227,6 +229,7 @@ class TestOverlapGuardReplacement:
                     day_id,
                     new_id,
                     extra_day_ids,
+                    _deleted,
                 ) = await importer._import_single_session(async_db_session, incoming)
 
         assert was_imported is False
@@ -254,6 +257,7 @@ class TestOverlapGuardReplacement:
                 day_id,
                 new_id,
                 extra_day_ids,
+                _deleted,
             ) = await importer._import_single_session(async_db_session, incoming)
 
         assert was_imported is True
@@ -279,6 +283,7 @@ class TestOverlapGuardReplacement:
                 day_id,
                 new_id,
                 extra_day_ids,
+                _deleted,
             ) = await importer._import_single_session(
                 async_db_session, incoming, force=True
             )
@@ -290,40 +295,62 @@ class TestOverlapGuardReplacement:
     async def test_replaced_row_different_day_yields_extra_day_id(
         self, async_db_session, importer, device
     ):
-        """If a replaced session belongs to a Day that differs from the new session's
-        day, its day_id appears in extra_day_ids for re-aggregation."""
-        # Session from 23:00 on day 10 through 03:00 on day 11.
-        # DayManager assigns it to day 10 (starts at 23:00 → after noon → day 10).
-        await _seed_session(
-            async_db_session,
-            device,
-            "20260110_230000",
-            _dt(10, 23),
-            _dt(11, 3),
-        )
-        await async_db_session.flush()
+        """A session on therapy day N replaced by a session that lands on therapy day
+        N-1 must result in day N being re-aggregated, then deleted as an empty orphan.
 
-        # Wider incoming session: 22:30 on day 10 through 04:00 on day 11.
-        # It covers the existing session entirely.
-        # DayManager assigns it to day 10 (starts at 22:30 → after noon).
-        incoming = _make_unified(
-            _SERIAL, "20260110_merged", _dt(10, 22, 30), _dt(11, 4)
-        )
+        The noon split: start < 12:00 → previous calendar day; start >= 12:00 → same day.
+        Existing starts at 13:00 on day 20 → therapy day 20.
+        Incoming covering session starts at 11:00 on day 20 → therapy day 19 (before noon).
+        After replacement day 20 is empty and must be cleaned up.
+        """
+        from sqlalchemy import select as sa_select  # noqa: PLC0415
 
-        async with async_db_session.begin_nested():
+        from snore.database.importers import SessionImporter  # noqa: PLC0415
+        from snore.database.models import Day  # noqa: PLC0415
+
+        full_importer = SessionImporter(profile_id=importer.profile_id)
+
+        # Import session A (therapy day 20) via the full batch path to get proper Day setup.
+        session_a = _make_unified(_SERIAL, "20260120_130000", _dt(20, 13), _dt(20, 19))
+        await full_importer.import_sessions_batch([session_a], db=async_db_session)
+
+        days_before = (
             (
-                was_imported,
-                new_day_id,
-                new_id,
-                extra_day_ids,
-            ) = await importer._import_single_session(async_db_session, incoming)
+                await async_db_session.execute(
+                    sa_select(Day).where(Day.device_id == device.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(days_before) == 1
+        assert days_before[0].session_count == 1
 
-        assert was_imported is True
-        assert await _session_exists(async_db_session, "20260110_merged")
-        # extra_day_ids is the set of replaced day_ids minus the new session's day_id
-        assert isinstance(extra_day_ids, set)
-        # In this case both sessions land on the same day (day 10), so no extra
-        assert extra_day_ids == set()
+        # Import session B: 11:00–21:00 → therapy day 19.  B fully covers A.
+        session_b = _make_unified(_SERIAL, "20260120_merged", _dt(20, 11), _dt(20, 21))
+        imported, skipped, failed, ids = await full_importer.import_sessions_batch(
+            [session_b], db=async_db_session
+        )
+
+        assert imported == 1
+        assert skipped == 0
+        # Session A must be gone, session B present.
+        assert not await _session_exists(async_db_session, "20260120_130000")
+        assert await _session_exists(async_db_session, "20260120_merged")
+
+        # Therapy day 20 (orphaned after A was deleted) must have been cleaned up.
+        # Therapy day 19 (B's day) must remain with session_count == 1.
+        days_after = (
+            (
+                await async_db_session.execute(
+                    sa_select(Day).where(Day.device_id == device.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(days_after) == 1
+        assert days_after[0].session_count == 1
 
     async def test_force_with_partial_overlap_skips_and_preserves_existing(
         self, async_db_session, importer, device, caplog
@@ -356,6 +383,7 @@ class TestOverlapGuardReplacement:
                     day_id,
                     new_id,
                     extra_day_ids,
+                    _deleted,
                 ) = await importer._import_single_session(
                     async_db_session, incoming, force=True
                 )
@@ -417,3 +445,56 @@ class TestOverlapGuardReplacement:
         # Exactly one Day row — the original orphan was not left behind.
         assert len(days) == 1
         assert days[0].session_count == 1
+
+
+class TestBatchSessionIdPruning:
+    async def test_intra_batch_replacement_prunes_stale_id(
+        self, async_db_session, importer, device
+    ):
+        """If session B in a batch fully covers and replaces session A (also in the
+        same batch), the returned session_ids must contain only B's ID — not A's
+        now-deleted ID, which would cause downstream consumers to hit a missing row.
+        """
+        # A: 01:00–07:00 on day 17
+        session_a = _make_unified(_SERIAL, "20260117_010000", _dt(17, 1), _dt(17, 7))
+        # B: 00:30–07:30 on day 17 — fully covers A (new.start ≤ A.start, new.end ≥ A.end)
+        session_b = _make_unified(
+            _SERIAL, "20260117_merged", _dt(17, 0, 30), _dt(17, 7, 30)
+        )
+
+        from snore.database.importers import SessionImporter  # noqa: PLC0415
+
+        full_importer = SessionImporter(profile_id=importer.profile_id)
+        (
+            imported,
+            skipped,
+            failed,
+            session_ids,
+        ) = await full_importer.import_sessions_batch(
+            [session_a, session_b], db=async_db_session
+        )
+
+        assert imported == 2  # both "imported" (A counted when it first imported)
+        assert skipped == 0
+        assert failed == 0
+        # A's ID must be pruned; only B's ID survives
+        assert len(session_ids) == 1
+        # The surviving session must be B (the merger)
+        assert await _session_exists(async_db_session, "20260117_merged")
+        assert not await _session_exists(async_db_session, "20260117_010000")
+        # Verify the returned ID matches the surviving row
+        from sqlalchemy import select as sa_select  # noqa: PLC0415
+
+        from snore.database import models as m  # noqa: PLC0415
+
+        survivor = (
+            (
+                await async_db_session.execute(
+                    sa_select(m.Session).where(m.Session.device_id == device.id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert survivor is not None
+        assert session_ids[0] == survivor.id

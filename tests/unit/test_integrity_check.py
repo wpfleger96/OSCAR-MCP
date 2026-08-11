@@ -268,3 +268,39 @@ class TestIntegrityCheckDeviceFilter:
         assert report.device_id_filter == device.id
         assert report.overlapping_session_pairs == []
         assert report.total_issues == 0
+
+
+class TestValidateCLIIntegrityFlag:
+    def test_integrity_flag_accepted_without_dates(self, tmp_path):
+        """snore validate --integrity must not require --from / --to.
+
+        Invokes the validate Click command in isolation (no real DB) and checks
+        that the UsageError for missing dates is NOT raised when --integrity is set.
+        The command will fail when it tries to open the non-existent DB path, but
+        that ClickException is distinct from the date-required UsageError.
+        """
+        from click.testing import CliRunner  # noqa: PLC0415
+
+        from snore.cli.commands.validate import validate  # noqa: PLC0415
+
+        runner = CliRunner()
+        # Point at a non-existent DB so the command fails fast after option parsing.
+        result = runner.invoke(
+            validate, ["--integrity", "--db", str(tmp_path / "no.db")]
+        )
+
+        # Must NOT be the "missing --from / --to" UsageError.
+        assert "required unless --integrity" not in (result.output or "")
+        # Must fail for the missing-DB reason (ClickException with "not found").
+        assert "not found" in result.output.lower()
+
+    def test_missing_dates_without_integrity_raises_usage_error(self):
+        """Without --integrity, omitting --from or --to triggers a UsageError."""
+        from click.testing import CliRunner  # noqa: PLC0415
+
+        from snore.cli.commands.validate import validate  # noqa: PLC0415
+
+        runner = CliRunner()
+        result = runner.invoke(validate, [])
+        assert result.exit_code != 0
+        assert "required unless --integrity" in (result.output or "")
