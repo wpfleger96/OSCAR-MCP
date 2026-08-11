@@ -25,6 +25,7 @@ from snore.api.errors import (
     not_found_handler,
     server_error_handler,
 )
+from snore.api.import_jobs import get_live_spool_dirs
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.import_jobs import start_import_worker as _start_import_worker
 from snore.api.import_jobs import start_reaper as _start_import_reaper
@@ -160,7 +161,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Start a single lifespan-owned TTL reaper, the analysis job worker, and the
     # import job worker (serialises execution to avoid SQLite write-lock contention).
-    reaper_thread, reaper_stop = _start_import_reaper(interval=60.0)
+    # The spool sweep runs each reaper tick so directories orphaned by a crash or
+    # restart mid-upload are removed periodically, not only at startup.  The lambda
+    # calls get_live_spool_dirs() at each tick — not at capture time — so active
+    # uploads are always excluded from the sweep.
+    reaper_thread, reaper_stop = _start_import_reaper(
+        interval=60.0,
+        spool_sweep_fn=lambda: _cleanup_stale_upload_spool_dirs(
+            skip_paths=get_live_spool_dirs()
+        ),
+    )
     _start_analysis_worker()
     from snore.api.import_worker import _run_import  # noqa: PLC0415
 
@@ -454,11 +464,17 @@ _STALE_UPLOAD_TMPDIR_AGE_SECONDS: float = 2 * 3600  # 2 hours
 def _cleanup_stale_upload_spool_dirs(
     skip_paths: set[Path] | frozenset[Path] = frozenset(),
 ) -> None:
-    """Remove orphaned upload spool directories from a previous crashed process.
+    """Remove orphaned upload spool directories.
+
+    Called at startup (once, to clear dirs from a previous crashed process) and
+    then periodically by the reaper thread.  The periodic call passes
+    ``get_live_spool_dirs()`` as *skip_paths* so active uploads are never
+    removed — chunk writes land in subdirectories and do not bump the top-level
+    spool dir mtime, making mtime alone an unreliable liveness signal.
 
     Scans both the legacy ``snore-upload-*`` prefix in the system temp dir
     (backward compat) and the durable spool directory on the persistent volume.
-    Directories in *skip_paths* are preserved for startup resume.
+    Directories in *skip_paths* are preserved unconditionally.
     """
     import shutil  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
@@ -481,7 +497,7 @@ def _cleanup_stale_upload_spool_dirs(
 
     for parent, require_prefix in scan_dirs:
         try:
-            entries = parent.iterdir()
+            entries = list(parent.iterdir())
         except OSError:
             continue
         for entry in entries:
@@ -504,7 +520,7 @@ def _cleanup_stale_upload_spool_dirs(
                     "Could not check/remove stale spool dir %s: %s", entry, exc
                 )
     if cleaned:
-        logger.info("Startup: removed %d stale upload spool dir(s)", cleaned)
+        logger.info("Removed %d stale upload spool dir(s)", cleaned)
 
 
 async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
