@@ -44,6 +44,23 @@
             </div>
         </div>
 
+        <!-- Mask info -->
+        <div
+            v-if="session.active_mask || maskTypeFromSettings"
+            class="mask-info text-sm text-muted-foreground"
+        >
+            <span v-if="session.active_mask">
+                Mask: {{ session.active_mask.brand }} {{ session.active_mask.model
+                }}<template v-if="session.active_mask.size"
+                    >, size {{ session.active_mask.size }}</template
+                >
+                ({{ styleLabel(session.active_mask.style) }}, since
+                {{ formatDateFull(session.active_mask.start_date) }})
+            </span>
+            <span v-if="session.active_mask && maskTypeFromSettings">·</span>
+            <span v-if="maskTypeFromSettings">Device type: {{ maskTypeFromSettings }}</span>
+        </div>
+
         <!-- Waveform section -->
         <div class="bg-card border border-border rounded-lg py-4 px-5 mb-6">
             <WaveformToolbar
@@ -844,7 +861,7 @@ import StatCard from '@/components/StatCard.vue'
 import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { useWaveformData } from '@/composables/useWaveformData'
-import { ahiClass, formatDateWithWeekday } from '@/utils/formatting'
+import { ahiClass, formatDateWithWeekday, formatDateFull } from '@/utils/formatting'
 import type { SessionDetail, EventItem } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
@@ -868,6 +885,20 @@ const flowPressureOpen = ref(false)
 const ieTiOpen = ref(false)
 const climateOpen = ref(false)
 const provenanceOpen = ref(false)
+
+const maskTypeFromSettings = computed(
+    () => session.value?.settings?.find((s) => s.key === 'mask_type')?.value ?? null,
+)
+
+const styleLabelMap: Record<string, string> = {
+    pillows: 'Pillows',
+    nasal: 'Nasal',
+    full_face: 'Full Face',
+}
+
+function styleLabel(style: string): string {
+    return styleLabelMap[style] ?? style
+}
 
 // STR tidal-volume stats are stored in L; convert to mL for display.
 function tvToMl(val: number | null | undefined): number | null {
@@ -1109,5 +1140,13 @@ onMounted(async () => {
     font-size: 0.875rem;
     padding: 0.3rem 0;
     border-bottom: 1px solid var(--color-border);
+}
+
+.mask-info {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 1rem;
 }
 </style>

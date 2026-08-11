@@ -1,6 +1,9 @@
 <template>
-    <div class="devices-view">
-        <h1 class="page-title">Devices</h1>
+    <div class="equipment-view">
+        <h1 class="page-title">Equipment</h1>
+
+        <!-- Devices section -->
+        <h2 class="section-heading">Devices</h2>
 
         <div v-if="loading" class="loading-state">
             <Loader2 class="inline h-4 w-4 animate-spin" /> Loading devices...
@@ -205,6 +208,10 @@
                 </Collapsible>
             </div>
         </div>
+
+        <!-- Masks section -->
+        <h2 class="section-heading">Masks</h2>
+        <MaskLogManager />
     </div>
 </template>
 
@@ -213,6 +220,7 @@ import { computed, reactive } from 'vue'
 import { ChevronDown, HardDrive, Loader2 } from '@lucide/vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import ErrorState from '@/components/ErrorState.vue'
+import MaskLogManager from '@/components/MaskLogManager.vue'
 import { getDevices, getDeviceDetail } from '@/api/devices'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
@@ -240,8 +248,17 @@ watch(devices, (devs) => {
 </script>
 
 <style scoped>
-.devices-view {
+.equipment-view {
     max-width: 900px;
+}
+
+.section-heading {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-muted-foreground);
+    margin: 1.5rem 0 0.75rem;
 }
 
 .empty-state {

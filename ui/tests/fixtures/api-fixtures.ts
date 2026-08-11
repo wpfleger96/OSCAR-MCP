@@ -1111,4 +1111,13 @@ export const sessionDetailFixture: SessionDetail = {
         minute_ventilation_mean: 6.5,
     },
     settings: null,
+    active_mask: {
+        id: 2,
+        brand: 'ResMed',
+        model: 'AirFit P10',
+        size: 'S',
+        style: 'pillows',
+        start_date: '2025-11-02',
+        notes: null,
+    },
 }

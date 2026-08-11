@@ -66,10 +66,11 @@ const router = createRouter({
             component: () => import('@/views/SessionListView.vue'),
         },
         {
-            path: '/devices',
-            name: 'devices',
-            component: () => import('@/views/DevicesView.vue'),
+            path: '/equipment',
+            name: 'equipment',
+            component: () => import('@/views/EquipmentView.vue'),
         },
+        { path: '/devices', redirect: '/equipment' },
         {
             path: '/sessions/:id',
             name: 'session-detail',

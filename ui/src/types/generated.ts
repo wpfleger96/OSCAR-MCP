@@ -3664,6 +3664,7 @@ export interface components {
          * @description Detailed view of a single session with all metadata.
          */
         SessionDetail: {
+            active_mask?: components['schemas']['MaskLogEntryResponse'] | null
             /** Data Quality Notes */
             data_quality_notes?: string[]
             /** Device Manufacturer */

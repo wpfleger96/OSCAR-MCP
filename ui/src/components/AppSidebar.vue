@@ -13,9 +13,9 @@
                 <List class="h-4 w-4" />
                 <span>Sessions</span>
             </RouterLink>
-            <RouterLink to="/devices" class="nav-item">
+            <RouterLink to="/equipment" class="nav-item">
                 <HardDrive class="h-4 w-4" />
-                <span>Devices</span>
+                <span>Equipment</span>
             </RouterLink>
 
             <span class="nav-group-label">Analysis</span>

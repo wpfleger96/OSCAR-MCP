@@ -126,17 +126,17 @@ test('session-detail dark', async ({ page }) => {
     await page.screenshot({ path: 'screenshots/session-detail-dark.png' })
 })
 
-test('devices', async ({ page }) => {
-    await page.goto('/devices')
-    await page.waitForSelector('.device-card')
+test('equipment', async ({ page }) => {
+    await page.goto('/equipment')
+    await page.waitForSelector('.equipment-view .device-card')
     await page.waitForTimeout(300)
-    await page.screenshot({ path: 'screenshots/devices.png' })
+    await page.screenshot({ path: 'screenshots/equipment.png' })
 })
 
-test('devices dark', async ({ page }) => {
-    await page.goto('/devices')
-    await page.waitForSelector('.device-card')
+test('equipment dark', async ({ page }) => {
+    await page.goto('/equipment')
+    await page.waitForSelector('.equipment-view .device-card')
     await page.getByText('Dark Mode').click()
     await page.waitForTimeout(300)
-    await page.screenshot({ path: 'screenshots/devices-dark.png' })
+    await page.screenshot({ path: 'screenshots/equipment-dark.png' })
 })
