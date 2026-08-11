@@ -1,6 +1,6 @@
 """Unit tests for SessionService."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -341,6 +341,70 @@ class TestSessionServiceEnable:
 
         await async_db_session.refresh(session)
         assert session.enabled is True
+
+
+class TestSessionTherapyDay:
+    """Tests that therapy_day (noon-cutoff) is returned correctly."""
+
+    async def test_list_session_late_evening_stays_same_day(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """Session starting at 23:57 has therapy_day == its calendar date."""
+        start = datetime(2025, 8, 9, 23, 57, 0)
+        await async_test_session_factory(
+            async_test_device.id, start, duration_hours=7.5
+        )
+
+        service = SessionService(async_db_session, profile_id=1)
+        result = await service.list_sessions()
+
+        assert len(result.sessions) == 1
+        assert result.sessions[0].therapy_day == date(2025, 8, 9)
+
+    async def test_list_session_early_morning_rolls_back_one_day(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """Session starting at 01:12 has therapy_day == previous calendar date (noon cutoff)."""
+        start = datetime(2025, 8, 10, 1, 12, 0)
+        await async_test_session_factory(
+            async_test_device.id, start, duration_hours=7.5
+        )
+
+        service = SessionService(async_db_session, profile_id=1)
+        result = await service.list_sessions()
+
+        assert len(result.sessions) == 1
+        assert result.sessions[0].therapy_day == date(2025, 8, 9)
+
+    async def test_session_detail_therapy_day_early_morning(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """SessionDetail.therapy_day is previous day for sessions starting before noon."""
+        start = datetime(2025, 8, 10, 0, 12, 0)
+        session = await async_test_session_factory(
+            async_test_device.id, start, duration_hours=8.0
+        )
+
+        service = SessionService(async_db_session, profile_id=1)
+        detail = await service.get_session_detail(session.id)
+
+        assert detail.therapy_day == date(2025, 8, 9)
+        assert detail.start_time == start
+
+    async def test_delete_preview_therapy_day_early_morning(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """DeletePreview sessions carry correct therapy_day for early-morning sessions."""
+        start = datetime(2025, 8, 10, 2, 0, 0)
+        session = await async_test_session_factory(
+            async_test_device.id, start, duration_hours=7.0
+        )
+
+        service = SessionService(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(session_ids=[session.id])
+
+        assert len(preview.sessions) == 1
+        assert preview.sessions[0].therapy_day == date(2025, 8, 9)
 
 
 class TestSessionServiceResolve:

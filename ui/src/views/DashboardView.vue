@@ -175,7 +175,7 @@
                         class="cursor-pointer even:bg-muted/50 hover:bg-muted/50"
                         @click="navigateToSession(session)"
                     >
-                        <TableCell>{{ formatDateShort(session.start_time) }}</TableCell>
+                        <TableCell>{{ formatDateFull(session.therapy_day) }}</TableCell>
                         <TableCell>{{ session.duration_hours.toFixed(1) }}h</TableCell>
                         <TableCell>{{ session.ahi?.toFixed(1) ?? '---' }}</TableCell>
                     </TableRow>
@@ -207,7 +207,7 @@ import { getSummary, getTrends } from '@/api/stats'
 import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'
-import { formatDateShort } from '@/utils/formatting'
+import { formatDateFull } from '@/utils/formatting'
 import { AHI_COLOR_SCALE } from '@/utils/ahiScale'
 import { EVENT_COLORS } from '@/types'
 import type { SessionListItem } from '@/types'

@@ -346,6 +346,7 @@ def display_session_detail(detail: SessionDetail, show_settings: bool) -> None:
             f"  Device: {escape(str(detail.device_manufacturer))} {escape(str(detail.device_model))} (SN: {escape(str(detail.device_serial))})"
         )
 
+    console.print(f"  Therapy Day: {detail.therapy_day}")
     console.print(f"  Start: {detail.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     console.print(f"  End: {detail.end_time.strftime('%Y-%m-%d %H:%M:%S')}")
     console.print(
