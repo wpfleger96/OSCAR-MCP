@@ -21,6 +21,20 @@ _dev-auth-seed:
     SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
     uv run snore user invite dev@localhost --role admin
 
+# Fully reset local dev state: stop stray dev servers (orphaned uvicorn
+# reload workers are the usual "database is locked" culprit), drop the DB,
+# and clear staged data. `snore db drop` skips sidecar cleanup when the main
+# DB file is already gone, so -wal/-shm are removed explicitly. Logs are
+# kept. The next `just dev` recreates the schema via startup migrations and
+# re-provisions the local user; re-import your data afterwards.
+reset:
+    -pkill -f "[u]vicorn snore.api.app" 2>/dev/null
+    -pkill -f "[s]nore serve" 2>/dev/null
+    -uv run snore db drop --force
+    rm -f ~/.snore/snore.db ~/.snore/snore.db-wal ~/.snore/snore.db-shm ~/.snore/vacuum.pending ~/.snore/writers.lock
+    rm -rf ~/.snore/raw ~/.snore/spool
+    @echo "Local dev state reset — run 'just dev' and re-import your data."
+
 # Build the Docker image locally for smoke-testing.
 docker-build:
     docker build -t snore .
