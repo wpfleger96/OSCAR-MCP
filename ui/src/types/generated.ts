@@ -540,6 +540,15 @@ export interface paths {
          *     VACUUM runs as a post-response background task so that reclaiming large
          *     waveform blobs never blocks the event loop or exceeds proxy timeouts.
          *     ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
+         *     A persistent marker file is written before the commit so that a container
+         *     restart between commit and VACUUM causes startup to reschedule the VACUUM.
+         *
+         *     Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
+         *     renamed into ``.quarantine/`` BEFORE the commit so that a container restart
+         *     between quarantine and commit leaves dirs visible to
+         *     ``DeletionSaga.recover()`` case 2 on next boot.  DB rows survive so the
+         *     state is consistent.  New imports proceed normally — re-upload and
+         *     deduplication make the loss harmless.
          *
          *     NOTE: Concurrent in-flight imports for this user's devices will fail if
          *     their device rows are deleted mid-import; this is accepted behavior.
@@ -756,6 +765,15 @@ export interface paths {
          *
          *     VACUUM runs as a post-response background task.  ``size_after_mb`` is null
          *     and ``vacuum_scheduled`` is true in the response when VACUUM is queued.
+         *     A persistent marker file is written before the commit so that a container
+         *     restart between commit and VACUUM causes startup to reschedule the VACUUM.
+         *
+         *     Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
+         *     renamed into ``.quarantine/`` BEFORE the commit.  A crash between quarantine
+         *     and commit leaves dirs in ``.quarantine/`` for ``DeletionSaga.recover()``
+         *     case 2 to sweep on next boot; DB rows survive so the state is consistent.
+         *     New imports proceed normally — re-upload deduplication makes the loss
+         *     harmless.
          *
          *     Note: this handler holds the SQLite write lock for the entire delete+commit,
          *     so on large databases concurrent import/analysis writers may hit their 5 s
@@ -3589,6 +3607,12 @@ export interface components {
              */
             start_time: string
             statistics?: components['schemas']['SessionStatistics'] | null
+            /**
+             * Therapy Day
+             * Format: date
+             * @description Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day
+             */
+            therapy_day: string
             /** Therapy Mode */
             therapy_mode: string | null
             /** Waveform Count */
@@ -3647,6 +3671,12 @@ export interface components {
              * @description Session start timestamp
              */
             start_time: string
+            /**
+             * Therapy Day
+             * Format: date
+             * @description Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day
+             */
+            therapy_day: string
         }
         /**
          * SessionSetting
@@ -3843,6 +3873,31 @@ export interface components {
              * @description Session date (YYYY-MM-DD)
              */
             date: string
+            /**
+             * Device Ahi
+             * @description Device AHI (events/hr)
+             */
+            device_ahi?: number | null
+            /**
+             * Device Cai
+             * @description Device CAI (central apnea index, events/hr)
+             */
+            device_cai?: number | null
+            /**
+             * Device Hi
+             * @description Device HI (hypopnea index, events/hr)
+             */
+            device_hi?: number | null
+            /**
+             * Device Oai
+             * @description Device OAI (obstructive apnea index, events/hr)
+             */
+            device_oai?: number | null
+            /**
+             * Device Uai
+             * @description Device UAI (upper-airway/unclassified apnea index, events/hr; vAuto/bilevel only)
+             */
+            device_uai?: number | null
             /**
              * Duration Hours
              * @description Session duration in hours

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.analysis.shared.versioning import AlgorithmIdentity, AlgoVersions
 from snore.analysis.types import AnalysisResult
 from snore.database import models
+from snore.database.day_manager import DayManager
 from snore.services.schemas import (
     AnalysisDeletePreview,
     AnalysisListItem,
@@ -197,9 +198,11 @@ class AnalysisFacade:
         for session in sessions:
             analysis_id = latest_analysis.get(session.id)
 
-            # day is loaded via joinedload; use start_time.date() as fallback.
+            # day is loaded via joinedload; apply noon-cutoff fallback when day is NULL.
             session_date = (
-                session.day.date if session.day else session.start_time.date()
+                session.day.date
+                if session.day
+                else DayManager.get_day_for_session(session.start_time)
             )
 
             results.append(

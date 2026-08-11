@@ -926,3 +926,70 @@ class TestStoreWithRetry:
 
         # sleep must not have been called — no retry happened
         sleep_mock.assert_not_called()
+
+
+class TestAnalysisFacadeTherapyDay:
+    """Tests that session_date in AnalysisListItem respects the noon-cutoff."""
+
+    async def test_session_date_uses_day_date_for_early_morning_session(
+        self, async_db_session, async_test_device
+    ):
+        """An early-morning session linked to its therapy day returns Day.date, not start_time.date().
+
+        Regression guard for the analysis facade fallback: the old code used
+        session.start_time.date() which ignored the noon cutoff.
+        """
+        # A session starting at 01:12 on Aug 10 belongs to Aug 9 (therapy day).
+        therapy_day_date = date(2025, 8, 9)
+        start = datetime(2025, 8, 10, 1, 12, 0)
+
+        day = Day(
+            device_id=async_test_device.id,
+            date=therapy_day_date,
+            total_therapy_hours=7.5,
+        )
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        sess = Session(
+            device_id=async_test_device.id,
+            day_id=day.id,
+            device_session_id="test_early_morning",
+            start_time=start,
+            end_time=start + timedelta(hours=7, minutes=30),
+            duration_seconds=7.5 * 3600,
+        )
+        async_db_session.add(sess)
+        await async_db_session.flush()
+
+        ar = AnalysisResult(
+            session_id=sess.id,
+            timestamp_start=sess.start_time,
+            timestamp_end=sess.end_time,
+            programmatic_result_json={"version": 1},
+            created_at=datetime.now(UTC),
+        )
+        async_db_session.add(ar)
+        await async_db_session.flush()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        results = await service.list_sessions_with_status()
+
+        assert len(results) == 1
+        # Must be therapy_day (Aug 9), NOT start_time.date() (Aug 10).
+        assert results[0].session_date == therapy_day_date
+        assert results[0].session_date != start.date()
+
+    async def test_fallback_noon_cutoff_applied_when_session_day_is_none(self):
+        """DayManager.get_day_for_session (the facade's NULL-day fallback) respects noon cutoff.
+
+        A session starting before noon belongs to the previous day; one starting
+        after noon belongs to its own calendar day.
+        """
+        from snore.database.day_manager import DayManager
+
+        before_noon = datetime(2025, 8, 10, 1, 12, 0)
+        assert DayManager.get_day_for_session(before_noon) == date(2025, 8, 9)
+
+        after_noon = datetime(2025, 8, 9, 23, 57, 0)
+        assert DayManager.get_day_for_session(after_noon) == date(2025, 8, 9)
