@@ -358,13 +358,13 @@ class MaskLogEntry(Base):
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("profiles.id", ondelete="CASCADE")
     )
-    brand: Mapped[str] = mapped_column(String(100))
-    model: Mapped[str] = mapped_column(String(150))
+    brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(150), nullable=True)
     size: Mapped[str | None] = mapped_column(String(50))
-    # pillows | nasal | full_face
-    style: Mapped[str] = mapped_column(String(20))
+    # pillows | nasal | full_face — None means not yet declared
+    style: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # Date the user started using this mask (user-declared, no timezone).
-    start_date: Mapped[date] = mapped_column(Date)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text)
     # Absolute audit instants.
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
@@ -376,10 +376,11 @@ class MaskLogEntry(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "style IN ('pillows','nasal','full_face')", name="chk_mask_style"
+            "style IS NULL OR style IN ('pillows','nasal','full_face')",
+            name="chk_mask_style",
         ),
-        CheckConstraint("length(brand) > 0", name="chk_mask_brand"),
-        CheckConstraint("length(model) > 0", name="chk_mask_model"),
+        CheckConstraint("brand IS NULL OR length(brand) > 0", name="chk_mask_brand"),
+        CheckConstraint("model IS NULL OR length(model) > 0", name="chk_mask_model"),
         Index("ix_mask_log_profile_start_date", "profile_id", "start_date"),
     )
 
