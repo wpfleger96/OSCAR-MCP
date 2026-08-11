@@ -23,6 +23,9 @@ from snore.validation.fl_report import (
 )
 from snore.validation.fl_validator import FlowLimitationValidator
 from snore.validation.report import (
+    CrossParserSameDay,
+    IntegrityReport,
+    OverlappingSessionPair,
     ValidationReport,
     export_report_csv,
     export_report_json,
@@ -31,6 +34,9 @@ from snore.validation.stats import mean_or_none, spearman_or_none
 
 __all__ = [
     "BatchValidator",
+    "CrossParserSameDay",
+    "IntegrityReport",
+    "OverlappingSessionPair",
     "ValidationReport",
     "export_report_csv",
     "export_report_json",

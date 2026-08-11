@@ -707,9 +707,13 @@ class TestTypedBulkInsert:
         importer = SessionImporter(profile_id)
         async with session_scope() as db:
             async with db.begin_nested():
-                imported, day_id, _sid = await importer._import_single_session(
-                    db, session_data
-                )
+                (
+                    imported,
+                    day_id,
+                    _sid,
+                    _extra,
+                    _deleted,
+                ) = await importer._import_single_session(db, session_data)
 
         assert imported is True
 

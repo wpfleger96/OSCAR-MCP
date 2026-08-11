@@ -7,9 +7,57 @@ Provides functionality to generate and export validation reports in JSON and CSV
 import csv
 import json
 
+from datetime import date, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+
+class OverlappingSessionPair(BaseModel):
+    """A pair of sessions on the same device whose time ranges strictly overlap."""
+
+    session_a_id: int = Field(description="Database ID of the first session")
+    session_b_id: int = Field(description="Database ID of the second session")
+    device_id: int = Field(description="Device that owns both sessions")
+    session_a_device_session_id: str = Field(
+        description="device_session_id of session A"
+    )
+    session_b_device_session_id: str = Field(
+        description="device_session_id of session B"
+    )
+    session_a_start: datetime = Field(description="Start time of session A")
+    session_a_end: datetime = Field(description="End time of session A")
+    session_b_start: datetime = Field(description="Start time of session B")
+    session_b_end: datetime = Field(description="End time of session B")
+
+
+class CrossParserSameDay(BaseModel):
+    """A device+date combination with sessions from more than one import source."""
+
+    device_id: int = Field(description="Device ID")
+    day_date: date = Field(description="Calendar date of the Day row")
+    import_sources: list[str] = Field(
+        description="Distinct import_source values for sessions on this day"
+    )
+
+
+class IntegrityReport(BaseModel):
+    """Data-integrity check results for the SNORE session database."""
+
+    checked_at: datetime = Field(description="Timestamp when the check ran")
+    device_id_filter: int | None = Field(
+        default=None, description="Device ID filter applied, or null for all devices"
+    )
+    null_day_id_sessions: list[int] = Field(
+        description="Session IDs where day_id IS NULL (not yet linked to a day)"
+    )
+    overlapping_session_pairs: list[OverlappingSessionPair] = Field(
+        description="Pairs of same-device sessions whose time ranges strictly overlap"
+    )
+    cross_parser_same_day: list[CrossParserSameDay] = Field(
+        description="Device+date combinations with sessions from multiple import sources"
+    )
+    total_issues: int = Field(description="Total count of detected integrity issues")
 
 
 class SessionValidation(BaseModel):

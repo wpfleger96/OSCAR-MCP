@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -57,8 +57,19 @@ async def mem_db():
     await engine.dispose()
 
 
-def _session(serial: str, device_session_id: str | None = None) -> UnifiedSession:
-    """Minimal UnifiedSession stub (no waveforms / events / statistics)."""
+def _session(
+    serial: str,
+    device_session_id: str | None = None,
+    day_offset: int = 0,
+) -> UnifiedSession:
+    """Minimal UnifiedSession stub (no waveforms / events / statistics).
+
+    day_offset shifts the session to a different calendar day so callers can
+    create multiple non-overlapping sessions on the same device.
+    """
+    base = datetime(2025, 1, 1, tzinfo=UTC)
+    start = base + timedelta(days=day_offset, hours=22)
+    end = base + timedelta(days=day_offset + 1, hours=6)
     return UnifiedSession(
         device_info=DeviceInfo(
             manufacturer="TestMfg",
@@ -66,8 +77,8 @@ def _session(serial: str, device_session_id: str | None = None) -> UnifiedSessio
             serial_number=serial,
         ),
         device_session_id=device_session_id or f"sess_{uuid.uuid4().hex[:8]}",
-        start_time=datetime(2025, 1, 1, 22, 0, 0, tzinfo=UTC),
-        end_time=datetime(2025, 1, 2, 6, 0, 0, tzinfo=UTC),
+        start_time=start,
+        end_time=end,
     )
 
 
@@ -81,7 +92,9 @@ async def test_import_sessions_batch_returns_correct_ids_for_new_sessions(mem_db
     """import_sessions_batch returns a distinct DB Session.id per imported row."""
     db, profile_id = mem_db
     serial = f"SN_{uuid.uuid4().hex[:8]}"
-    sessions = [_session(serial), _session(serial)]
+    # Use day_offset=0 and day_offset=1 so the sessions land on different nights
+    # and don't trigger the overlap guard.
+    sessions = [_session(serial, day_offset=0), _session(serial, day_offset=1)]
 
     importer = SessionImporter(profile_id=profile_id)
     imported, skipped, failed, session_ids = await importer.import_sessions_batch(
