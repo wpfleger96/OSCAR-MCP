@@ -292,6 +292,20 @@ class SessionStatistics(BaseModel):
     mask_events: float | None = None
 
 
+class MaskLogEntryResponse(BaseModel):
+    """A single user-entered mask equipment log entry."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    brand: str
+    model: str
+    size: str | None = None
+    style: str
+    start_date: date
+    notes: str | None = None
+
+
 class SessionSetting(BaseModel):
     """Single setting key-value pair for a session."""
 
@@ -323,6 +337,7 @@ class SessionDetail(BaseModel):
     data_quality_notes: list[str] = Field(default_factory=list)
     statistics: SessionStatistics | None = None
     settings: list[SessionSetting] | None = None
+    active_mask: MaskLogEntryResponse | None = None
 
 
 class DeletePreview(BaseModel):
@@ -468,20 +483,6 @@ class DeviceDetail(DeviceInfo):
     usage: DeviceUsageSummary
     current_settings: dict[str, str] | None
     settings_history: list[SettingsChange]
-
-
-class MaskLogEntryResponse(BaseModel):
-    """A single user-entered mask equipment log entry."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    brand: str
-    model: str
-    size: str | None = None
-    style: str
-    start_date: date
-    notes: str | None = None
 
 
 class DayListItem(BaseModel):

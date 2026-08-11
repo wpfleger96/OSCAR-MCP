@@ -97,6 +97,36 @@ class MaskLogService:
         await self.db_session.flush()
         return MaskLogEntryResponse.model_validate(entry)
 
+    async def get_active_entry_for_date(
+        self, target_date: date
+    ) -> MaskLogEntryResponse | None:
+        """Return the mask entry active on target_date.
+
+        "Active" means the most recent entry with start_date <= target_date,
+        tie-broken by id DESC for same-day entries. None when no entry qualifies.
+        """
+        entry = (
+            (
+                await self.db_session.execute(
+                    select(models.MaskLogEntry)
+                    .where(
+                        models.MaskLogEntry.profile_id == self.profile_id,
+                        models.MaskLogEntry.start_date <= target_date,
+                    )
+                    .order_by(
+                        models.MaskLogEntry.start_date.desc(),
+                        models.MaskLogEntry.id.desc(),
+                    )
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if not entry:
+            return None
+        return MaskLogEntryResponse.model_validate(entry)
+
     async def delete_entry(self, entry_id: int) -> None:
         """Delete an entry. Raises NotFoundError if missing or foreign."""
         entry = await self._get_owned_entry(entry_id)

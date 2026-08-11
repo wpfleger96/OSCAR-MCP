@@ -11,6 +11,7 @@ from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
 from snore.database import models
 from snore.database.day_manager import DayManager
 from snore.exceptions import NotFoundError
+from snore.services.mask_log_service import MaskLogService
 from snore.services.schemas import (
     DeletePreview,
     SessionDetail,
@@ -219,6 +220,11 @@ class SessionService:
                 SessionSetting(key=s.key, value=s.value) for s in settings_records
             ]
 
+        mask_service = MaskLogService(self.db_session, self.profile_id)
+        active_mask = await mask_service.get_active_entry_for_date(
+            session.start_time.date()
+        )
+
         duration_seconds = session.duration_seconds or 0.0
         return SessionDetail(
             id=session.id,
@@ -246,6 +252,7 @@ class SessionService:
             ),
             statistics=statistics,
             settings=settings_list,
+            active_mask=active_mask,
         )
 
     async def get_delete_preview(

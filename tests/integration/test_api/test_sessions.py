@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 
 class TestSessionsList:
@@ -137,6 +137,51 @@ class TestGetSession:
         data = response.json()
         assert data["has_statistics"] is True
         assert data["statistics"]["ahi"] == 3.5
+
+    def test_get_session_active_mask_populated(
+        self,
+        api_client,
+        db_session,
+        test_device,
+        test_profile,
+        test_session_factory,
+    ):
+        """active_mask is populated when a mask entry precedes the session date."""
+        from snore.database.models import MaskLogEntry  # noqa: PLC0415
+
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2025, 6, 15, 22, 0)
+        )
+
+        entry = MaskLogEntry(
+            profile_id=test_profile.id,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 6, 1),
+        )
+        db_session.add(entry)
+        db_session.flush()
+
+        response = api_client.get(f"/api/v1/sessions/{session.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["active_mask"] is not None
+        assert data["active_mask"]["brand"] == "ResMed"
+        assert data["active_mask"]["model"] == "AirFit P10"
+
+    def test_get_session_active_mask_null_when_no_entries(
+        self, api_client, db_session, test_device, test_profile, test_session_factory
+    ):
+        """active_mask is null in the response when there are no mask log entries."""
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2025, 6, 15, 22, 0)
+        )
+
+        response = api_client.get(f"/api/v1/sessions/{session.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["active_mask"] is None
 
 
 class TestUpdateSession:

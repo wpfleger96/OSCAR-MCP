@@ -205,6 +205,62 @@ class TestSessionServiceDetail:
         assert detail.settings[0].key == "test_key"
 
 
+class TestSessionDetailActiveMask:
+    """Tests that get_session_detail populates active_mask correctly."""
+
+    async def test_active_mask_populated_when_entry_exists(
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_profile,
+        async_test_session_factory,
+    ):
+        """active_mask is set when a mask entry has start_date <= session date."""
+        from datetime import date  # noqa: PLC0415
+
+        from snore.database.models import MaskLogEntry  # noqa: PLC0415
+
+        session_start = datetime(2025, 6, 15, 22, 0)
+        session = await async_test_session_factory(
+            async_test_device.id, session_start, duration_hours=8.0
+        )
+
+        entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 6, 1),
+        )
+        async_db_session.add(entry)
+        await async_db_session.flush()
+
+        service = SessionService(async_db_session, profile_id=async_test_profile.id)
+        detail = await service.get_session_detail(session.id)
+
+        assert detail.active_mask is not None
+        assert detail.active_mask.brand == "ResMed"
+        assert detail.active_mask.model == "AirFit P10"
+
+    async def test_active_mask_none_when_no_entries(
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_profile,
+        async_test_session_factory,
+    ):
+        """active_mask is None when there are no mask log entries."""
+        session_start = datetime(2025, 6, 15, 22, 0)
+        session = await async_test_session_factory(
+            async_test_device.id, session_start, duration_hours=8.0
+        )
+
+        service = SessionService(async_db_session, profile_id=async_test_profile.id)
+        detail = await service.get_session_detail(session.id)
+
+        assert detail.active_mask is None
+
+
 class TestSessionServiceDelete:
     """Tests for SessionService delete operations."""
 
