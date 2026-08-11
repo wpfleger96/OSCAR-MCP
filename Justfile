@@ -47,7 +47,7 @@ check-all: check test web-install web-check
     @echo "All quality checks and tests passed"
 
 # Sync, type-check, auto-fix lint/format, and run tests
-pre-commit: sync type-check lint format test web-install web-type-check web-lint web-format
+pre-commit: sync type-check lint format test-precommit web-install web-type-check web-lint web-format
     @echo "Pre-commit checks passed"
 
 # Testing
@@ -59,6 +59,10 @@ test:
 # Run unit tests only
 test-unit:
     uv run pytest -m unit
+
+# Run unit tests optimized for pre-commit (no coverage, quiet output)
+test-precommit:
+    uv run pytest -m unit --no-cov -q
 
 # Run integration tests only
 test-integration:

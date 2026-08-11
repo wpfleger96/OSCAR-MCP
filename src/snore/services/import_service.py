@@ -14,7 +14,7 @@ from snore.database.importers import SessionImporter
 from snore.database.session import session_scope
 from snore.database.txn import run_txn
 from snore.database.write_gate import write_gate
-from snore.parsers.register_all import register_all_parsers
+from snore.parsers.register_all import ensure_registered_parsers
 from snore.parsers.registry import parser_registry
 from snore.parsers.unified import UnifiedSession
 from snore.services.schemas import ImportResult, ImportSource, ImportSourceResult
@@ -61,7 +61,7 @@ class ImportService:
 
     def detect_sources(self, path: Path) -> list[ImportSource]:
         """Detect all importable data sources under path."""
-        register_all_parsers()
+        ensure_registered_parsers()
         results = parser_registry.detect_all_parsers(path)
 
         sources: list[ImportSource] = []
