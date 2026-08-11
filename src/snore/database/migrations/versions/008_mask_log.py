@@ -3,9 +3,9 @@
 Stores user-entered mask history (brand, model, size, style, start date,
 notes) so mask changes can be correlated with therapy outcomes.
 
-For a fresh Alembic install (empty DB), ``001_baseline`` creates the table
-from ``Base.metadata`` (excluded from baseline via ``_EXCLUDE``), so this
-migration handles existing installs only.
+``001_baseline`` skips ``mask_log`` via its ``_EXCLUDE`` set, so this
+migration creates the table on both fresh and existing installs; the
+table-exists guard makes it idempotent.
 
 Revision ID: 008_mask_log
 Revises: 007_str_extras

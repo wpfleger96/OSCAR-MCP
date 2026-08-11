@@ -39,6 +39,7 @@ __all__ = [
     "RxSettingChange",
     "RxChangesResponse",
     "RxAllResponse",
+    "MergedSettingsChange",
     # Import schemas
     "ImportSource",
     "ImportSourceResult",
@@ -570,6 +571,23 @@ class RxChangesResponse(BaseModel):
     """All settings changes across all devices, sorted by (date, device_id, key)."""
 
     changes: list[RxSettingChange]
+
+
+class MergedSettingsChange(BaseModel):
+    """One settings change from either the device settings log or the mask log."""
+
+    date: date
+    source: str  # "device_settings" | "mask_log"
+    device_id: int | None = None  # null for mask_log entries
+    device_name: str | None = None
+    key: str  # settings key, or "mask_equipment"
+    old_value: str | None = None
+    new_value: str | None = None
+    mask_brand: str | None = None  # mask_log-only detail, null for device_settings
+    mask_model: str | None = None
+    mask_size: str | None = None
+    mask_style: str | None = None
+    notes: str | None = None
 
 
 class RxAllResponse(BaseModel):

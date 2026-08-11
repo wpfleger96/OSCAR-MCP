@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
-from typing import Literal, cast
+from datetime import date, timedelta
+from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 
 from snore.services.schemas import (
     DayDetail,
@@ -180,14 +180,29 @@ class BreathTrendsValidationRequest(BaseModel):
 
 MaskStyle = Literal["pillows", "nasal", "full_face"]
 
+_MASK_START_DATE_MIN = date(2000, 1, 1)
+_MASK_START_DATE_MAX_FUTURE_DAYS = 366
+
+
+def _validate_plausible_start_date(value: date) -> date:
+    """Reject start dates outside the CPAP-era clinical window."""
+    if value < _MASK_START_DATE_MIN:
+        raise ValueError("start_date must be on or after 2000-01-01")
+    if value > date.today() + timedelta(days=_MASK_START_DATE_MAX_FUTURE_DAYS):
+        raise ValueError("start_date must not be more than 366 days in the future")
+    return value
+
+
+PlausibleStartDate = Annotated[date, AfterValidator(_validate_plausible_start_date)]
+
 
 class MaskLogCreateRequest(BaseModel):
     brand: str = Field(min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=150)
     style: MaskStyle
-    start_date: date
-    size: str | None = Field(default=None, max_length=50)
-    notes: str | None = None
+    start_date: PlausibleStartDate
+    size: str | None = Field(default=None, min_length=1, max_length=50)
+    notes: str | None = Field(default=None, max_length=4000)
 
 
 class MaskLogUpdateRequest(BaseModel):
@@ -196,9 +211,9 @@ class MaskLogUpdateRequest(BaseModel):
     brand: str | None = Field(default=None, min_length=1, max_length=100)
     model: str | None = Field(default=None, min_length=1, max_length=150)
     style: MaskStyle | None = None
-    start_date: date | None = None
-    size: str | None = Field(default=None, max_length=50)
-    notes: str | None = None
+    start_date: PlausibleStartDate | None = None
+    size: str | None = Field(default=None, min_length=1, max_length=50)
+    notes: str | None = Field(default=None, max_length=4000)
 
     @model_validator(mode="after")
     def reject_null_required_fields(self) -> MaskLogUpdateRequest:

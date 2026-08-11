@@ -1,6 +1,8 @@
 import uuid
 
-from datetime import date
+from datetime import date, timedelta
+
+import pytest
 
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -121,11 +123,51 @@ class TestMaskLogValidation:
         response = api_client.post(MASKS_URL, json=_create_entry_payload(brand=""))
         assert response.status_code == 422
 
-    def test_patch_null_required_field_returns_422(self, api_client, test_profile):
+    @pytest.mark.parametrize("field", ["brand", "model", "style", "start_date"])
+    def test_patch_null_required_field_returns_422(
+        self, api_client, test_profile, field
+    ):
         response = api_client.post(MASKS_URL, json=_create_entry_payload())
         entry_id = response.json()["id"]
 
-        response = api_client.patch(f"{MASKS_URL}/{entry_id}", json={"brand": None})
+        response = api_client.patch(f"{MASKS_URL}/{entry_id}", json={field: None})
+        assert response.status_code == 422
+
+    def test_create_too_long_notes_returns_422(self, api_client, test_profile):
+        response = api_client.post(
+            MASKS_URL, json=_create_entry_payload(notes="x" * 4001)
+        )
+        assert response.status_code == 422
+
+    def test_create_empty_size_returns_422(self, api_client, test_profile):
+        response = api_client.post(MASKS_URL, json=_create_entry_payload(size=""))
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize(
+        "start_date",
+        ["1999-12-31", (date.today() + timedelta(days=730)).isoformat()],
+    )
+    def test_create_implausible_start_date_returns_422(
+        self, api_client, test_profile, start_date
+    ):
+        response = api_client.post(
+            MASKS_URL, json=_create_entry_payload(start_date=start_date)
+        )
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize(
+        "start_date",
+        ["1999-12-31", (date.today() + timedelta(days=730)).isoformat()],
+    )
+    def test_patch_implausible_start_date_returns_422(
+        self, api_client, test_profile, start_date
+    ):
+        response = api_client.post(MASKS_URL, json=_create_entry_payload())
+        entry_id = response.json()["id"]
+
+        response = api_client.patch(
+            f"{MASKS_URL}/{entry_id}", json={"start_date": start_date}
+        )
         assert response.status_code == 422
 
 

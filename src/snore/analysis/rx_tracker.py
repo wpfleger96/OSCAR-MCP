@@ -14,6 +14,8 @@ from sqlalchemy.orm import joinedload, selectinload
 from snore.database.models import Day, Device
 from snore.database.models import Session as SessionModel
 from snore.services.schemas import (
+    MaskLogEntryResponse,
+    MergedSettingsChange,
     RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
@@ -64,6 +66,74 @@ def _diff_settings(
     return [
         (k, prev.get(k), curr.get(k)) for k in all_keys if prev.get(k) != curr.get(k)
     ]
+
+
+def _describe_mask(entry: MaskLogEntryResponse) -> str:
+    """Return "Brand Model (size)", omitting the parens when size is null."""
+    desc = f"{entry.brand} {entry.model}"
+    return f"{desc} ({entry.size})" if entry.size else desc
+
+
+def merge_changes_with_mask_log(
+    device_changes: list[RxSettingChange],
+    mask_entries: list[MaskLogEntryResponse],
+    start: date,
+    end: date,
+    device_id: int | None = None,
+) -> list[MergedSettingsChange]:
+    """Merge device settings changes with mask log entries in [start, end].
+
+    Device changes are windowed to the range; the optional device_id filter
+    narrows only them — mask log entries are profile-level, so they are always
+    included.  ``mask_entries`` must be the FULL (start_date, id)-ordered log,
+    not pre-windowed, so the first in-range entry's old_value can come from
+    the latest entry before the range (None for the first entry ever logged).
+
+    Returns entries sorted by (date, source, device_id, key).
+    """
+    merged = [
+        MergedSettingsChange(
+            date=c.date,
+            source="device_settings",
+            device_id=c.device_id,
+            device_name=c.device_name,
+            key=c.key,
+            old_value=c.old_value,
+            new_value=c.new_value,
+        )
+        for c in device_changes
+        if start <= c.date <= end and (device_id is None or c.device_id == device_id)
+    ]
+
+    prev_desc: str | None = None
+    for entry in mask_entries:
+        desc = _describe_mask(entry)
+        if start <= entry.start_date <= end:
+            merged.append(
+                MergedSettingsChange(
+                    date=entry.start_date,
+                    source="mask_log",
+                    key="mask_equipment",
+                    old_value=prev_desc,
+                    new_value=desc,
+                    mask_brand=entry.brand,
+                    mask_model=entry.model,
+                    mask_size=entry.size,
+                    mask_style=entry.style,
+                    notes=entry.notes,
+                )
+            )
+        prev_desc = desc
+
+    merged.sort(
+        key=lambda e: (
+            e.date,
+            e.source,
+            e.device_id if e.device_id is not None else -1,
+            e.key,
+        )
+    )
+    return merged
 
 
 @dataclass
@@ -120,7 +190,8 @@ class RxTracker:
 
         Invariant: for any DB state, result equals get_history()[-1] when
         non-empty — the period with max (start_date, device_id) across all
-        devices.  Empty DB / no periods → None.
+        devices.  Empty DB / no periods → None.  The invariant holds for the
+        default RX_KEYS call only, not get_history(keys=TIMELINE_KEYS).
         """
         candidates: list[RxPeriod] = []
         for device_id, device_name in await self._get_devices(db_session):
@@ -157,7 +228,7 @@ class RxTracker:
         settings such as mask_type and humidity_level — not just the
         prescription-defining RX_KEYS.  This gives a complete audit trail of
         every setting the clinician or patient touched.  Do not narrow this to
-        _get_day_rx_settings; use _get_day_settings (no key filter).
+        _get_day_period_settings; use _get_day_settings (no key filter).
         """
         return self._compute_changes(await self._days_by_device(db_session))
 
@@ -306,7 +377,7 @@ class RxTracker:
         current_start_date: date | None = None
 
         for day in days:
-            day_settings = self._get_day_rx_settings(day, keys)
+            day_settings = self._get_day_period_settings(day, keys)
 
             if day_settings is None:
                 continue
@@ -445,7 +516,7 @@ class RxTracker:
 
         return settings_dict if settings_dict else None
 
-    def _get_day_rx_settings(
+    def _get_day_period_settings(
         self, day: Day, keys: tuple[str, ...] = RX_KEYS
     ) -> dict[str, str] | None:
         """Extract period-defining settings from the longest enabled session of a day."""
@@ -535,7 +606,7 @@ class RxTracker:
                 break
 
             for day in batch:
-                day_settings = self._get_day_rx_settings(day)
+                day_settings = self._get_day_period_settings(day)
                 if day_settings is None:
                     continue
 

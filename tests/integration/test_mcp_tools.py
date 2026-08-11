@@ -282,6 +282,40 @@ class TestGetSettingsChanges:
         assert result.changes[0].old_value is None
         assert result.changes[0].new_value == "F&P Evora (S)"
 
+    async def test_same_day_mask_entries_keep_insertion_order_and_chain(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Two mask entries on the same start_date appear in id order, chained."""
+        from snore.database.models import MaskLogEntry
+        from snore.mcp.tools.changes import get_settings_changes
+
+        for brand, model in [("ResMed", "AirFit P10"), ("ResMed", "AirFit F20")]:
+            async_db_session.add(
+                MaskLogEntry(
+                    profile_id=async_test_profile.id,
+                    brand=brand,
+                    model=model,
+                    style="nasal",
+                    start_date=date(2024, 7, 1),
+                )
+            )
+            await async_db_session.flush()
+
+        result = await get_settings_changes(
+            async_db_session,
+            date(2024, 7, 1),
+            date(2024, 7, 31),
+            profile_id=async_test_profile.id,
+        )
+
+        assert result.total_changes == 2
+        first, second = result.changes
+        assert first.new_value == "ResMed AirFit P10"
+        assert first.old_value is None
+        # old_value chains across same-day entries in insertion (id) order
+        assert second.new_value == "ResMed AirFit F20"
+        assert second.old_value == "ResMed AirFit P10"
+
     async def test_device_id_filter_keeps_profile_level_mask_entries(
         self, async_db_session: AsyncSession, async_test_profile: Any
     ) -> None:

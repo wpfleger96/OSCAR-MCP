@@ -9,20 +9,12 @@ from fastmcp import Context
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
-
-    from snore.services.schemas import MaskLogEntryResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.rx_tracker import RxTracker
+from snore.analysis.rx_tracker import RxTracker, merge_changes_with_mask_log
 from snore.mcp.schemas import SettingsChangeEntry, SettingsChangesResponse
 from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
 from snore.services.mask_log_service import MaskLogService
-
-
-def _describe_mask(entry: MaskLogEntryResponse) -> str:
-    """Return "Brand Model (size)", omitting the parens when size is null."""
-    desc = f"{entry.brand} {entry.model}"
-    return f"{desc} ({entry.size})" if entry.size else desc
 
 
 async def get_settings_changes(
@@ -39,53 +31,14 @@ async def get_settings_changes(
     (key="mask_equipment").  Mask log entries are profile-level, so the
     optional device_id filter narrows only the device_settings entries.
     """
-    tracker = RxTracker(profile_id)
-    device_changes = (await tracker.get_changes(db_session)).changes
-    entries = [
-        SettingsChangeEntry(
-            date=c.date,
-            source="device_settings",
-            device_id=c.device_id,
-            device_name=c.device_name,
-            key=c.key,
-            old_value=c.old_value,
-            new_value=c.new_value,
-        )
-        for c in device_changes
-        if start <= c.date <= end and (device_id is None or c.device_id == device_id)
-    ]
-
+    device_changes = (await RxTracker(profile_id).get_changes(db_session)).changes
     # Full ordered log (start_date, id) so the first in-range entry's old_value
     # can come from the latest entry before the range.
     mask_entries = await MaskLogService(db_session, profile_id).list_entries()
-    prev_desc: str | None = None
-    for entry in mask_entries:
-        desc = _describe_mask(entry)
-        if start <= entry.start_date <= end:
-            entries.append(
-                SettingsChangeEntry(
-                    date=entry.start_date,
-                    source="mask_log",
-                    key="mask_equipment",
-                    old_value=prev_desc,
-                    new_value=desc,
-                    mask_brand=entry.brand,
-                    mask_model=entry.model,
-                    mask_size=entry.size,
-                    mask_style=entry.style,
-                    notes=entry.notes,
-                )
-            )
-        prev_desc = desc
-
-    entries.sort(
-        key=lambda e: (
-            e.date,
-            e.source,
-            e.device_id if e.device_id is not None else -1,
-            e.key,
-        )
+    merged = merge_changes_with_mask_log(
+        device_changes, mask_entries, start, end, device_id
     )
+    entries = [SettingsChangeEntry.model_validate(c.model_dump()) for c in merged]
     return SettingsChangesResponse(changes=entries, total_changes=len(entries))
 
 

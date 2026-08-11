@@ -9,7 +9,12 @@ import pytest
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.rx_tracker import TIMELINE_KEYS, RxTracker, _diff_settings
+from snore.analysis.rx_tracker import (
+    TIMELINE_KEYS,
+    RxTracker,
+    _diff_settings,
+    changed_setting_keys,
+)
 from snore.database.models import Day, Device, Session, Setting
 
 
@@ -505,7 +510,7 @@ class TestRxTrackerCurrentTailWalk:
                 base + timedelta(days=i),
                 settings=real_settings,
             )
-        # Days 5–7: disabled sessions → _get_day_rx_settings returns None
+        # Days 5–7: disabled sessions → _get_day_period_settings returns None
         for i in range(5, 8):
             await _create_day_with_session(
                 async_db_session,
@@ -967,6 +972,48 @@ class TestTimelineKeys:
         assert result[0].settings["mask_type"] == "Pillows"
         assert result[1].settings["mask_type"] == "Full Face"
         assert result[1].start_date == base + timedelta(days=3)
+
+    async def test_timeline_keys_mask_type_removal_splits_period(
+        self, async_db_session, async_test_device
+    ):
+        """A mask_type present→absent transition splits TIMELINE_KEYS periods.
+
+        Under the MCP timeline semantics (absent keys read as None), the
+        removal is flagged as a mask_type change; default RX_KEYS history is
+        unaffected.
+        """
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings=RX_SETTINGS,
+            )
+        await async_db_session.flush()
+
+        tracker = RxTracker(1)
+        result = await tracker.get_history(async_db_session, keys=TIMELINE_KEYS)
+
+        assert len(result) == 2
+        assert result[0].settings["mask_type"] == "Pillows"
+        assert "mask_type" not in result[1].settings
+        assert result[1].start_date == base + timedelta(days=3)
+
+        # MCP layer semantics: absent keys become None, flagging the removal
+        prev = {k: result[0].settings.get(k) for k in TIMELINE_KEYS}
+        curr = {k: result[1].settings.get(k) for k in TIMELINE_KEYS}
+        assert changed_setting_keys(prev, curr) == {"mask_type"}
+
+        # Default RX_KEYS history ignores the mask_type removal
+        assert len(await tracker.get_history(async_db_session)) == 1
 
     async def test_default_history_does_not_split_on_mask_type(
         self, async_db_session, async_test_device
