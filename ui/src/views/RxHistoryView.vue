@@ -8,7 +8,7 @@
 
         <ErrorState v-else-if="error" :message="error" :retry="reload" />
 
-        <template v-else-if="history.length">
+        <template v-else>
             <!-- Current Settings -->
             <div v-if="current" class="section-card">
                 <h2>Current Settings</h2>
@@ -167,9 +167,11 @@
                     </Table>
                 </div>
             </div>
-        </template>
 
-        <div v-else class="no-data"><Info class="h-4 w-4" /> No prescription data available.</div>
+            <div v-if="!history.length && !timelineRows.length" class="no-data">
+                <Info class="h-4 w-4" /> No prescription data available.
+            </div>
+        </template>
 
         <!-- Mask Equipment -->
         <div v-if="!loading" class="section-card">
