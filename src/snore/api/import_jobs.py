@@ -985,10 +985,13 @@ def start_reaper(
             try:
                 _reap_terminal()
                 _reap_stale_pending_uploads()
-                if spool_sweep_fn is not None:
-                    spool_sweep_fn()
             except Exception:
                 logger.exception("Reaper iteration failed")
+            if spool_sweep_fn is not None:
+                try:
+                    spool_sweep_fn()
+                except Exception:
+                    logger.exception("Spool sweep failed")
 
     t = threading.Thread(target=_reap_loop, daemon=True, name="import-job-reaper")
     t.start()

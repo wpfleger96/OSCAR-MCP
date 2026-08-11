@@ -8,14 +8,22 @@ thread invokes the optional spool_sweep_fn each iteration.
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import snore.api.import_jobs as job_store
 
+from snore.api.app import (
+    _STALE_UPLOAD_TMPDIR_AGE_SECONDS,
+    _cleanup_stale_upload_spool_dirs,
+)
 from snore.api.import_jobs import (
     PENDING_UPLOAD_TIMEOUT_SECONDS,
     JobState,
@@ -333,23 +341,24 @@ class TestStartReaperSpoolSweepFn:
             call_count += 1
             called.set()
 
-        _, stop = start_reaper(interval=0.01, spool_sweep_fn=_sweep)
+        thread, stop = start_reaper(interval=0.01, spool_sweep_fn=_sweep)
         try:
             fired = called.wait(timeout=2.0)
         finally:
             stop.set()
+            thread.join(timeout=1.0)
 
         assert fired, "spool_sweep_fn was never called within 2 s"
         assert call_count >= 1
 
     def test_no_sweep_fn_does_not_raise(self):
         """start_reaper(spool_sweep_fn=None) runs without error."""
-        _, stop = start_reaper(interval=0.01, spool_sweep_fn=None)
+        thread, stop = start_reaper(interval=0.01, spool_sweep_fn=None)
         # Give the loop one tick to confirm it doesn't crash.
-        import time
-
         time.sleep(0.05)
+        assert thread.is_alive(), "Reaper thread must still be running after one tick"
         stop.set()
+        thread.join(timeout=1.0)
 
     def test_sweep_fn_exception_does_not_kill_reaper(self):
         """A sweep fn that raises does not crash the reaper thread."""
@@ -362,10 +371,77 @@ class TestStartReaperSpoolSweepFn:
                 raise RuntimeError("first call fails")
             reached_second.set()
 
-        _, stop = start_reaper(interval=0.01, spool_sweep_fn=_flaky)
+        thread, stop = start_reaper(interval=0.01, spool_sweep_fn=_flaky)
         try:
             survived = reached_second.wait(timeout=2.0)
         finally:
             stop.set()
+            thread.join(timeout=1.0)
 
         assert survived, "reaper thread died after sweep fn raised"
+
+    def test_sweep_fn_evaluated_per_tick_not_captured(self, tmp_path):
+        """The sweep lambda re-evaluates get_live_spool_dirs() on each tick.
+
+        A job created AFTER the reaper starts must appear in a subsequent tick's
+        skip set, proving the lambda does not capture a snapshot at startup.
+        """
+        captured: list[frozenset[object]] = []
+        ticked = threading.Event()
+
+        def _recording_sweep() -> None:
+            captured.append(get_live_spool_dirs())
+            ticked.set()
+
+        thread, stop = start_reaper(interval=0.01, spool_sweep_fn=_recording_sweep)
+        try:
+            # Wait for the first tick (before the late job exists).
+            ticked.wait(timeout=2.0)
+            ticked.clear()
+
+            # Create a job AFTER the reaper has already ticked at least once.
+            spool = tmp_path / "late_spool"
+            spool.mkdir()
+            create_job(JobType.UPLOAD, temp_dir=spool)
+
+            # Wait for the next tick to pick up the new job.
+            fired = ticked.wait(timeout=2.0)
+        finally:
+            stop.set()
+            thread.join(timeout=1.0)
+
+        assert fired, "Reaper did not tick after job was created"
+        assert spool in captured[-1], (
+            "get_live_spool_dirs() must be re-evaluated per tick, not captured at start"
+        )
+
+
+@pytest.mark.unit
+class TestCleanupStaleSpoolDirsSkipPaths:
+    """_cleanup_stale_upload_spool_dirs honours skip_paths for active uploads."""
+
+    def _make_stale_dir(self, parent: Path, name: str) -> Path:
+        """Create a subdirectory whose mtime is old enough to be swept."""
+        d = parent / name
+        d.mkdir()
+        old_time = time.time() - _STALE_UPLOAD_TMPDIR_AGE_SECONDS - 1
+        os.utime(d, (old_time, old_time))
+        return d
+
+    def test_skip_paths_spares_active_upload_dir(self, tmp_path):
+        """A stale dir in skip_paths is preserved; its non-skipped sibling is removed.
+
+        This is the core guard preventing deletion of in-progress chunked uploads:
+        mtime is unreliable for active uploads because chunk writes land in
+        subdirectories and don't bump the top-level spool dir mtime.
+        """
+        kept = self._make_stale_dir(tmp_path, "active_upload")
+        removed = self._make_stale_dir(tmp_path, "orphaned_upload")
+        mock_cfg = MagicMock()
+        mock_cfg.upload_spool_dir = tmp_path
+
+        with patch("snore.api.config.get_config", return_value=mock_cfg):
+            _cleanup_stale_upload_spool_dirs(skip_paths=frozenset([kept]))
+
+        assert kept.exists(), "Directory in skip_paths must not be removed"
+        assert not removed.exists(), "Non-skipped stale sibling must be removed"

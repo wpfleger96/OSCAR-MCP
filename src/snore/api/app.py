@@ -497,7 +497,7 @@ def _cleanup_stale_upload_spool_dirs(
 
     for parent, require_prefix in scan_dirs:
         try:
-            entries = parent.iterdir()
+            entries = list(parent.iterdir())
         except OSError:
             continue
         for entry in entries:
@@ -520,7 +520,7 @@ def _cleanup_stale_upload_spool_dirs(
                     "Could not check/remove stale spool dir %s: %s", entry, exc
                 )
     if cleaned:
-        logger.info("Startup: removed %d stale upload spool dir(s)", cleaned)
+        logger.info("Removed %d stale upload spool dir(s)", cleaned)
 
 
 async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
