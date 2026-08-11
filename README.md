@@ -281,6 +281,31 @@ The redemption URL contains the one-time invite token and is written to the
 server log as the delivery channel, so treat your logs as sensitive until the
 invite is redeemed.
 
+#### Deploy gating (watchtower)
+
+SNORE ships a pre-update lifecycle hook for `nickfedor/watchtower` that defers container replacement while the app is mid-operation (active import, running analysis, or held reset lock).
+
+**Endpoint:** `GET /health/busy` — unauthenticated, not in the OpenAPI schema. Returns `{"busy": <bool>}`. Active signals: in-flight import jobs (PENDING_UPLOAD, PENDING, or RUNNING), running analysis jobs, and a held reset lock. Reasons are logged at DEBUG level for operator diagnostics and omitted from the response to avoid leaking activity timing on a tunnel-exposed endpoint.
+
+**Hook script:** `/app/scripts/watchtower-pre-update.sh` (absolute path inside the container). Exits `75` (EX_TEMPFAIL) when the app is busy, `0` otherwise. Fail-open: any error — connection refused, timeout, missing python, malformed response — exits `0` so an unhealthy app never blocks its own replacement.
+
+**Known limitation:** CLI imports run via `docker exec` inside the container are not reflected in the busy signal; only API-initiated imports are tracked.
+
+**Compose configuration** the operator must add to the `snore` service (add these only after an image containing the script has been deployed — a missing script exec-fails and aborts the whole watchtower update run under this fork's semantics):
+
+```yaml
+services:
+  snore:
+    labels:
+      com.centurylinklabs.watchtower.lifecycle.pre-update: /app/scripts/watchtower-pre-update.sh
+      com.centurylinklabs.watchtower.lifecycle.pre-update-timeout: "2"  # minutes (= 120 s); must exceed the hook's 5 s fetch timeout
+    stop_grace_period: 60s
+
+  watchtower:
+    environment:
+      WATCHTOWER_LIFECYCLE_HOOKS: "true"
+```
+
 ### 9. Shell Completions
 
 ```bash
