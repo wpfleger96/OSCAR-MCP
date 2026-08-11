@@ -25,27 +25,49 @@ from snore.services.writer_lease import get_writer_lease
 logger = logging.getLogger(__name__)
 
 
-def purge_profile_raw_dir(profile_id: int, raw_root: Path, label: str = "") -> None:
-    """Quarantine-rename then rmtree the raw/<profile_id>/ backup dir (idempotent).
+def quarantine_profile_raw_dir(profile_id: int, raw_root: Path) -> Path | None:
+    """Atomically rename raw/<profile_id>/ into .quarantine/ (step 1 of purge).
 
-    Follows the two-step pattern used by DeletionSaga: atomic rename to
-    .quarantine/ first so the directory is invisible to new imports, then rmtree.
-    Interruption leaves the dir in .quarantine/ where startup recovery will clean it.
+    Returns the quarantine destination path when the rename succeeds, or None
+    when the source directory is absent.  Idempotent: removes a stale
+    destination before renaming so the rename always lands cleanly.
+
+    Callers that need crash safety call this BEFORE committing the matching
+    DB deletions, then rmtree the returned path after a successful commit.  A
+    crash between quarantine and commit leaves the dir in .quarantine/ where
+    DeletionSaga.recover() case 2 will sweep it on next boot.
 
     Args:
-        profile_id: The profile whose raw backup dir to purge.
+        profile_id: The profile whose raw backup dir to quarantine.
         raw_root: Root of the raw backup directory tree.
-        label: Optional label included in the log message (e.g. "delete-data").
     """
     src = raw_root / str(profile_id)
     if not src.exists():
-        return
+        return None
     quarantine = raw_root / ".quarantine"
     quarantine.mkdir(parents=True, exist_ok=True)
     dst = quarantine / str(profile_id)
     if dst.exists():
         shutil.rmtree(dst, ignore_errors=True)
     src.rename(dst)
+    return dst
+
+
+def purge_profile_raw_dir(profile_id: int, raw_root: Path, label: str = "") -> None:
+    """Quarantine-rename then rmtree the raw/<profile_id>/ backup dir (idempotent).
+
+    Delegates to quarantine_profile_raw_dir (atomic rename) then rmtree.
+    Interruption leaves the dir in .quarantine/ where startup recovery will
+    clean it.  Existing callers (DeletionSaga) are unchanged.
+
+    Args:
+        profile_id: The profile whose raw backup dir to purge.
+        raw_root: Root of the raw backup directory tree.
+        label: Optional label included in the log message (e.g. "delete-data").
+    """
+    dst = quarantine_profile_raw_dir(profile_id, raw_root)
+    if dst is None:
+        return
     shutil.rmtree(dst, ignore_errors=True)
     tag = f" ({label})" if label else ""
     logger.info("Purged raw backup for profile %d%s", profile_id, tag)

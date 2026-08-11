@@ -358,6 +358,13 @@ DEFAULT_DATABASE_PATH = str(Path.home() / ".snore" / "snore.db")
 # Raw file backup directory
 DEFAULT_RAW_BACKUP_DIR = Path.home() / ".snore" / "raw"
 
+# Marker file written before a DB commit that will trigger a post-commit VACUUM.
+# Persists across restarts: startup checks for this file and reschedules the
+# VACUUM when a prior container restart interrupted it.  Content is the SQLite
+# file path so startup can re-derive the target without environment variables.
+# Removed by _vacuum_background after a successful VACUUM.
+DEFAULT_VACUUM_PENDING_MARKER = Path.home() / ".snore" / "vacuum.pending"
+
 # Upload staging spool directory (durable across restarts)
 DEFAULT_UPLOAD_SPOOL_DIR = Path.home() / ".snore" / "spool"
 

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +51,14 @@ def _vacuum_background(db_path: str) -> None:
         conn = sqlite3.connect(db_path, isolation_level=None)
         conn.execute("VACUUM")
         logger.info("Background VACUUM completed for %s", db_path)
+        # Remove the pending-vacuum marker so a subsequent restart does not
+        # schedule another VACUUM unnecessarily.
+        try:
+            from snore.constants import DEFAULT_VACUUM_PENDING_MARKER  # noqa: PLC0415
+
+            DEFAULT_VACUUM_PENDING_MARKER.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Could not clear vacuum pending marker: %s", exc)
     except Exception as exc:
         logger.warning("Background VACUUM failed for %s (non-fatal): %s", db_path, exc)
     finally:
@@ -326,10 +335,6 @@ class DatabaseService:
     ) -> tuple[int, int, int]:
         """Delete all sleep data owned by *user_id*; commit; purge raw dirs.
 
-        The raw-dir purge runs synchronously on the calling thread/event loop
-        (unlike ``reset_db``, which offloads via ``asyncio.to_thread``) —
-        acceptable for the typical 1-2 profiles per user.
-
         Deletes Device rows for every live profile owned by the user — the DB
         cascades (Device → Session/Day/Waveform/Event/Statistics/Setting/
         AnalysisResult/Breath/DetectedPattern) handle the rest.  Session has two
@@ -339,16 +344,30 @@ class DatabaseService:
 
         Import job records (no FK, explicit delete) are also removed.
 
+        Crash-safe cleanup (quarantine-before-commit pattern):
+
+        Raw backup directories are quarantine-renamed into ``.quarantine/``
+        BEFORE the commit so that a container restart between quarantine and
+        commit leaves the dirs visible to ``DeletionSaga.recover()`` case 2 on
+        next boot.  On commit failure the dirs are renamed back; on success
+        they are rmtree'd best-effort.  ``CancelledError`` may skip the rmtree
+        — startup recovery cleans up any ``.quarantine/`` leftovers.
+
+        Trade-off: a crash between quarantine and commit means DB rows survive
+        but raw backups are swept by startup recovery.  New imports proceed
+        normally — re-upload and deduplication make the loss harmless.
+
         NOTE: Concurrent in-flight imports for this user's devices will fail if
         their device rows are deleted mid-import; this is accepted behavior.
 
-        Commits the transaction.  Caller is responsible for scheduling vacuum.
+        Commits the transaction.  Caller is responsible for writing the vacuum
+        marker and scheduling vacuum.
 
         Returns:
             (devices_deleted, import_jobs_deleted, profiles_processed) counts.
         """
         from snore.services.profile_service import (
-            purge_profile_raw_dir,  # noqa: PLC0415
+            quarantine_profile_raw_dir,  # noqa: PLC0415
         )
 
         profile_ids = list(
@@ -380,10 +399,44 @@ class DatabaseService:
         )
         import_jobs_deleted = import_cursor.rowcount or 0  # type: ignore[attr-defined]
 
-        await db.commit()
+        # Quarantine raw dirs BEFORE committing.  A crash between quarantine
+        # and commit leaves the dirs in .quarantine/ for startup recovery to
+        # sweep; the DB rows survive so the state is consistent.
+        quarantined: list[tuple[int, Path]] = []
+        for pid in profile_ids:
+            dst = quarantine_profile_raw_dir(pid, raw_root)
+            if dst is not None:
+                quarantined.append((pid, dst))
 
-        for profile_id in profile_ids:
-            purge_profile_raw_dir(profile_id, raw_root, label="delete-data")
+        try:
+            await db.commit()
+        except Exception:
+            # Commit failed — restore quarantined dirs so raw backups are not
+            # orphaned alongside the uncommitted DB rows.
+            for pid, dst in quarantined:
+                src = raw_root / str(pid)
+                try:
+                    dst.rename(src)
+                except Exception:
+                    logger.warning(
+                        "Could not restore quarantined raw dir for profile %d after "
+                        "commit failure; dir remains in .quarantine/ for startup recovery",
+                        pid,
+                    )
+            raise
+
+        # Commit succeeded — best-effort rmtree.  CancelledError may skip this;
+        # startup recovery (DeletionSaga case 2) purges .quarantine/ leftovers.
+        for pid, dst in quarantined:
+            try:
+                shutil.rmtree(dst, ignore_errors=True)
+                logger.info("Purged raw backup for profile %d (delete-data)", pid)
+            except Exception:
+                logger.warning(
+                    "Post-commit rmtree for profile %d failed; dir remains in "
+                    ".quarantine/ for startup recovery",
+                    pid,
+                )
 
         return devices_deleted, import_jobs_deleted, len(profile_ids)
 

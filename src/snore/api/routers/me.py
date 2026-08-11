@@ -60,7 +60,7 @@ from snore.auth.passwords import (
     verify_password_async,
 )
 from snore.auth.session_cookie import clear_session_cookie, set_session_cookie
-from snore.constants import DEFAULT_RAW_BACKUP_DIR
+from snore.constants import DEFAULT_RAW_BACKUP_DIR, DEFAULT_VACUUM_PENDING_MARKER
 from snore.database import models
 from snore.services.database_service import (
     DatabaseService,
@@ -380,6 +380,15 @@ async def delete_my_data(
     VACUUM runs as a post-response background task so that reclaiming large
     waveform blobs never blocks the event loop or exceeds proxy timeouts.
     ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
+    A persistent marker file is written before the commit so that a container
+    restart between commit and VACUUM causes startup to reschedule the VACUUM.
+
+    Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
+    renamed into ``.quarantine/`` BEFORE the commit so that a container restart
+    between quarantine and commit leaves dirs visible to
+    ``DeletionSaga.recover()`` case 2 on next boot.  DB rows survive so the
+    state is consistent.  New imports proceed normally — re-upload and
+    deduplication make the loss harmless.
 
     NOTE: Concurrent in-flight imports for this user's devices will fail if
     their device rows are deleted mid-import; this is accepted behavior.
@@ -404,6 +413,18 @@ async def delete_my_data(
     db_path = target.sqlite_path if is_sqlite_file else ""
 
     size_before = await asyncio.to_thread(file_size_mb, db_path)
+
+    # Write vacuum marker before commit so a container restart between commit
+    # and VACUUM causes startup to reschedule the VACUUM.  Best-effort: a
+    # marker-write failure is logged but never aborts the request.
+    if is_sqlite_file:
+        try:
+            DEFAULT_VACUUM_PENDING_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            DEFAULT_VACUUM_PENDING_MARKER.write_text(db_path)
+        except Exception:
+            logger.warning(
+                "Could not write vacuum pending marker; VACUUM may not resume after a crash"
+            )
 
     async with db_busy_maps_to_409():
         (
