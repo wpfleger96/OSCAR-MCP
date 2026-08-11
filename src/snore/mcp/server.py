@@ -197,11 +197,12 @@ WORKFLOW:
 1. get_data_overview  → discover devices, date ranges, channels
 2. get_nightly_summary → identify nights of interest (30 nights/page)
 3. get_settings_timeline → understand settings epochs
-4. get_events (date) → event-level detail for a night
-5. get_breath_table, find_windows, compare_epochs for breath morphology tuning
-6. get_ca_analysis → central-apnea context and periodic-breathing stats
-7. render_window → PNG chart for visual inspection (≤15 min window)
-8. get_waveform → raw per-sample arrays for deep inspection (≤2 min window)
+4. get_settings_changes → full audit log of device settings changes + user-logged mask equipment changes
+5. get_events (date) → event-level detail for a night
+6. get_breath_table, find_windows, compare_epochs for breath morphology tuning
+7. get_ca_analysis → central-apnea context and periodic-breathing stats
+8. render_window → PNG chart for visual inspection (≤15 min window)
+9. get_waveform → raw per-sample arrays for deep inspection (≤2 min window)
 
 DATA TIERS (progressive disclosure):
   Tier 1 (primary):  computed metrics — indices, percentiles, aggregates
@@ -435,7 +436,8 @@ def _register_resources(mcp: FastMCP) -> None:
         """JSON schema for a named response type.
 
         Available schema_types: device_capabilities, device_info, data_overview,
-        settings_epoch, settings_timeline, nightly_row, compliance_fields,
+        settings_epoch, settings_timeline, settings_change_entry, settings_changes,
+        nightly_row, compliance_fields,
         nightly_summary, event_context, event_row, events_response, capability_entry,
         breath_table_query, breath_table_row, breath_table_bin, breath_table_response,
         window_row, session_coverage_entry, find_windows_response, epoch_spec,
@@ -527,6 +529,7 @@ def _register_tools(mcp: FastMCP) -> None:
     from snore.mcp.tools import (  # noqa: PLC0415
         breath_table,
         ca_analysis,
+        changes,
         epochs,
         events,
         overview,
@@ -538,6 +541,7 @@ def _register_tools(mcp: FastMCP) -> None:
 
     overview.register(mcp)
     settings.register(mcp)
+    changes.register(mcp)
     summary.register(mcp)
     events.register(mcp)
     breath_table.register(mcp)

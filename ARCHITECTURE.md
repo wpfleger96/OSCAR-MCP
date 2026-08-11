@@ -16,7 +16,7 @@ Technical documentation for the SNORE system architecture, components, and desig
 ├──────────────┬──────────────┬──────────────┤
 │ FastAPI REST │   CLI (cli/) │  MCP Server  │
 │ API (api/)   │  Click cmds  │  (mcp/)      │
-│ 17 routers   │  snore cmds  │  10 tools    │
+│ 17 routers   │  snore cmds  │  11 tools    │
 ├──────────────┴──────────────┴──────────────┤
 │        Service Layer (services/)            │
 │  13 services: business logic between        │
@@ -550,7 +550,7 @@ StaticRuntime     — stdio path; profile_id resolved at startup
 ActorRuntime      — OAuth HTTP path; profile_id from per-request context var
 ```
 
-`_scope_and_run(ctx, impl, *, tool_name, **kwargs)` in `server.py` captures the common scaffold shared by seven of the ten tools: open scope → call impl with `(db, profile_id=..., **kwargs)` → `model_dump(mode="json")` → `_check_response_size`.
+`_scope_and_run(ctx, impl, *, tool_name, **kwargs)` in `server.py` captures the common scaffold shared by eight of the eleven tools: open scope → call impl with `(db, profile_id=..., **kwargs)` → `model_dump(mode="json")` → `_check_response_size`.
 
 ### Tool Modules
 
@@ -560,6 +560,7 @@ Each tool is defined in `src/snore/mcp/tools/<name>.py` and owns a `register(mcp
 |--------|-----------|---------|
 | `overview.py` | `get_data_overview` | `_scope_and_run` |
 | `settings.py` | `get_settings_timeline` | `_scope_and_run` |
+| `changes.py` | `get_settings_changes` | `_scope_and_run` |
 | `summary.py` | `get_nightly_summary` | `_scope_and_run` |
 | `events.py` | `get_events` | `_scope_and_run` |
 | `breath_table.py` | `get_breath_table` | `_scope_and_run` |
@@ -575,7 +576,7 @@ Tools implement progressive disclosure across three tiers:
 
 | Tier | Tools | Description |
 |------|-------|-------------|
-| 1 (primary) | overview, summary, settings, events, epochs, ca_analysis | Computed metrics — indices, percentiles, aggregates |
+| 1 (primary) | overview, summary, settings, changes, events, epochs, ca_analysis | Computed metrics — indices, percentiles, aggregates |
 | 2 (secondary) | render_window | PNG charts — visual inspection of waveform windows ≤15 min |
 | 3 (escape hatch) | get_waveform, breath_table | Raw arrays and per-breath rows for deep inspection |
 

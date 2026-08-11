@@ -9,7 +9,7 @@ import pytest
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.rx_tracker import RxTracker, _diff_settings
+from snore.analysis.rx_tracker import TIMELINE_KEYS, RxTracker, _diff_settings
 from snore.database.models import Day, Device, Session, Setting
 
 
@@ -937,3 +937,112 @@ class TestRxTrackerChanges:
         assert change.old_value == "3"
         assert change.new_value == "5"
         assert change.device_id == async_test_device.id
+
+
+class TestTimelineKeys:
+    async def test_timeline_keys_mask_type_change_splits_period(
+        self, async_db_session, async_test_device
+    ):
+        """get_history(keys=TIMELINE_KEYS) splits a period when mask_type changes."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Full Face"},
+            )
+        await async_db_session.flush()
+
+        result = await RxTracker(1).get_history(async_db_session, keys=TIMELINE_KEYS)
+
+        assert len(result) == 2
+        assert result[0].settings["mask_type"] == "Pillows"
+        assert result[1].settings["mask_type"] == "Full Face"
+        assert result[1].start_date == base + timedelta(days=3)
+
+    async def test_default_history_does_not_split_on_mask_type(
+        self, async_db_session, async_test_device
+    ):
+        """Default get_history() ignores a mask_type-only change (RX_KEYS behavior)."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Full Face"},
+            )
+        await async_db_session.flush()
+
+        result = await RxTracker(1).get_history(async_db_session)
+
+        assert len(result) == 1
+        assert result[0].days_count == 6
+
+    async def test_humidity_level_change_never_splits_period(
+        self, async_db_session, async_test_device
+    ):
+        """humidity_level is excluded from both RX_KEYS and TIMELINE_KEYS epochs."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "humidity_level": "3"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "humidity_level": "5"},
+            )
+        await async_db_session.flush()
+
+        tracker = RxTracker(1)
+        assert len(await tracker.get_history(async_db_session)) == 1
+        assert len(await tracker.get_history(async_db_session, keys=TIMELINE_KEYS)) == 1
+
+    async def test_get_current_unaffected_by_mask_type_change(
+        self, async_db_session, async_test_device
+    ):
+        """get_current keeps RX-only fingerprints: mask_type change is no boundary."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Full Face"},
+            )
+        await async_db_session.flush()
+
+        result = await RxTracker(1).get_current(async_db_session)
+
+        assert result is not None
+        assert result.days_count == 6
+        assert result.start_date == base
+        assert "mask_type" not in result.settings

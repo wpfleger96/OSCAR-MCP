@@ -123,6 +123,209 @@ class TestGetSettingsTimeline:
         # Only the March session epoch should appear
         assert result.total_epochs == 1
 
+    async def test_mask_type_change_splits_epochs_and_flags_changed_key(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """A mask_type change splits epochs; mask_type appears in settings + changed_keys."""
+        from snore.database.models import Setting
+        from snore.mcp.tools.settings import get_settings_timeline
+
+        device = await _make_device(async_db_session, async_test_profile.id)
+        for i in range(2):
+            _, sess = await _make_day_session(
+                async_db_session, device, date(2024, 3, 1) + timedelta(days=i)
+            )
+            async_db_session.add(
+                Setting(session_id=sess.id, key="mode", value="AutoSet")
+            )
+            async_db_session.add(
+                Setting(session_id=sess.id, key="mask_type", value="Pillows")
+            )
+        for i in range(2, 4):
+            _, sess = await _make_day_session(
+                async_db_session, device, date(2024, 3, 1) + timedelta(days=i)
+            )
+            async_db_session.add(
+                Setting(session_id=sess.id, key="mode", value="AutoSet")
+            )
+            async_db_session.add(
+                Setting(session_id=sess.id, key="mask_type", value="Full Face")
+            )
+        await async_db_session.flush()
+
+        result = await get_settings_timeline(
+            async_db_session,
+            date(2024, 3, 1),
+            date(2024, 3, 31),
+            profile_id=async_test_profile.id,
+        )
+
+        assert result.total_epochs == 2
+        first, second = result.epochs
+        assert first.settings["mask_type"] == "Pillows"
+        assert second.settings["mask_type"] == "Full Face"
+        assert second.start_date == date(2024, 3, 3)
+        assert second.changed_keys == ["mask_type"]
+
+
+# ---------------------------------------------------------------------------
+# get_settings_changes
+# ---------------------------------------------------------------------------
+
+
+class TestGetSettingsChanges:
+    async def test_empty_database_returns_no_changes(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        from snore.mcp.tools.changes import get_settings_changes
+
+        result = await get_settings_changes(
+            async_db_session,
+            date(2024, 1, 1),
+            date(2024, 12, 31),
+            profile_id=async_test_profile.id,
+        )
+        assert result.changes == []
+        assert result.total_changes == 0
+
+    async def test_merged_changes_interleave_sources_in_date_order(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """Device settings changes and mask log entries merge into one date-ordered log."""
+        from snore.database.models import MaskLogEntry, Setting
+        from snore.mcp.tools.changes import get_settings_changes
+
+        device = await _make_device(async_db_session, async_test_profile.id)
+        # Day 1: pressure_max 15 → Day 3: pressure_max 18 (device change on Mar 3)
+        for day_date, pmax in [(date(2024, 3, 1), "15.0"), (date(2024, 3, 3), "18.0")]:
+            _, sess = await _make_day_session(async_db_session, device, day_date)
+            async_db_session.add(
+                Setting(session_id=sess.id, key="pressure_max", value=pmax)
+            )
+        # Mask log: an entry before the range (old_value source) and one inside
+        async_db_session.add(
+            MaskLogEntry(
+                profile_id=async_test_profile.id,
+                brand="ResMed",
+                model="AirFit P10",
+                size="M",
+                style="pillows",
+                start_date=date(2024, 1, 15),
+            )
+        )
+        async_db_session.add(
+            MaskLogEntry(
+                profile_id=async_test_profile.id,
+                brand="ResMed",
+                model="AirFit F20",
+                size=None,
+                style="full_face",
+                start_date=date(2024, 3, 2),
+                notes="switched for leak issues",
+            )
+        )
+        await async_db_session.flush()
+
+        result = await get_settings_changes(
+            async_db_session,
+            date(2024, 3, 1),
+            date(2024, 3, 31),
+            profile_id=async_test_profile.id,
+        )
+
+        assert result.total_changes == 2
+        mask_change, device_change = result.changes
+        # Date order: mask log entry (Mar 2) before device change (Mar 3)
+        assert mask_change.date == date(2024, 3, 2)
+        assert mask_change.source == "mask_log"
+        assert mask_change.key == "mask_equipment"
+        assert mask_change.device_id is None
+        assert mask_change.new_value == "ResMed AirFit F20"  # size null → no parens
+        assert mask_change.old_value == "ResMed AirFit P10 (M)"  # pre-range entry
+        assert mask_change.mask_brand == "ResMed"
+        assert mask_change.mask_style == "full_face"
+        assert mask_change.notes == "switched for leak issues"
+
+        assert device_change.date == date(2024, 3, 3)
+        assert device_change.source == "device_settings"
+        assert device_change.device_id == device.id
+        assert device_change.key == "pressure_max"
+        assert device_change.old_value == "15.0"
+        assert device_change.new_value == "18.0"
+
+    async def test_first_mask_entry_ever_has_null_old_value(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        from snore.database.models import MaskLogEntry
+        from snore.mcp.tools.changes import get_settings_changes
+
+        async_db_session.add(
+            MaskLogEntry(
+                profile_id=async_test_profile.id,
+                brand="F&P",
+                model="Evora",
+                size="S",
+                style="nasal",
+                start_date=date(2024, 5, 1),
+            )
+        )
+        await async_db_session.flush()
+
+        result = await get_settings_changes(
+            async_db_session,
+            date(2024, 5, 1),
+            date(2024, 5, 31),
+            profile_id=async_test_profile.id,
+        )
+
+        assert result.total_changes == 1
+        assert result.changes[0].old_value is None
+        assert result.changes[0].new_value == "F&P Evora (S)"
+
+    async def test_device_id_filter_keeps_profile_level_mask_entries(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """device_id narrows device_settings entries; mask_log entries always remain."""
+        from snore.database.models import MaskLogEntry, Setting
+        from snore.mcp.tools.changes import get_settings_changes
+
+        device_a = await _make_device(async_db_session, async_test_profile.id)
+        device_b = await _make_device(async_db_session, async_test_profile.id)
+        for device in [device_a, device_b]:
+            for day_date, mode in [
+                (date(2024, 6, 1), "CPAP"),
+                (date(2024, 6, 2), "AutoSet"),
+            ]:
+                _, sess = await _make_day_session(async_db_session, device, day_date)
+                async_db_session.add(
+                    Setting(session_id=sess.id, key="mode", value=mode)
+                )
+        async_db_session.add(
+            MaskLogEntry(
+                profile_id=async_test_profile.id,
+                brand="ResMed",
+                model="AirFit N20",
+                size="M",
+                style="nasal",
+                start_date=date(2024, 6, 3),
+            )
+        )
+        await async_db_session.flush()
+
+        result = await get_settings_changes(
+            async_db_session,
+            date(2024, 6, 1),
+            date(2024, 6, 30),
+            profile_id=async_test_profile.id,
+            device_id=device_a.id,
+        )
+
+        sources = [(c.source, c.device_id) for c in result.changes]
+        assert ("device_settings", device_a.id) in sources
+        assert ("device_settings", device_b.id) not in sources
+        assert ("mask_log", None) in sources
+        assert result.total_changes == 2
+
 
 # ---------------------------------------------------------------------------
 # get_nightly_summary

@@ -35,6 +35,11 @@ RX_KEYS = (
     "ps",
 )
 
+# Keys that define a settings-timeline epoch: the prescription keys plus the
+# device-reported mask type.  humidity_level deliberately stays out — comfort
+# tweaks should not split epochs.
+TIMELINE_KEYS = (*RX_KEYS, "mask_type")
+
 _TAIL_WALK_BATCH_SIZE = 90
 
 
@@ -95,9 +100,18 @@ class RxTracker:
         """
         self.profile_id = profile_id
 
-    async def get_history(self, db_session: AsyncSession) -> list[RxPeriodResponse]:
-        """Return all RX periods with stats."""
-        periods = await self._compute_periods(db_session)
+    async def get_history(
+        self, db_session: AsyncSession, keys: tuple[str, ...] = RX_KEYS
+    ) -> list[RxPeriodResponse]:
+        """Return all RX periods with stats.
+
+        Args:
+            keys: Settings keys that define a period fingerprint.  Defaults
+                to RX_KEYS (prescription-only periods — the /rx/* and CLI
+                behavior); pass TIMELINE_KEYS to also split periods when the
+                device-reported mask_type changes.
+        """
+        periods = await self._compute_periods(db_session, keys)
         stats = self._compute_period_stats(periods)
         return [self._to_response(p) for p in stats]
 
@@ -183,18 +197,24 @@ class RxTracker:
             device_name=period.device_name,
         )
 
-    async def _compute_periods(self, db_session: AsyncSession) -> list[RxPeriod]:
+    async def _compute_periods(
+        self, db_session: AsyncSession, keys: tuple[str, ...] = RX_KEYS
+    ) -> list[RxPeriod]:
         """Query all days and group into RX periods."""
-        return self._compute_periods_from_groups(await self._days_by_device(db_session))
+        return self._compute_periods_from_groups(
+            await self._days_by_device(db_session), keys
+        )
 
     def _compute_periods_from_groups(
-        self, device_groups: list[tuple[int, str, list[Day]]]
+        self,
+        device_groups: list[tuple[int, str, list[Day]]],
+        keys: tuple[str, ...] = RX_KEYS,
     ) -> list[RxPeriod]:
         """Group consecutive days per device by therapy settings into RX periods."""
         all_periods: list[RxPeriod] = []
         for device_id, device_name, device_days in device_groups:
             all_periods.extend(
-                self._compute_device_periods(device_days, device_id, device_name)
+                self._compute_device_periods(device_days, device_id, device_name, keys)
             )
         all_periods.sort(key=lambda p: (p.start_date, p.device_id))
         return all_periods
@@ -272,7 +292,11 @@ class RxTracker:
         return result
 
     def _compute_device_periods(
-        self, days: list[Day], device_id: int, device_name: str
+        self,
+        days: list[Day],
+        device_id: int,
+        device_name: str,
+        keys: tuple[str, ...] = RX_KEYS,
     ) -> list[RxPeriod]:
         """Run the fingerprint-grouping loop for a single device's days in date order."""
         periods: list[RxPeriod] = []
@@ -282,7 +306,7 @@ class RxTracker:
         current_start_date: date | None = None
 
         for day in days:
-            day_settings = self._get_day_rx_settings(day)
+            day_settings = self._get_day_rx_settings(day, keys)
 
             if day_settings is None:
                 continue
@@ -421,9 +445,11 @@ class RxTracker:
 
         return settings_dict if settings_dict else None
 
-    def _get_day_rx_settings(self, day: Day) -> dict[str, str] | None:
-        """Extract RX-defining settings from the longest enabled session of a day."""
-        return self._get_day_settings(day, key_filter=RX_KEYS)
+    def _get_day_rx_settings(
+        self, day: Day, keys: tuple[str, ...] = RX_KEYS
+    ) -> dict[str, str] | None:
+        """Extract period-defining settings from the longest enabled session of a day."""
+        return self._get_day_settings(day, key_filter=keys)
 
     def _build_fingerprint(self, settings: dict[str, str]) -> str:
         """Build a fingerprint string from RX settings for comparison."""

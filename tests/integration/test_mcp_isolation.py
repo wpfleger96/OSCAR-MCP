@@ -255,6 +255,59 @@ class TestProfileIsolation:
         assert "CPAP_Distinct" in b_modes
         assert "AutoSet" not in b_modes
 
+    async def test_settings_changes_shows_only_own_mask_log_entries(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        from snore.database.models import MaskLogEntry
+        from snore.mcp.tools.changes import get_settings_changes
+
+        profile_a = async_test_profile
+        profile_b = await _make_profile(async_db_session)
+
+        async_db_session.add(
+            MaskLogEntry(
+                profile_id=profile_a.id,
+                brand="BrandA",
+                model="ModelA",
+                size="M",
+                style="nasal",
+                start_date=date(2024, 9, 20),
+            )
+        )
+        async_db_session.add(
+            MaskLogEntry(
+                profile_id=profile_b.id,
+                brand="BrandB",
+                model="ModelB",
+                size="L",
+                style="full_face",
+                start_date=date(2024, 9, 21),
+            )
+        )
+        await async_db_session.flush()
+
+        result_a = await get_settings_changes(
+            async_db_session,
+            date(2024, 9, 1),
+            date(2024, 9, 30),
+            profile_id=profile_a.id,
+        )
+        result_b = await get_settings_changes(
+            async_db_session,
+            date(2024, 9, 1),
+            date(2024, 9, 30),
+            profile_id=profile_b.id,
+        )
+
+        # A sees only its own mask entry; B's never appears
+        a_values = [c.new_value for c in result_a.changes]
+        assert a_values == ["BrandA ModelA (M)"]
+        assert all("BrandB" not in (v or "") for v in a_values)
+
+        # B sees only its own mask entry; A's never appears
+        b_values = [c.new_value for c in result_b.changes]
+        assert b_values == ["BrandB ModelB (L)"]
+
 
 # ---------------------------------------------------------------------------
 # TestDeviceAmbiguity — two devices same date, no device_id filter

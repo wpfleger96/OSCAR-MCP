@@ -127,6 +127,34 @@ class SettingsTimelineResponse(BaseModel):
     device_capabilities_by_device: dict[str, DeviceCapabilities] = {}
 
 
+class SettingsChangeEntry(BaseModel):
+    """One settings change from either the device settings log or the mask log."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    date: date
+    source: str  # "device_settings" | "mask_log"
+    device_id: int | None = None  # null for mask_log entries
+    device_name: str | None = None
+    key: str  # settings key, or "mask_equipment"
+    old_value: str | None = None
+    new_value: str | None = None
+    mask_brand: str | None = None  # mask_log-only detail, null for device_settings
+    mask_model: str | None = None
+    mask_size: str | None = None
+    mask_style: str | None = None
+    notes: str | None = None
+
+
+class SettingsChangesResponse(BaseModel):
+    """Response from get_settings_changes."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    changes: list[SettingsChangeEntry]
+    total_changes: int
+
+
 class NightlyRow(BaseModel):
     """Per-night summary row returned by get_nightly_summary."""
 
@@ -639,6 +667,8 @@ SCHEMA_MODEL_MAP: dict[str, type[BaseModel]] = {
     "data_overview": DataOverviewResponse,
     "settings_epoch": SettingsEpoch,
     "settings_timeline": SettingsTimelineResponse,
+    "settings_change_entry": SettingsChangeEntry,
+    "settings_changes": SettingsChangesResponse,
     "nightly_row": NightlyRow,
     "compliance_fields": ComplianceFields,
     "nightly_summary": NightlySummaryResponse,
