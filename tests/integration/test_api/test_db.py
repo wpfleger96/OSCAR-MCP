@@ -506,3 +506,129 @@ class TestDbBusyMapsTo409:
             result.append(42)
 
         assert result == [42]
+
+
+# ---------------------------------------------------------------------------
+# Crash-safe cleanup: vacuum marker and quarantine-before-commit
+# ---------------------------------------------------------------------------
+
+
+class TestDbResetVacuumMarker:
+    """POST /db/reset writes the vacuum pending marker before the commit."""
+
+    def _make_admin_client(
+        self,
+        async_db_session: AsyncSession,
+        db_session: SyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[object, models.User, models.Profile]:
+        """Reuse the multiuser setup pattern for admin client."""
+        _multiuser_env(monkeypatch)
+        from snore.api.config import load_config, set_config  # noqa: PLC0415
+
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        user = models.User(
+            canonical_email=f"admin_{uuid.uuid4().hex[:8]}@test.local",
+            role="admin",
+        )
+        db_session.add(user)
+        db_session.flush()
+        profile = models.Profile(user_id=user.id, name="Default")
+        db_session.add(profile)
+        db_session.flush()
+        user.default_profile_id = profile.id
+        db_session.flush()
+
+        actor = _admin_actor(user.id, profile.id)
+        client = make_test_client(async_db_session, actor=actor)
+        client.headers.update({"origin": "http://127.0.0.1:8000"})
+        return client, user, profile
+
+    def test_reset_writes_vacuum_marker(
+        self, async_db_session, db_session, monkeypatch, temp_db, tmp_path
+    ):
+        """POST /db/reset writes a vacuum pending marker file before committing.
+
+        The marker content is whatever sqlite_path is resolved in the test
+        environment (may not equal temp_db since target resolution uses env
+        vars); we only assert it is non-empty and the marker file is created.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        client, _, _ = self._make_admin_client(
+            async_db_session, db_session, monkeypatch
+        )
+        marker = tmp_path / "vacuum.pending"
+
+        with (
+            _patch_target(temp_db),
+            patch("snore.api.routers.db.DEFAULT_VACUUM_PENDING_MARKER", marker),
+        ):
+            response = client.post("/api/v1/db/reset", json={"include_accounts": False})
+
+        assert response.status_code == 200
+        # _vacuum_background is patched to a no-op in tests so the marker persists.
+        assert marker.exists(), (
+            "Vacuum pending marker must be written by reset endpoint"
+        )
+        assert marker.read_text().strip(), "Marker must contain a non-empty DB path"
+
+    def test_reset_quarantine_survives_rmtree_failure_and_is_swept(
+        self,
+        async_db_session,
+        db_session,
+        monkeypatch,
+        temp_db,
+        tmp_path,
+    ):
+        """When post-commit rmtree fails, dir stays in .quarantine/ for startup recovery."""
+        import asyncio  # noqa: PLC0415
+
+        from contextlib import asynccontextmanager  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.services.profile_service import DeletionSaga  # noqa: PLC0415
+
+        client, _, profile = self._make_admin_client(
+            async_db_session, db_session, monkeypatch
+        )
+
+        raw_root = tmp_path / "raw"
+        profile_dir = raw_root / str(profile.id)
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "data.edf").write_text("backup")
+
+        # Patch shutil.rmtree in the db router to simulate a crash right after commit.
+        def _rmtree_raise(path, **kwargs):
+            raise OSError("disk error")
+
+        with (
+            _patch_target(temp_db),
+            patch("snore.api.routers.db._raw_root", return_value=raw_root),
+            patch("snore.api.routers.db.shutil.rmtree", side_effect=_rmtree_raise),
+        ):
+            response = client.post("/api/v1/db/reset", json={"include_accounts": False})
+
+        # The reset is committed; response must still be 200.
+        assert response.status_code == 200
+
+        # Quarantine dir must exist (rmtree was skipped/failed).
+        quarantine_dst = raw_root / ".quarantine" / str(profile.id)
+        assert quarantine_dst.exists(), "Quarantine dir must remain when rmtree fails"
+
+        # Simulate startup recovery sweeping the orphaned quarantine dir.
+        @asynccontextmanager
+        async def _mock_session_scope():
+            yield async_db_session
+
+        with patch("snore.services.profile_service.session_scope", _mock_session_scope):
+            saga = DeletionSaga(raw_root=raw_root)
+            asyncio.run(saga._recover_async())
+
+        assert not quarantine_dst.exists(), (
+            "DeletionSaga.recover() case 2 must sweep quarantine dir after crash"
+        )
