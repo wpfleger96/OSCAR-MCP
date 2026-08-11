@@ -2,10 +2,9 @@
 Register all available device parsers.
 
 This module provides explicit parser registration, which is safer than
-auto-registration at module import time. Call ``register_all_parsers()``
-at application startup, or ``ensure_registered_parsers()`` in idempotent
-contexts (e.g. ``BreathService.get_device_capabilities()`` and the
-``docs://capabilities`` lifespan hook).
+auto-registration at module import time. Call ``ensure_registered_parsers()``
+at any call site — it is safe to invoke repeatedly and will not raise if
+parsers are already registered.
 """
 
 from __future__ import annotations
@@ -40,46 +39,6 @@ def _build_parser_instances() -> list[DeviceParser]:
     return parsers
 
 
-def register_all_parsers() -> None:
-    """
-    Register all available device parsers with the global registry.
-
-    This function attempts to import and register each parser individually,
-    with proper error handling. If a parser fails to import or register,
-    a warning is logged but other parsers continue to load.
-
-    This should be called once at application startup.  For idempotent
-    call sites (tools, lifespan hooks) prefer ``ensure_registered_parsers()``
-    — it skips already-registered IDs without emitting false errors.
-    """
-    from snore.parsers.registry import parser_registry
-
-    try:
-        from snore.parsers.resmed_edf import ResmedEDFParser
-
-        parser_registry.register(ResmedEDFParser())
-        logger.debug("Registered ResMed EDF+ parser")
-    except ImportError as e:
-        logger.warning(f"ResMed EDF+ parser not available: {e}")
-    except Exception as e:
-        logger.error(f"Failed to register ResMed EDF+ parser: {e}", exc_info=True)
-
-    try:
-        from snore.parsers.oscar_device import OscarDeviceParser
-
-        parser_registry.register(OscarDeviceParser())
-        logger.debug("Registered OSCAR binary parser")
-    except ImportError as e:
-        logger.warning(f"OSCAR binary parser not available: {e}")
-    except Exception as e:
-        logger.error(f"Failed to register OSCAR binary parser: {e}", exc_info=True)
-
-    registered_count = len(parser_registry.list_parsers())
-    logger.debug(
-        f"Parser registration complete: {registered_count} parser(s) available"
-    )
-
-
 def ensure_registered_parsers() -> None:
     """Register any parser IDs not yet in the global registry.
 
@@ -88,9 +47,9 @@ def ensure_registered_parsers() -> None:
     skipped — no duplicate-ID errors, no false error logs.  Handles partially
     populated registries correctly.
 
-    Call sites: ``BreathService.get_device_capabilities()`` and the
-    ``docs://capabilities`` lifespan hook — both may run in cold-start
-    processes where ``register_all_parsers()`` has not yet been called.
+    Call sites: ``BreathService.get_device_capabilities()``,
+    ``ImportService.detect_sources()``, ``ExportService.export_raw()``, and the
+    ``docs://capabilities`` lifespan hook.
     """
     from snore.parsers.registry import parser_registry
 
