@@ -110,7 +110,7 @@ def session_list(
             print_table(
                 [
                     ("ID", 5),
-                    ("Date", 12),
+                    ("Therapy Day", 12),
                     ("Time", 8),
                     ("Duration", 10),
                     ("Device", 30),
@@ -236,7 +236,7 @@ def session_delete(
             print_table(
                 [
                     ("ID", 5),
-                    ("Date", 12),
+                    ("Therapy Day", 12),
                     ("Time", 8),
                     ("Duration", 10),
                     ("Device", 30),

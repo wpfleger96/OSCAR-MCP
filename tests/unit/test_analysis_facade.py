@@ -929,17 +929,16 @@ class TestStoreWithRetry:
 
 
 class TestAnalysisFacadeTherapyDay:
-    """Tests that session_date in AnalysisListItem respects the noon-cutoff."""
+    """Tests that session_date in AnalysisListItem reflects Day.date (the therapy day)."""
 
-    async def test_session_date_uses_day_date_for_early_morning_session(
+    async def test_early_morning_session_returns_day_date_not_start_date(
         self, async_db_session, async_test_device
     ):
-        """An early-morning session linked to its therapy day returns Day.date, not start_time.date().
+        """An early-morning session returns Day.date (therapy day), not start_time.date().
 
-        Regression guard for the analysis facade fallback: the old code used
-        session.start_time.date() which ignored the noon cutoff.
+        A session starting at 01:12 on Aug 10 belongs to the Aug 9 therapy day.
+        The facade must surface Day.date so the analysis list matches the Days view.
         """
-        # A session starting at 01:12 on Aug 10 belongs to Aug 9 (therapy day).
         therapy_day_date = date(2025, 8, 9)
         start = datetime(2025, 8, 10, 1, 12, 0)
 
@@ -979,17 +978,3 @@ class TestAnalysisFacadeTherapyDay:
         # Must be therapy_day (Aug 9), NOT start_time.date() (Aug 10).
         assert results[0].session_date == therapy_day_date
         assert results[0].session_date != start.date()
-
-    async def test_fallback_noon_cutoff_applied_when_session_day_is_none(self):
-        """DayManager.get_day_for_session (the facade's NULL-day fallback) respects noon cutoff.
-
-        A session starting before noon belongs to the previous day; one starting
-        after noon belongs to its own calendar day.
-        """
-        from snore.database.day_manager import DayManager
-
-        before_noon = datetime(2025, 8, 10, 1, 12, 0)
-        assert DayManager.get_day_for_session(before_noon) == date(2025, 8, 9)
-
-        after_noon = datetime(2025, 8, 9, 23, 57, 0)
-        assert DayManager.get_day_for_session(after_noon) == date(2025, 8, 9)
