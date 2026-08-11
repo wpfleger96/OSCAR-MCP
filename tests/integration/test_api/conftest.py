@@ -57,6 +57,22 @@ def reset_auth_throttle_stores():
     _lockout.get_invite_lockout_store()._entries.clear()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_raw_root(monkeypatch, tmp_path):
+    """Redirect DEFAULT_RAW_BACKUP_DIR to a tmp_path subdir for every API test.
+
+    db.py's _raw_root() imports the constant at call time (covered by patching
+    snore.constants); me.py imports it at module level (covered by the binding
+    patch below).  Both must be redirected so no code path in any API test can
+    write to the real ~/.snore/raw/ directory.
+    """
+    import snore.api.routers.me as _me_router  # noqa: PLC0415
+
+    fake_raw = tmp_path / "raw"
+    monkeypatch.setattr("snore.constants.DEFAULT_RAW_BACKUP_DIR", fake_raw)
+    monkeypatch.setattr(_me_router, "DEFAULT_RAW_BACKUP_DIR", fake_raw)
+
+
 @pytest.fixture
 def import_worker():
     """Start the import worker with the real _run_import callback for this test.
