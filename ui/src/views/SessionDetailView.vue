@@ -50,12 +50,17 @@
             class="mask-info text-sm text-muted-foreground"
         >
             <span v-if="session.active_mask">
-                Mask: {{ session.active_mask.brand }} {{ session.active_mask.model
+                Mask: {{ maskDisplayName
                 }}<template v-if="session.active_mask.size"
                     >, size {{ session.active_mask.size }}</template
+                ><template v-if="session.active_mask.style || session.active_mask.start_date">
+                    ({{ styleLabel(session.active_mask.style)
+                    }}<template v-if="session.active_mask.style && session.active_mask.start_date"
+                        >, </template
+                    ><template v-if="session.active_mask.start_date"
+                        >since {{ formatDateFull(session.active_mask.start_date) }}</template
+                    >)</template
                 >
-                ({{ styleLabel(session.active_mask.style) }}, since
-                {{ formatDateFull(session.active_mask.start_date) }})
             </span>
             <span v-if="session.active_mask && maskTypeFromSettings">·</span>
             <span v-if="maskTypeFromSettings">Device type: {{ maskTypeFromSettings }}</span>
@@ -896,9 +901,16 @@ const styleLabelMap: Record<string, string> = {
     full_face: 'Full Face',
 }
 
-function styleLabel(style: string): string {
+function styleLabel(style: string | null | undefined): string {
+    if (!style) return ''
     return styleLabelMap[style] ?? style
 }
+
+const maskDisplayName = computed(() => {
+    const m = session.value?.active_mask
+    if (!m) return ''
+    return [m.brand, m.model].filter(Boolean).join(' ')
+})
 
 // STR tidal-volume stats are stored in L; convert to mL for display.
 function tvToMl(val: number | null | undefined): number | null {

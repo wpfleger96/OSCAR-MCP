@@ -7,6 +7,7 @@ import type {
     DeviceInfo,
     DeviceDetail,
     MaskLogEntryResponse,
+    MaskEpochResponse,
     PeriodStatistics,
     RecordsData,
     RxPeriodResponse,
@@ -1056,6 +1057,25 @@ export const maskLogFixture: MaskLogEntryResponse[] = [
         style: 'full_face',
         start_date: '2026-02-22',
         notes: null,
+    },
+]
+
+export const maskEpochsFixture: MaskEpochResponse[] = [
+    {
+        mask_type: 'Nasal',
+        style: 'nasal',
+        start_date: '2025-05-10',
+        end_date: '2025-11-01',
+        days_count: 175,
+        device_name: 'ResMed AirSense 11 AutoSet',
+    },
+    {
+        mask_type: 'Pillows',
+        style: 'pillows',
+        start_date: '2025-11-02',
+        end_date: '2026-04-06',
+        days_count: 156,
+        device_name: 'ResMed AirSense 11 AutoSet',
     },
 ]
 

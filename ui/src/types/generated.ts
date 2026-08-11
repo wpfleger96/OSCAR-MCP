@@ -877,6 +877,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/equipment/masks/epochs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Mask Epochs */
+        get: operations['list_mask_epochs_api_v1_equipment_masks_epochs_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/equipment/masks/{entry_id}': {
         parameters: {
             query?: never
@@ -3067,26 +3084,47 @@ export interface components {
             /** Password */
             password: string
         }
-        /** MaskLogCreateRequest */
-        MaskLogCreateRequest: {
-            /** Brand */
-            brand: string
-            /** Model */
-            model: string
-            /** Notes */
-            notes?: string | null
-            /** Size */
-            size?: string | null
+        /**
+         * MaskEpochResponse
+         * @description A contiguous run of nights sharing one device-reported mask type.
+         *
+         *     style is the normalized mask_log-style value (None when the device value is
+         *     unrecognized).
+         */
+        MaskEpochResponse: {
+            /** Days Count */
+            days_count: number
+            /** Device Name */
+            device_name: string | null
+            /**
+             * End Date
+             * Format: date
+             */
+            end_date: string
+            /** Mask Type */
+            mask_type: string
             /**
              * Start Date
              * Format: date
              */
             start_date: string
-            /**
-             * Style
-             * @enum {string}
-             */
-            style: 'pillows' | 'nasal' | 'full_face'
+            /** Style */
+            style: string | null
+        }
+        /** MaskLogCreateRequest */
+        MaskLogCreateRequest: {
+            /** Brand */
+            brand?: string | null
+            /** Model */
+            model?: string | null
+            /** Notes */
+            notes?: string | null
+            /** Size */
+            size?: string | null
+            /** Start Date */
+            start_date?: string | null
+            /** Style */
+            style?: ('pillows' | 'nasal' | 'full_face') | null
         }
         /**
          * MaskLogEntryResponse
@@ -3094,26 +3132,23 @@ export interface components {
          */
         MaskLogEntryResponse: {
             /** Brand */
-            brand: string
+            brand?: string | null
             /** Id */
             id: number
             /** Model */
-            model: string
+            model?: string | null
             /** Notes */
             notes?: string | null
             /** Size */
             size?: string | null
-            /**
-             * Start Date
-             * Format: date
-             */
-            start_date: string
+            /** Start Date */
+            start_date?: string | null
             /** Style */
-            style: string
+            style?: string | null
         }
         /**
          * MaskLogUpdateRequest
-         * @description PATCH body: omitted fields are unchanged; explicit null clears size/notes.
+         * @description PATCH body: omitted fields are unchanged; explicit null clears any field.
          */
         MaskLogUpdateRequest: {
             /** Brand */
@@ -5419,6 +5454,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_mask_epochs_api_v1_equipment_masks_epochs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskEpochResponse'][]
                 }
             }
         }

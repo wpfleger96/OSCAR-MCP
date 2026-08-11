@@ -211,7 +211,7 @@
 
         <!-- Masks section -->
         <h2 class="section-heading">Masks</h2>
-        <MaskLogManager />
+        <MaskLogManager :epochs="epochs" />
     </div>
 </template>
 
@@ -222,10 +222,11 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import ErrorState from '@/components/ErrorState.vue'
 import MaskLogManager from '@/components/MaskLogManager.vue'
 import { getDevices, getDeviceDetail } from '@/api/devices'
+import { getMaskEpochs } from '@/api/equipment'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
 import { categorizeSettings, formatSettingValue, settingLabel } from '@/utils/deviceSettings'
-import type { DeviceDetail } from '@/types'
+import type { DeviceDetail, MaskEpochResponse } from '@/types'
 
 const { data, loading, error, reload } = useApiLoad<DeviceDetail[]>(async () => {
     const list = await getDevices()
@@ -233,6 +234,13 @@ const { data, loading, error, reload } = useApiLoad<DeviceDetail[]>(async () => 
 }, 'Failed to load devices')
 
 const devices = computed(() => data.value ?? [])
+
+// Epochs fetch: failure is silently degraded — MaskLogManager still works without epochs.
+const { data: epochsData } = useApiLoad<MaskEpochResponse[]>(
+    () => getMaskEpochs(),
+    'Failed to load mask epochs',
+)
+const epochs = computed(() => epochsData.value ?? [])
 
 // Default current-settings open, history collapsed per device
 const settingsOpen = reactive<Record<number, boolean>>({})

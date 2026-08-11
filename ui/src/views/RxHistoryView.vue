@@ -255,14 +255,23 @@ const STYLE_OPTIONS: { value: MaskStyle; label: string }[] = [
     { value: 'full_face', label: 'Full Face' },
 ]
 
-function styleLabel(style: string): string {
+function styleLabel(style: string | null | undefined): string {
+    if (!style) return ''
     return STYLE_OPTIONS.find((o) => o.value === style)?.label ?? style
 }
 
 function maskSummary(entry: MaskLogEntryResponse): string {
-    const details = [styleLabel(entry.style)]
+    const nameParts = [entry.brand, entry.model].filter(Boolean)
+    const hasName = nameParts.length > 0
+    const name = hasName
+        ? nameParts.join(' ')
+        : entry.style
+          ? styleLabel(entry.style)
+          : 'unspecified mask'
+    const details: string[] = []
+    if (hasName && entry.style) details.push(styleLabel(entry.style))
     if (entry.size) details.push(`size ${entry.size}`)
-    return `${entry.brand} ${entry.model} (${details.join(', ')})`
+    return details.length ? `${name} (${details.join(', ')})` : name
 }
 
 const { data: maskData, error: maskError } = useApiLoad(
@@ -282,12 +291,16 @@ const timelineRows = computed<TimelineRow[]>(() => {
         date: change.date,
         change,
     }))
-    const maskRows: TimelineRow[] = (maskData.value ?? []).map((entry) => ({
-        source: 'mask',
-        key: `mask-${entry.id}`,
-        date: entry.start_date,
-        entry,
-    }))
+    const maskRows: TimelineRow[] = (maskData.value ?? [])
+        .filter(
+            (entry): entry is MaskLogEntryResponse & { start_date: string } => !!entry.start_date,
+        )
+        .map((entry) => ({
+            source: 'mask' as const,
+            key: `mask-${entry.id}`,
+            date: entry.start_date,
+            entry,
+        }))
     return [...deviceRows, ...maskRows].sort((a, b) => b.date.localeCompare(a.date))
 })
 </script>

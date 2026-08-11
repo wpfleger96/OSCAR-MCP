@@ -1,5 +1,5 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client'
-import type { MaskLogEntryResponse } from '@/types'
+import type { MaskEpochResponse, MaskLogEntryResponse } from '@/types'
 import type { components } from '@/types/generated'
 
 type MaskLogCreateRequest = components['schemas']['MaskLogCreateRequest']
@@ -23,3 +23,5 @@ export const updateMaskLogEntry = apiPatch<
 export const deleteMaskLogEntry = apiDelete<void, [entryId: number]>(
     (entryId) => `/equipment/masks/${entryId}`,
 )
+
+export const getMaskEpochs = apiGet<MaskEpochResponse[]>('/equipment/masks/epochs')

@@ -9,58 +9,59 @@
         <ErrorState v-else-if="maskError" :message="maskError" :retry="reloadMasks" />
 
         <template v-else>
-            <div v-if="masks.length" class="overflow-x-auto">
-                <Table>
-                    <TableHeader>
-                        <TableRow>
-                            <TableHead class="whitespace-nowrap">Start Date</TableHead>
-                            <TableHead class="whitespace-nowrap">Brand</TableHead>
-                            <TableHead class="whitespace-nowrap">Model</TableHead>
-                            <TableHead class="whitespace-nowrap">Style</TableHead>
-                            <TableHead class="whitespace-nowrap">Size</TableHead>
-                            <TableHead>Notes</TableHead>
-                            <TableHead v-if="canWrite"></TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        <TableRow v-for="entry in masks" :key="entry.id">
-                            <TableCell class="whitespace-nowrap">{{
-                                formatDateFull(entry.start_date)
-                            }}</TableCell>
-                            <TableCell class="whitespace-nowrap">{{ entry.brand }}</TableCell>
-                            <TableCell class="whitespace-nowrap">{{ entry.model }}</TableCell>
-                            <TableCell class="whitespace-nowrap">{{
-                                styleLabel(entry.style)
-                            }}</TableCell>
-                            <TableCell class="whitespace-nowrap">{{ entry.size ?? '—' }}</TableCell>
-                            <TableCell>{{ entry.notes ?? '—' }}</TableCell>
-                            <TableCell v-if="canWrite" class="whitespace-nowrap text-right">
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    :disabled="saving"
-                                    @click="startEdit(entry)"
-                                >
-                                    Edit
-                                </Button>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    :disabled="saving"
-                                    @click="startDelete(entry)"
-                                >
-                                    Delete
-                                </Button>
-                            </TableCell>
-                        </TableRow>
-                    </TableBody>
-                </Table>
+            <!-- Epoch cards (from device data) -->
+            <div v-if="epochs.length > 0" class="epoch-list">
+                <div v-for="(epoch, i) in epochs" :key="i" class="epoch-card">
+                    <div class="epoch-header">
+                        <div class="epoch-info">
+                            <span class="epoch-style">{{ epochStyleLabel(epoch) }}</span>
+                            <span class="epoch-dates">
+                                {{ formatDateFull(epoch.start_date) }} –
+                                {{ formatDateFull(epoch.end_date) }}
+                            </span>
+                            <span class="epoch-nights">{{ epoch.days_count }} nights</span>
+                            <span v-if="epoch.device_name" class="epoch-device">
+                                {{ epoch.device_name }}
+                            </span>
+                        </div>
+                        <Button
+                            v-if="canWrite"
+                            size="sm"
+                            variant="outline"
+                            :disabled="saving"
+                            @click="prefillFromEpoch(epoch)"
+                        >
+                            Add details
+                        </Button>
+                    </div>
+                    <div v-if="(entriesByEpoch.get(epoch) ?? []).length > 0" class="epoch-entries">
+                        <MaskEntryTable
+                            :entries="entriesByEpoch.get(epoch) ?? []"
+                            :can-write="canWrite"
+                            :saving="saving"
+                            @edit="startEdit"
+                            @delete="startDelete"
+                        />
+                    </div>
+                </div>
             </div>
-            <p v-else class="mask-empty">No mask equipment logged yet.</p>
+
+            <!-- Entries not matched to any epoch (and all entries when no epochs exist) -->
+            <template v-if="otherEntries.length > 0">
+                <h3 v-if="epochs.length > 0" class="other-entries-heading">Other entries</h3>
+                <MaskEntryTable
+                    :entries="otherEntries"
+                    :can-write="canWrite"
+                    :saving="saving"
+                    @edit="startEdit"
+                    @delete="startDelete"
+                />
+            </template>
+            <p v-else-if="!masks.length" class="mask-empty">No mask equipment logged yet.</p>
 
             <p v-if="maskActionError" class="mask-action-error">{{ maskActionError }}</p>
 
-            <form v-if="canWrite" class="mask-form" @submit.prevent="handleSubmit">
+            <form v-if="canWrite" ref="formRef" class="mask-form" @submit.prevent="handleSubmit">
                 <h3>{{ editingId != null ? 'Edit Mask' : 'Add Mask' }}</h3>
                 <div class="mask-form-grid">
                     <!-- Brand -->
@@ -92,7 +93,6 @@
                                 type="text"
                                 class="field-input"
                                 placeholder="Brand name"
-                                required
                                 maxlength="100"
                                 :disabled="saving"
                             />
@@ -137,7 +137,6 @@
                                 type="text"
                                 class="field-input"
                                 placeholder="e.g. AirFit P10"
-                                required
                                 maxlength="150"
                                 :disabled="saving"
                             />
@@ -155,11 +154,15 @@
                     <!-- Style -->
                     <div class="mask-field">
                         <label class="mask-label">Style</label>
-                        <Select v-model="form.style">
+                        <Select
+                            :model-value="form.style || STYLE_UNSET"
+                            @update:model-value="onStyleSelect"
+                        >
                             <SelectTrigger class="w-full">
                                 <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
+                                <SelectItem :value="STYLE_UNSET">—</SelectItem>
                                 <SelectItem
                                     v-for="opt in STYLE_OPTIONS"
                                     :key="opt.value"
@@ -180,7 +183,7 @@
                     <!-- Size -->
                     <div class="mask-field">
                         <label class="mask-label">Size</label>
-                        <template v-if="sizeMode === 'catalog'">
+                        <template v-if="effectiveSizeMode === 'catalog'">
                             <Select
                                 :model-value="form.size || SIZE_NONE"
                                 @update:model-value="onSizeSelect"
@@ -207,6 +210,7 @@
                                 :disabled="saving"
                             />
                             <button
+                                v-if="form.style"
                                 type="button"
                                 class="use-list-link"
                                 @click="switchSizeToCatalog"
@@ -231,7 +235,7 @@
                 </div>
 
                 <div class="mask-form-actions">
-                    <Button type="submit" :disabled="saving || !formValid">
+                    <Button type="submit" :disabled="saving">
                         <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />
                         {{ editingId != null ? 'Save' : 'Add Mask' }}
                     </Button>
@@ -260,7 +264,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
@@ -271,14 +275,6 @@ import {
     SelectValue,
 } from '@/components/ui/select'
 import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
-} from '@/components/ui/table'
-import {
     getMaskLog,
     createMaskLogEntry,
     updateMaskLogEntry,
@@ -287,10 +283,11 @@ import {
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
 import { formatDateFull } from '@/utils/formatting'
-import type { MaskLogEntryResponse } from '@/types'
+import type { MaskEpochResponse, MaskLogEntryResponse } from '@/types'
 import DatePickerInput from '@/components/DatePickerInput.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import MaskEntryTable from '@/components/MaskEntryTable.vue'
 import {
     CUSTOM_VALUE,
     MASK_CATALOG,
@@ -299,6 +296,8 @@ import {
     findModel,
     type MaskStyle,
 } from '@/utils/maskOptions'
+
+const props = withDefaults(defineProps<{ epochs?: MaskEpochResponse[] }>(), { epochs: () => [] })
 
 const { canWrite } = useAuth()
 
@@ -320,8 +319,17 @@ const STYLE_OPTIONS: { value: MaskStyle; label: string }[] = [
     { value: 'pillows', label: 'Pillows' },
 ]
 
+// Sentinel for the unset style Select option.
+const STYLE_UNSET = '__style_none__'
+
 function styleLabel(style: string): string {
     return STYLE_OPTIONS.find((o) => o.value === style)?.label ?? style
+}
+
+function epochStyleLabel(epoch: MaskEpochResponse): string {
+    if (epoch.style) return styleLabel(epoch.style)
+    // Device reported an unrecognized mask type — show it verbatim.
+    return epoch.mask_type
 }
 
 // --- Per-field catalog/custom mode ---
@@ -340,7 +348,7 @@ const SIZE_NONE = '__size_none__'
 const emptyForm = {
     brand: '',
     model: '',
-    style: 'nasal' as MaskStyle,
+    style: '' as MaskStyle | '',
     startDate: '',
     size: '',
     notes: '',
@@ -349,19 +357,19 @@ const form = ref({ ...emptyForm })
 const editingId = ref<number | null>(null)
 const saving = ref(false)
 const maskActionError = ref<string | null>(null)
-
-const formValid = computed(
-    () =>
-        form.value.brand.trim() !== '' &&
-        form.value.model.trim() !== '' &&
-        form.value.startDate !== '',
-)
+const formRef = ref<HTMLFormElement | null>(null)
 
 // --- Derived selects ---
 
 const currentBrandModels = computed(() => findBrand(form.value.brand)?.models ?? [])
 
-const currentSizes = computed(() => SIZES_BY_STYLE[form.value.style] ?? [])
+const currentSizes = computed(() => {
+    const style = form.value.style
+    return style ? (SIZES_BY_STYLE[style] ?? []) : []
+})
+
+// When style is unset, the catalog size list is empty and unhelpful — fall back to text input.
+const effectiveSizeMode = computed<FieldMode>(() => (form.value.style ? sizeMode.value : 'custom'))
 
 // --- Brand cascade ---
 
@@ -411,6 +419,19 @@ function switchModelToCatalog() {
     sizeMode.value = 'catalog'
 }
 
+// --- Style cascade ---
+
+function onStyleSelect(value: unknown) {
+    if (value === STYLE_UNSET || value === '') {
+        form.value.style = ''
+    } else {
+        const str = typeof value === 'string' ? value : ''
+        form.value.style = STYLE_OPTIONS.some((o) => o.value === str) ? (str as MaskStyle) : ''
+    }
+    form.value.size = ''
+    sizeMode.value = 'catalog'
+}
+
 // --- Size cascade ---
 
 function onSizeSelect(value: unknown) {
@@ -443,40 +464,56 @@ function startEdit(entry: MaskLogEntryResponse) {
     editingId.value = entry.id
     maskActionError.value = null
 
-    brandMode.value = findBrand(entry.brand) ? 'catalog' : 'custom'
-    modelMode.value = findModel(entry.brand, entry.model) ? 'catalog' : 'custom'
+    const brand = entry.brand ?? ''
+    const model = entry.model ?? ''
+    const style = entry.style ?? ''
 
-    const entryStyle = STYLE_OPTIONS.some((o) => o.value === entry.style)
-        ? (entry.style as MaskStyle)
-        : 'nasal'
+    brandMode.value = brand ? (findBrand(brand) ? 'catalog' : 'custom') : 'catalog'
+    modelMode.value = brand && model ? (findModel(brand, model) ? 'catalog' : 'custom') : 'catalog'
+
+    const entryStyle: MaskStyle | '' = STYLE_OPTIONS.some((o) => o.value === style)
+        ? (style as MaskStyle)
+        : ''
 
     if (!entry.size) {
         sizeMode.value = 'catalog'
-    } else if (SIZES_BY_STYLE[entryStyle]?.includes(entry.size)) {
+    } else if (entryStyle && SIZES_BY_STYLE[entryStyle]?.includes(entry.size)) {
         sizeMode.value = 'catalog'
     } else {
         sizeMode.value = 'custom'
     }
 
     form.value = {
-        brand: entry.brand,
-        model: entry.model,
+        brand,
+        model,
         style: entryStyle,
-        startDate: entry.start_date,
+        startDate: entry.start_date ?? '',
         size: entry.size ?? '',
         notes: entry.notes ?? '',
     }
 }
 
+function prefillFromEpoch(epoch: MaskEpochResponse) {
+    resetForm()
+    const epochStyle = epoch.style ?? ''
+    form.value.style = STYLE_OPTIONS.some((o) => o.value === epochStyle)
+        ? (epochStyle as MaskStyle)
+        : ''
+    form.value.startDate = epoch.start_date
+    maskActionError.value = null
+    nextTick(() => {
+        formRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    })
+}
+
 async function handleSubmit() {
-    if (!formValid.value) return
     saving.value = true
     maskActionError.value = null
     const body = {
-        brand: form.value.brand.trim(),
-        model: form.value.model.trim(),
-        style: form.value.style,
-        start_date: form.value.startDate,
+        brand: form.value.brand.trim() || null,
+        model: form.value.model.trim() || null,
+        style: (form.value.style as MaskStyle) || null,
+        start_date: form.value.startDate || null,
         size: form.value.size.trim() || null,
         notes: form.value.notes.trim() || null,
     }
@@ -495,6 +532,32 @@ async function handleSubmit() {
     }
 }
 
+// --- Epoch entry grouping ---
+
+// Single pass over entries: bucket each into its first matching epoch or the "other" list.
+const epochGrouping = computed(() => {
+    const byEpoch = new Map<MaskEpochResponse, MaskLogEntryResponse[]>(
+        props.epochs.map((e) => [e, []]),
+    )
+    const other: MaskLogEntryResponse[] = []
+    for (const entry of masks.value) {
+        const matched = entry.start_date
+            ? (props.epochs.find(
+                  (e) => entry.start_date! >= e.start_date && entry.start_date! <= e.end_date,
+              ) ?? null)
+            : null
+        if (matched !== null) {
+            byEpoch.get(matched)!.push(entry)
+        } else {
+            other.push(entry)
+        }
+    }
+    return { byEpoch, other }
+})
+
+const entriesByEpoch = computed(() => epochGrouping.value.byEpoch)
+const otherEntries = computed(() => epochGrouping.value.other)
+
 // --- Delete ---
 
 const deleteTarget = ref<MaskLogEntryResponse | null>(null)
@@ -503,7 +566,7 @@ const deleting = ref(false)
 
 const deleteMessage = computed(() =>
     deleteTarget.value
-        ? `Delete ${deleteTarget.value.brand} ${deleteTarget.value.model} from the mask log?`
+        ? `Delete ${deleteTarget.value.brand ?? 'mask'} ${deleteTarget.value.model ?? 'entry'} from the mask log?`
         : '',
 )
 
@@ -590,5 +653,67 @@ async function handleDelete() {
 
 .use-list-link:hover {
     opacity: 0.8;
+}
+
+.epoch-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.epoch-card {
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+}
+
+.epoch-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.25rem;
+}
+
+.epoch-info {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.epoch-style {
+    font-weight: 600;
+}
+
+.epoch-dates {
+    color: var(--color-muted-foreground);
+}
+
+.epoch-nights {
+    color: var(--color-muted-foreground);
+    font-size: 0.8rem;
+}
+
+.epoch-device {
+    color: var(--color-muted-foreground);
+    font-size: 0.8rem;
+    font-style: italic;
+}
+
+.epoch-entries {
+    margin-top: 0.5rem;
+    border-top: 1px solid var(--color-border);
+    padding-top: 0.5rem;
+}
+
+.other-entries-heading {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    color: var(--color-muted-foreground);
 }
 </style>

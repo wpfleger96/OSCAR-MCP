@@ -55,6 +55,7 @@ export type DateListResponse = Schemas['DateListResponse']
 
 // Equipment
 export type MaskLogEntryResponse = Schemas['MaskLogEntryResponse']
+export type MaskEpochResponse = Schemas['MaskEpochResponse']
 
 // RX
 export type RxPeriodResponse = Schemas['RxPeriodResponse']
