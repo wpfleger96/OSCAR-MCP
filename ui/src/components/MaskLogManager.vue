@@ -453,10 +453,9 @@ function resetForm() {
     sizeMode.value = 'catalog'
 }
 
-function startEdit(entry: MaskLogEntryResponse) {
-    editingId.value = entry.id
-    maskActionError.value = null
-
+// Populate brand/model/style/size form fields and their catalog/custom modes from an entry.
+// startDate, notes, and editingId are left untouched — callers set those themselves.
+function applyEntryToForm(entry: MaskLogEntryResponse) {
     const brand = entry.brand ?? ''
     const model = entry.model ?? ''
     const style = entry.style ?? ''
@@ -476,26 +475,64 @@ function startEdit(entry: MaskLogEntryResponse) {
         sizeMode.value = 'custom'
     }
 
-    form.value = {
-        brand,
-        model,
-        style: entryStyle,
-        startDate: entry.start_date ?? '',
-        size: entry.size ?? '',
-        notes: entry.notes ?? '',
+    form.value.brand = brand
+    form.value.model = model
+    form.value.style = entryStyle
+    form.value.size = entry.size ?? ''
+}
+
+function startEdit(entry: MaskLogEntryResponse) {
+    editingId.value = entry.id
+    maskActionError.value = null
+    applyEntryToForm(entry)
+    form.value.startDate = entry.start_date ?? ''
+    form.value.notes = entry.notes ?? ''
+}
+
+// Return the most recent logged entry whose style matches epochStyle, for use as a template.
+// "Most recent": greatest start_date among dated entries (ties broken by greatest id);
+// falls back to greatest id among undated entries when no dated candidates exist.
+function findTemplateEntry(epochStyle: MaskStyle): MaskLogEntryResponse | null {
+    const candidates = masks.value.filter((e) => e.style === epochStyle)
+    const dated = candidates.filter((e) => e.start_date !== null)
+    if (dated.length > 0) {
+        return dated.reduce((best, e) => {
+            if (e.start_date! > best.start_date!) return e
+            if (e.start_date! === best.start_date! && e.id > best.id) return e
+            return best
+        })
     }
+    const undated = candidates.filter((e) => e.start_date === null)
+    if (undated.length > 0) {
+        return undated.reduce((best, e) => (e.id > best.id ? e : best))
+    }
+    return null
 }
 
 function prefillFromEpoch(epoch: MaskEpochResponse) {
     resetForm()
-    const epochStyle = epoch.style ?? ''
-    form.value.style = STYLE_OPTIONS.some((o) => o.value === epochStyle)
-        ? (epochStyle as MaskStyle)
-        : ''
-    form.value.startDate = epoch.start_date
     maskActionError.value = null
+
+    const epochStyle: MaskStyle | '' = STYLE_OPTIONS.some((o) => o.value === (epoch.style ?? ''))
+        ? (epoch.style as MaskStyle)
+        : ''
+
+    // Trial periods mean the same physical mask often spans multiple device epochs.
+    // Prefill equipment identity from the most recent same-style entry so the user
+    // doesn't have to re-enter brand/model/size for each new epoch.
+    if (epochStyle) {
+        const template = findTemplateEntry(epochStyle)
+        if (template) {
+            applyEntryToForm(template)
+        }
+        // Device-reported style always wins; notes are entry-specific and must not carry over.
+        form.value.style = epochStyle
+    }
+
+    form.value.startDate = epoch.start_date
+
     nextTick(() => {
-        formRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        formRef.value?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
     })
 }
 

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent } from 'vue'
+import { defineComponent, nextTick } from 'vue'
 
 // All vi.mock calls must appear before any component import.
 
@@ -39,7 +39,7 @@ vi.mock('@lucide/vue', () => ({
 }))
 
 vi.mock('@/components/DatePickerInput.vue', () => ({
-    default: { template: '<input />' },
+    default: { props: ['modelValue'], template: '<input :value="modelValue" />' },
 }))
 
 vi.mock('@/components/DeleteConfirmDialog.vue', () => ({
@@ -78,6 +78,8 @@ import { makeAuthMock } from './helpers/mockUseAuth'
 import { useAuth } from '@/composables/useAuth'
 import { getMaskLog } from '@/api/equipment'
 import MaskLogManager from '@/components/MaskLogManager.vue'
+import { Select } from '@/components/ui/select'
+import DatePickerInput from '@/components/DatePickerInput.vue'
 import type { MaskEpochResponse, MaskLogEntryResponse } from '@/types'
 
 // --- Fixtures ---
@@ -212,5 +214,123 @@ describe('MaskLogManager', () => {
         expect(wrapper.find('.other-entries-heading').exists()).toBe(false)
         // Entry is still displayed in the plain (non-epoch) table.
         expect(wrapper.find('[data-entry-id="50"]').exists()).toBe(true)
+    })
+})
+
+describe('MaskLogManager epoch prefill', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        setupAuthMock()
+    })
+
+    it('test_add_details_prefills_brand_model_size_from_matching_style_entry', async () => {
+        // Existing entry with full_face equipment details and entry-specific notes/date.
+        const entry = makeEntry({
+            id: 1,
+            brand: 'ResMed',
+            model: 'AirFit F20',
+            style: 'full_face',
+            size: 'M',
+            start_date: '2025-02-01',
+            notes: 'fits well',
+        })
+        // Epoch with matching style but a different start date (new trial period).
+        const epoch = makeEpoch({
+            style: 'full_face',
+            mask_type: 'FullFaceMask',
+            start_date: '2025-07-01',
+            end_date: '2025-12-31',
+        })
+        vi.mocked(getMaskLog).mockResolvedValue([entry])
+
+        const wrapper = await mountManager([epoch])
+
+        await wrapper.find('.epoch-card button').trigger('click')
+        await nextTick()
+
+        // Brand and model come from the existing same-style entry (catalog mode, 4 Selects rendered).
+        const selects = wrapper.findAllComponents(Select)
+        expect(selects[0].props('modelValue')).toBe('ResMed')
+        expect(selects[1].props('modelValue')).toBe('AirFit F20')
+        // selects[2] is the style Select — value comes from the epoch
+        expect(selects[3].props('modelValue')).toBe('M')
+
+        // Start date must be the epoch's start_date, not the entry's.
+        const datePicker = wrapper.findComponent(DatePickerInput)
+        expect(datePicker.find('input').element.value).toBe('2025-07-01')
+
+        // Notes are entry-specific and must not carry over.
+        expect((wrapper.find('#mask-notes').element as HTMLInputElement).value).toBe('')
+    })
+
+    it('test_add_details_ignores_entries_of_different_style', async () => {
+        // Only a pillows entry exists — should not template a nasal epoch.
+        const entry = makeEntry({
+            id: 1,
+            brand: 'ResMed',
+            model: 'AirFit P10',
+            style: 'pillows',
+            size: 'S',
+            start_date: '2025-02-01',
+        })
+        const epoch = makeEpoch({
+            style: 'nasal',
+            mask_type: 'NasalMask',
+            start_date: '2025-07-01',
+            end_date: '2025-12-31',
+        })
+        vi.mocked(getMaskLog).mockResolvedValue([entry])
+
+        const wrapper = await mountManager([epoch])
+
+        await wrapper.find('.epoch-card button').trigger('click')
+        await nextTick()
+
+        // No matching template — brand field stays blank.
+        // Without a brand, the Model Select is also suppressed (3 Selects: Brand, Style, Size).
+        const selects = wrapper.findAllComponents(Select)
+        expect(selects).toHaveLength(3)
+        expect(selects[0].props('modelValue')).toBeUndefined()
+        // Notes remain empty.
+        expect((wrapper.find('#mask-notes').element as HTMLInputElement).value).toBe('')
+    })
+
+    it('test_add_details_uses_later_start_date_entry_when_multiple_same_style_exist', async () => {
+        // Two pillows entries; the later one (id=2, date=2025-06-01) should win.
+        const older = makeEntry({
+            id: 1,
+            brand: 'ResMed',
+            model: 'AirFit P10',
+            style: 'pillows',
+            size: 'S',
+            start_date: '2025-03-01',
+        })
+        const newer = makeEntry({
+            id: 2,
+            brand: 'Philips Respironics',
+            model: 'Nuance',
+            style: 'pillows',
+            size: 'M',
+            start_date: '2025-06-01',
+        })
+        // API returns oldest-first; reversed in the component = [newer, older].
+        const epoch = makeEpoch({
+            style: 'pillows',
+            mask_type: 'PillowMask',
+            start_date: '2025-09-01',
+            end_date: '2025-12-31',
+        })
+        vi.mocked(getMaskLog).mockResolvedValue([older, newer])
+
+        const wrapper = await mountManager([epoch])
+
+        await wrapper.find('.epoch-card button').trigger('click')
+        await nextTick()
+
+        // The newer entry's brand wins (not ResMed from the older one).
+        const selects = wrapper.findAllComponents(Select)
+        expect(selects[0].props('modelValue')).toBe('Philips Respironics')
+        expect(selects[1].props('modelValue')).toBe('Nuance')
+        expect(selects[3].props('modelValue')).toBe('M')
     })
 })
