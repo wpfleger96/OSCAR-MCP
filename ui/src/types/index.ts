@@ -163,6 +163,25 @@ export const WAVEFORM_LABELS: Record<string, string> = {
     trigger_cycle: 'Trigger/Cycle (raw codes)',
 }
 
+export const WAVEFORM_GLOSSARY_MAP: Record<WaveformType, string> = {
+    flow: 'flow',
+    pressure: 'pressure',
+    therapy_pressure: 'therapy_pressure',
+    epap: 'epap',
+    leak: 'leak',
+    mv: 'mv',
+    rr: 'resp_rate',
+    tv: 'tidal_volume',
+    spo2: 'spo2',
+    pulse: 'pulse',
+    fl: 'fl_device',
+    snore: 'snore_device',
+    ie_ratio: 'ie_ratio_waveform',
+    ti: 'ti_waveform',
+    pressure_hr: 'pressure_hr_waveform',
+    trigger_cycle: 'trigger_cycle',
+}
+
 // Stats trend/records payloads (untyped on the backend)
 export interface TrendData {
     ahi: [string, number | null][]

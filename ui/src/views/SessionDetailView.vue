@@ -614,6 +614,7 @@
                             :value="session.statistics.blow_press_5th"
                             unit="cmH₂O"
                             :decimals="1"
+                            glossary-key="blow_press"
                         />
                         <StatCard
                             v-if="session.statistics.blow_press_95th != null"
@@ -628,6 +629,7 @@
                             :value="session.statistics.blow_flow_median"
                             unit="L/min"
                             :decimals="1"
+                            glossary-key="blow_flow"
                         />
                     </div>
                 </CollapsibleContent>
@@ -729,6 +731,7 @@
                             :value="session.statistics.htube_temp_median"
                             unit="°C"
                             :decimals="1"
+                            glossary-key="htube_temp"
                         />
                         <StatCard
                             v-if="session.statistics.htube_pow_median != null"
@@ -736,6 +739,7 @@
                             :value="session.statistics.htube_pow_median"
                             unit="W"
                             :decimals="1"
+                            glossary-key="htube_pow"
                         />
                         <StatCard
                             v-if="session.statistics.hum_pow_median != null"
@@ -743,6 +747,7 @@
                             :value="session.statistics.hum_pow_median"
                             unit="W"
                             :decimals="1"
+                            glossary-key="hum_pow"
                         />
                     </div>
                 </CollapsibleContent>
