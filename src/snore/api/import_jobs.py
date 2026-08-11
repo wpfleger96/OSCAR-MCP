@@ -719,6 +719,20 @@ def remove_job(job_id: str) -> None:
         _jobs.pop(job_id, None)
 
 
+def get_live_spool_dirs() -> frozenset[Path]:
+    """Return the spool directories of all in-flight upload jobs.
+
+    Used by the periodic spool sweep to skip directories that belong to
+    active uploads.  Chunk writes land in subdirectories and do not bump
+    the top-level spool dir mtime, so mtime alone is not a safe liveness
+    signal — callers must skip any path returned here.
+    """
+    with _lock:
+        return frozenset(
+            job.temp_dir for job in _jobs.values() if job.temp_dir is not None
+        )
+
+
 def cancel_job(job_id: str) -> bool:
     """Cancel a job. Returns True if the job existed and was not already terminal."""
     job = get_job(job_id)
@@ -949,12 +963,20 @@ def _reap_stale_pending_uploads() -> None:
         job.release_capacity()
 
 
-def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Event]:
+def start_reaper(
+    interval: float = 60.0,
+    spool_sweep_fn: Callable[[], None] | None = None,
+) -> tuple[threading.Thread, threading.Event]:
     """Start a background daemon thread that reaps jobs every *interval* seconds.
 
     Each iteration runs both the terminal-job TTL reaper and the stale
     PENDING_UPLOAD reaper so abandoned multi-chunk uploads release their
-    admission slots promptly.
+    admission slots promptly.  If *spool_sweep_fn* is provided it is called
+    each iteration after the two reapers; a sweep failure never kills the thread.
+
+    In production, *spool_sweep_fn* is wired to the stale spool-dir cleanup so
+    that directories orphaned by a crash or restart are removed periodically
+    rather than only at the next startup.
     """
     stop_event = threading.Event()
 
@@ -965,6 +987,11 @@ def start_reaper(interval: float = 60.0) -> tuple[threading.Thread, threading.Ev
                 _reap_stale_pending_uploads()
             except Exception:
                 logger.exception("Reaper iteration failed")
+            if spool_sweep_fn is not None:
+                try:
+                    spool_sweep_fn()
+                except Exception:
+                    logger.exception("Spool sweep failed")
 
     t = threading.Thread(target=_reap_loop, daemon=True, name="import-job-reaper")
     t.start()
