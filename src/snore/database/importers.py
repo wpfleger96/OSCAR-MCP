@@ -41,6 +41,36 @@ from snore.parsers.unified import UnifiedSession, WaveformData
 logger = logging.getLogger(__name__)
 
 
+async def _find_overlapping(
+    db: AsyncSession,
+    device_id: int,
+    start_time: datetime,
+    end_time: datetime,
+) -> list[models.Session]:
+    """Return all sessions for device_id that strictly overlap [start_time, end_time).
+
+    Strict inequality: adjacent segments where a.end == b.start do NOT overlap.
+    Results are ordered by start_time so callers can reason about segment order.
+
+    Session time columns are naive wall-clock datetimes; strip any timezone info
+    from the parameters before comparison so SQLite comparisons stay type-consistent.
+    """
+    # Session.start_time / end_time are tz-naive (device wall-clock).  Strip any
+    # timezone info from the query parameters to prevent comparison errors.
+    naive_start = start_time.replace(tzinfo=None)
+    naive_end = end_time.replace(tzinfo=None)
+    stmt = (
+        select(models.Session)
+        .where(
+            models.Session.device_id == device_id,
+            models.Session.start_time < naive_end,
+            models.Session.end_time > naive_start,
+        )
+        .order_by(models.Session.start_time)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 def serialize_waveform(waveform: WaveformData) -> bytes:
     """
     Serialize waveform data to bytes for database storage.
@@ -131,9 +161,9 @@ class SessionImporter:
         db: AsyncSession,
         session_data: UnifiedSession,
         force: bool = False,
-    ) -> tuple[bool, int | None, int | None]:
+    ) -> tuple[bool, int | None, int | None, set[int]]:
         """
-        Import a single session. Returns (imported, day_id, session_id).
+        Import a single session. Returns (imported, day_id, session_id, extra_day_ids).
 
         This method NEVER aggregates - aggregation is handled by the caller.
         It does NOT open its own savepoint; callers that want per-session
@@ -145,9 +175,11 @@ class SessionImporter:
             force: If True, re-import existing sessions
 
         Returns:
-            Tuple of (was_imported, day_id, session_id).  session_id is the
-            PK of the newly inserted (or replaced-on-force) Session row;
-            None when was_imported is False.
+            Tuple of (was_imported, day_id, session_id, extra_day_ids).
+            session_id is the PK of the newly inserted (or replaced-on-force)
+            Session row; None when was_imported is False.
+            extra_day_ids is the set of day IDs from overlap-replaced rows that
+            differ from the new session's day and need re-aggregation.
         """
         profile_id = self.profile_id
         stmt = select(models.Device).where(
@@ -186,12 +218,53 @@ class SessionImporter:
             logger.debug(
                 f"Session {session_data.device_session_id} already exists, skipping"
             )
-            return False, None, None
+            return False, None, None, set()
 
         if existing and force:
             logger.debug(f"Force re-importing session {session_data.device_session_id}")
             await db.delete(existing)
             await db.flush()
+
+        # Overlap guard: check whether any *other* session for this device already
+        # covers time that the incoming session would occupy.  This catches the
+        # cross-parser and segment-evolution duplicate cases that the
+        # UNIQUE(device_id, device_session_id) constraint cannot.
+        replaced_day_ids: set[int] = set()
+        # Strip tz info so comparisons with naive DB columns don't raise TypeError.
+        naive_start = session_data.start_time.replace(tzinfo=None)
+        naive_end = session_data.end_time.replace(tzinfo=None)
+        overlapping = await _find_overlapping(
+            db,
+            device_id=device.id,
+            start_time=naive_start,
+            end_time=naive_end,
+        )
+        if overlapping:
+            all_covered = all(
+                naive_start <= row.start_time and naive_end >= row.end_time
+                for row in overlapping
+            )
+            if all_covered:
+                # Incoming session fully covers every overlapping row: replace them.
+                replaced_ids = [row.device_session_id for row in overlapping]
+                replaced_day_ids = {row.day_id for row in overlapping if row.day_id}
+                for row in overlapping:
+                    await db.delete(row)
+                await db.flush()
+                logger.info(
+                    f"Overlap guard: replaced {replaced_ids} with incoming "
+                    f"{session_data.device_session_id} "
+                    f"({session_data.start_time} – {session_data.end_time})"
+                )
+            else:
+                # Incoming session only partially overlaps: skip it.
+                overlap_ids = [row.device_session_id for row in overlapping]
+                logger.warning(
+                    f"Overlap guard: skipping {session_data.device_session_id} "
+                    f"({session_data.start_time} – {session_data.end_time}) — "
+                    f"partial overlap with existing {overlap_ids}"
+                )
+                return False, None, None, set()
 
         notes_json = (
             json.dumps(session_data.data_quality_notes)
@@ -243,7 +316,11 @@ class SessionImporter:
         logger.debug(
             f"Imported session {session_data.device_session_id} from {session_data.start_time}"
         )
-        return True, day_id, new_session.id
+        # Compute which replaced day IDs need independent re-aggregation: those that
+        # differ from the new session's day (a segment that crossed noon can produce a
+        # replaced day_id distinct from day_id).
+        extra_day_ids = replaced_day_ids - {day_id}
+        return True, day_id, new_session.id, extra_day_ids
 
     async def import_session(
         self,
@@ -395,11 +472,13 @@ class SessionImporter:
                         was_imported,
                         day_id,
                         new_session_id,
+                        extra_day_ids,
                     ) = await self._import_single_session(db, session_data, force)
                 if was_imported:
                     imported += 1
                     if day_id:
                         batch_day_ids.add(day_id)
+                    batch_day_ids.update(extra_day_ids)
                     if new_session_id is not None:
                         batch_session_ids.append(new_session_id)
                 else:

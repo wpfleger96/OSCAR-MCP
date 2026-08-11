@@ -43,5 +43,9 @@ async def list_dates(service: DayServiceDep) -> DateListResponse:
 
 
 @router.get("/{day_date}", response_model=DayDetail)
-async def get_day(day_date: date, service: DayServiceDep) -> DayDetail:
-    return await service.get_day(day_date)
+async def get_day(
+    day_date: date,
+    service: DayServiceDep,
+    device_id: int | None = Query(default=None),
+) -> DayDetail:
+    return await service.get_day(day_date, device_id=device_id)

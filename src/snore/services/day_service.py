@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from datetime import date
 
 from sqlalchemy import ColumnElement, func, select
@@ -10,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.database import models
 from snore.exceptions import NotFoundError
 from snore.services.schemas import DayDetail, DayListItem
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["DayService"]
 
@@ -68,8 +72,12 @@ class DayService:
         rows = (await self.db_session.execute(query)).scalars().all()
         return list(rows)
 
-    async def get_day(self, day_date: date) -> DayDetail:
+    async def get_day(self, day_date: date, device_id: int | None = None) -> DayDetail:
         """Return detailed day record with session IDs.
+
+        When multiple devices have Day rows on the same date (e.g. a machine-switch
+        date), returns the first row ordered by device_id with a warning rather than
+        raising MultipleResultsFound.  Pass device_id to select a specific device.
 
         Raises NotFoundError if no day exists for this date in the actor's profile.
         """
@@ -78,10 +86,24 @@ class DayService:
             .join(models.Device, models.Day.device_id == models.Device.id)
             .where(self._profile_filter(), models.Day.date == day_date)
         )
-        day = (await self.db_session.execute(stmt)).scalar_one_or_none()
+        if device_id is not None:
+            stmt = stmt.where(models.Day.device_id == device_id)
 
-        if day is None:
+        stmt = stmt.order_by(models.Day.device_id)
+
+        rows = (await self.db_session.execute(stmt)).scalars().all()
+
+        if not rows:
             raise NotFoundError(f"No data found for date {day_date}")
+
+        if len(rows) > 1:
+            device_ids = [r.device_id for r in rows]
+            logger.warning(
+                f"Multiple Day rows for date {day_date}: device_ids={device_ids}; "
+                f"returning device_id={rows[0].device_id}"
+            )
+
+        day = rows[0]
 
         session_ids = [
             row[0]

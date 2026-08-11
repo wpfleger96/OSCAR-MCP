@@ -4,9 +4,9 @@ Batch validation logic for running validation across multiple sessions.
 
 import logging
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.modes.config import AASM_CONFIG
@@ -15,6 +15,9 @@ from snore.analysis.utils import convert_machine_events
 from snore.database import models
 from snore.validation.report import (
     AggregateMetrics,
+    CrossParserSameDay,
+    IntegrityReport,
+    OverlappingSessionPair,
     SessionValidation,
     ValidationReport,
 )
@@ -193,6 +196,120 @@ class BatchValidator:
             device_cai=stats_row.cai if stats_row is not None else None,
             device_hi=stats_row.hi if stats_row is not None else None,
             device_uai=stats_row.uai if stats_row is not None else None,
+        )
+
+    async def check_data_integrity(
+        self, device_id: int | None = None
+    ) -> IntegrityReport:
+        """Check structural data integrity of the session database.
+
+        Three checks:
+        1. Sessions where day_id IS NULL (never linked to a Day row).
+        2. Same-device session pairs whose time ranges strictly overlap.
+        3. Device+day combinations with sessions from more than one import source.
+
+        Args:
+            device_id: Restrict checks to a specific device, or None for all devices
+                belonging to this profile.
+
+        Returns:
+            IntegrityReport with all detected issues and a total_issues count.
+        """
+        # Base device filter: all devices owned by this profile.
+        device_scope = select(models.Device.id).where(
+            models.Device.profile_id == self.profile_id
+        )
+        if device_id is not None:
+            device_scope = device_scope.where(models.Device.id == device_id)
+
+        # --- Check 1: sessions with day_id IS NULL ---
+        null_day_stmt = select(models.Session.id).where(
+            models.Session.device_id.in_(device_scope),
+            models.Session.day_id.is_(None),
+        )
+        null_day_ids = list(
+            (await self.db_session.execute(null_day_stmt)).scalars().all()
+        )
+
+        # --- Check 2: overlapping session pairs (self-join) ---
+        a = models.Session.__table__.alias("a")
+        b = models.Session.__table__.alias("b")
+        overlap_stmt = (
+            select(
+                a.c.id.label("a_id"),
+                b.c.id.label("b_id"),
+                a.c.device_id.label("device_id"),
+                a.c.device_session_id.label("a_dsid"),
+                b.c.device_session_id.label("b_dsid"),
+                a.c.start_time.label("a_start"),
+                a.c.end_time.label("a_end"),
+                b.c.start_time.label("b_start"),
+                b.c.end_time.label("b_end"),
+            )
+            .where(
+                a.c.id < b.c.id,
+                a.c.device_id == b.c.device_id,
+                a.c.device_id.in_(device_scope),
+                # Strict overlap: neither adjacent segments (a.end == b.start) nor
+                # non-overlapping order qualify.
+                a.c.start_time < b.c.end_time,
+                a.c.end_time > b.c.start_time,
+            )
+            .order_by(a.c.device_id, a.c.start_time)
+        )
+        overlap_rows = (await self.db_session.execute(overlap_stmt)).all()
+        overlapping_pairs = [
+            OverlappingSessionPair(
+                session_a_id=row.a_id,
+                session_b_id=row.b_id,
+                device_id=row.device_id,
+                session_a_device_session_id=row.a_dsid,
+                session_b_device_session_id=row.b_dsid,
+                session_a_start=row.a_start,
+                session_a_end=row.a_end,
+                session_b_start=row.b_start,
+                session_b_end=row.b_end,
+            )
+            for row in overlap_rows
+        ]
+
+        # --- Check 3: same device + same Day with >1 distinct import_source ---
+        cross_stmt = (
+            select(
+                models.Session.device_id,
+                models.Day.date,
+                func.group_concat(models.Session.import_source.distinct()).label(
+                    "sources"
+                ),
+            )
+            .join(models.Day, models.Session.day_id == models.Day.id)
+            .where(
+                models.Session.device_id.in_(device_scope),
+                models.Session.import_source.isnot(None),
+            )
+            .group_by(models.Session.device_id, models.Day.date)
+            .having(func.count(models.Session.import_source.distinct()) > 1)
+            .order_by(models.Session.device_id, models.Day.date)
+        )
+        cross_rows = (await self.db_session.execute(cross_stmt)).all()
+        cross_parser = [
+            CrossParserSameDay(
+                device_id=row.device_id,
+                day_date=row.date,
+                import_sources=sorted(s for s in row.sources.split(",") if s),
+            )
+            for row in cross_rows
+        ]
+
+        total_issues = len(null_day_ids) + len(overlapping_pairs) + len(cross_parser)
+
+        return IntegrityReport(
+            checked_at=datetime.now(UTC),
+            device_id_filter=device_id,
+            null_day_id_sessions=null_day_ids,
+            overlapping_session_pairs=overlapping_pairs,
+            cross_parser_same_day=cross_parser,
+            total_issues=total_issues,
         )
 
     def _calculate_aggregate(

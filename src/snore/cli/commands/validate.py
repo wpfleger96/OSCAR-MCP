@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,17 @@ from snore.cli.decorators import (
 from snore.cli.decorators import (
     db_session as open_db_session,
 )
-from snore.cli.display import console, err_console, print_footer, print_header
+from snore.cli.display import (
+    ICON_CHECK,
+    ICON_ERROR,
+    ICON_WARN,
+    console,
+    err_console,
+    print_footer,
+    print_header,
+    print_kv,
+    print_table,
+)
 
 
 @click.command()
@@ -35,6 +46,18 @@ from snore.cli.display import console, err_console, print_footer, print_header
     type=click.Path(),
     help="Export report to file (.json or .csv)",
 )
+@click.option(
+    "--integrity",
+    is_flag=True,
+    default=False,
+    help="Run data-integrity check instead of detection validation",
+)
+@click.option(
+    "--device-id",
+    type=int,
+    default=None,
+    help="Restrict integrity check to a specific device ID",
+)
 @db_option
 @actor_options
 def validate(
@@ -42,6 +65,8 @@ def validate(
     date_to: datetime,
     mode: str,
     export: str | None,
+    integrity: bool,
+    device_id: int | None,
     db: str | None,
     actor_user: str | None,
     actor_profile: str | None,
@@ -51,12 +76,18 @@ def validate(
 
     Validates SNORE's detection against machine events for sessions in the specified
     date range, and displays aggregate metrics.
-    """
-    if date_from > date_to:
-        raise click.ClickException("--from date must be before or equal to --to date")
 
+    Use --integrity to run a structural data-integrity check instead.
+    """
     if db and not Path(db).expanduser().exists():
         raise click.ClickException(f"Database not found: {db}")
+
+    if integrity:
+        asyncio.run(_run_integrity(db, actor_user, actor_profile, device_id))
+        return
+
+    if date_from > date_to:
+        raise click.ClickException("--from date must be before or equal to --to date")
 
     async def _run() -> None:
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
@@ -167,3 +198,100 @@ def validate(
                 raise click.ClickException(str(e)) from e
 
     asyncio.run(_run())
+
+
+async def _run_integrity(
+    db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
+    device_id: int | None,
+) -> None:
+    """Run the data-integrity check and print results; exits nonzero on issues."""
+    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.validation.batch import BatchValidator
+
+    async with open_db_session(db) as async_db:
+        try:
+            profile_id = await resolve_cli_profile_id(
+                async_db, actor_user, actor_profile
+            )
+            validator = BatchValidator(async_db, profile_id)
+            report = await validator.check_data_integrity(device_id=device_id)
+        except Exception as e:
+            import traceback
+
+            err_console.print(f"Integrity check error: {e}")
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                traceback.print_exc()
+            raise click.ClickException(str(e)) from e
+
+    print_header("DATA INTEGRITY REPORT")
+    filter_label = str(device_id) if device_id is not None else "all devices"
+    print_kv("Checked at", report.checked_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+    print_kv("Device filter", filter_label)
+    print_kv("Total issues", str(report.total_issues))
+    print_footer()
+
+    # Null day_id sessions
+    console.print(
+        f"\n{ICON_CHECK if not report.null_day_id_sessions else ICON_ERROR} "
+        f"Sessions with null day_id: {len(report.null_day_id_sessions)}"
+    )
+    if report.null_day_id_sessions:
+        print_table(
+            columns=[("Session ID", 12)],
+            rows=[[str(sid)] for sid in report.null_day_id_sessions[:20]],
+        )
+        if len(report.null_day_id_sessions) > 20:
+            console.print(f"  ... and {len(report.null_day_id_sessions) - 20} more")
+
+    # Overlapping session pairs
+    console.print(
+        f"\n{ICON_CHECK if not report.overlapping_session_pairs else ICON_ERROR} "
+        f"Overlapping session pairs: {len(report.overlapping_session_pairs)}"
+    )
+    if report.overlapping_session_pairs:
+        print_table(
+            columns=[
+                ("Device", 8),
+                ("Session A", 24),
+                ("Session B", 24),
+            ],
+            rows=[
+                [
+                    str(p.device_id),
+                    p.session_a_device_session_id,
+                    p.session_b_device_session_id,
+                ]
+                for p in report.overlapping_session_pairs[:20]
+            ],
+        )
+        if len(report.overlapping_session_pairs) > 20:
+            console.print(
+                f"  ... and {len(report.overlapping_session_pairs) - 20} more"
+            )
+
+    # Cross-parser same-day
+    console.print(
+        f"\n{ICON_CHECK if not report.cross_parser_same_day else ICON_WARN} "
+        f"Cross-parser same-day entries: {len(report.cross_parser_same_day)}"
+    )
+    if report.cross_parser_same_day:
+        print_table(
+            columns=[("Device", 8), ("Date", 12), ("Sources", 0)],
+            rows=[
+                [
+                    str(cp.device_id),
+                    str(cp.day_date),
+                    ", ".join(cp.import_sources),
+                ]
+                for cp in report.cross_parser_same_day[:20]
+            ],
+        )
+        if len(report.cross_parser_same_day) > 20:
+            console.print(f"  ... and {len(report.cross_parser_same_day) - 20} more")
+
+    print_footer()
+
+    if report.total_issues > 0:
+        sys.exit(1)
