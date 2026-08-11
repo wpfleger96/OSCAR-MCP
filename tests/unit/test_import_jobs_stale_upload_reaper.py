@@ -1,11 +1,14 @@
-"""Unit tests for the stale PENDING_UPLOAD reaper.
+"""Unit tests for the stale PENDING_UPLOAD reaper and periodic spool sweep.
 
 Verifies that abandoned multi-chunk uploads are reclaimed after the idle timeout
-expires, that active uploads are left alone, and that capacity counters are
-correctly released.
+expires, that active uploads are left alone, that capacity counters are correctly
+released, that get_live_spool_dirs tracks in-flight jobs, and that the reaper
+thread invokes the optional spool_sweep_fn each iteration.
 """
 
 from __future__ import annotations
+
+import threading
 
 from datetime import UTC, datetime, timedelta
 
@@ -20,7 +23,9 @@ from snore.api.import_jobs import (
     _reap_stale_pending_uploads,
     create_job,
     get_job,
+    get_live_spool_dirs,
     reserve_slot,
+    start_reaper,
 )
 
 # ---------------------------------------------------------------------------
@@ -245,3 +250,122 @@ class TestTryCancelIfStaleUploadReturnType:
         assert result is not None
         # Should be approximately idle_age.total_seconds() — allow 5s of test slop.
         assert abs(result - idle_age.total_seconds()) < 5.0
+
+
+@pytest.mark.unit
+class TestGetLiveSpoolDirs:
+    """get_live_spool_dirs returns the spool paths of in-flight jobs only."""
+
+    def test_empty_when_no_jobs(self):
+        """Returns an empty frozenset when the job store is empty."""
+        result = get_live_spool_dirs()
+        assert isinstance(result, frozenset)
+        assert len(result) == 0
+
+    def test_includes_live_job_temp_dir(self, tmp_path):
+        """A job's temp_dir appears in the result while the job is in the store."""
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        create_job(JobType.UPLOAD, temp_dir=spool)
+
+        result = get_live_spool_dirs()
+
+        assert isinstance(result, frozenset)
+        assert spool in result
+
+    def test_excludes_job_without_temp_dir(self):
+        """Jobs with temp_dir=None do not contribute a path to the result."""
+        job = reserve_slot(None)
+        assert job is not None
+        assert job.temp_dir is None
+
+        result = get_live_spool_dirs()
+
+        assert len(result) == 0
+
+    def test_excludes_removed_job_temp_dir(self, tmp_path):
+        """A job removed from the store no longer appears in the result."""
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        job = create_job(JobType.UPLOAD, temp_dir=spool)
+        assert spool in get_live_spool_dirs()
+
+        job_store._jobs.pop(job.job_id, None)
+
+        assert spool not in get_live_spool_dirs()
+
+    def test_multiple_jobs_all_included(self, tmp_path):
+        """All in-flight jobs with a temp_dir are returned."""
+        spools = [tmp_path / f"spool{i}" for i in range(3)]
+        for s in spools:
+            s.mkdir()
+        for s in spools:
+            create_job(JobType.UPLOAD, temp_dir=s)
+
+        result = get_live_spool_dirs()
+
+        for s in spools:
+            assert s in result
+        assert len(result) == len(spools)
+
+    def test_returns_frozenset(self, tmp_path):
+        """Result is always a frozenset, never a mutable set."""
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        create_job(JobType.UPLOAD, temp_dir=spool)
+
+        result = get_live_spool_dirs()
+
+        assert isinstance(result, frozenset)
+
+
+@pytest.mark.unit
+class TestStartReaperSpoolSweepFn:
+    """start_reaper calls spool_sweep_fn each iteration; None is a safe default."""
+
+    def test_sweep_fn_invoked_each_iteration(self):
+        """spool_sweep_fn is called on every reaper loop iteration."""
+        call_count = 0
+        called = threading.Event()
+
+        def _sweep() -> None:
+            nonlocal call_count
+            call_count += 1
+            called.set()
+
+        _, stop = start_reaper(interval=0.01, spool_sweep_fn=_sweep)
+        try:
+            fired = called.wait(timeout=2.0)
+        finally:
+            stop.set()
+
+        assert fired, "spool_sweep_fn was never called within 2 s"
+        assert call_count >= 1
+
+    def test_no_sweep_fn_does_not_raise(self):
+        """start_reaper(spool_sweep_fn=None) runs without error."""
+        _, stop = start_reaper(interval=0.01, spool_sweep_fn=None)
+        # Give the loop one tick to confirm it doesn't crash.
+        import time
+
+        time.sleep(0.05)
+        stop.set()
+
+    def test_sweep_fn_exception_does_not_kill_reaper(self):
+        """A sweep fn that raises does not crash the reaper thread."""
+        calls: list[int] = []
+        reached_second = threading.Event()
+
+        def _flaky() -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("first call fails")
+            reached_second.set()
+
+        _, stop = start_reaper(interval=0.01, spool_sweep_fn=_flaky)
+        try:
+            survived = reached_second.wait(timeout=2.0)
+        finally:
+            stop.set()
+
+        assert survived, "reaper thread died after sweep fn raised"
