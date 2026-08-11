@@ -78,10 +78,10 @@ class ExportService:
 
         Works entirely from the filesystem — no database needed.
         """
-        from snore.parsers.register_all import register_all_parsers
+        from snore.parsers.register_all import ensure_registered_parsers
         from snore.parsers.registry import parser_registry
 
-        register_all_parsers()
+        ensure_registered_parsers()
 
         serial = self._resolve_device_serial(device_serial)
         device_root = self.backup_root / serial

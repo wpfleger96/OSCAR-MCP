@@ -109,7 +109,7 @@ class TestWriteGateWiring:
                 "snore.services.import_service.SessionImporter.cleanup_orphaned_records",
                 new=AsyncMock(return_value={}),
             ),
-            patch("snore.services.import_service.register_all_parsers"),
+            patch("snore.services.import_service.ensure_registered_parsers"),
             patch(
                 "snore.services.import_service.parser_registry.detect_all_parsers",
                 return_value=[],

@@ -125,10 +125,10 @@ def resmed_parser():
 @pytest.fixture
 def parser_registry():
     """Return the global parser registry with parsers registered."""
-    from snore.parsers.register_all import register_all_parsers
+    from snore.parsers.register_all import ensure_registered_parsers
     from snore.parsers.registry import parser_registry
 
-    register_all_parsers()
+    ensure_registered_parsers()
 
     return parser_registry
 
