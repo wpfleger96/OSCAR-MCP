@@ -12,6 +12,7 @@ import {
     rxCurrentFixture,
     rxCompareFixture,
     rxChangesFixture,
+    maskLogFixture,
     sessionDetailFixture,
 } from './tests/fixtures/api-fixtures'
 
@@ -22,6 +23,7 @@ function routeApi(route: Route) {
     if (url.includes('/stats/summary')) return route.fulfill({ json: summaryFixture })
     if (url.includes('/stats/trends')) return route.fulfill({ json: trendsFixture })
     if (url.includes('/stats/periods')) return route.fulfill({ json: periodsFixture })
+    if (url.includes('/equipment/masks')) return route.fulfill({ json: maskLogFixture })
     if (url.includes('/rx/changes')) return route.fulfill({ json: rxChangesFixture })
     if (url.includes('/rx/compare')) return route.fulfill({ json: rxCompareFixture })
     if (url.includes('/rx/current')) return route.fulfill({ json: rxCurrentFixture })

@@ -53,6 +53,9 @@ export type DayListItem = Schemas['DayListItem']
 export type DayDetail = Schemas['DayDetail']
 export type DateListResponse = Schemas['DateListResponse']
 
+// Equipment
+export type MaskLogEntryResponse = Schemas['MaskLogEntryResponse']
+
 // RX
 export type RxPeriodResponse = Schemas['RxPeriodResponse']
 export type RxComparisonResponse = Schemas['RxComparisonResponse']

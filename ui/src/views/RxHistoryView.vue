@@ -103,43 +103,65 @@
                 </div>
             </div>
 
-            <!-- Settings Changes — most recent first -->
-            <div v-if="changes.length" class="section-card">
+            <!-- Settings Changes — device changes merged with mask log, most recent first -->
+            <div v-if="timelineRows.length" class="section-card">
                 <h2>Settings Changes</h2>
                 <div class="overflow-x-auto">
                     <Table>
                         <TableHeader>
                             <TableRow>
                                 <TableHead class="whitespace-nowrap">Date</TableHead>
+                                <TableHead class="whitespace-nowrap">Source</TableHead>
                                 <TableHead class="whitespace-nowrap">Device</TableHead>
                                 <TableHead class="whitespace-nowrap">Setting</TableHead>
                                 <TableHead class="whitespace-nowrap">Change</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            <TableRow v-for="(change, i) in changes" :key="changeKey(change, i)">
+                            <TableRow v-for="row in timelineRows" :key="row.key">
                                 <TableCell class="whitespace-nowrap">{{
-                                    formatDateFull(change.date)
-                                }}</TableCell>
-                                <TableCell class="whitespace-nowrap">{{
-                                    change.device_name
-                                }}</TableCell>
-                                <TableCell class="whitespace-nowrap">{{
-                                    settingLabel(change.key)
+                                    formatDateFull(row.date)
                                 }}</TableCell>
                                 <TableCell class="whitespace-nowrap">
-                                    <span class="text-muted-foreground">{{
-                                        change.old_value != null
-                                            ? formatSettingValue(change.key, change.old_value)
-                                            : '—'
-                                    }}</span>
-                                    <span class="mx-1">→</span>
-                                    <span>{{
-                                        change.new_value != null
-                                            ? formatSettingValue(change.key, change.new_value)
-                                            : '—'
-                                    }}</span>
+                                    <Badge v-if="row.source === 'device'" variant="secondary"
+                                        >Device</Badge
+                                    >
+                                    <Badge v-else variant="outline">Mask Log</Badge>
                                 </TableCell>
+                                <template v-if="row.source === 'device'">
+                                    <TableCell class="whitespace-nowrap">{{
+                                        row.change.device_name
+                                    }}</TableCell>
+                                    <TableCell class="whitespace-nowrap">{{
+                                        settingLabel(row.change.key)
+                                    }}</TableCell>
+                                    <TableCell class="whitespace-nowrap">
+                                        <span class="text-muted-foreground">{{
+                                            row.change.old_value != null
+                                                ? formatSettingValue(
+                                                      row.change.key,
+                                                      row.change.old_value,
+                                                  )
+                                                : '—'
+                                        }}</span>
+                                        <span class="mx-1">→</span>
+                                        <span>{{
+                                            row.change.new_value != null
+                                                ? formatSettingValue(
+                                                      row.change.key,
+                                                      row.change.new_value,
+                                                  )
+                                                : '—'
+                                        }}</span>
+                                    </TableCell>
+                                </template>
+                                <template v-else>
+                                    <TableCell class="whitespace-nowrap">—</TableCell>
+                                    <TableCell class="whitespace-nowrap">Mask</TableCell>
+                                    <TableCell class="whitespace-nowrap">{{
+                                        maskSummary(row.entry)
+                                    }}</TableCell>
+                                </template>
                             </TableRow>
                         </TableBody>
                     </Table>
@@ -148,13 +170,184 @@
         </template>
 
         <div v-else class="no-data"><Info class="h-4 w-4" /> No prescription data available.</div>
+
+        <!-- Mask Equipment -->
+        <div v-if="!loading" class="section-card">
+            <h2>Mask Equipment</h2>
+
+            <div v-if="maskLoading" class="loading-state">
+                <Loader2 class="h-4 w-4 animate-spin" /> Loading mask log...
+            </div>
+
+            <ErrorState v-else-if="maskError" :message="maskError" :retry="reloadMasks" />
+
+            <template v-else>
+                <div v-if="masks.length" class="overflow-x-auto">
+                    <Table>
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead class="whitespace-nowrap">Start Date</TableHead>
+                                <TableHead class="whitespace-nowrap">Brand</TableHead>
+                                <TableHead class="whitespace-nowrap">Model</TableHead>
+                                <TableHead class="whitespace-nowrap">Style</TableHead>
+                                <TableHead class="whitespace-nowrap">Size</TableHead>
+                                <TableHead>Notes</TableHead>
+                                <TableHead v-if="canWrite"></TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            <TableRow v-for="entry in masks" :key="entry.id">
+                                <TableCell class="whitespace-nowrap">{{
+                                    formatDateFull(entry.start_date)
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{ entry.brand }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{ entry.model }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    styleLabel(entry.style)
+                                }}</TableCell>
+                                <TableCell class="whitespace-nowrap">{{
+                                    entry.size ?? '—'
+                                }}</TableCell>
+                                <TableCell>{{ entry.notes ?? '—' }}</TableCell>
+                                <TableCell v-if="canWrite" class="whitespace-nowrap text-right">
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        :disabled="saving"
+                                        @click="startEdit(entry)"
+                                    >
+                                        Edit
+                                    </Button>
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        :disabled="saving"
+                                        @click="startDelete(entry)"
+                                    >
+                                        Delete
+                                    </Button>
+                                </TableCell>
+                            </TableRow>
+                        </TableBody>
+                    </Table>
+                </div>
+                <p v-else class="mask-empty">No mask equipment logged yet.</p>
+
+                <p v-if="maskActionError" class="mask-action-error">{{ maskActionError }}</p>
+
+                <form v-if="canWrite" class="mask-form" @submit.prevent="handleSubmit">
+                    <h3>{{ editingId != null ? 'Edit Mask' : 'Add Mask' }}</h3>
+                    <div class="mask-form-grid">
+                        <div class="mask-field">
+                            <label class="mask-label" for="mask-brand">Brand</label>
+                            <input
+                                id="mask-brand"
+                                v-model="form.brand"
+                                type="text"
+                                class="field-input"
+                                placeholder="e.g. ResMed"
+                                required
+                                :disabled="saving"
+                            />
+                        </div>
+                        <div class="mask-field">
+                            <label class="mask-label" for="mask-model">Model</label>
+                            <input
+                                id="mask-model"
+                                v-model="form.model"
+                                type="text"
+                                class="field-input"
+                                placeholder="e.g. AirFit P10"
+                                required
+                                :disabled="saving"
+                            />
+                        </div>
+                        <div class="mask-field">
+                            <label class="mask-label">Style</label>
+                            <Select v-model="form.style">
+                                <SelectTrigger class="w-full">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem
+                                        v-for="opt in STYLE_OPTIONS"
+                                        :key="opt.value"
+                                        :value="opt.value"
+                                    >
+                                        {{ opt.label }}
+                                    </SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
+                        <div class="mask-field">
+                            <label class="mask-label">Start Date</label>
+                            <DatePickerInput v-model="form.startDate" />
+                        </div>
+                        <div class="mask-field">
+                            <label class="mask-label" for="mask-size">Size</label>
+                            <input
+                                id="mask-size"
+                                v-model="form.size"
+                                type="text"
+                                class="field-input"
+                                placeholder="Optional"
+                                :disabled="saving"
+                            />
+                        </div>
+                        <div class="mask-field">
+                            <label class="mask-label" for="mask-notes">Notes</label>
+                            <input
+                                id="mask-notes"
+                                v-model="form.notes"
+                                type="text"
+                                class="field-input"
+                                placeholder="Optional"
+                                :disabled="saving"
+                            />
+                        </div>
+                    </div>
+                    <div class="mask-form-actions">
+                        <Button type="submit" :disabled="saving || !formValid">
+                            <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />
+                            {{ editingId != null ? 'Save' : 'Add Mask' }}
+                        </Button>
+                        <Button
+                            v-if="editingId != null"
+                            type="button"
+                            variant="ghost"
+                            :disabled="saving"
+                            @click="resetForm"
+                        >
+                            Cancel
+                        </Button>
+                    </div>
+                </form>
+            </template>
+        </div>
+
+        <DeleteConfirmDialog
+            v-model:visible="deleteDialogVisible"
+            title="Delete mask entry"
+            :message="deleteMessage"
+            :loading="false"
+            :deleting="deleting"
+            @confirm="handleDelete"
+        />
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { Loader2, Info } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select'
 import {
     Table,
     TableBody,
@@ -164,19 +357,27 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { getRxAll } from '@/api/rx'
+import {
+    getMaskLog,
+    createMaskLogEntry,
+    updateMaskLogEntry,
+    deleteMaskLogEntry,
+} from '@/api/equipment'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { useAuth } from '@/composables/useAuth'
 import { formatDateFull } from '@/utils/formatting'
 import { settingLabel, formatSettingValue } from '@/utils/deviceSettings'
-import type { RxPeriodResponse, RxSettingChange } from '@/types'
+import type { MaskLogEntryResponse, RxPeriodResponse, RxSettingChange } from '@/types'
+import DatePickerInput from '@/components/DatePickerInput.vue'
+import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import ErrorState from '@/components/ErrorState.vue'
+
+const { canWrite } = useAuth()
 
 const { data, loading, error, reload } = useApiLoad(() => getRxAll(), 'Failed to load RX data')
 
 const history = computed(() => data.value?.history ?? [])
 const current = computed(() => data.value?.current ?? null)
-const changes = computed<RxSettingChange[]>(() =>
-    [...(data.value?.changes?.changes ?? [])].reverse(),
-)
 
 interface ComparisonRow extends RxPeriodResponse {
     isBest: boolean
@@ -218,8 +419,158 @@ function summarizeSettings(settings: Record<string, string>): string {
     return parts.join(', ')
 }
 
-function changeKey(change: RxSettingChange, i: number): string {
-    return `${change.date}-${change.device_id}-${change.key}-${i}`
+// --- Mask equipment log ---
+
+type MaskStyle = 'pillows' | 'nasal' | 'full_face'
+
+const STYLE_OPTIONS: { value: MaskStyle; label: string }[] = [
+    { value: 'pillows', label: 'Pillows' },
+    { value: 'nasal', label: 'Nasal' },
+    { value: 'full_face', label: 'Full Face' },
+]
+
+function styleLabel(style: string): string {
+    return STYLE_OPTIONS.find((o) => o.value === style)?.label ?? style
+}
+
+function maskSummary(entry: MaskLogEntryResponse): string {
+    const details = [styleLabel(entry.style)]
+    if (entry.size) details.push(`size ${entry.size}`)
+    return `${entry.brand} ${entry.model} (${details.join(', ')})`
+}
+
+const {
+    data: maskData,
+    loading: maskLoading,
+    error: maskError,
+    reload: reloadMasks,
+} = useApiLoad(() => getMaskLog(), 'Failed to load mask log')
+
+// API returns entries oldest-first; show most recent first like the rest of the page.
+const masks = computed<MaskLogEntryResponse[]>(() => [...(maskData.value ?? [])].reverse())
+
+// Device setting changes merged with mask log entries, most recent first.
+type TimelineRow =
+    | { source: 'device'; key: string; date: string; change: RxSettingChange }
+    | { source: 'mask'; key: string; date: string; entry: MaskLogEntryResponse }
+
+const timelineRows = computed<TimelineRow[]>(() => {
+    const deviceRows: TimelineRow[] = (data.value?.changes?.changes ?? []).map((change, i) => ({
+        source: 'device',
+        key: `device-${change.date}-${change.device_id}-${change.key}-${i}`,
+        date: change.date,
+        change,
+    }))
+    const maskRows: TimelineRow[] = (maskData.value ?? []).map((entry) => ({
+        source: 'mask',
+        key: `mask-${entry.id}`,
+        date: entry.start_date,
+        entry,
+    }))
+    return [...deviceRows, ...maskRows].sort((a, b) => b.date.localeCompare(a.date))
+})
+
+// --- Add / edit form ---
+
+const emptyForm = {
+    brand: '',
+    model: '',
+    style: 'nasal' as MaskStyle,
+    startDate: '',
+    size: '',
+    notes: '',
+}
+const form = ref({ ...emptyForm })
+const editingId = ref<number | null>(null)
+const saving = ref(false)
+const maskActionError = ref<string | null>(null)
+
+const formValid = computed(
+    () =>
+        form.value.brand.trim() !== '' &&
+        form.value.model.trim() !== '' &&
+        form.value.startDate !== '',
+)
+
+function resetForm() {
+    form.value = { ...emptyForm }
+    editingId.value = null
+}
+
+function startEdit(entry: MaskLogEntryResponse) {
+    editingId.value = entry.id
+    form.value = {
+        brand: entry.brand,
+        model: entry.model,
+        style: STYLE_OPTIONS.some((o) => o.value === entry.style)
+            ? (entry.style as MaskStyle)
+            : 'nasal',
+        startDate: entry.start_date,
+        size: entry.size ?? '',
+        notes: entry.notes ?? '',
+    }
+    maskActionError.value = null
+}
+
+async function handleSubmit() {
+    if (!formValid.value) return
+    saving.value = true
+    maskActionError.value = null
+    const body = {
+        brand: form.value.brand.trim(),
+        model: form.value.model.trim(),
+        style: form.value.style,
+        start_date: form.value.startDate,
+        size: form.value.size.trim() || null,
+        notes: form.value.notes.trim() || null,
+    }
+    try {
+        if (editingId.value != null) {
+            await updateMaskLogEntry(editingId.value, body)
+        } else {
+            await createMaskLogEntry(body)
+        }
+        resetForm()
+        await reloadMasks()
+    } catch (e: unknown) {
+        maskActionError.value = e instanceof Error ? e.message : 'Failed to save mask entry'
+    } finally {
+        saving.value = false
+    }
+}
+
+// --- Delete ---
+
+const deleteTarget = ref<MaskLogEntryResponse | null>(null)
+const deleteDialogVisible = ref(false)
+const deleting = ref(false)
+
+const deleteMessage = computed(() =>
+    deleteTarget.value
+        ? `Delete ${deleteTarget.value.brand} ${deleteTarget.value.model} from the mask log?`
+        : '',
+)
+
+function startDelete(entry: MaskLogEntryResponse) {
+    deleteTarget.value = entry
+    deleteDialogVisible.value = true
+    maskActionError.value = null
+}
+
+async function handleDelete() {
+    if (!deleteTarget.value) return
+    deleting.value = true
+    try {
+        await deleteMaskLogEntry(deleteTarget.value.id)
+        if (editingId.value === deleteTarget.value.id) resetForm()
+        await reloadMasks()
+    } catch (e: unknown) {
+        maskActionError.value = e instanceof Error ? e.message : 'Failed to delete mask entry'
+    } finally {
+        deleting.value = false
+        deleteDialogVisible.value = false
+        deleteTarget.value = null
+    }
 }
 </script>
 
@@ -251,5 +602,51 @@ function changeKey(change: RxSettingChange, i: number): string {
 
 .setting-pill {
     font-size: 0.78rem;
+}
+
+.mask-empty {
+    font-size: 0.875rem;
+    color: var(--color-muted-foreground);
+}
+
+.mask-action-error {
+    margin-top: 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-destructive);
+}
+
+.mask-form {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--color-border);
+}
+
+.mask-form h3 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+}
+
+.mask-form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.mask-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+
+.mask-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+.mask-form-actions {
+    display: flex;
+    gap: 0.5rem;
 }
 </style>

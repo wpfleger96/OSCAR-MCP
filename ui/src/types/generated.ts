@@ -540,6 +540,15 @@ export interface paths {
          *     VACUUM runs as a post-response background task so that reclaiming large
          *     waveform blobs never blocks the event loop or exceeds proxy timeouts.
          *     ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
+         *     A persistent marker file is written before the commit so that a container
+         *     restart between commit and VACUUM causes startup to reschedule the VACUUM.
+         *
+         *     Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
+         *     renamed into ``.quarantine/`` BEFORE the commit so that a container restart
+         *     between quarantine and commit leaves dirs visible to
+         *     ``DeletionSaga.recover()`` case 2 on next boot.  DB rows survive so the
+         *     state is consistent.  New imports proceed normally — re-upload and
+         *     deduplication make the loss harmless.
          *
          *     NOTE: Concurrent in-flight imports for this user's devices will fail if
          *     their device rows are deleted mid-import; this is accepted behavior.
@@ -756,6 +765,15 @@ export interface paths {
          *
          *     VACUUM runs as a post-response background task.  ``size_after_mb`` is null
          *     and ``vacuum_scheduled`` is true in the response when VACUUM is queued.
+         *     A persistent marker file is written before the commit so that a container
+         *     restart between commit and VACUUM causes startup to reschedule the VACUUM.
+         *
+         *     Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
+         *     renamed into ``.quarantine/`` BEFORE the commit.  A crash between quarantine
+         *     and commit leaves dirs in ``.quarantine/`` for ``DeletionSaga.recover()``
+         *     case 2 to sweep on next boot; DB rows survive so the state is consistent.
+         *     New imports proceed normally — re-upload deduplication makes the loss
+         *     harmless.
          *
          *     Note: this handler holds the SQLite write lock for the entire delete+commit,
          *     so on large databases concurrent import/analysis writers may hit their 5 s
@@ -839,6 +857,42 @@ export interface paths {
         options?: never
         head?: never
         patch?: never
+        trace?: never
+    }
+    '/api/v1/equipment/masks': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Mask Log Entries */
+        get: operations['list_mask_log_entries_api_v1_equipment_masks_get']
+        put?: never
+        /** Create Mask Log Entry */
+        post: operations['create_mask_log_entry_api_v1_equipment_masks_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/equipment/masks/{entry_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /** Delete Mask Log Entry */
+        delete: operations['delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete']
+        options?: never
+        head?: never
+        /** Update Mask Log Entry */
+        patch: operations['update_mask_log_entry_api_v1_equipment_masks__entry_id__patch']
         trace?: never
     }
     '/api/v1/export/csv': {
@@ -3013,6 +3067,68 @@ export interface components {
             /** Password */
             password: string
         }
+        /** MaskLogCreateRequest */
+        MaskLogCreateRequest: {
+            /** Brand */
+            brand: string
+            /** Model */
+            model: string
+            /** Notes */
+            notes?: string | null
+            /** Size */
+            size?: string | null
+            /**
+             * Start Date
+             * Format: date
+             */
+            start_date: string
+            /**
+             * Style
+             * @enum {string}
+             */
+            style: 'pillows' | 'nasal' | 'full_face'
+        }
+        /**
+         * MaskLogEntryResponse
+         * @description A single user-entered mask equipment log entry.
+         */
+        MaskLogEntryResponse: {
+            /** Brand */
+            brand: string
+            /** Id */
+            id: number
+            /** Model */
+            model: string
+            /** Notes */
+            notes?: string | null
+            /** Size */
+            size?: string | null
+            /**
+             * Start Date
+             * Format: date
+             */
+            start_date: string
+            /** Style */
+            style: string
+        }
+        /**
+         * MaskLogUpdateRequest
+         * @description PATCH body: omitted fields are unchanged; explicit null clears size/notes.
+         */
+        MaskLogUpdateRequest: {
+            /** Brand */
+            brand?: string | null
+            /** Model */
+            model?: string | null
+            /** Notes */
+            notes?: string | null
+            /** Size */
+            size?: string | null
+            /** Start Date */
+            start_date?: string | null
+            /** Style */
+            style?: ('pillows' | 'nasal' | 'full_face') | null
+        }
         /** McpStatus */
         McpStatus: {
             /** Auth Provider */
@@ -3843,6 +3959,31 @@ export interface components {
              * @description Session date (YYYY-MM-DD)
              */
             date: string
+            /**
+             * Device Ahi
+             * @description Device AHI (events/hr)
+             */
+            device_ahi?: number | null
+            /**
+             * Device Cai
+             * @description Device CAI (central apnea index, events/hr)
+             */
+            device_cai?: number | null
+            /**
+             * Device Hi
+             * @description Device HI (hypopnea index, events/hr)
+             */
+            device_hi?: number | null
+            /**
+             * Device Oai
+             * @description Device OAI (obstructive apnea index, events/hr)
+             */
+            device_oai?: number | null
+            /**
+             * Device Uai
+             * @description Device UAI (upper-airway/unclassified apnea index, events/hr; vAuto/bilevel only)
+             */
+            device_uai?: number | null
             /**
              * Duration Hours
              * @description Session duration in hours
@@ -5215,6 +5356,123 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['DeviceDetail']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_mask_log_entries_api_v1_equipment_masks_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse'][]
+                }
+            }
+        }
+    }
+    create_mask_log_entry_api_v1_equipment_masks_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['MaskLogCreateRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                entry_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    update_mask_log_entry_api_v1_equipment_masks__entry_id__patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                entry_id: number
+            }
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['MaskLogUpdateRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse']
                 }
             }
             /** @description Validation Error */

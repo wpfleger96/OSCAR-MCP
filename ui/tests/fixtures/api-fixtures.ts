@@ -6,6 +6,7 @@ import type {
     SessionListItem,
     DeviceInfo,
     DeviceDetail,
+    MaskLogEntryResponse,
     PeriodStatistics,
     RecordsData,
     RxPeriodResponse,
@@ -1027,6 +1028,36 @@ export const rxChangesFixture: RxChangesResponse = {
         },
     ],
 }
+
+export const maskLogFixture: MaskLogEntryResponse[] = [
+    {
+        id: 1,
+        brand: 'ResMed',
+        model: 'AirFit N20',
+        size: 'M',
+        style: 'nasal',
+        start_date: '2025-05-10',
+        notes: null,
+    },
+    {
+        id: 2,
+        brand: 'ResMed',
+        model: 'AirFit P10',
+        size: 'S',
+        style: 'pillows',
+        start_date: '2025-11-02',
+        notes: 'Switched after nasal bridge irritation',
+    },
+    {
+        id: 3,
+        brand: 'Philips',
+        model: 'DreamWear Full Face',
+        size: null,
+        style: 'full_face',
+        start_date: '2026-02-22',
+        notes: null,
+    },
+]
 
 export const sessionDetailFixture: SessionDetail = {
     id: 1470,
