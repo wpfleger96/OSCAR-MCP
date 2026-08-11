@@ -1073,3 +1073,42 @@ class TestDeleteData:
 
         assert resp.status_code == 409
         assert "already in progress" in resp.json()["detail"]
+
+    def test_delete_data_writes_vacuum_marker(
+        self, async_db_session, db_session, tmp_path
+    ):
+        """POST /auth/me/delete-data writes a vacuum pending marker before committing.
+
+        Patches DatabaseTarget.from_env_and_flags to return a known SQLite file
+        target so is_sqlite_file=True in the handler, ensuring the marker write
+        branch is exercised.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from snore.database.target import DatabaseTarget  # noqa: PLC0415
+
+        user, profile = _seed_user(db_session, role="member")
+        client = _make_client(async_db_session, user.id, profile.id, "member")
+
+        # Use a real file target so is_sqlite_file=True.
+        db_file = tmp_path / "test.db"
+        db_file.touch()
+        marker = tmp_path / "vacuum.pending"
+
+        fake_target = DatabaseTarget.from_url(str(db_file))
+
+        with (
+            patch("snore.api.routers.me.DEFAULT_VACUUM_PENDING_MARKER", marker),
+            patch(
+                "snore.database.target.DatabaseTarget.from_env_and_flags",
+                return_value=fake_target,
+            ),
+        ):
+            resp = client.post("/api/v1/auth/me/delete-data")
+
+        assert resp.status_code == 200
+        # _vacuum_background is patched to no-op in tests, so marker persists.
+        assert marker.exists(), (
+            "Vacuum pending marker must be written by delete-data endpoint"
+        )
+        assert marker.read_text().strip(), "Marker must contain a non-empty DB path"

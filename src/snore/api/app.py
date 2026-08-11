@@ -125,6 +125,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     lease.acquire_shared()
 
+    # Schedule pending vacuum if a prior restart interrupted it before VACUUM ran.
+    from snore.constants import DEFAULT_VACUUM_PENDING_MARKER  # noqa: PLC0415
+    from snore.services.database_service import _vacuum_background  # noqa: PLC0415
+
+    if DEFAULT_VACUUM_PENDING_MARKER.exists():
+        try:
+            pending_db_path = DEFAULT_VACUUM_PENDING_MARKER.read_text().strip()
+            if pending_db_path:
+                logger.info(
+                    "Startup: vacuum pending marker found — scheduling background VACUUM"
+                )
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(None, _vacuum_background, pending_db_path)
+        except Exception as exc:
+            logger.warning("Startup: failed to schedule pending VACUUM: %s", exc)
+
     # Purge expired/consumed oauth_attempts at startup.
     await _startup_purge_expired_oauth_attempts()
 

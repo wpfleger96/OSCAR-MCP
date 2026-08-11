@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from snore.database.models import (
     AnalysisResult,
     Device,
@@ -12,6 +14,10 @@ from snore.database.models import (
     Waveform,
 )
 from snore.services.database_service import DatabaseService
+
+# Import the real _vacuum_background at module level so we bypass the autouse
+# _disable_background_vacuum fixture that replaces it with a no-op per test.
+from snore.services.database_service import _vacuum_background as _REAL_VACUUM_BG
 from snore.services.device_service import DeviceService
 
 
@@ -473,3 +479,235 @@ class TestVacuum:
         service = DatabaseService(async_db_session, profile_id=1)
         result = service.vacuum_sqlite(str(temp_db))
         assert result.status == "success"
+
+
+class TestVacuumBackgroundMarker:
+    """_vacuum_background must remove the pending-vacuum marker on success.
+
+    Uses _REAL_VACUUM_BG (module-level import) to bypass the autouse
+    _disable_background_vacuum fixture that replaces _vacuum_background with a
+    no-op in all tests.
+    """
+
+    def test_removes_marker_after_successful_vacuum(self, tmp_path, temp_db):
+        """Marker file is deleted after _vacuum_background runs successfully."""
+        import sqlite3 as _sqlite3
+
+        from unittest.mock import patch
+
+        # temp_db is created by the fixture; sqlite3 needs the tables to exist
+        # but VACUUM works on any valid SQLite file regardless.
+        conn = _sqlite3.connect(str(temp_db))
+        conn.close()
+
+        marker = tmp_path / "vacuum.pending"
+        marker.write_text(str(temp_db))
+
+        with patch("snore.constants.DEFAULT_VACUUM_PENDING_MARKER", marker):
+            _REAL_VACUUM_BG(str(temp_db))
+
+        assert not marker.exists(), "Marker must be removed after successful VACUUM"
+
+    def test_marker_survives_vacuum_failure(self, tmp_path):
+        """Marker is left in place when VACUUM fails (corrupt SQLite file)."""
+        from unittest.mock import patch
+
+        # Create a file with non-SQLite content so sqlite3 raises DatabaseError.
+        corrupt_db = tmp_path / "corrupt.db"
+        corrupt_db.write_bytes(b"not a sqlite database -- corrupt content")
+
+        marker = tmp_path / "vacuum.pending"
+        marker.write_text(str(corrupt_db))
+
+        with patch("snore.constants.DEFAULT_VACUUM_PENDING_MARKER", marker):
+            _REAL_VACUUM_BG(str(corrupt_db))
+
+        assert marker.exists(), "Marker must remain when VACUUM fails"
+
+    def test_vacuum_with_no_marker_does_not_raise(self, tmp_path, temp_db):
+        """_vacuum_background succeeds even when no marker file is present."""
+        import sqlite3 as _sqlite3
+
+        from unittest.mock import patch
+
+        conn = _sqlite3.connect(str(temp_db))
+        conn.close()
+
+        absent_marker = tmp_path / "nonexistent.pending"
+
+        with patch("snore.constants.DEFAULT_VACUUM_PENDING_MARKER", absent_marker):
+            _REAL_VACUUM_BG(str(temp_db))  # must not raise
+
+
+class TestDeleteUserDataCommitFailure:
+    """delete_user_data must restore quarantined dirs when the commit fails."""
+
+    async def test_commit_failure_restores_dirs(self, async_db_session, tmp_path):
+        """Quarantined dirs are renamed back when db.commit() raises."""
+        import uuid
+
+        from unittest.mock import AsyncMock
+
+        from snore.database.models import Profile, User
+        from snore.services.database_service import DatabaseService
+
+        # Seed a user + profile.
+        user = User(
+            canonical_email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+            role="member",
+        )
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="Test")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+
+        raw_root = tmp_path / "raw"
+        profile_dir = raw_root / str(profile.id)
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "backup.edf").write_text("precious data")
+
+        # Patch commit to raise.
+        orig_commit = async_db_session.commit
+        async_db_session.commit = AsyncMock(
+            side_effect=RuntimeError("simulated commit failure")
+        )
+        try:
+            with pytest.raises(RuntimeError, match="simulated commit failure"):
+                await DatabaseService.delete_user_data(
+                    async_db_session, user.id, raw_root
+                )
+        finally:
+            async_db_session.commit = orig_commit
+
+        # Dir must be restored to its original location.
+        assert profile_dir.exists(), "Raw dir must be restored after commit failure"
+        assert (profile_dir / "backup.edf").read_text() == "precious data"
+        quarantine_dst = raw_root / ".quarantine" / str(profile.id)
+        assert not quarantine_dst.exists(), (
+            "Quarantine dst must be cleaned up on restore"
+        )
+
+    async def test_successful_commit_quarantine_removed(
+        self, async_db_session, tmp_path
+    ):
+        """After a successful commit, the quarantined dir is rmtree'd."""
+        import uuid
+
+        from snore.database.models import Profile, User
+        from snore.services.database_service import DatabaseService
+
+        user = User(
+            canonical_email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+            role="member",
+        )
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="Test")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+
+        raw_root = tmp_path / "raw"
+        profile_dir = raw_root / str(profile.id)
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "backup.edf").write_text("data")
+
+        await DatabaseService.delete_user_data(async_db_session, user.id, raw_root)
+
+        # Both src and quarantine dst must be gone.
+        assert not profile_dir.exists()
+        quarantine_dst = raw_root / ".quarantine" / str(profile.id)
+        assert not quarantine_dst.exists()
+
+    async def test_quarantine_survives_post_commit_rmtree_failure(
+        self, async_db_session, tmp_path
+    ):
+        """When the post-commit rmtree raises, the quarantine dir remains for startup recovery."""
+        import uuid
+
+        from unittest.mock import patch
+
+        from snore.database.models import Profile, User
+        from snore.services.database_service import DatabaseService
+
+        user = User(
+            canonical_email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+            role="member",
+        )
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="Test")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+
+        raw_root = tmp_path / "raw"
+        profile_dir = raw_root / str(profile.id)
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "backup.edf").write_text("data")
+
+        # Simulate a crash/error in the post-commit rmtree step.
+        with patch(
+            "snore.services.database_service.shutil.rmtree",
+            side_effect=OSError("disk error"),
+        ):
+            # Should complete without raising (rmtree failure is best-effort).
+            result = await DatabaseService.delete_user_data(
+                async_db_session, user.id, raw_root
+            )
+
+        assert result[0] >= 0  # devices_deleted (may be 0 if no devices seeded)
+        # The quarantine dir must still exist — startup recovery will purge it.
+        quarantine_dst = raw_root / ".quarantine" / str(profile.id)
+        assert quarantine_dst.exists(), "Quarantine dir must remain when rmtree fails"
+        assert not profile_dir.exists(), "Source must be gone (renamed to quarantine)"
+
+
+class TestStartupVacuumRecovery:
+    """DeletionSaga.recover() case 2 sweeps quarantine dirs left by reset/delete-data."""
+
+    async def test_recover_sweeps_integer_named_quarantine_dirs_without_tombstone(
+        self, async_db_session, tmp_path
+    ):
+        """Case 2: quarantine dirs whose profile_id has no tombstone are purged on startup."""
+        import asyncio
+        import uuid
+
+        from snore.database.models import Profile, User
+        from snore.services.profile_service import DeletionSaga
+
+        # Seed a live profile (no tombstone / deleting_at IS NULL).
+        user = User(
+            canonical_email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+            role="member",
+        )
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="Test")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+        await async_db_session.commit()
+
+        raw_root = tmp_path / "raw"
+
+        # Simulate the "crash between quarantine and commit" state: the quarantine
+        # dir exists but the profile row survived (commit didn't happen).
+        quarantine_dst = raw_root / ".quarantine" / str(profile.id)
+        quarantine_dst.mkdir(parents=True)
+        (quarantine_dst / "orphan.edf").write_text("orphaned")
+
+        # Patch session_scope so DeletionSaga uses our test session.
+        from contextlib import asynccontextmanager
+        from unittest.mock import patch
+
+        @asynccontextmanager
+        async def _mock_session_scope():
+            yield async_db_session
+
+        with patch("snore.services.profile_service.session_scope", _mock_session_scope):
+            saga = DeletionSaga(raw_root=raw_root)
+            await asyncio.to_thread(saga.recover)
+
+        # Startup recovery (case 2) must have purged the orphaned quarantine dir.
+        assert not quarantine_dst.exists(), (
+            "DeletionSaga.recover() case 2 must purge quarantine dir with no tombstone"
+        )

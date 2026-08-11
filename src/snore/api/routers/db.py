@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import secrets
+import shutil
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +18,7 @@ from snore.api.deps import ImmediateDbDep, ResetLockDep, service_dep
 from snore.api.errors import db_busy_maps_to_409
 from snore.api.guards import RequireAdmin
 from snore.auth.invite_tokens import hash_invite_token
+from snore.constants import DEFAULT_VACUUM_PENDING_MARKER
 from snore.database import models
 from snore.database.models import Base
 from snore.database.target import DatabaseTarget
@@ -25,7 +27,7 @@ from snore.services.database_service import (
     _vacuum_background,
     file_size_mb,
 )
-from snore.services.profile_service import purge_profile_raw_dir
+from snore.services.profile_service import quarantine_profile_raw_dir
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
 
 logger = logging.getLogger(__name__)
@@ -157,6 +159,15 @@ async def reset_db(
 
     VACUUM runs as a post-response background task.  ``size_after_mb`` is null
     and ``vacuum_scheduled`` is true in the response when VACUUM is queued.
+    A persistent marker file is written before the commit so that a container
+    restart between commit and VACUUM causes startup to reschedule the VACUUM.
+
+    Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
+    renamed into ``.quarantine/`` BEFORE the commit.  A crash between quarantine
+    and commit leaves dirs in ``.quarantine/`` for ``DeletionSaga.recover()``
+    case 2 to sweep on next boot; DB rows survive so the state is consistent.
+    New imports proceed normally — re-upload deduplication makes the loss
+    harmless.
 
     Note: this handler holds the SQLite write lock for the entire delete+commit,
     so on large databases concurrent import/analysis writers may hit their 5 s
@@ -177,6 +188,22 @@ async def reset_db(
 
     raw_root = _raw_root()
     caller_email = ""
+
+    # Write vacuum marker before commit so a container restart between commit
+    # and VACUUM causes startup to reschedule the VACUUM.  Best-effort: a
+    # marker-write failure is logged but never aborts the request.
+    if is_sqlite_file:
+        try:
+            DEFAULT_VACUUM_PENDING_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            DEFAULT_VACUUM_PENDING_MARKER.write_text(db_path)
+        except Exception:
+            logger.warning(
+                "Could not write vacuum pending marker; VACUUM may not resume after a crash"
+            )
+
+    # Quarantined dirs are populated inside the async-with block so they are
+    # accessible for rmtree after the block.
+    quarantined: list[tuple[int, Path]] = []
 
     async with db_busy_maps_to_409():
         if req.include_accounts:
@@ -200,7 +227,7 @@ async def reset_db(
                     detail="Could not resolve caller email; reset aborted to prevent data loss.",
                 )
 
-        # Collect all profile IDs for raw-dir purge (Core SQL, avoids ORM
+        # Collect all profile IDs for raw-dir quarantine (Core SQL, avoids ORM
         # identity-map conflicts with the bulk delete that follows).
         profile_ids = list((await db.execute(select(models.Profile.id))).scalars())
 
@@ -227,7 +254,30 @@ async def reset_db(
         else:
             bootstrap_invite_url = None
 
-        await db.commit()
+        # Quarantine raw dirs BEFORE committing (crash-safe).  A crash between
+        # quarantine and commit leaves dirs in .quarantine/ for startup recovery;
+        # DB rows survive so the state is consistent.
+        for pid in profile_ids:
+            dst = quarantine_profile_raw_dir(pid, raw_root)
+            if dst is not None:
+                quarantined.append((pid, dst))
+
+        try:
+            await db.commit()
+        except Exception:
+            # Commit failed — restore quarantined dirs so raw backups are not
+            # orphaned alongside the uncommitted DB rows.
+            for pid, dst in quarantined:
+                src = raw_root / str(pid)
+                try:
+                    dst.rename(src)
+                except Exception:
+                    logger.warning(
+                        "Could not restore quarantined raw dir for profile %d after "
+                        "commit failure; dir remains in .quarantine/ for startup recovery",
+                        pid,
+                    )
+            raise
 
         if req.include_accounts:
             logger.warning(
@@ -236,19 +286,28 @@ async def reset_db(
                 caller_email,
             )
 
-    # Purge raw backup dirs after commit (idempotent quarantine-rename pattern).
-    def _purge_all() -> None:
-        for pid in profile_ids:
-            purge_profile_raw_dir(pid, raw_root)
+    # Best-effort rmtree of quarantined dirs after a successful commit.
+    # CancelledError may skip this; startup recovery (DeletionSaga case 2)
+    # purges any .quarantine/ leftovers on next boot.
+    def _rmtree_quarantined() -> None:
+        for pid, dst in quarantined:
+            try:
+                shutil.rmtree(dst, ignore_errors=True)
+                logger.info("Purged quarantine for profile %d (reset)", pid)
+            except Exception:
+                logger.warning(
+                    "Post-commit rmtree for profile %d failed; startup recovery will purge",
+                    pid,
+                )
 
     try:
-        await asyncio.to_thread(_purge_all)
+        await asyncio.to_thread(_rmtree_quarantined)
     except Exception:
         # The reset is committed; a cleanup failure must not withhold the
         # response (for factory resets the one-time bootstrap invite URL
-        # exists nowhere else). Leftover raw dirs are logged for operators.
+        # exists nowhere else). Leftover quarantine dirs are logged for operators.
         logger.exception(
-            "Raw-dir purge failed after reset commit; leftover directories remain"
+            "Quarantine cleanup failed after reset commit; startup recovery will purge on next boot"
         )
 
     # Schedule VACUUM as a post-response background task.  FastAPI runs sync
