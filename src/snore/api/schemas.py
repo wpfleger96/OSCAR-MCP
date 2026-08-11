@@ -9,6 +9,7 @@ from snore.services.schemas import (
     DayDetail,
     DayListItem,
     ImportSource,
+    MaskLogEntryResponse,
     RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
@@ -41,6 +42,9 @@ __all__ = [
     "RxComparisonResponse",
     "RxSettingChange",
     "RxChangesResponse",
+    "MaskLogEntryResponse",
+    "MaskLogCreateRequest",
+    "MaskLogUpdateRequest",
     "AnalysisJobStatus",
     "AnalysisJobsListResponse",
     "AnalysisJobEnqueued",
@@ -171,6 +175,36 @@ class BreathTrendsValidationRequest(BaseModel):
     def validate_date_order(self) -> BreathTrendsValidationRequest:
         if self.to_date < self.from_date:
             raise ValueError("to_date must be >= from_date")
+        return self
+
+
+MaskStyle = Literal["pillows", "nasal", "full_face"]
+
+
+class MaskLogCreateRequest(BaseModel):
+    brand: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=150)
+    style: MaskStyle
+    start_date: date
+    size: str | None = Field(default=None, max_length=50)
+    notes: str | None = None
+
+
+class MaskLogUpdateRequest(BaseModel):
+    """PATCH body: omitted fields are unchanged; explicit null clears size/notes."""
+
+    brand: str | None = Field(default=None, min_length=1, max_length=100)
+    model: str | None = Field(default=None, min_length=1, max_length=150)
+    style: MaskStyle | None = None
+    start_date: date | None = None
+    size: str | None = Field(default=None, max_length=50)
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self) -> MaskLogUpdateRequest:
+        for field in ("brand", "model", "style", "start_date"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
         return self
 
 

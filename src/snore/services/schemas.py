@@ -29,6 +29,8 @@ __all__ = [
     "SettingsChange",
     "DeviceUsageSummary",
     "DeviceDetail",
+    # Mask equipment log schema (consumed by MaskLogService and API routers)
+    "MaskLogEntryResponse",
     # RX / Day / Event schemas (consumed by RxService, DayService, and API routers)
     "DayListItem",
     "DayDetail",
@@ -465,6 +467,20 @@ class DeviceDetail(DeviceInfo):
     usage: DeviceUsageSummary
     current_settings: dict[str, str] | None
     settings_history: list[SettingsChange]
+
+
+class MaskLogEntryResponse(BaseModel):
+    """A single user-entered mask equipment log entry."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    brand: str
+    model: str
+    size: str | None = None
+    style: str
+    start_date: date
+    notes: str | None = None
 
 
 class DayListItem(BaseModel):

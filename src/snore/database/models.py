@@ -281,6 +281,12 @@ class Profile(Base):
         cascade="all, delete-orphan",
         lazy="raise",
     )
+    mask_log_entries = relationship(
+        "MaskLogEntry",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_profile_user_name"),
@@ -341,6 +347,44 @@ class Device(Base):
 
     def __repr__(self) -> str:
         return f"<Device(id={self.id}, profile_id={self.profile_id}, manufacturer={self.manufacturer}, model={self.model}, serial={self.serial_number})>"
+
+
+class MaskLogEntry(Base):
+    """User-entered mask equipment log entry, owned by a Profile."""
+
+    __tablename__ = "mask_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE")
+    )
+    brand: Mapped[str] = mapped_column(String(100))
+    model: Mapped[str] = mapped_column(String(150))
+    size: Mapped[str | None] = mapped_column(String(50))
+    # pillows | nasal | full_face
+    style: Mapped[str] = mapped_column(String(20))
+    # Date the user started using this mask (user-declared, no timezone).
+    start_date: Mapped[date] = mapped_column(Date)
+    notes: Mapped[str | None] = mapped_column(Text)
+    # Absolute audit instants.
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, default=utc_now, onupdate=utc_now
+    )
+
+    profile = relationship("Profile", back_populates="mask_log_entries", lazy="raise")
+
+    __table_args__ = (
+        CheckConstraint(
+            "style IN ('pillows','nasal','full_face')", name="chk_mask_style"
+        ),
+        CheckConstraint("length(brand) > 0", name="chk_mask_brand"),
+        CheckConstraint("length(model) > 0", name="chk_mask_model"),
+        Index("ix_mask_log_profile_start_date", "profile_id", "start_date"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MaskLogEntry(id={self.id}, profile_id={self.profile_id}, brand={self.brand}, model={self.model}, style={self.style})>"
 
 
 class Day(Base):

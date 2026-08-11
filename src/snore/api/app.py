@@ -36,6 +36,7 @@ from snore.api.routers import (
     days,
     db,
     devices,
+    equipment,
     events,
     export,
     import_data,
@@ -775,6 +776,9 @@ def create_app() -> FastAPI:
     app.include_router(analysis.router, prefix=API_V1_PREFIX, tags=["analysis"])
     app.include_router(days.router, prefix=f"{API_V1_PREFIX}/days", tags=["days"])
     app.include_router(rx.router, prefix=f"{API_V1_PREFIX}/rx", tags=["rx"])
+    app.include_router(
+        equipment.router, prefix=f"{API_V1_PREFIX}/equipment", tags=["equipment"]
+    )
 
     # /import/detect and /import/path are local-mode-only (server-path import).
     # In multiuser mode these routes are NOT registered — the loopback-peer
