@@ -225,9 +225,19 @@ def _server_base_url(
     asyncio.run(cleanup_database())
     reset_config()
 
+    import snore.api.app as _app_mod  # noqa: PLC0415
+
     from snore.api.app import create_app  # noqa: PLC0415
 
+    # Suppress the SPA static mount so unknown-path requests return 404 even
+    # when ui/dist is present locally.  Without this, the SPA fallback middleware
+    # intercepts every 404 that is not an API or MCP path and returns index.html.
+    _orig_resolve_spa_dist = _app_mod._resolve_spa_dist
+    _app_mod._resolve_spa_dist = lambda: None
+
     app = create_app()
+
+    _app_mod._resolve_spa_dist = _orig_resolve_spa_dist
 
     config = uvicorn.Config(
         app,

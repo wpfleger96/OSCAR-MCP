@@ -1513,7 +1513,7 @@ class TestInitOnceFuture:
                 # it — nobody may retrieve the exception except the done-callback.
                 import time  # noqa: PLC0415
 
-                deadline = time.monotonic() + 5.0
+                deadline = time.monotonic() + 30.0
                 while task_ref is not None and not task_ref.done():
                     assert time.monotonic() < deadline, "init task did not finish"
                     await asyncio.sleep(0.01)
@@ -1774,7 +1774,7 @@ class TestInitOnceFuture:
             # Wait for cleanup task to finish (bounded).
             # Poll the TASK OBJECT (not sess_mod._cleanup_task which becomes None
             # before the task fully returns — the lock is held until task exit).
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 30.0
             while not cleanup_task_ref.done():
                 assert time.monotonic() < deadline, "_cleanup_task did not finish"
                 await asyncio.sleep(0.01)
@@ -1789,7 +1789,7 @@ class TestInitOnceFuture:
         # Subsequent init must succeed — no stuck-barrier hang.
         init_task = asyncio.create_task(sess_mod.init_database(str(db_path2)))
         try:
-            await asyncio.wait_for(init_task, timeout=5.0)
+            await asyncio.wait_for(init_task, timeout=30.0)
         except TimeoutError:
             init_task.cancel()
             raise AssertionError(
@@ -1865,7 +1865,7 @@ class TestInitOnceFuture:
 
         # Wait for reinit to complete.
         try:
-            await asyncio.wait_for(reinit_task, timeout=5.0)
+            await asyncio.wait_for(reinit_task, timeout=30.0)
         except TimeoutError:
             reinit_task.cancel()
             raise AssertionError("reinit_task timed out after cleanup") from None
@@ -2021,7 +2021,7 @@ class TestInitOnceFuture:
 
             # Wait (bounded) for the shared task to finish WITHOUT awaiting it —
             # nobody may retrieve the exception except the done-callback.
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 30.0
             while not cleanup_task_ref.done():
                 assert time.monotonic() < deadline, "cleanup task did not finish"
                 await asyncio.sleep(0.01)

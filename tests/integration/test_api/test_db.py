@@ -1,12 +1,15 @@
 import typing
 import uuid
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
@@ -18,12 +21,23 @@ from tests.helpers.api_client import make_test_client
 from tests.integration.test_api.conftest import _multiuser_env
 
 
-def _patch_target(temp_db: object) -> object:
-    """Context manager that patches the DB router to use the test database."""
+@contextmanager
+def _patch_target(temp_db: object, client: TestClient) -> Generator[None]:
+    """Context manager that installs a dependency override on *client*'s app.
+
+    Uses app.dependency_overrides so FastAPI's Depends(_get_target) captures
+    the replacement at request time, not at route-definition time.
+    """
+    from snore.api.routers.db import _get_target
     from snore.database.target import DatabaseTarget
 
     target = DatabaseTarget.from_url(str(temp_db))
-    return patch("snore.api.routers.db._get_target", return_value=target)
+    app = client.app
+    app.dependency_overrides[_get_target] = lambda: target
+    try:
+        yield
+    finally:
+        del app.dependency_overrides[_get_target]
 
 
 def _member_actor(user_id: int) -> ActorContext:
@@ -55,13 +69,13 @@ def _demo_actor(user_id: int) -> ActorContext:
 
 class TestDbStats:
     def test_stats_excludes_db_path(self, api_client, temp_db):
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.get("/api/v1/db/stats")
         data = response.json()
         assert "db_path" not in data
 
     def test_stats_empty_db_counts_zero(self, api_client, temp_db):
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.get("/api/v1/db/stats")
         data = response.json()
         assert data["session_count"] == 0
@@ -72,14 +86,14 @@ class TestDbStats:
     ):
         test_session_factory(test_device.id, start_time=datetime(2025, 1, 1, 22, 0))
         db_session.commit()
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.get("/api/v1/db/stats")
         data = response.json()
         assert data["device_count"] >= 1
         assert data["session_count"] >= 1
 
     def test_admin_gets_200(self, api_client, temp_db):
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.get("/api/v1/db/stats")
         assert response.status_code == 200
 
@@ -91,16 +105,44 @@ class TestDbStats:
         db_session.add(member)
         db_session.flush()
         client = make_test_client(async_db_session, actor=_member_actor(member.id))
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, client):
             response = client.get("/api/v1/db/stats")
         assert response.status_code == 403
 
 
 class TestDbVacuum:
-    def test_vacuum_status_is_success(self, api_client, temp_db):
-        with _patch_target(temp_db):
+    def test_vacuum_status_is_success(self, api_client, tmp_path):
+        import os
+        import sqlite3
+
+        # VACUUM requires exclusive file access.  The test client's async_db_session
+        # holds an open connection to temp_db, so we target a separate fresh SQLite
+        # file that has no other connections.  This also proves the dependency
+        # override is in effect: the real database is ~4 GB, our file is tiny.
+        vacuum_db = tmp_path / "vacuum_only.db"
+        sqlite3.connect(str(vacuum_db)).close()
+
+        from snore.api.routers.db import _get_target
+        from snore.database.target import DatabaseTarget
+
+        vt = DatabaseTarget.from_url(str(vacuum_db))
+        api_client.app.dependency_overrides[_get_target] = lambda: vt
+        try:
             response = api_client.post("/api/v1/db/vacuum")
-        assert response.json()["status"] == "success"
+        finally:
+            del api_client.app.dependency_overrides[_get_target]
+
+        data = response.json()
+        assert data["status"] == "success"
+        # vacuum_sqlite() measures the file size after VACUUM and returns it as
+        # size_after_mb.  Compare against the actual on-disk size to verify the
+        # override sent VACUUM to vacuum_db, not the real ~/.snore/snore.db.
+        expected_mb = os.path.getsize(str(vacuum_db)) / (1024 * 1024)
+        assert data["size_after_mb"] == pytest.approx(expected_mb, abs=0.01), (
+            f"vacuum targeted the wrong file: expected vacuum_db ({expected_mb:.6f} MB) "
+            f"but got size_after_mb={data['size_after_mb']:.6f} MB — "
+            "dependency override may have silently stopped working"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +152,7 @@ class TestDbVacuum:
 
 class TestDbReset:
     def test_reset_status_is_success(self, api_client, temp_db):
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.post("/api/v1/db/reset")
         assert response.json()["status"] == "success"
 
@@ -119,13 +161,13 @@ class TestDbReset:
     ):
         test_session_factory(test_device.id, start_time=datetime(2025, 1, 1, 22, 0))
         db_session.commit()
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.post("/api/v1/db/reset")
         assert response.json()["total_rows_deleted"] >= 1
 
     def test_reset_no_body_uses_data_only_default(self, api_client, temp_db):
         """Empty POST (no body) defaults to data-only reset — no bootstrap_invite_url."""
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.post("/api/v1/db/reset")
         data = response.json()
         assert data["status"] == "success"
@@ -133,7 +175,7 @@ class TestDbReset:
 
     def test_reset_explicit_data_only(self, api_client, temp_db):
         """include_accounts=false explicitly — same result as default."""
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.post(
                 "/api/v1/db/reset", json={"include_accounts": False}
             )
@@ -192,7 +234,7 @@ class TestDbResetMultiuser:
         db_session.flush()
         client = make_test_client(async_db_session, actor=_member_actor(member.id))
 
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, client):
             response = client.post("/api/v1/db/reset")
         assert response.status_code == 403
 
@@ -208,7 +250,7 @@ class TestDbResetMultiuser:
         db_session.flush()
         client = make_test_client(async_db_session, actor=_demo_actor(demo_user.id))
 
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, client):
             response = client.post("/api/v1/db/reset")
         assert response.status_code == 403
 
@@ -232,7 +274,7 @@ class TestDbResetMultiuser:
             async_db_session, db_session, monkeypatch
         )
 
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, client):
             response = client.post("/api/v1/db/reset", json={"include_accounts": False})
 
         assert response.status_code == 200
@@ -269,7 +311,7 @@ class TestDbResetMultiuser:
             async_db_session, db_session, monkeypatch
         )
 
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, client):
             response = client.post("/api/v1/db/reset", json={"include_accounts": True})
 
         assert response.status_code == 200
@@ -311,7 +353,7 @@ class TestDbResetMultiuser:
             async_db_session, db_session, monkeypatch
         )
 
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, client):
             response = client.post("/api/v1/db/reset", json={"include_accounts": False})
 
         assert response.status_code == 200
@@ -345,7 +387,7 @@ class TestDbResetMultiuser:
         (profile_dir / "data.edf").write_text("fake")
 
         with (
-            _patch_target(temp_db),
+            _patch_target(temp_db, client),
             patch("snore.api.routers.db._raw_root", return_value=raw_root),
         ):
             response = client.post("/api/v1/db/reset", json={"include_accounts": False})
@@ -374,7 +416,7 @@ class TestDbResetConcurrency:
         mock_lock.locked = lambda: True
         monkeypatch.setattr(deps, "_reset_lock", mock_lock)
 
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             response = api_client.post("/api/v1/db/reset")
 
         assert response.status_code == 409
@@ -414,7 +456,7 @@ class TestDbResetConcurrency:
 
     def test_sequential_resets_both_succeed(self, api_client, temp_db):
         """Two consecutive data-only resets both return 200, proving the lock is released."""
-        with _patch_target(temp_db):
+        with _patch_target(temp_db, api_client):
             first = api_client.post("/api/v1/db/reset")
             second = api_client.post("/api/v1/db/reset")
 
