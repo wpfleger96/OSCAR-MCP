@@ -602,20 +602,20 @@ class TestCapabilitiesColdProcess:
         assert not result.analysis_run
         assert result.analysis_session_count == 0
 
-    async def test_capabilities_register_all_parsers_idempotent(self) -> None:
-        """M4: register_all_parsers() is safe to call multiple times (idempotent via catch)."""
-        from snore.parsers.register_all import register_all_parsers
+    async def test_capabilities_ensure_registered_parsers_idempotent(self) -> None:
+        """M4: ensure_registered_parsers() is safe to call multiple times."""
+        from snore.parsers.register_all import ensure_registered_parsers
         from snore.parsers.registry import parser_registry
 
         # First call registers parsers
-        register_all_parsers()
+        ensure_registered_parsers()
         count_after_first = len(parser_registry.list_parsers())
         assert count_after_first >= 0  # may be 0 if parsers not installed; that's fine
 
         # Second call must not raise even if parsers are already registered
         try:
-            register_all_parsers()
+            ensure_registered_parsers()
         except Exception as exc:
             raise AssertionError(
-                f"register_all_parsers() raised on second call: {exc}"
+                f"ensure_registered_parsers() raised on second call: {exc}"
             ) from exc
