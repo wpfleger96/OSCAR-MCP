@@ -859,6 +859,59 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/equipment/masks': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Mask Log Entries */
+        get: operations['list_mask_log_entries_api_v1_equipment_masks_get']
+        put?: never
+        /** Create Mask Log Entry */
+        post: operations['create_mask_log_entry_api_v1_equipment_masks_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/equipment/masks/epochs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Mask Epochs */
+        get: operations['list_mask_epochs_api_v1_equipment_masks_epochs_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/equipment/masks/{entry_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /** Delete Mask Log Entry */
+        delete: operations['delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete']
+        options?: never
+        head?: never
+        /** Update Mask Log Entry */
+        patch: operations['update_mask_log_entry_api_v1_equipment_masks__entry_id__patch']
+        trace?: never
+    }
     '/api/v1/export/csv': {
         parameters: {
             query?: never
@@ -3031,6 +3084,92 @@ export interface components {
             /** Password */
             password: string
         }
+        /**
+         * MaskEpochResponse
+         * @description A contiguous run of nights sharing one device-reported mask type.
+         *
+         *     style is the normalized mask_log-style value (None when the device value is
+         *     unrecognized).  device_id identifies the reporting device for multi-device
+         *     installs.
+         */
+        MaskEpochResponse: {
+            /** Days Count */
+            days_count: number
+            /** Device Id */
+            device_id: number | null
+            /** Device Name */
+            device_name: string | null
+            /**
+             * End Date
+             * Format: date
+             */
+            end_date: string
+            /** Mask Type */
+            mask_type: string
+            /**
+             * Start Date
+             * Format: date
+             */
+            start_date: string
+            /** Style */
+            style: string | null
+        }
+        /**
+         * MaskLogCreateRequest
+         * @description POST body: all fields are optional — an entirely empty create is accepted.
+         */
+        MaskLogCreateRequest: {
+            /** Brand */
+            brand?: string | null
+            /** Model */
+            model?: string | null
+            /** Notes */
+            notes?: string | null
+            /** Size */
+            size?: string | null
+            /** Start Date */
+            start_date?: string | null
+            /** Style */
+            style?: ('pillows' | 'nasal' | 'full_face') | null
+        }
+        /**
+         * MaskLogEntryResponse
+         * @description A single user-entered mask equipment log entry.
+         */
+        MaskLogEntryResponse: {
+            /** Brand */
+            brand?: string | null
+            /** Id */
+            id: number
+            /** Model */
+            model?: string | null
+            /** Notes */
+            notes?: string | null
+            /** Size */
+            size?: string | null
+            /** Start Date */
+            start_date?: string | null
+            /** Style */
+            style?: string | null
+        }
+        /**
+         * MaskLogUpdateRequest
+         * @description PATCH body: omitted fields are unchanged; explicit null clears any field.
+         */
+        MaskLogUpdateRequest: {
+            /** Brand */
+            brand?: string | null
+            /** Model */
+            model?: string | null
+            /** Notes */
+            notes?: string | null
+            /** Size */
+            size?: string | null
+            /** Start Date */
+            start_date?: string | null
+            /** Style */
+            style?: ('pillows' | 'nasal' | 'full_face') | null
+        }
         /** McpStatus */
         McpStatus: {
             /** Auth Provider */
@@ -3566,6 +3705,7 @@ export interface components {
          * @description Detailed view of a single session with all metadata.
          */
         SessionDetail: {
+            active_mask?: components['schemas']['MaskLogEntryResponse'] | null
             /** Data Quality Notes */
             data_quality_notes?: string[]
             /** Device Manufacturer */
@@ -5130,7 +5270,9 @@ export interface operations {
     }
     get_day_api_v1_days__day_date__get: {
         parameters: {
-            query?: never
+            query?: {
+                device_id?: number | null
+            }
             header?: never
             path: {
                 day_date: string
@@ -5270,6 +5412,143 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['DeviceDetail']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_mask_log_entries_api_v1_equipment_masks_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse'][]
+                }
+            }
+        }
+    }
+    create_mask_log_entry_api_v1_equipment_masks_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['MaskLogCreateRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_mask_epochs_api_v1_equipment_masks_epochs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskEpochResponse'][]
+                }
+            }
+        }
+    }
+    delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                entry_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    update_mask_log_entry_api_v1_equipment_masks__entry_id__patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                entry_id: number
+            }
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['MaskLogUpdateRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse']
                 }
             }
             /** @description Validation Error */

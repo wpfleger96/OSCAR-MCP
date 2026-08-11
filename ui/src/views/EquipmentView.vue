@@ -1,6 +1,9 @@
 <template>
-    <div class="devices-view">
-        <h1 class="page-title">Devices</h1>
+    <div class="equipment-view">
+        <h1 class="page-title">Equipment</h1>
+
+        <!-- Devices section -->
+        <h2 class="section-heading">Devices</h2>
 
         <div v-if="loading" class="loading-state">
             <Loader2 class="inline h-4 w-4 animate-spin" /> Loading devices...
@@ -105,8 +108,7 @@
                         </div>
                         <div v-else class="settings-groups">
                             <div
-                                v-for="cat in categorizeSettings(device.current_settings)
-                                    .categories"
+                                v-for="cat in categorizedSettings.get(device.id)?.categories"
                                 :key="cat.label"
                                 class="settings-group"
                             >
@@ -123,14 +125,13 @@
                                 </dl>
                             </div>
                             <div
-                                v-if="categorizeSettings(device.current_settings).other.length"
+                                v-if="categorizedSettings.get(device.id)?.other.length"
                                 class="settings-group"
                             >
                                 <h4 class="settings-group-label">Other settings</h4>
                                 <dl class="settings-list">
                                     <div
-                                        v-for="entry in categorizeSettings(device.current_settings)
-                                            .other"
+                                        v-for="entry in categorizedSettings.get(device.id)?.other"
                                         :key="entry.key"
                                         class="setting-row"
                                     >
@@ -205,19 +206,25 @@
                 </Collapsible>
             </div>
         </div>
+
+        <!-- Masks section -->
+        <h2 class="section-heading">Masks</h2>
+        <MaskLogManager :epochs="epochs" />
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import { ChevronDown, HardDrive, Loader2 } from '@lucide/vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import ErrorState from '@/components/ErrorState.vue'
+import MaskLogManager from '@/components/MaskLogManager.vue'
 import { getDevices, getDeviceDetail } from '@/api/devices'
+import { getMaskEpochs } from '@/api/equipment'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
 import { categorizeSettings, formatSettingValue, settingLabel } from '@/utils/deviceSettings'
-import type { DeviceDetail } from '@/types'
+import type { DeviceDetail, MaskEpochResponse } from '@/types'
 
 const { data, loading, error, reload } = useApiLoad<DeviceDetail[]>(async () => {
     const list = await getDevices()
@@ -226,11 +233,28 @@ const { data, loading, error, reload } = useApiLoad<DeviceDetail[]>(async () => 
 
 const devices = computed(() => data.value ?? [])
 
+// Epochs fetch: failure is silently degraded — MaskLogManager still works without epochs.
+const { data: epochsData } = useApiLoad<MaskEpochResponse[]>(
+    () => getMaskEpochs(),
+    'Failed to load mask epochs',
+)
+const epochs = computed(() => epochsData.value ?? [])
+
 // Default current-settings open, history collapsed per device
 const settingsOpen = reactive<Record<number, boolean>>({})
 const historyOpen = reactive<Record<number, boolean>>({})
 
-import { watch } from 'vue'
+// Computed once per devices change instead of three times per render per device.
+const categorizedSettings = computed(
+    () =>
+        new Map(
+            devices.value.map((d) => [
+                d.id,
+                d.current_settings ? categorizeSettings(d.current_settings) : null,
+            ]),
+        ),
+)
+
 watch(devices, (devs) => {
     for (const d of devs) {
         if (!(d.id in settingsOpen)) settingsOpen[d.id] = true
@@ -240,8 +264,17 @@ watch(devices, (devs) => {
 </script>
 
 <style scoped>
-.devices-view {
+.equipment-view {
     max-width: 900px;
+}
+
+.section-heading {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-muted-foreground);
+    margin: 1.5rem 0 0.75rem;
 }
 
 .empty-state {

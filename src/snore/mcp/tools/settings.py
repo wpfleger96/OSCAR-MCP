@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.rx_tracker import RX_KEYS, RxTracker, changed_setting_keys
+from snore.analysis.rx_tracker import TIMELINE_KEYS, RxTracker, changed_setting_keys
 from snore.mcp.schemas import (
     DeviceCapabilities,
     SettingsEpoch,
@@ -32,13 +32,14 @@ async def get_settings_timeline(
 
     Each epoch covers a contiguous period of identical settings.  Changed keys
     are flagged on the epoch where the change first appears.  Uses only the
-    generic RX_KEYS; no vendor-specific branching (G4).
+    generic RX_KEYS plus ``mask_type``; epochs split when the device-reported
+    mask type changes; no vendor-specific branching (G4).
 
     Device capabilities are populated per distinct device_id across the filtered
     epochs, scoped through build_device_capabilities (profile-safe).
     """
     tracker = RxTracker(profile_id)
-    all_periods = await tracker.get_history(db_session)
+    all_periods = await tracker.get_history(db_session, keys=TIMELINE_KEYS)
 
     # Filter to requested date range and optional device
     filtered = [
@@ -77,8 +78,8 @@ async def get_settings_timeline(
         dev_id = period.device_id
         raw = period.settings
 
-        # Restrict to generic RX_KEYS; absent keys become None
-        settings: dict[str, str | None] = {k: raw.get(k) for k in RX_KEYS}
+        # Restrict to the timeline keys; absent keys become None
+        settings: dict[str, str | None] = {k: raw.get(k) for k in TIMELINE_KEYS}
 
         # Determine which keys changed vs. previous epoch for this device
         key = dev_id if dev_id is not None else -1
@@ -127,8 +128,10 @@ def register(mcp: FastMCP) -> None:
 
         Each epoch represents a contiguous period of identical settings.
         Changed keys are flagged on the epoch where the change first appears.
-        Uses generic RX_KEYS only (mode, epr_level, epr_mode, pressure_min,
-        pressure_max, pressure_fixed, ipap, epap, ps).
+        Uses generic RX_KEYS (mode, epr_level, epr_mode, pressure_min,
+        pressure_max, pressure_fixed, ipap, epap, ps) plus ``mask_type``:
+        epochs split when the device-reported mask type changes.  No
+        vendor-specific branching (G4).
 
         Each epoch's ``device_id`` is ``null`` (never ``0``) when no device is
         associated with the epoch.

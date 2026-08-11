@@ -29,6 +29,9 @@ __all__ = [
     "SettingsChange",
     "DeviceUsageSummary",
     "DeviceDetail",
+    # Mask equipment log schemas (consumed by MaskLogService and API routers)
+    "MaskLogEntryResponse",
+    "MaskEpochResponse",
     # RX / Day / Event schemas (consumed by RxService, DayService, and API routers)
     "DayListItem",
     "DayDetail",
@@ -37,6 +40,7 @@ __all__ = [
     "RxSettingChange",
     "RxChangesResponse",
     "RxAllResponse",
+    "MergedSettingsChange",
     # Import schemas
     "ImportSource",
     "ImportSourceResult",
@@ -292,6 +296,37 @@ class SessionStatistics(BaseModel):
     mask_events: float | None = None
 
 
+class MaskLogEntryResponse(BaseModel):
+    """A single user-entered mask equipment log entry."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    brand: str | None = None
+    model: str | None = None
+    size: str | None = None
+    style: str | None = None
+    start_date: date | None = None
+    notes: str | None = None
+
+
+class MaskEpochResponse(BaseModel):
+    """A contiguous run of nights sharing one device-reported mask type.
+
+    style is the normalized mask_log-style value (None when the device value is
+    unrecognized).  device_id identifies the reporting device for multi-device
+    installs.
+    """
+
+    mask_type: str
+    style: str | None
+    start_date: date
+    end_date: date
+    days_count: int
+    device_id: int | None
+    device_name: str | None
+
+
 class SessionSetting(BaseModel):
     """Single setting key-value pair for a session."""
 
@@ -326,6 +361,7 @@ class SessionDetail(BaseModel):
     data_quality_notes: list[str] = Field(default_factory=list)
     statistics: SessionStatistics | None = None
     settings: list[SessionSetting] | None = None
+    active_mask: MaskLogEntryResponse | None = None
 
 
 class DeletePreview(BaseModel):
@@ -560,6 +596,23 @@ class RxChangesResponse(BaseModel):
     """All settings changes across all devices, sorted by (date, device_id, key)."""
 
     changes: list[RxSettingChange]
+
+
+class MergedSettingsChange(BaseModel):
+    """One settings change from either the device settings log or the mask log."""
+
+    date: date
+    source: str  # "device_settings" | "mask_log"
+    device_id: int | None = None  # null for mask_log entries
+    device_name: str | None = None
+    key: str  # settings key, or "mask_equipment"
+    old_value: str | None = None
+    new_value: str | None = None
+    mask_brand: str | None = None  # mask_log-only detail, null for device_settings
+    mask_model: str | None = None
+    mask_size: str | None = None
+    mask_style: str | None = None
+    notes: str | None = None
 
 
 class RxAllResponse(BaseModel):

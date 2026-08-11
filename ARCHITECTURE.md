@@ -16,10 +16,10 @@ Technical documentation for the SNORE system architecture, components, and desig
 ├──────────────┬──────────────┬──────────────┤
 │ FastAPI REST │   CLI (cli/) │  MCP Server  │
 │ API (api/)   │  Click cmds  │  (mcp/)      │
-│ 17 routers   │  snore cmds  │  10 tools    │
+│ 18 routers   │  snore cmds  │  11 tools    │
 ├──────────────┴──────────────┴──────────────┤
 │        Service Layer (services/)            │
-│  13 services: business logic between        │
+│  19 services: business logic between        │
 │  CLI/API and database                       │
 ├─────────────────────────────────────────────┤
 │        Analysis Layer (Parser Agnostic)     │
@@ -335,6 +335,7 @@ FastAPI application serving the same data as the CLI through HTTP endpoints. Lau
 | devices | `/devices` | List, detail |
 | days | `/days` | List, detail |
 | rx | `/rx` | History, current, compare |
+| equipment | `/equipment` | Mask log CRUD (`GET/POST /masks`, `PATCH/DELETE /masks/{id}`); device mask-type epochs (`GET /masks/epochs`); write ops guarded by `RequireWritable` |
 | reports | `/reports` | Report generation |
 | import | `/import` | Upload files, SSE progress, cancel, pipeline job list; detect + path-import (local mode only) |
 | export | `/export` | CSV, JSON, raw file download |
@@ -368,19 +369,25 @@ Imports and analysis run as serialised background jobs to avoid SQLite write-loc
 
 ## Service Layer
 
-13 service modules in `src/snore/services/` form the business logic layer between CLI/API and database:
+19 service modules in `src/snore/services/` form the business logic layer between CLI/API and database:
 
 | Service | Responsibility |
 |---------|---------------|
 | AnalysisFacade | Analysis orchestration, result retrieval, batch analysis |
 | BackupService | Raw SD card file backup to `~/.snore/raw/` |
+| BreathService | Per-session breath-by-breath data retrieval; stores and queries segmented breath records with shape features and flow-limitation scores |
 | DatabaseService | Database operations (stats, vacuum, init) |
 | DayService | Day aggregation and lookup |
+| DemoService | Demo mode bootstrap — provisions the demo user, profile, and fixture session data for local evaluation |
 | DeviceService | Device listing and per-device detail (usage summary, current settings, settings history) |
 | EventService | Event queries and matching |
 | ExportService | Data export (CSV, JSON, raw files) |
 | ImportService | CPAP data import: source detection, file upload, backup, parse orchestration |
 | lttb (module) | Largest-Triangle-Three-Buckets downsampling via `lttb_downsample()` |
+| MaskEpochService | Contiguous device-reported mask-type epochs via `RxTracker.get_history(keys=("mask_type",))`, normalized to the mask style vocabulary |
+| MaskLogService | Profile-scoped CRUD for user-entered mask equipment log; all identity fields optional; 404-not-403 for foreign profile IDs |
+| ProfileService | Profile CRUD, timezone validation, and raw-directory quarantine/purge for offline deletion |
+| ReportService | Nightly and comparison CPAP report generation from session and statistics data |
 | SessionService | Session CRUD and filtering |
 | StatsService | Statistics calculations and summaries |
 | WaveformService | Waveform data access, formatting, event comparison |
@@ -477,6 +484,15 @@ pattern_id, start_time, duration, confidence,
 detected_by, metrics_json (JSON), notes
 ```
 
+**mask_log**
+```sql
+id, profile_id (FK profiles),
+brand (nullable), model (nullable), size (nullable), style (nullable),
+start_date (nullable), notes (nullable),
+created_at, updated_at
+```
+All identity fields (`brand`, `model`, `size`, `style`, `start_date`) are nullable to support partial entries saved before the user has complete information. CHECK constraints enforce non-empty when provided (`brand IS NULL OR length(brand) > 0`, same for `model`) and style within the vocabulary (`style IS NULL OR style IN ('pillows','nasal','full_face')`). Index `ix_mask_log_profile_start_date` on `(profile_id, start_date)`. Entries with NULL `start_date` are excluded from active-mask resolution and from the merged settings timeline. Added by migrations 008 and 009.
+
 ---
 
 ## Data Flow
@@ -550,7 +566,7 @@ StaticRuntime     — stdio path; profile_id resolved at startup
 ActorRuntime      — OAuth HTTP path; profile_id from per-request context var
 ```
 
-`_scope_and_run(ctx, impl, *, tool_name, **kwargs)` in `server.py` captures the common scaffold shared by seven of the ten tools: open scope → call impl with `(db, profile_id=..., **kwargs)` → `model_dump(mode="json")` → `_check_response_size`.
+`_scope_and_run(ctx, impl, *, tool_name, **kwargs)` in `server.py` captures the common scaffold shared by eight of the eleven tools: open scope → call impl with `(db, profile_id=..., **kwargs)` → `model_dump(mode="json")` → `_check_response_size`.
 
 ### Tool Modules
 
@@ -560,6 +576,7 @@ Each tool is defined in `src/snore/mcp/tools/<name>.py` and owns a `register(mcp
 |--------|-----------|---------|
 | `overview.py` | `get_data_overview` | `_scope_and_run` |
 | `settings.py` | `get_settings_timeline` | `_scope_and_run` |
+| `changes.py` | `get_settings_changes` | `_scope_and_run` |
 | `summary.py` | `get_nightly_summary` | `_scope_and_run` |
 | `events.py` | `get_events` | `_scope_and_run` |
 | `breath_table.py` | `get_breath_table` | `_scope_and_run` |
@@ -575,7 +592,7 @@ Tools implement progressive disclosure across three tiers:
 
 | Tier | Tools | Description |
 |------|-------|-------------|
-| 1 (primary) | overview, summary, settings, events, epochs, ca_analysis | Computed metrics — indices, percentiles, aggregates |
+| 1 (primary) | overview, summary, settings, changes, events, epochs, ca_analysis | Computed metrics — indices, percentiles, aggregates |
 | 2 (secondary) | render_window | PNG charts — visual inspection of waveform windows ≤15 min |
 | 3 (escape hatch) | get_waveform, breath_table | Raw arrays and per-breath rows for deep inspection |
 

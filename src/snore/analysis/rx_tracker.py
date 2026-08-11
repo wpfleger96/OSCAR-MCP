@@ -14,6 +14,8 @@ from sqlalchemy.orm import joinedload, selectinload
 from snore.database.models import Day, Device
 from snore.database.models import Session as SessionModel
 from snore.services.schemas import (
+    MaskLogEntryResponse,
+    MergedSettingsChange,
     RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
@@ -34,6 +36,11 @@ RX_KEYS = (
     "epap",
     "ps",
 )
+
+# Keys that define a settings-timeline epoch: the prescription keys plus the
+# device-reported mask type.  humidity_level deliberately stays out — comfort
+# tweaks should not split epochs.
+TIMELINE_KEYS = (*RX_KEYS, "mask_type")
 
 _TAIL_WALK_BATCH_SIZE = 90
 
@@ -59,6 +66,89 @@ def _diff_settings(
     return [
         (k, prev.get(k), curr.get(k)) for k in all_keys if prev.get(k) != curr.get(k)
     ]
+
+
+def _describe_mask(entry: MaskLogEntryResponse) -> str:
+    """Return a human-readable mask name, handling nullable brand/model/style.
+
+    Builds the name from the non-null parts of brand and model; falls back to
+    style, then "unspecified mask".  Appends "(size)" when size is set.
+    """
+    name = (
+        " ".join(p for p in (entry.brand, entry.model) if p)
+        or entry.style
+        or "unspecified mask"
+    )
+    return f"{name} ({entry.size})" if entry.size else name
+
+
+def merge_changes_with_mask_log(
+    device_changes: list[RxSettingChange],
+    mask_entries: list[MaskLogEntryResponse],
+    start: date,
+    end: date,
+    device_id: int | None = None,
+) -> list[MergedSettingsChange]:
+    """Merge device settings changes with mask log entries in [start, end].
+
+    Device changes are windowed to the range; the optional device_id filter
+    narrows only them — mask log entries are profile-level, so they are always
+    included.  ``mask_entries`` must be the FULL (start_date, id)-ordered log,
+    not pre-windowed, so the first in-range entry's old_value can come from
+    the latest entry before the range (None for the first entry ever logged).
+
+    Mask log entries with a null start_date are skipped and do not appear in
+    the output or affect the prev_desc running state.
+
+    Returns entries sorted by (date, source, device_id, key).
+    """
+    merged = [
+        MergedSettingsChange(
+            date=c.date,
+            source="device_settings",
+            device_id=c.device_id,
+            device_name=c.device_name,
+            key=c.key,
+            old_value=c.old_value,
+            new_value=c.new_value,
+        )
+        for c in device_changes
+        if start <= c.date <= end and (device_id is None or c.device_id == device_id)
+    ]
+
+    prev_desc: str | None = None
+    for entry in mask_entries:
+        # Entries without a start_date cannot be placed on the timeline; skip
+        # entirely so they don't affect prev_desc either.
+        if entry.start_date is None:
+            continue
+        desc = _describe_mask(entry)
+        if start <= entry.start_date <= end:
+            merged.append(
+                MergedSettingsChange(
+                    date=entry.start_date,
+                    source="mask_log",
+                    key="mask_equipment",
+                    old_value=prev_desc,
+                    new_value=desc,
+                    mask_brand=entry.brand,
+                    mask_model=entry.model,
+                    mask_size=entry.size,
+                    mask_style=entry.style,
+                    notes=entry.notes,
+                )
+            )
+        prev_desc = desc
+
+    merged.sort(
+        key=lambda e: (
+            e.date,
+            e.source,
+            e.device_id if e.device_id is not None else -1,
+            e.key,
+        )
+    )
+    return merged
 
 
 @dataclass
@@ -95,9 +185,18 @@ class RxTracker:
         """
         self.profile_id = profile_id
 
-    async def get_history(self, db_session: AsyncSession) -> list[RxPeriodResponse]:
-        """Return all RX periods with stats."""
-        periods = await self._compute_periods(db_session)
+    async def get_history(
+        self, db_session: AsyncSession, keys: tuple[str, ...] = RX_KEYS
+    ) -> list[RxPeriodResponse]:
+        """Return all RX periods with stats.
+
+        Args:
+            keys: Settings keys that define a period fingerprint.  Defaults
+                to RX_KEYS (prescription-only periods — the /rx/* and CLI
+                behavior); pass TIMELINE_KEYS to also split periods when the
+                device-reported mask_type changes.
+        """
+        periods = await self._compute_periods(db_session, keys)
         stats = self._compute_period_stats(periods)
         return [self._to_response(p) for p in stats]
 
@@ -106,7 +205,8 @@ class RxTracker:
 
         Invariant: for any DB state, result equals get_history()[-1] when
         non-empty — the period with max (start_date, device_id) across all
-        devices.  Empty DB / no periods → None.
+        devices.  Empty DB / no periods → None.  The invariant holds for the
+        default RX_KEYS call only, not get_history(keys=TIMELINE_KEYS).
         """
         candidates: list[RxPeriod] = []
         for device_id, device_name in await self._get_devices(db_session):
@@ -136,16 +236,25 @@ class RxTracker:
             worst_index=worst_index,
         )
 
-    async def get_changes(self, db_session: AsyncSession) -> RxChangesResponse:
+    async def get_changes(
+        self, db_session: AsyncSession, end: date | None = None
+    ) -> RxChangesResponse:
         """Return a log of every per-key settings change across all devices.
 
         Intentionally diffs ALL persisted settings keys — including comfort
         settings such as mask_type and humidity_level — not just the
         prescription-defining RX_KEYS.  This gives a complete audit trail of
         every setting the clinician or patient touched.  Do not narrow this to
-        _get_day_rx_settings; use _get_day_settings (no key filter).
+        _get_day_period_settings; use _get_day_settings (no key filter).
+
+        end: when supplied, device history is loaded only up to this date (Days
+        with date > end are excluded at the SQL level).  The end bound is safe
+        because later days cannot affect earlier diffs.  A start bound must NOT
+        be pushed into SQL — change detection diffs consecutive days-with-settings
+        and the first in-window change needs the last pre-window value;
+        start-windowing stays in Python.
         """
-        return self._compute_changes(await self._days_by_device(db_session))
+        return self._compute_changes(await self._days_by_device(db_session, end=end))
 
     async def get_all(
         self, db_session: AsyncSession, min_days: int = 7
@@ -183,18 +292,24 @@ class RxTracker:
             device_name=period.device_name,
         )
 
-    async def _compute_periods(self, db_session: AsyncSession) -> list[RxPeriod]:
+    async def _compute_periods(
+        self, db_session: AsyncSession, keys: tuple[str, ...] = RX_KEYS
+    ) -> list[RxPeriod]:
         """Query all days and group into RX periods."""
-        return self._compute_periods_from_groups(await self._days_by_device(db_session))
+        return self._compute_periods_from_groups(
+            await self._days_by_device(db_session), keys
+        )
 
     def _compute_periods_from_groups(
-        self, device_groups: list[tuple[int, str, list[Day]]]
+        self,
+        device_groups: list[tuple[int, str, list[Day]]],
+        keys: tuple[str, ...] = RX_KEYS,
     ) -> list[RxPeriod]:
         """Group consecutive days per device by therapy settings into RX periods."""
         all_periods: list[RxPeriod] = []
         for device_id, device_name, device_days in device_groups:
             all_periods.extend(
-                self._compute_device_periods(device_days, device_id, device_name)
+                self._compute_device_periods(device_days, device_id, device_name, keys)
             )
         all_periods.sort(key=lambda p: (p.start_date, p.device_id))
         return all_periods
@@ -229,31 +344,31 @@ class RxTracker:
         return RxChangesResponse(changes=all_changes)
 
     async def _days_by_device(
-        self, db_session: AsyncSession
+        self, db_session: AsyncSession, end: date | None = None
     ) -> list[tuple[int, str, list[Day]]]:
         """Query all days grouped by device, ordered by (device_id, date).
+
+        When end is supplied, only days with date <= end are included at the
+        SQL level.  Callers that need the full history (get_all, _compute_periods)
+        omit end and receive all days unchanged.
 
         Returns a list of (device_id, device_name, days) tuples, one per
         device, preserving the query order.  Devices whose Day rows have no
         matching Device row (device is None) are skipped with a warning.
         """
-        days = (
-            (
-                await db_session.execute(
-                    select(Day)
-                    .join(Device, Day.device_id == Device.id)
-                    .where(Device.profile_id == self.profile_id)
-                    .order_by(Day.device_id, Day.date)
-                    .options(
-                        joinedload(Day.sessions).joinedload(SessionModel.settings),
-                        joinedload(Day.device),
-                    )
-                )
+        q = (
+            select(Day)
+            .join(Device, Day.device_id == Device.id)
+            .where(Device.profile_id == self.profile_id)
+            .order_by(Day.device_id, Day.date)
+            .options(
+                joinedload(Day.sessions).joinedload(SessionModel.settings),
+                joinedload(Day.device),
             )
-            .unique()
-            .scalars()
-            .all()
         )
+        if end is not None:
+            q = q.where(Day.date <= end)
+        days = (await db_session.execute(q)).unique().scalars().all()
 
         result: list[tuple[int, str, list[Day]]] = []
         for device_id, device_days_iter in itertools.groupby(
@@ -272,7 +387,11 @@ class RxTracker:
         return result
 
     def _compute_device_periods(
-        self, days: list[Day], device_id: int, device_name: str
+        self,
+        days: list[Day],
+        device_id: int,
+        device_name: str,
+        keys: tuple[str, ...] = RX_KEYS,
     ) -> list[RxPeriod]:
         """Run the fingerprint-grouping loop for a single device's days in date order."""
         periods: list[RxPeriod] = []
@@ -282,7 +401,7 @@ class RxTracker:
         current_start_date: date | None = None
 
         for day in days:
-            day_settings = self._get_day_rx_settings(day)
+            day_settings = self._get_day_period_settings(day, keys)
 
             if day_settings is None:
                 continue
@@ -421,9 +540,11 @@ class RxTracker:
 
         return settings_dict if settings_dict else None
 
-    def _get_day_rx_settings(self, day: Day) -> dict[str, str] | None:
-        """Extract RX-defining settings from the longest enabled session of a day."""
-        return self._get_day_settings(day, key_filter=RX_KEYS)
+    def _get_day_period_settings(
+        self, day: Day, keys: tuple[str, ...] = RX_KEYS
+    ) -> dict[str, str] | None:
+        """Extract period-defining settings from the longest enabled session of a day."""
+        return self._get_day_settings(day, key_filter=keys)
 
     def _build_fingerprint(self, settings: dict[str, str]) -> str:
         """Build a fingerprint string from RX settings for comparison."""
@@ -509,7 +630,7 @@ class RxTracker:
                 break
 
             for day in batch:
-                day_settings = self._get_day_rx_settings(day)
+                day_settings = self._get_day_period_settings(day)
                 if day_settings is None:
                     continue
 

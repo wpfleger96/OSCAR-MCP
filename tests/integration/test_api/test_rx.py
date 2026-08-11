@@ -112,6 +112,37 @@ class TestRxRouter:
         assert ps_change["device_id"] == device.id
         assert "AirSense 10" in ps_change["device_name"]
 
+    def test_get_rx_history_ignores_mask_type_only_change(
+        self, api_client, db_session, test_profile
+    ):
+        """Period boundaries are unchanged when only mask_type changes mid-span."""
+        device = _create_device(db_session, test_profile.id)
+        base = date(2025, 8, 1)
+        rx = {"mode": "CPAP", "pressure_fixed": "8.0"}
+        for i in range(3):
+            _create_day_with_session(
+                db_session,
+                device,
+                base + timedelta(days=i),
+                settings={**rx, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            _create_day_with_session(
+                db_session,
+                device,
+                base + timedelta(days=i),
+                settings={**rx, "mask_type": "Full Face"},
+            )
+        db_session.flush()
+
+        response = api_client.get("/api/v1/rx/history")
+        assert response.status_code == 200
+        periods = response.json()
+        assert len(periods) == 1
+        assert periods[0]["start_date"] == str(base)
+        assert periods[0]["end_date"] == str(base + timedelta(days=5))
+        assert periods[0]["days_count"] == 6
+
     def test_get_rx_history_carries_device_fields(
         self, api_client, db_session, test_profile
     ):

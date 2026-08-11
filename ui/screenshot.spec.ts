@@ -12,6 +12,8 @@ import {
     rxCurrentFixture,
     rxCompareFixture,
     rxChangesFixture,
+    maskLogFixture,
+    maskEpochsFixture,
     sessionDetailFixture,
 } from './tests/fixtures/api-fixtures'
 
@@ -22,6 +24,8 @@ function routeApi(route: Route) {
     if (url.includes('/stats/summary')) return route.fulfill({ json: summaryFixture })
     if (url.includes('/stats/trends')) return route.fulfill({ json: trendsFixture })
     if (url.includes('/stats/periods')) return route.fulfill({ json: periodsFixture })
+    if (url.includes('/equipment/masks/epochs')) return route.fulfill({ json: maskEpochsFixture })
+    if (url.includes('/equipment/masks')) return route.fulfill({ json: maskLogFixture })
     if (url.includes('/rx/changes')) return route.fulfill({ json: rxChangesFixture })
     if (url.includes('/rx/compare')) return route.fulfill({ json: rxCompareFixture })
     if (url.includes('/rx/current')) return route.fulfill({ json: rxCurrentFixture })
@@ -124,17 +128,17 @@ test('session-detail dark', async ({ page }) => {
     await page.screenshot({ path: 'screenshots/session-detail-dark.png' })
 })
 
-test('devices', async ({ page }) => {
-    await page.goto('/devices')
-    await page.waitForSelector('.device-card')
+test('equipment', async ({ page }) => {
+    await page.goto('/equipment')
+    await page.waitForSelector('.equipment-view .device-card')
     await page.waitForTimeout(300)
-    await page.screenshot({ path: 'screenshots/devices.png' })
+    await page.screenshot({ path: 'screenshots/equipment.png' })
 })
 
-test('devices dark', async ({ page }) => {
-    await page.goto('/devices')
-    await page.waitForSelector('.device-card')
+test('equipment dark', async ({ page }) => {
+    await page.goto('/equipment')
+    await page.waitForSelector('.equipment-view .device-card')
     await page.getByText('Dark Mode').click()
     await page.waitForTimeout(300)
-    await page.screenshot({ path: 'screenshots/devices-dark.png' })
+    await page.screenshot({ path: 'screenshots/equipment-dark.png' })
 })

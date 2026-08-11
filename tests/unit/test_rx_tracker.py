@@ -9,8 +9,16 @@ import pytest
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.rx_tracker import RxTracker, _diff_settings
+from snore.analysis.rx_tracker import (
+    TIMELINE_KEYS,
+    RxTracker,
+    _describe_mask,
+    _diff_settings,
+    changed_setting_keys,
+    merge_changes_with_mask_log,
+)
 from snore.database.models import Day, Device, Session, Setting
+from snore.services.schemas import MaskLogEntryResponse, RxSettingChange
 
 
 async def _create_device(
@@ -505,7 +513,7 @@ class TestRxTrackerCurrentTailWalk:
                 base + timedelta(days=i),
                 settings=real_settings,
             )
-        # Days 5–7: disabled sessions → _get_day_rx_settings returns None
+        # Days 5–7: disabled sessions → _get_day_period_settings returns None
         for i in range(5, 8):
             await _create_day_with_session(
                 async_db_session,
@@ -937,3 +945,343 @@ class TestRxTrackerChanges:
         assert change.old_value == "3"
         assert change.new_value == "5"
         assert change.device_id == async_test_device.id
+
+
+class TestTimelineKeys:
+    async def test_timeline_keys_mask_type_change_splits_period(
+        self, async_db_session, async_test_device
+    ):
+        """get_history(keys=TIMELINE_KEYS) splits a period when mask_type changes."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Full Face"},
+            )
+        await async_db_session.flush()
+
+        result = await RxTracker(1).get_history(async_db_session, keys=TIMELINE_KEYS)
+
+        assert len(result) == 2
+        assert result[0].settings["mask_type"] == "Pillows"
+        assert result[1].settings["mask_type"] == "Full Face"
+        assert result[1].start_date == base + timedelta(days=3)
+
+    async def test_timeline_keys_mask_type_removal_splits_period(
+        self, async_db_session, async_test_device
+    ):
+        """A mask_type present→absent transition splits TIMELINE_KEYS periods.
+
+        Under the MCP timeline semantics (absent keys read as None), the
+        removal is flagged as a mask_type change; default RX_KEYS history is
+        unaffected.
+        """
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings=RX_SETTINGS,
+            )
+        await async_db_session.flush()
+
+        tracker = RxTracker(1)
+        result = await tracker.get_history(async_db_session, keys=TIMELINE_KEYS)
+
+        assert len(result) == 2
+        assert result[0].settings["mask_type"] == "Pillows"
+        assert "mask_type" not in result[1].settings
+        assert result[1].start_date == base + timedelta(days=3)
+
+        # MCP layer semantics: absent keys become None, flagging the removal
+        prev = {k: result[0].settings.get(k) for k in TIMELINE_KEYS}
+        curr = {k: result[1].settings.get(k) for k in TIMELINE_KEYS}
+        assert changed_setting_keys(prev, curr) == {"mask_type"}
+
+        # Default RX_KEYS history ignores the mask_type removal
+        assert len(await tracker.get_history(async_db_session)) == 1
+
+    async def test_default_history_does_not_split_on_mask_type(
+        self, async_db_session, async_test_device
+    ):
+        """Default get_history() ignores a mask_type-only change (RX_KEYS behavior)."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Full Face"},
+            )
+        await async_db_session.flush()
+
+        result = await RxTracker(1).get_history(async_db_session)
+
+        assert len(result) == 1
+        assert result[0].days_count == 6
+
+    async def test_humidity_level_change_never_splits_period(
+        self, async_db_session, async_test_device
+    ):
+        """humidity_level is excluded from both RX_KEYS and TIMELINE_KEYS epochs."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "humidity_level": "3"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "humidity_level": "5"},
+            )
+        await async_db_session.flush()
+
+        tracker = RxTracker(1)
+        assert len(await tracker.get_history(async_db_session)) == 1
+        assert len(await tracker.get_history(async_db_session, keys=TIMELINE_KEYS)) == 1
+
+    async def test_get_current_unaffected_by_mask_type_change(
+        self, async_db_session, async_test_device
+    ):
+        """get_current keeps RX-only fingerprints: mask_type change is no boundary."""
+        base = date(2025, 8, 1)
+        for i in range(3):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Pillows"},
+            )
+        for i in range(3, 6):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                settings={**RX_SETTINGS, "mask_type": "Full Face"},
+            )
+        await async_db_session.flush()
+
+        result = await RxTracker(1).get_current(async_db_session)
+
+        assert result is not None
+        assert result.days_count == 6
+        assert result.start_date == base
+        assert "mask_type" not in result.settings
+
+
+def _make_mask_entry(**kwargs: object) -> MaskLogEntryResponse:
+    """Build a MaskLogEntryResponse with sensible defaults, overridable per-test."""
+    defaults: dict[str, object] = {
+        "id": 1,
+        "brand": "ResMed",
+        "model": "AirFit P10",
+        "style": "pillows",
+        "start_date": date(2025, 6, 1),
+        "size": None,
+        "notes": None,
+    }
+    defaults.update(kwargs)
+    return MaskLogEntryResponse.model_validate(defaults)
+
+
+class TestDescribeMask:
+    """Tests for _describe_mask() with the new nullable brand/model/style contract."""
+
+    def test_full_brand_and_model_no_size(self):
+        entry = _make_mask_entry(
+            brand="ResMed", model="AirFit P10", style="pillows", size=None
+        )
+        assert _describe_mask(entry) == "ResMed AirFit P10"
+
+    def test_full_brand_and_model_with_size(self):
+        entry = _make_mask_entry(
+            brand="ResMed", model="AirFit P10", style="pillows", size="M"
+        )
+        assert _describe_mask(entry) == "ResMed AirFit P10 (M)"
+
+    def test_brand_only_no_model(self):
+        entry = _make_mask_entry(brand="ResMed", model=None, style="pillows", size=None)
+        assert _describe_mask(entry) == "ResMed"
+
+    def test_model_only_no_brand(self):
+        entry = _make_mask_entry(
+            brand=None, model="AirFit P10", style="pillows", size=None
+        )
+        assert _describe_mask(entry) == "AirFit P10"
+
+    def test_style_fallback_when_no_brand_or_model(self):
+        entry = _make_mask_entry(brand=None, model=None, style="pillows", size=None)
+        assert _describe_mask(entry) == "pillows"
+
+    def test_style_fallback_with_size(self):
+        entry = _make_mask_entry(brand=None, model=None, style="pillows", size="M")
+        assert _describe_mask(entry) == "pillows (M)"
+
+    def test_unspecified_mask_when_all_none(self):
+        entry = _make_mask_entry(brand=None, model=None, style=None, size=None)
+        assert _describe_mask(entry) == "unspecified mask"
+
+    def test_model_only_with_size(self):
+        entry = _make_mask_entry(
+            brand=None, model="AirFit P10", style="pillows", size="S"
+        )
+        assert _describe_mask(entry) == "AirFit P10 (S)"
+
+
+class TestMergeChangesWithMaskLog:
+    """Tests for merge_changes_with_mask_log() with null-date entries skipped."""
+
+    def test_null_date_entry_skipped_entirely(self):
+        """An entry with start_date=None is excluded from the merged timeline."""
+        null_entry = _make_mask_entry(
+            id=1,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=None,
+        )
+        window_start = date(2025, 6, 1)
+        window_end = date(2025, 6, 30)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[],
+            mask_entries=[null_entry],
+            start=window_start,
+            end=window_end,
+        )
+
+        assert result == []
+
+    def test_null_date_entry_does_not_perturb_prev_desc(self):
+        """A null-date entry sandwiched before a dated entry leaves prev_desc unaffected.
+
+        The dated entry after the null-date entry should see the last DATED
+        entry's description as old_value, as if the null-date entry never existed.
+        """
+        first_dated = _make_mask_entry(
+            id=1,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 5, 1),
+        )
+        null_entry = _make_mask_entry(
+            id=2,
+            brand="Philips",
+            model="DreamWear",
+            style="nasal",
+            start_date=None,
+        )
+        second_dated = _make_mask_entry(
+            id=3,
+            brand="Fisher & Paykel",
+            model="Evora",
+            style="full_face",
+            start_date=date(2025, 6, 15),
+        )
+        window_start = date(2025, 6, 1)
+        window_end = date(2025, 6, 30)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[],
+            mask_entries=[first_dated, null_entry, second_dated],
+            start=window_start,
+            end=window_end,
+        )
+
+        # Only second_dated falls in the window; old_value must come from
+        # first_dated (the last dated entry before the window), NOT from
+        # null_entry which is skipped entirely.
+        assert len(result) == 1
+        assert result[0].new_value == "Fisher & Paykel Evora"
+        assert result[0].old_value == "ResMed AirFit P10"
+
+    def test_first_dated_entry_after_null_has_none_old_value(self):
+        """When no prior dated entry exists, old_value is None even if a null-date entry precedes."""
+        null_entry = _make_mask_entry(
+            id=1,
+            brand="Philips",
+            model="DreamWear",
+            style="nasal",
+            start_date=None,
+        )
+        dated = _make_mask_entry(
+            id=2,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 6, 10),
+        )
+        window_start = date(2025, 6, 1)
+        window_end = date(2025, 6, 30)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[],
+            mask_entries=[null_entry, dated],
+            start=window_start,
+            end=window_end,
+        )
+
+        assert len(result) == 1
+        assert result[0].new_value == "ResMed AirFit P10"
+        assert result[0].old_value is None
+
+    def test_same_date_device_change_sorts_before_mask_entry(self):
+        """On the same date, source="device_settings" sorts before source="mask_log"."""
+        device_change = RxSettingChange(
+            date=date(2025, 3, 2),
+            device_id=1,
+            device_name="ResMed AirSense 10",
+            key="pressure_fixed",
+            old_value="8.0",
+            new_value="9.0",
+        )
+        mask_entry = _make_mask_entry(
+            id=2,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 3, 2),
+        )
+        window_start = date(2025, 3, 1)
+        window_end = date(2025, 3, 31)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[device_change],
+            mask_entries=[mask_entry],
+            start=window_start,
+            end=window_end,
+        )
+
+        assert len(result) == 2
+        assert result[0].source == "device_settings"
+        assert result[1].source == "mask_log"

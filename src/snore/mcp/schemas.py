@@ -28,6 +28,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict
 
+from snore.services.schemas import MergedSettingsChange
+
 
 def tz_fields(source: Any) -> dict[str, Any]:
     """Schema kwargs for the tier-2 timezone companion fields.
@@ -125,6 +127,25 @@ class SettingsTimelineResponse(BaseModel):
     epochs: list[SettingsEpoch]
     total_epochs: int
     device_capabilities_by_device: dict[str, DeviceCapabilities] = {}
+
+
+class SettingsChangeEntry(MergedSettingsChange):
+    """One settings change from either the device settings log or the mask log.
+
+    Field-identical subclass of services.schemas.MergedSettingsChange — kept as
+    a distinct MCP-layer name for the docs://schemas registry.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SettingsChangesResponse(BaseModel):
+    """Response from get_settings_changes."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    changes: list[SettingsChangeEntry]
+    total_changes: int
 
 
 class NightlyRow(BaseModel):
@@ -639,6 +660,8 @@ SCHEMA_MODEL_MAP: dict[str, type[BaseModel]] = {
     "data_overview": DataOverviewResponse,
     "settings_epoch": SettingsEpoch,
     "settings_timeline": SettingsTimelineResponse,
+    "settings_change_entry": SettingsChangeEntry,
+    "settings_changes": SettingsChangesResponse,
     "nightly_row": NightlyRow,
     "compliance_fields": ComplianceFields,
     "nightly_summary": NightlySummaryResponse,

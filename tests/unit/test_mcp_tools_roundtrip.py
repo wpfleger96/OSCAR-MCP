@@ -228,6 +228,64 @@ class TestGetSettingsTimelineRoundtrip:
 
 
 # ---------------------------------------------------------------------------
+# get_settings_changes
+# ---------------------------------------------------------------------------
+
+
+class TestGetSettingsChangesRoundtrip:
+    async def test_tool_is_registered(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
+        """get_settings_changes appears in the server's tool listing."""
+        async with mcp_client_factory(mock_db_session) as client:
+            tools = await client.list_tools()
+
+        assert "get_settings_changes" in {t.name for t in tools}
+
+    async def test_empty_db_returns_no_changes(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
+        """get_settings_changes with no data: no error, changes=[]."""
+        from snore.services.schemas import RxChangesResponse  # noqa: PLC0415
+
+        with (
+            patch(
+                "snore.analysis.rx_tracker.RxTracker.get_changes",
+                new_callable=AsyncMock,
+                return_value=RxChangesResponse(changes=[]),
+            ),
+            patch(
+                "snore.services.mask_log_service.MaskLogService.list_entries",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            async with mcp_client_factory(mock_db_session) as client:
+                result = await client.call_tool(
+                    "get_settings_changes",
+                    {"start": "2024-01-01", "end": "2024-12-31"},
+                )
+
+        assert not result.is_error
+        payload = json.loads(result.content[0].text)
+        assert payload["changes"] == []
+        assert payload["total_changes"] == 0
+
+    async def test_invalid_date_range_returns_error(
+        self, mock_db_session: Any, mcp_client_factory: Any
+    ) -> None:
+        """get_settings_changes with end < start: ToolError raised."""
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        async with mcp_client_factory(mock_db_session) as client:
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "get_settings_changes",
+                    {"start": "2024-12-31", "end": "2024-01-01"},
+                )
+
+
+# ---------------------------------------------------------------------------
 # get_nightly_summary
 # ---------------------------------------------------------------------------
 

@@ -11,8 +11,9 @@ Auth classification for ``/api/v1/*`` routes:
   ``ActorDep → get_actor``, which raises 401 in multiuser mode when no
   actor is present.  The effect is identical to ``require_auth`` — there
   is simply no duplicate declaration needed.  Affected routers: ``days``,
-  ``devices``, ``events``, ``reports``, ``rx``, ``sessions`` (list / read),
-  ``stats``, ``waveforms``, ``analysis`` (read routes).
+  ``devices``, ``equipment``, ``events``, ``reports``, ``rx``,
+  ``sessions`` (list / read), ``stats``, ``waveforms``, ``analysis``
+  (read routes).
 
 - **Public routes** (no auth): ``/api/v1/auth/*`` (login, logout, status,
   invite lookup/redeem).  These are intentionally unauthenticated.

@@ -4,9 +4,9 @@ Mirrors ``import_job_records``: persisted at RUNNING and terminal state
 transitions so a server restart can detect orphaned in-progress rows and
 either resume them or mark them failed.
 
-For a fresh Alembic install (empty DB), ``001_baseline`` creates the table
-from ``Base.metadata`` (excluded from baseline via ``_EXCLUDE``), so this
-migration handles existing installs only.
+``001_baseline`` skips ``analysis_job_records`` via its ``_EXCLUDE`` set, so
+this migration creates the table on both fresh and existing installs; the
+table-exists guard makes it idempotent.
 
 Revision ID: 005_analysis_job_records
 Revises: 004_session_mask_segments

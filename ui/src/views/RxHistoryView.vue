@@ -8,7 +8,7 @@
 
         <ErrorState v-else-if="error" :message="error" :retry="reload" />
 
-        <template v-else-if="history.length">
+        <template v-else>
             <!-- Current Settings -->
             <div v-if="current" class="section-card">
                 <h2>Current Settings</h2>
@@ -103,51 +103,80 @@
                 </div>
             </div>
 
-            <!-- Settings Changes — most recent first -->
-            <div v-if="changes.length" class="section-card">
+            <!-- Settings Changes — device changes merged with mask log, most recent first -->
+            <div v-if="timelineRows.length || maskError" class="section-card">
                 <h2>Settings Changes</h2>
-                <div class="overflow-x-auto">
+                <div v-if="timelineRows.length" class="overflow-x-auto">
                     <Table>
                         <TableHeader>
                             <TableRow>
                                 <TableHead class="whitespace-nowrap">Date</TableHead>
+                                <TableHead class="whitespace-nowrap">Source</TableHead>
                                 <TableHead class="whitespace-nowrap">Device</TableHead>
                                 <TableHead class="whitespace-nowrap">Setting</TableHead>
                                 <TableHead class="whitespace-nowrap">Change</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            <TableRow v-for="(change, i) in changes" :key="changeKey(change, i)">
+                            <TableRow v-for="row in timelineRows" :key="row.key">
                                 <TableCell class="whitespace-nowrap">{{
-                                    formatDateFull(change.date)
-                                }}</TableCell>
-                                <TableCell class="whitespace-nowrap">{{
-                                    change.device_name
-                                }}</TableCell>
-                                <TableCell class="whitespace-nowrap">{{
-                                    settingLabel(change.key)
+                                    formatDateFull(row.date)
                                 }}</TableCell>
                                 <TableCell class="whitespace-nowrap">
-                                    <span class="text-muted-foreground">{{
-                                        change.old_value != null
-                                            ? formatSettingValue(change.key, change.old_value)
-                                            : '—'
-                                    }}</span>
-                                    <span class="mx-1">→</span>
-                                    <span>{{
-                                        change.new_value != null
-                                            ? formatSettingValue(change.key, change.new_value)
-                                            : '—'
-                                    }}</span>
+                                    <Badge v-if="row.source === 'device'" variant="secondary"
+                                        >Device</Badge
+                                    >
+                                    <Badge v-else variant="outline">Mask Log</Badge>
                                 </TableCell>
+                                <template v-if="row.source === 'device'">
+                                    <TableCell class="whitespace-nowrap">{{
+                                        row.change.device_name
+                                    }}</TableCell>
+                                    <TableCell class="whitespace-nowrap">{{
+                                        settingLabel(row.change.key)
+                                    }}</TableCell>
+                                    <TableCell class="whitespace-nowrap">
+                                        <span class="text-muted-foreground">{{
+                                            row.change.old_value != null
+                                                ? formatSettingValue(
+                                                      row.change.key,
+                                                      row.change.old_value,
+                                                  )
+                                                : '—'
+                                        }}</span>
+                                        <span class="mx-1">→</span>
+                                        <span>{{
+                                            row.change.new_value != null
+                                                ? formatSettingValue(
+                                                      row.change.key,
+                                                      row.change.new_value,
+                                                  )
+                                                : '—'
+                                        }}</span>
+                                    </TableCell>
+                                </template>
+                                <template v-else>
+                                    <TableCell class="whitespace-nowrap">—</TableCell>
+                                    <TableCell class="whitespace-nowrap">Mask</TableCell>
+                                    <TableCell class="whitespace-nowrap">{{
+                                        maskSummary(row.entry)
+                                    }}</TableCell>
+                                </template>
                             </TableRow>
                         </TableBody>
                     </Table>
                 </div>
+                <p v-if="maskError" class="text-sm text-destructive mt-2">{{ maskError }}</p>
+                <p class="text-sm text-muted-foreground mt-2">
+                    Manage your mask equipment on the
+                    <RouterLink to="/equipment" class="underline">Equipment page</RouterLink>.
+                </p>
+            </div>
+
+            <div v-if="!history.length && !timelineRows.length" class="no-data">
+                <Info class="h-4 w-4" /> No prescription data available.
             </div>
         </template>
-
-        <div v-else class="no-data"><Info class="h-4 w-4" /> No prescription data available.</div>
     </div>
 </template>
 
@@ -164,19 +193,18 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { getRxAll } from '@/api/rx'
+import { getMaskLog } from '@/api/equipment'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
 import { settingLabel, formatSettingValue } from '@/utils/deviceSettings'
-import type { RxPeriodResponse, RxSettingChange } from '@/types'
+import { maskEntryName, styleLabel } from '@/utils/maskOptions'
+import type { MaskLogEntryResponse, RxPeriodResponse, RxSettingChange } from '@/types'
 import ErrorState from '@/components/ErrorState.vue'
 
 const { data, loading, error, reload } = useApiLoad(() => getRxAll(), 'Failed to load RX data')
 
 const history = computed(() => data.value?.history ?? [])
 const current = computed(() => data.value?.current ?? null)
-const changes = computed<RxSettingChange[]>(() =>
-    [...(data.value?.changes?.changes ?? [])].reverse(),
-)
 
 interface ComparisonRow extends RxPeriodResponse {
     isBest: boolean
@@ -218,9 +246,46 @@ function summarizeSettings(settings: Record<string, string>): string {
     return parts.join(', ')
 }
 
-function changeKey(change: RxSettingChange, i: number): string {
-    return `${change.date}-${change.device_id}-${change.key}-${i}`
+// --- Mask log ---
+
+function maskSummary(entry: MaskLogEntryResponse): string {
+    const hasName = !!(entry.brand || entry.model)
+    const name = maskEntryName(entry)
+    const details: string[] = []
+    if (hasName && entry.style) details.push(styleLabel(entry.style))
+    if (entry.size) details.push(`size ${entry.size}`)
+    return details.length ? `${name} (${details.join(', ')})` : name
 }
+
+const { data: maskData, error: maskError } = useApiLoad(
+    () => getMaskLog(),
+    'Failed to load mask log',
+)
+
+// Device setting changes merged with mask log entries, most recent first.
+type TimelineRow =
+    | { source: 'device'; key: string; date: string; change: RxSettingChange }
+    | { source: 'mask'; key: string; date: string; entry: MaskLogEntryResponse }
+
+const timelineRows = computed<TimelineRow[]>(() => {
+    const deviceRows: TimelineRow[] = (data.value?.changes?.changes ?? []).map((change, i) => ({
+        source: 'device',
+        key: `device-${change.date}-${change.device_id}-${change.key}-${i}`,
+        date: change.date,
+        change,
+    }))
+    const maskRows: TimelineRow[] = (maskData.value ?? [])
+        .filter(
+            (entry): entry is MaskLogEntryResponse & { start_date: string } => !!entry.start_date,
+        )
+        .map((entry) => ({
+            source: 'mask' as const,
+            key: `mask-${entry.id}`,
+            date: entry.start_date,
+            entry,
+        }))
+    return [...deviceRows, ...maskRows].sort((a, b) => b.date.localeCompare(a.date))
+})
 </script>
 
 <style scoped>

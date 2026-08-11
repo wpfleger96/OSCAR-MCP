@@ -25,6 +25,8 @@ class TestSchemaModelMap:
             "data_overview",
             "settings_epoch",
             "settings_timeline",
+            "settings_change_entry",
+            "settings_changes",
             "nightly_row",
             "compliance_fields",
             "nightly_summary",

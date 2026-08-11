@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from datetime import date
-from typing import Literal, cast
+from datetime import date, timedelta
+from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from snore.services.schemas import (
     DayDetail,
     DayListItem,
     ImportSource,
+    MaskLogEntryResponse,
     RxAllResponse,
     RxChangesResponse,
     RxComparisonResponse,
@@ -41,6 +49,9 @@ __all__ = [
     "RxComparisonResponse",
     "RxSettingChange",
     "RxChangesResponse",
+    "MaskLogEntryResponse",
+    "MaskLogCreateRequest",
+    "MaskLogUpdateRequest",
     "AnalysisJobStatus",
     "AnalysisJobsListResponse",
     "AnalysisJobEnqueued",
@@ -172,6 +183,66 @@ class BreathTrendsValidationRequest(BaseModel):
         if self.to_date < self.from_date:
             raise ValueError("to_date must be >= from_date")
         return self
+
+
+# Style vocabulary must stay in sync: DB CHECKs (models.py, migrations 008/009), services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.
+MaskStyle = Literal["pillows", "nasal", "full_face"]
+
+_MASK_START_DATE_MIN = date(2000, 1, 1)
+_MASK_START_DATE_MAX_FUTURE_DAYS = 366
+
+
+def _validate_plausible_start_date(value: date) -> date:
+    """Reject start dates outside the CPAP-era clinical window."""
+    if value < _MASK_START_DATE_MIN:
+        raise ValueError("start_date must be on or after 2000-01-01")
+    if value > date.today() + timedelta(days=_MASK_START_DATE_MAX_FUTURE_DAYS):
+        raise ValueError("start_date must not be more than 366 days in the future")
+    return value
+
+
+PlausibleStartDate = Annotated[date, AfterValidator(_validate_plausible_start_date)]
+
+
+class _MaskLogFields(BaseModel):
+    """Shared optional field set for mask log request bodies."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    brand: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+        ]
+        | None
+    ) = None
+    model: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=150)
+        ]
+        | None
+    ) = None
+    style: MaskStyle | None = None
+    start_date: PlausibleStartDate | None = None
+    size: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)
+        ]
+        | None
+    ) = None
+    notes: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
+        ]
+        | None
+    ) = None
+
+
+class MaskLogCreateRequest(_MaskLogFields):
+    """POST body: all fields are optional — an entirely empty create is accepted."""
+
+
+class MaskLogUpdateRequest(_MaskLogFields):
+    """PATCH body: omitted fields are unchanged; explicit null clears any field."""
 
 
 class AnalysisJobStatus(BaseModel):

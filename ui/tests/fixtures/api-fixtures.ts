@@ -6,6 +6,8 @@ import type {
     SessionListItem,
     DeviceInfo,
     DeviceDetail,
+    MaskLogEntryResponse,
+    MaskEpochResponse,
     PeriodStatistics,
     RecordsData,
     RxPeriodResponse,
@@ -1028,6 +1030,57 @@ export const rxChangesFixture: RxChangesResponse = {
     ],
 }
 
+export const maskLogFixture: MaskLogEntryResponse[] = [
+    {
+        id: 1,
+        brand: 'ResMed',
+        model: 'AirFit N20',
+        size: 'M',
+        style: 'nasal',
+        start_date: '2025-05-10',
+        notes: null,
+    },
+    {
+        id: 2,
+        brand: 'ResMed',
+        model: 'AirFit P10',
+        size: 'S',
+        style: 'pillows',
+        start_date: '2025-11-02',
+        notes: 'Switched after nasal bridge irritation',
+    },
+    {
+        id: 3,
+        brand: 'Philips',
+        model: 'DreamWear Full Face',
+        size: null,
+        style: 'full_face',
+        start_date: '2026-02-22',
+        notes: null,
+    },
+]
+
+export const maskEpochsFixture: MaskEpochResponse[] = [
+    {
+        device_id: 1,
+        mask_type: 'Nasal',
+        style: 'nasal',
+        start_date: '2025-05-10',
+        end_date: '2025-11-01',
+        days_count: 175,
+        device_name: 'ResMed AirSense 11 AutoSet',
+    },
+    {
+        device_id: 1,
+        mask_type: 'Pillows',
+        style: 'pillows',
+        start_date: '2025-11-02',
+        end_date: '2026-04-06',
+        days_count: 156,
+        device_name: 'ResMed AirSense 11 AutoSet',
+    },
+]
+
 export const sessionDetailFixture: SessionDetail = {
     id: 1470,
     device_session_id: '20260406_merged',
@@ -1080,4 +1133,13 @@ export const sessionDetailFixture: SessionDetail = {
         minute_ventilation_mean: 6.5,
     },
     settings: null,
+    active_mask: {
+        id: 2,
+        brand: 'ResMed',
+        model: 'AirFit P10',
+        size: 'S',
+        style: 'pillows',
+        start_date: '2025-11-02',
+        notes: null,
+    },
 }
