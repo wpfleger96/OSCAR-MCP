@@ -195,6 +195,9 @@ class SessionListItem(BaseModel):
     """Single session item in a list view."""
 
     id: int = Field(description="Session database ID")
+    therapy_day: date = Field(
+        description="Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day"
+    )
     start_time: datetime = Field(description="Session start timestamp")
     duration_hours: float = Field(description="Session duration in hours")
     enabled: bool = Field(description="Whether session is enabled for stats")
@@ -337,6 +340,9 @@ class SessionDetail(BaseModel):
     device_manufacturer: str | None
     device_model: str | None
     device_serial: str | None
+    therapy_day: date = Field(
+        description="Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day"
+    )
     start_time: datetime
     end_time: datetime
     duration_hours: float

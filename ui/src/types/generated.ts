@@ -3741,6 +3741,12 @@ export interface components {
              */
             start_time: string
             statistics?: components['schemas']['SessionStatistics'] | null
+            /**
+             * Therapy Day
+             * Format: date
+             * @description Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day
+             */
+            therapy_day: string
             /** Therapy Mode */
             therapy_mode: string | null
             /** Waveform Count */
@@ -3799,6 +3805,12 @@ export interface components {
              * @description Session start timestamp
              */
             start_time: string
+            /**
+             * Therapy Day
+             * Format: date
+             * @description Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day
+             */
+            therapy_day: string
         }
         /**
          * SessionSetting
@@ -5252,7 +5264,9 @@ export interface operations {
     }
     get_day_api_v1_days__day_date__get: {
         parameters: {
-            query?: never
+            query?: {
+                device_id?: number | null
+            }
             header?: never
             path: {
                 day_date: string

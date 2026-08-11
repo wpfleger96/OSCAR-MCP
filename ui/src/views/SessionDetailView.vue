@@ -28,11 +28,12 @@
         <!-- Session header -->
         <div class="session-header">
             <div>
-                <h1>{{ formatDateWithWeekday(session.start_time) }}</h1>
+                <h1>{{ formatDateWithWeekday(session.therapy_day) }}</h1>
                 <div class="session-meta text-muted-foreground">
                     <Badge v-if="session.therapy_mode">{{ session.therapy_mode }}</Badge>
                     <span>{{ session.device_manufacturer }} {{ session.device_model }}</span>
                     <span>{{ session.duration_hours.toFixed(1) }} hours</span>
+                    <span>Started: {{ formatDateTime(session.start_time) }}</span>
                     <span v-if="session.statistics?.ahi != null">
                         AHI:
                         <strong :class="ahiClass(session.statistics.ahi)">{{
@@ -866,7 +867,7 @@ import StatCard from '@/components/StatCard.vue'
 import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { useWaveformData } from '@/composables/useWaveformData'
-import { ahiClass, formatDateWithWeekday, formatDateFull } from '@/utils/formatting'
+import { ahiClass, formatDateWithWeekday, formatDateFull, formatDateTime } from '@/utils/formatting'
 import type { SessionDetail, EventItem } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()

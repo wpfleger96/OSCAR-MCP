@@ -1,5 +1,7 @@
 """Unit tests for DayService."""
 
+import logging
+
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -290,3 +292,58 @@ class TestDayServiceGet:
 
         assert result is not None
         assert result.session_ids == []
+
+    async def test_get_day_two_devices_same_date_no_exception(
+        self, async_db_session, async_test_device, async_test_profile, caplog
+    ):
+        """When two devices both have a Day on the same date, get_day returns the
+        first (by device_id) rather than raising MultipleResultsFound."""
+        second_device = Device(
+            profile_id=async_test_profile.id,
+            manufacturer="OtherCo",
+            model="OtherModel",
+            serial_number="DAY_SVC_TEST_002",
+        )
+        async_db_session.add(second_device)
+        await async_db_session.flush()
+
+        await _create_day(
+            async_db_session, async_test_device, date(2025, 8, 1), ahi=2.0
+        )
+        await _create_day(async_db_session, second_device, date(2025, 8, 1), ahi=4.0)
+        await async_db_session.flush()
+
+        service = DayService(async_db_session, async_test_profile.id)
+        with caplog.at_level(logging.WARNING, logger="snore.services.day_service"):
+            result = await service.get_day(date(2025, 8, 1))
+
+        assert result is not None
+        # Should return the lower device_id deterministically
+        assert result.device_id == min(async_test_device.id, second_device.id)
+        assert "Multiple Day rows" in caplog.text
+
+    async def test_get_day_device_id_filter_selects_correct_device(
+        self, async_db_session, async_test_device, async_test_profile
+    ):
+        """device_id= parameter selects the specific device's Day row."""
+        second_device = Device(
+            profile_id=async_test_profile.id,
+            manufacturer="OtherCo",
+            model="OtherModel",
+            serial_number="DAY_SVC_TEST_003",
+        )
+        async_db_session.add(second_device)
+        await async_db_session.flush()
+
+        await _create_day(
+            async_db_session, async_test_device, date(2025, 8, 2), ahi=2.0
+        )
+        await _create_day(async_db_session, second_device, date(2025, 8, 2), ahi=4.0)
+        await async_db_session.flush()
+
+        service = DayService(async_db_session, async_test_profile.id)
+        result = await service.get_day(date(2025, 8, 2), device_id=second_device.id)
+
+        assert result is not None
+        assert result.device_id == second_device.id
+        assert result.ahi == pytest.approx(4.0)

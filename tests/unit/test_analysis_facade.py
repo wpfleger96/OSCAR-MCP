@@ -926,3 +926,55 @@ class TestStoreWithRetry:
 
         # sleep must not have been called — no retry happened
         sleep_mock.assert_not_called()
+
+
+class TestAnalysisFacadeTherapyDay:
+    """Tests that session_date in AnalysisListItem reflects Day.date (the therapy day)."""
+
+    async def test_early_morning_session_returns_day_date_not_start_date(
+        self, async_db_session, async_test_device
+    ):
+        """An early-morning session returns Day.date (therapy day), not start_time.date().
+
+        A session starting at 01:12 on Aug 10 belongs to the Aug 9 therapy day.
+        The facade must surface Day.date so the analysis list matches the Days view.
+        """
+        therapy_day_date = date(2025, 8, 9)
+        start = datetime(2025, 8, 10, 1, 12, 0)
+
+        day = Day(
+            device_id=async_test_device.id,
+            date=therapy_day_date,
+            total_therapy_hours=7.5,
+        )
+        async_db_session.add(day)
+        await async_db_session.flush()
+
+        sess = Session(
+            device_id=async_test_device.id,
+            day_id=day.id,
+            device_session_id="test_early_morning",
+            start_time=start,
+            end_time=start + timedelta(hours=7, minutes=30),
+            duration_seconds=7.5 * 3600,
+        )
+        async_db_session.add(sess)
+        await async_db_session.flush()
+
+        ar = AnalysisResult(
+            session_id=sess.id,
+            timestamp_start=sess.start_time,
+            timestamp_end=sess.end_time,
+            programmatic_result_json={"version": 1},
+            created_at=datetime.now(UTC),
+        )
+        async_db_session.add(ar)
+        await async_db_session.flush()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        results = await service.list_sessions_with_status()
+
+        assert len(results) == 1
+        # Must be therapy_day (Aug 9), NOT start_time.date() (Aug 10).
+        assert results[0].session_date == therapy_day_date
+        assert results[0].session_date != start.date()

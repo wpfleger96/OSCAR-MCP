@@ -109,6 +109,7 @@ class SessionService:
             sessions.append(
                 SessionListItem(
                     id=session.id,
+                    therapy_day=DayManager.get_day_for_session(session.start_time),
                     start_time=session.start_time,
                     duration_hours=(session.duration_seconds or 0.0) / 3600,
                     enabled=bool(session.enabled),
@@ -232,6 +233,7 @@ class SessionService:
             device_manufacturer=device.manufacturer if device else None,
             device_model=device.model if device else None,
             device_serial=device.serial_number if device else None,
+            therapy_day=DayManager.get_day_for_session(session.start_time),
             start_time=session.start_time,
             end_time=session.end_time,
             duration_hours=duration_seconds / 3600,
@@ -297,6 +299,7 @@ class SessionService:
             sessions.append(
                 SessionListItem(
                     id=session.id,
+                    therapy_day=DayManager.get_day_for_session(session.start_time),
                     start_time=session.start_time,
                     duration_hours=(session.duration_seconds or 0.0) / 3600,
                     enabled=True,

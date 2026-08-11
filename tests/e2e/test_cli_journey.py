@@ -38,7 +38,7 @@ def test_session_list_and_show(snore, imported_db):
     """`session list` and `session show --settings` surface the imported night."""
     listing = snore("session", "list", db=imported_db)
     assert listing.returncode == 0
-    assert "2024-06-21" in listing.stdout
+    assert "2024-06-20" in listing.stdout
     assert "22231974465" in listing.stdout  # device serial
     assert "Showing all 1 sessions" in listing.stdout
 

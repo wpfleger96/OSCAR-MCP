@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 import re
 
-# The five imported nights, by the START date shown in `session list`.
-START_DATES = ["2024-06-21", "2025-01-10", "2025-08-08", "2025-09-10", "2025-10-25"]
+# The five imported nights, by the therapy day (noon-cutoff date) shown in `session list`.
+START_DATES = ["2024-06-20", "2025-01-09", "2025-08-07", "2025-09-10", "2025-10-24"]
 # The four 2025 nights only (a 2025-bounded range excludes the 2024 device night).
 DATES_2025 = [d for d in START_DATES if d.startswith("2025")]
 
@@ -59,7 +59,7 @@ def test_date_range_filter_selects_only_in_range_nights(snore, multi_night_db):
     assert listing.returncode == 0
     rows = [ln for ln in listing.stdout.splitlines() if "22231974465" in ln]
     assert len(rows) == 4
-    assert "2024-06-21" not in listing.stdout
+    assert "2024-06-20" not in listing.stdout
     for date in DATES_2025:
         assert date in listing.stdout
 

@@ -16,7 +16,7 @@ from snore.services.schemas import ImportSource
 class TestDetectSources:
     def test_empty_directory_returns_empty_list(self, tmp_path):
         service = ImportService()
-        with patch("snore.services.import_service.register_all_parsers"):
+        with patch("snore.services.import_service.ensure_registered_parsers"):
             with patch(
                 "snore.services.import_service.parser_registry.detect_all_parsers",
                 return_value=[],
@@ -36,7 +36,7 @@ class TestDetectSources:
         }
 
         service = ImportService()
-        with patch("snore.services.import_service.register_all_parsers"):
+        with patch("snore.services.import_service.ensure_registered_parsers"):
             with patch(
                 "snore.services.import_service.parser_registry.detect_all_parsers",
                 return_value=[(mock_parser, mock_detection)],
@@ -60,7 +60,7 @@ class TestDetectSources:
         }
 
         service = ImportService()
-        with patch("snore.services.import_service.register_all_parsers"):
+        with patch("snore.services.import_service.ensure_registered_parsers"):
             with patch(
                 "snore.services.import_service.parser_registry.detect_all_parsers",
                 return_value=[(mock_parser, mock_detection)],
