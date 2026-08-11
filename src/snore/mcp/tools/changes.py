@@ -31,14 +31,19 @@ async def get_settings_changes(
     (key="mask_equipment").  Mask log entries are profile-level, so the
     optional device_id filter narrows only the device_settings entries.
     """
-    device_changes = (await RxTracker(profile_id).get_changes(db_session)).changes
+    # Device history is loaded only up to end; later days cannot affect earlier diffs.
+    device_changes = (
+        await RxTracker(profile_id).get_changes(db_session, end=end)
+    ).changes
     # Full ordered log (start_date, id) so the first in-range entry's old_value
-    # can come from the latest entry before the range.
+    # can come from the latest entry before the range — start-windowing stays in Python.
     mask_entries = await MaskLogService(db_session, profile_id).list_entries()
     merged = merge_changes_with_mask_log(
         device_changes, mask_entries, start, end, device_id
     )
-    entries = [SettingsChangeEntry.model_validate(c.model_dump()) for c in merged]
+    entries = [
+        SettingsChangeEntry.model_validate(c, from_attributes=True) for c in merged
+    ]
     return SettingsChangesResponse(changes=entries, total_changes=len(entries))
 
 

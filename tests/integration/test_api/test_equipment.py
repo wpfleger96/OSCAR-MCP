@@ -123,15 +123,6 @@ class TestMaskLogValidation:
         response = api_client.post(MASKS_URL, json=_create_entry_payload(brand=""))
         assert response.status_code == 422
 
-    @pytest.mark.parametrize("field", ["brand", "model", "style", "start_date"])
-    def test_patch_null_clears_field_returns_200(self, api_client, test_profile, field):
-        response = api_client.post(MASKS_URL, json=_create_entry_payload())
-        entry_id = response.json()["id"]
-
-        response = api_client.patch(f"{MASKS_URL}/{entry_id}", json={field: None})
-        assert response.status_code == 200
-        assert response.json()[field] is None
-
     def test_create_too_long_notes_returns_422(self, api_client, test_profile):
         response = api_client.post(
             MASKS_URL, json=_create_entry_payload(notes="x" * 4001)
@@ -168,6 +159,45 @@ class TestMaskLogValidation:
             f"{MASKS_URL}/{entry_id}", json={"start_date": start_date}
         )
         assert response.status_code == 422
+
+    def test_whitespace_only_brand_returns_422(self, api_client, test_profile):
+        response = api_client.post(MASKS_URL, json=_create_entry_payload(brand="   "))
+        assert response.status_code == 422
+
+    def test_empty_notes_returns_422(self, api_client, test_profile):
+        response = api_client.post(MASKS_URL, json=_create_entry_payload(notes=""))
+        assert response.status_code == 422
+
+    def test_unknown_field_on_post_returns_422(self, api_client, test_profile):
+        response = api_client.post(
+            MASKS_URL, json={**_create_entry_payload(), "bogus": 1}
+        )
+        assert response.status_code == 422
+
+    def test_unknown_field_on_patch_returns_422(self, api_client, test_profile):
+        response = api_client.post(MASKS_URL, json=_create_entry_payload())
+        assert response.status_code == 201
+        entry_id = response.json()["id"]
+
+        response = api_client.patch(f"{MASKS_URL}/{entry_id}", json={"bogus": 1})
+        assert response.status_code == 422
+
+    def test_padded_brand_trimmed_on_post_returns_201(self, api_client, test_profile):
+        response = api_client.post(
+            MASKS_URL, json=_create_entry_payload(brand="  ResMed  ")
+        )
+        assert response.status_code == 201
+        assert response.json()["brand"] == "ResMed"
+
+    def test_patch_empty_body_returns_200_unchanged(self, api_client, test_profile):
+        response = api_client.post(MASKS_URL, json=_create_entry_payload())
+        assert response.status_code == 201
+        original = response.json()
+        entry_id = original["id"]
+
+        response = api_client.patch(f"{MASKS_URL}/{entry_id}", json={})
+        assert response.status_code == 200
+        assert response.json() == original
 
 
 class TestMaskLogNotFound:
@@ -422,12 +452,16 @@ class TestMaskEpochsEndpoint:
         assert pillows_epoch["end_date"] == str(base + timedelta(days=2))
         assert pillows_epoch["days_count"] == 3
         assert "AirSense 10" in pillows_epoch["device_name"]
+        assert isinstance(pillows_epoch["device_id"], int)
+        assert pillows_epoch["device_id"] == device.id
 
         assert nasal_epoch["mask_type"] == "Nasal"
         assert nasal_epoch["style"] == "nasal"
         assert nasal_epoch["start_date"] == str(base + timedelta(days=3))
         assert nasal_epoch["end_date"] == str(base + timedelta(days=4))
         assert nasal_epoch["days_count"] == 2
+        assert isinstance(nasal_epoch["device_id"], int)
+        assert nasal_epoch["device_id"] == device.id
 
     def test_unknown_mask_type_returns_null_style(
         self, api_client, db_session, test_profile

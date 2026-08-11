@@ -9,6 +9,7 @@ __all__ = ["MaskEpochService"]
 
 # Maps device-reported mask_type values to the normalized mask_log style vocabulary.
 # Device values not present here map to style=None.
+# Keep in sync with: api/schemas.py MaskStyle, DB CHECKs (models.py, migrations 008/009), ui/src/utils/maskOptions.ts.
 _MASK_TYPE_TO_STYLE: dict[str, str] = {
     "Pillows": "pillows",
     "Nasal": "nasal",
@@ -41,6 +42,7 @@ class MaskEpochService:
                 start_date=p.start_date,
                 end_date=p.end_date,
                 days_count=p.days_count,
+                device_id=p.device_id,
                 device_name=p.device_name,
             )
             for p in periods

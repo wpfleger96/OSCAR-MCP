@@ -375,6 +375,7 @@ class MaskLogEntry(Base):
     profile = relationship("Profile", back_populates="mask_log_entries", lazy="raise")
 
     __table_args__ = (
+        # Style vocabulary: keep in sync with api/schemas.py MaskStyle, migrations 008/009 CHECKs, services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.
         CheckConstraint(
             "style IS NULL OR style IN ('pillows','nasal','full_face')",
             name="chk_mask_style",

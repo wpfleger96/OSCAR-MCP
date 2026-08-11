@@ -18,7 +18,7 @@ from snore.analysis.rx_tracker import (
     merge_changes_with_mask_log,
 )
 from snore.database.models import Day, Device, Session, Setting
-from snore.services.schemas import MaskLogEntryResponse
+from snore.services.schemas import MaskLogEntryResponse, RxSettingChange
 
 
 async def _create_device(
@@ -1254,3 +1254,34 @@ class TestMergeChangesWithMaskLog:
         assert len(result) == 1
         assert result[0].new_value == "ResMed AirFit P10"
         assert result[0].old_value is None
+
+    def test_same_date_device_change_sorts_before_mask_entry(self):
+        """On the same date, source="device_settings" sorts before source="mask_log"."""
+        device_change = RxSettingChange(
+            date=date(2025, 3, 2),
+            device_id=1,
+            device_name="ResMed AirSense 10",
+            key="pressure_fixed",
+            old_value="8.0",
+            new_value="9.0",
+        )
+        mask_entry = _make_mask_entry(
+            id=2,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 3, 2),
+        )
+        window_start = date(2025, 3, 1)
+        window_end = date(2025, 3, 31)
+
+        result = merge_changes_with_mask_log(
+            device_changes=[device_change],
+            mask_entries=[mask_entry],
+            start=window_start,
+            end=window_end,
+        )
+
+        assert len(result) == 2
+        assert result[0].source == "device_settings"
+        assert result[1].source == "mask_log"

@@ -314,7 +314,8 @@ class MaskEpochResponse(BaseModel):
     """A contiguous run of nights sharing one device-reported mask type.
 
     style is the normalized mask_log-style value (None when the device value is
-    unrecognized).
+    unrecognized).  device_id identifies the reporting device for multi-device
+    installs.
     """
 
     mask_type: str
@@ -322,6 +323,7 @@ class MaskEpochResponse(BaseModel):
     start_date: date
     end_date: date
     days_count: int
+    device_id: int | None
     device_name: str | None
 
 

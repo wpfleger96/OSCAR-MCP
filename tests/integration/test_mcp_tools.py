@@ -360,6 +360,41 @@ class TestGetSettingsChanges:
         assert ("mask_log", None) in sources
         assert result.total_changes == 2
 
+    async def test_device_change_after_end_excluded_old_value_correct(
+        self, async_db_session: AsyncSession, async_test_profile: Any
+    ) -> None:
+        """A device change dated after `end` is excluded; the in-range change's
+        old_value still reflects the pre-range baseline correctly."""
+        from snore.database.models import Setting
+        from snore.mcp.tools.changes import get_settings_changes
+
+        device = await _make_device(async_db_session, async_test_profile.id)
+        # Day 1: establish baseline (mode=CPAP) — no change yet
+        _, sess1 = await _make_day_session(async_db_session, device, date(2024, 3, 1))
+        async_db_session.add(Setting(session_id=sess1.id, key="mode", value="CPAP"))
+        # Day 3 (in range): mode changes CPAP → AutoSet
+        _, sess3 = await _make_day_session(async_db_session, device, date(2024, 3, 3))
+        async_db_session.add(Setting(session_id=sess3.id, key="mode", value="AutoSet"))
+        # Day 7 (after end): mode changes AutoSet → APAP — must be excluded
+        _, sess7 = await _make_day_session(async_db_session, device, date(2024, 3, 7))
+        async_db_session.add(Setting(session_id=sess7.id, key="mode", value="APAP"))
+        await async_db_session.flush()
+
+        # Query window ends on Mar 4 — Day 3 is included, Day 7 is not
+        result = await get_settings_changes(
+            async_db_session,
+            date(2024, 3, 1),
+            date(2024, 3, 4),
+            profile_id=async_test_profile.id,
+        )
+
+        device_changes = [c for c in result.changes if c.source == "device_settings"]
+        assert len(device_changes) == 1
+        change = device_changes[0]
+        assert change.date == date(2024, 3, 3)
+        assert change.old_value == "CPAP"
+        assert change.new_value == "AutoSet"
+
 
 # ---------------------------------------------------------------------------
 # get_nightly_summary

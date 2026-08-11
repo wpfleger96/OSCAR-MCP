@@ -12,6 +12,12 @@ from snore.services.schemas import MaskLogEntryResponse
 
 __all__ = ["MaskLogService"]
 
+# Columns update_entry may touch — guards setattr against ownership/identity
+# columns (id, profile_id) if a future caller passes an unvalidated mapping.
+_ALLOWED_UPDATE_KEYS = frozenset(
+    {"brand", "model", "style", "start_date", "size", "notes"}
+)
+
 
 class MaskLogService:
     """Service for CRUD on a profile's user-entered mask equipment log."""
@@ -89,15 +95,21 @@ class MaskLogService:
         """Apply the given field updates to an entry (PATCH semantics).
 
         ``updates`` maps column names to new values — pass only the fields the
-        caller explicitly set so omitted fields stay unchanged.
+        caller explicitly set so omitted fields stay unchanged.  Unknown keys
+        raise ValueError.  An empty mapping still fetches and returns the
+        entry without flushing.
 
         Raises NotFoundError if the entry doesn't exist or belongs to a
         different profile.
         """
         entry = await self._get_owned_entry(entry_id)
-        for key, value in updates.items():
-            setattr(entry, key, value)
-        await self.db_session.flush()
+        unknown = set(updates) - _ALLOWED_UPDATE_KEYS
+        if unknown:
+            raise ValueError(f"unexpected mask log fields: {sorted(unknown)}")
+        if updates:
+            for key, value in updates.items():
+                setattr(entry, key, value)
+            await self.db_session.flush()
         return MaskLogEntryResponse.model_validate(entry)
 
     async def get_active_entry_for_date(

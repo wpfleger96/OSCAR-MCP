@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Annotated, Literal, cast
 
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from snore.services.schemas import (
     DayDetail,
@@ -178,6 +185,7 @@ class BreathTrendsValidationRequest(BaseModel):
         return self
 
 
+# Style vocabulary must stay in sync: DB CHECKs (models.py, migrations 008/009), services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.
 MaskStyle = Literal["pillows", "nasal", "full_face"]
 
 _MASK_START_DATE_MIN = date(2000, 1, 1)
@@ -196,24 +204,45 @@ def _validate_plausible_start_date(value: date) -> date:
 PlausibleStartDate = Annotated[date, AfterValidator(_validate_plausible_start_date)]
 
 
-class MaskLogCreateRequest(BaseModel):
-    brand: str | None = Field(default=None, min_length=1, max_length=100)
-    model: str | None = Field(default=None, min_length=1, max_length=150)
+class _MaskLogFields(BaseModel):
+    """Shared optional field set for mask log request bodies."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    brand: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+        ]
+        | None
+    ) = None
+    model: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=150)
+        ]
+        | None
+    ) = None
     style: MaskStyle | None = None
     start_date: PlausibleStartDate | None = None
-    size: str | None = Field(default=None, min_length=1, max_length=50)
-    notes: str | None = Field(default=None, max_length=4000)
+    size: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)
+        ]
+        | None
+    ) = None
+    notes: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
+        ]
+        | None
+    ) = None
 
 
-class MaskLogUpdateRequest(BaseModel):
+class MaskLogCreateRequest(_MaskLogFields):
+    """POST body: all fields are optional — an entirely empty create is accepted."""
+
+
+class MaskLogUpdateRequest(_MaskLogFields):
     """PATCH body: omitted fields are unchanged; explicit null clears any field."""
-
-    brand: str | None = Field(default=None, min_length=1, max_length=100)
-    model: str | None = Field(default=None, min_length=1, max_length=150)
-    style: MaskStyle | None = None
-    start_date: PlausibleStartDate | None = None
-    size: str | None = Field(default=None, min_length=1, max_length=50)
-    notes: str | None = Field(default=None, max_length=4000)
 
 
 class AnalysisJobStatus(BaseModel):

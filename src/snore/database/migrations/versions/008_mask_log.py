@@ -7,6 +7,9 @@ notes) so mask changes can be correlated with therapy outcomes.
 migration creates the table on both fresh and existing installs; the
 table-exists guard makes it idempotent.
 
+Migration 009 immediately relaxes the NOT NULL identity fields introduced here
+(brand, model, style, start_date) — the strict schema never shipped in a release.
+
 Revision ID: 008_mask_log
 Revises: 007_str_extras
 """
@@ -49,6 +52,7 @@ def upgrade() -> None:
         sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
+        # Style vocabulary: keep in sync with api/schemas.py MaskStyle, models.py CHECKs, services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.
         sa.CheckConstraint(
             "style IN ('pillows','nasal','full_face')", name="chk_mask_style"
         ),

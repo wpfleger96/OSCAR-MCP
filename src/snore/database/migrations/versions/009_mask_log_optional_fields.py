@@ -59,6 +59,7 @@ def upgrade() -> None:
         batch_op.drop_constraint("chk_mask_brand", type_="check")
         batch_op.drop_constraint("chk_mask_model", type_="check")
 
+        # Style vocabulary: keep in sync with api/schemas.py MaskStyle, models.py CHECKs, services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.
         batch_op.create_check_constraint("chk_mask_style", _STYLE_NEW)
         batch_op.create_check_constraint("chk_mask_brand", _BRAND_NEW)
         batch_op.create_check_constraint("chk_mask_model", _MODEL_NEW)

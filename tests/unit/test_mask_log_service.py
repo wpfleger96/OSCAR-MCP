@@ -2,6 +2,8 @@
 
 from datetime import date
 
+import pytest
+
 from snore.database.models import MaskLogEntry
 from snore.services.mask_log_service import MaskLogService
 
@@ -345,3 +347,47 @@ class TestListEntriesOrdering:
         assert len(results) == 2
         assert results[0].id == first_null.id
         assert results[1].id == second_null.id
+
+
+class TestUpdateEntryGuards:
+    """Tests for MaskLogService.update_entry() validation guards."""
+
+    async def test_unknown_key_raises_value_error(
+        self, async_db_session, async_test_profile
+    ):
+        """Passing an unrecognised field key raises ValueError mentioning the offending field."""
+        entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="ResMed",
+            model="AirFit P10",
+            style="pillows",
+            start_date=date(2025, 6, 1),
+        )
+        async_db_session.add(entry)
+        await async_db_session.flush()
+
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        with pytest.raises(ValueError, match="unexpected mask log fields"):
+            await service.update_entry(entry.id, {"profile_id": "999"})
+
+    async def test_empty_mapping_returns_entry_unchanged(
+        self, async_db_session, async_test_profile
+    ):
+        """An empty updates mapping returns the entry with all fields unchanged."""
+        entry = MaskLogEntry(
+            profile_id=async_test_profile.id,
+            brand="Philips",
+            model="DreamWear",
+            style="nasal",
+            start_date=date(2025, 3, 15),
+        )
+        async_db_session.add(entry)
+        await async_db_session.flush()
+
+        service = MaskLogService(async_db_session, async_test_profile.id)
+        result = await service.update_entry(entry.id, {})
+
+        assert result.brand == "Philips"
+        assert result.model == "DreamWear"
+        assert result.style == "nasal"
+        assert result.start_date == date(2025, 3, 15)

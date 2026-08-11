@@ -236,7 +236,9 @@ class RxTracker:
             worst_index=worst_index,
         )
 
-    async def get_changes(self, db_session: AsyncSession) -> RxChangesResponse:
+    async def get_changes(
+        self, db_session: AsyncSession, end: date | None = None
+    ) -> RxChangesResponse:
         """Return a log of every per-key settings change across all devices.
 
         Intentionally diffs ALL persisted settings keys — including comfort
@@ -244,8 +246,15 @@ class RxTracker:
         prescription-defining RX_KEYS.  This gives a complete audit trail of
         every setting the clinician or patient touched.  Do not narrow this to
         _get_day_period_settings; use _get_day_settings (no key filter).
+
+        end: when supplied, device history is loaded only up to this date (Days
+        with date > end are excluded at the SQL level).  The end bound is safe
+        because later days cannot affect earlier diffs.  A start bound must NOT
+        be pushed into SQL — change detection diffs consecutive days-with-settings
+        and the first in-window change needs the last pre-window value;
+        start-windowing stays in Python.
         """
-        return self._compute_changes(await self._days_by_device(db_session))
+        return self._compute_changes(await self._days_by_device(db_session, end=end))
 
     async def get_all(
         self, db_session: AsyncSession, min_days: int = 7
@@ -335,31 +344,31 @@ class RxTracker:
         return RxChangesResponse(changes=all_changes)
 
     async def _days_by_device(
-        self, db_session: AsyncSession
+        self, db_session: AsyncSession, end: date | None = None
     ) -> list[tuple[int, str, list[Day]]]:
         """Query all days grouped by device, ordered by (device_id, date).
+
+        When end is supplied, only days with date <= end are included at the
+        SQL level.  Callers that need the full history (get_all, _compute_periods)
+        omit end and receive all days unchanged.
 
         Returns a list of (device_id, device_name, days) tuples, one per
         device, preserving the query order.  Devices whose Day rows have no
         matching Device row (device is None) are skipped with a warning.
         """
-        days = (
-            (
-                await db_session.execute(
-                    select(Day)
-                    .join(Device, Day.device_id == Device.id)
-                    .where(Device.profile_id == self.profile_id)
-                    .order_by(Day.device_id, Day.date)
-                    .options(
-                        joinedload(Day.sessions).joinedload(SessionModel.settings),
-                        joinedload(Day.device),
-                    )
-                )
+        q = (
+            select(Day)
+            .join(Device, Day.device_id == Device.id)
+            .where(Device.profile_id == self.profile_id)
+            .order_by(Day.device_id, Day.date)
+            .options(
+                joinedload(Day.sessions).joinedload(SessionModel.settings),
+                joinedload(Day.device),
             )
-            .unique()
-            .scalars()
-            .all()
         )
+        if end is not None:
+            q = q.where(Day.date <= end)
+        days = (await db_session.execute(q)).unique().scalars().all()
 
         result: list[tuple[int, str, list[Day]]] = []
         for device_id, device_days_iter in itertools.groupby(
