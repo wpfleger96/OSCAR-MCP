@@ -25,8 +25,7 @@
                         </SelectContent>
                     </Select>
                     <InfoHint
-                        v-if="WAVEFORM_GLOSSARY_MAP[chart.type as WaveformType]"
-                        :glossary-key="WAVEFORM_GLOSSARY_MAP[chart.type as WaveformType]!"
+                        :glossary-key="WAVEFORM_GLOSSARY_MAP[chart.type as WaveformType]"
                     />
                 </div>
                 <Button

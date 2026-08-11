@@ -163,7 +163,7 @@ export const WAVEFORM_LABELS: Record<string, string> = {
     trigger_cycle: 'Trigger/Cycle (raw codes)',
 }
 
-export const WAVEFORM_GLOSSARY_MAP: Partial<Record<WaveformType, string>> = {
+export const WAVEFORM_GLOSSARY_MAP: Record<WaveformType, string> = {
     flow: 'flow',
     pressure: 'pressure',
     therapy_pressure: 'therapy_pressure',
