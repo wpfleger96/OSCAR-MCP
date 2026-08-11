@@ -565,7 +565,7 @@ class TestDbResetVacuumMarker:
         marker = tmp_path / "vacuum.pending"
 
         with (
-            _patch_target(temp_db),
+            _patch_target(temp_db, client),
             patch("snore.api.routers.db.DEFAULT_VACUUM_PENDING_MARKER", marker),
         ):
             response = client.post("/api/v1/db/reset", json={"include_accounts": False})
@@ -607,7 +607,7 @@ class TestDbResetVacuumMarker:
             raise OSError("disk error")
 
         with (
-            _patch_target(temp_db),
+            _patch_target(temp_db, client),
             patch("snore.api.routers.db._raw_root", return_value=raw_root),
             patch("snore.api.routers.db.shutil.rmtree", side_effect=_rmtree_raise),
         ):
