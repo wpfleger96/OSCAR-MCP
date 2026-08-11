@@ -367,6 +367,18 @@ def cancel_job(job_id: str) -> bool:
     return result
 
 
+def has_running_jobs() -> bool:
+    """Return True if any analysis job is currently in the RUNNING state.
+
+    Used by the /health/busy endpoint to gate watchtower container replacement.
+    QUEUED jobs are excluded: they have no in-progress data writes yet, so
+    interrupting them is safe.  The sessions remain committed in the database
+    and analysis re-triggers on the next import or manual batch run.
+    """
+    with _lock:
+        return any(j.state == AnalysisJobState.RUNNING for j in _all_jobs.values())
+
+
 # Reaper pattern: reaped inline inside the worker loop — after each job completes
 # and on idle timeouts.  The analysis store is accessed only by the worker thread
 # and a low-frequency list endpoint, so the eager-reap-on-read approach used by

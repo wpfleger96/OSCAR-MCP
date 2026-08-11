@@ -632,6 +632,16 @@ def _check_and_reserve(owner_user_id: int | None) -> bool:
         return True
 
 
+def has_active_jobs() -> bool:
+    """Return True if any import job is in an active (non-terminal) state.
+
+    Active states are PENDING_UPLOAD, PENDING, and RUNNING.  Used by the
+    /health/busy endpoint to gate watchtower container replacement.
+    """
+    with _lock:
+        return any(j.state in ACTIVE_STATES for j in _jobs.values())
+
+
 def reserve_slot(owner_user_id: int | None) -> ImportJob | None:
     """Atomically check caps and create a PENDING_UPLOAD reservation.
 
