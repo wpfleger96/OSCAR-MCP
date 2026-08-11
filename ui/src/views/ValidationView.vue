@@ -114,9 +114,15 @@
                             <TableHead class="whitespace-nowrap"
                                 >Apnea F1 <InfoHint glossary-key="f1"
                             /></TableHead>
-                            <TableHead>Hypopnea Sens</TableHead>
-                            <TableHead>Hypopnea Prec</TableHead>
-                            <TableHead>Hypopnea F1</TableHead>
+                            <TableHead class="whitespace-nowrap"
+                                >Hypopnea Sens <InfoHint glossary-key="sensitivity"
+                            /></TableHead>
+                            <TableHead class="whitespace-nowrap"
+                                >Hypopnea Prec <InfoHint glossary-key="precision"
+                            /></TableHead>
+                            <TableHead class="whitespace-nowrap"
+                                >Hypopnea F1 <InfoHint glossary-key="f1"
+                            /></TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>

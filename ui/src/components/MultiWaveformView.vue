@@ -6,19 +6,29 @@
             class="border border-border rounded-lg p-3 bg-card"
         >
             <div class="flex items-center justify-between mb-2">
-                <Select
-                    :model-value="chart.type"
-                    @update:model-value="(v) => updateChartType(idx, v as string)"
-                >
-                    <SelectTrigger class="w-[180px] h-8 text-sm">
-                        <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                        <SelectItem v-for="opt in typeOptions" :key="opt.value" :value="opt.value">
-                            {{ opt.label }}
-                        </SelectItem>
-                    </SelectContent>
-                </Select>
+                <div class="flex items-center gap-2">
+                    <Select
+                        :model-value="chart.type"
+                        @update:model-value="(v) => updateChartType(idx, v as string)"
+                    >
+                        <SelectTrigger class="w-[180px] h-8 text-sm">
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectItem
+                                v-for="opt in typeOptions"
+                                :key="opt.value"
+                                :value="opt.value"
+                            >
+                                {{ opt.label }}
+                            </SelectItem>
+                        </SelectContent>
+                    </Select>
+                    <InfoHint
+                        v-if="WAVEFORM_GLOSSARY_MAP[chart.type as WaveformType]"
+                        :glossary-key="WAVEFORM_GLOSSARY_MAP[chart.type as WaveformType]!"
+                    />
+                </div>
                 <Button
                     v-if="charts.length > 1"
                     variant="ghost"
@@ -72,9 +82,10 @@ import {
 } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
 import WaveformChart from './WaveformChart.vue'
+import InfoHint from '@/components/InfoHint.vue'
 import { getWaveformData } from '@/api/waveforms'
-import { WAVEFORM_LABELS } from '@/types'
-import type { WaveformDataResponse, EventItem } from '@/types'
+import { WAVEFORM_LABELS, WAVEFORM_GLOSSARY_MAP } from '@/types'
+import type { WaveformDataResponse, EventItem, WaveformType } from '@/types'
 
 const props = defineProps<{
     sessionId: number
