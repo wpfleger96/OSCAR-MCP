@@ -1,18 +1,21 @@
 <template>
     <div class="waveform-toolbar">
-        <Select
-            :model-value="modelValue"
-            @update:model-value="(v) => $emit('update:modelValue', v as string)"
-        >
-            <SelectTrigger class="w-[180px] h-8 text-sm">
-                <SelectValue placeholder="Waveform type" />
-            </SelectTrigger>
-            <SelectContent>
-                <SelectItem v-for="opt in typeOptions" :key="opt.value" :value="opt.value">
-                    {{ opt.label }}
-                </SelectItem>
-            </SelectContent>
-        </Select>
+        <div class="flex items-center gap-2">
+            <Select
+                :model-value="modelValue"
+                @update:model-value="(v) => $emit('update:modelValue', v as string)"
+            >
+                <SelectTrigger class="w-[180px] h-8 text-sm">
+                    <SelectValue placeholder="Waveform type" />
+                </SelectTrigger>
+                <SelectContent>
+                    <SelectItem v-for="opt in typeOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                    </SelectItem>
+                </SelectContent>
+            </Select>
+            <InfoHint v-if="glossaryKey" :glossary-key="glossaryKey" />
+        </div>
         <div class="toolbar-right">
             <Button
                 v-if="multiWaveform"
@@ -54,7 +57,9 @@ import {
 } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
 import { Toggle } from '@/components/ui/toggle'
-import { WAVEFORM_LABELS } from '@/types'
+import InfoHint from '@/components/InfoHint.vue'
+import { WAVEFORM_LABELS, WAVEFORM_GLOSSARY_MAP } from '@/types'
+import type { WaveformType } from '@/types'
 
 const props = defineProps<{
     availableTypes: string[]
@@ -76,6 +81,8 @@ const typeOptions = computed(() =>
         label: WAVEFORM_LABELS[t] ?? t,
     })),
 )
+
+const glossaryKey = computed(() => WAVEFORM_GLOSSARY_MAP[props.modelValue as WaveformType] ?? null)
 </script>
 
 <style scoped>

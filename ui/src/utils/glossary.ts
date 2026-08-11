@@ -295,4 +295,41 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         label: 'Humidifier Temperature',
         short: 'Median humidifier chamber temperature, in °C.',
     },
+
+    // ── Blower-side flow & pressure (STR percentiles) ─────────────────────
+    blow_press: {
+        label: 'Blower Pressure',
+        short: 'Pressure measured at the blower output, upstream of the humidifier and tubing, in cmH₂O.',
+        long: 'Differs from mask pressure: blower pressure is higher because it has not yet dropped across the hose and humidifier. Percentile variants summarize the nightly distribution.',
+    },
+    blow_flow: {
+        label: 'Blower Flow',
+        short: 'Airflow measured at the blower output, in L/min. Includes both patient flow and intentional leak.',
+    },
+
+    // ── Climate & humidifier power ────────────────────────────────────────
+    htube_temp: {
+        label: 'Heated Tube Temperature',
+        short: 'Median heated-tube (ClimateLine) temperature, in °C.',
+    },
+    htube_pow: {
+        label: 'Heated Tube Power',
+        short: 'Median power delivered to the heated tube, in watts.',
+    },
+    hum_pow: {
+        label: 'Humidifier Power',
+        short: 'Median power delivered to the humidifier heater plate, in watts.',
+    },
+
+    // ── Primary waveform channels ─────────────────────────────────────────
+    flow: {
+        label: 'Flow Rate',
+        short: 'Bidirectional inspiratory/expiratory airflow in L/min, sampled at 25 Hz.',
+        long: 'Positive values are inspiratory; negative values are expiratory. This is the primary signal used for breath detection and event scoring.',
+    },
+    therapy_pressure: {
+        label: 'Therapy Pressure',
+        short: 'Therapy-algorithm target pressure in cmH₂O, reported as a 0.5 Hz duty-cycle average.',
+        long: "Distinct from the mask-side 'Pressure' channel: this is the algorithm's commanded set point rather than the measured delivered pressure.",
+    },
 }
