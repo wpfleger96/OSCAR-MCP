@@ -324,3 +324,96 @@ class TestOverlapGuardReplacement:
         assert isinstance(extra_day_ids, set)
         # In this case both sessions land on the same day (day 10), so no extra
         assert extra_day_ids == set()
+
+    async def test_force_with_partial_overlap_skips_and_preserves_existing(
+        self, async_db_session, importer, device, caplog
+    ):
+        """Critical safety: force-import A' with same ID as A but partial overlap
+        with B must not import A' AND must leave A untouched.
+
+        Before the fix, the force path deleted A before the overlap check ran;
+        when the guard returned False (partial overlap with B), A was gone but
+        A' was never inserted — silent data loss.
+        """
+        # A: 01:00–07:00
+        await _seed_session(
+            async_db_session, device, "20260112_010000", _dt(12, 1), _dt(12, 7)
+        )
+        # B: 07:30–09:00  (does NOT overlap A; adjacent gap at 07:00–07:30)
+        await _seed_session(
+            async_db_session, device, "20260112_073000", _dt(12, 7, 30), _dt(12, 9)
+        )
+        await async_db_session.flush()
+
+        # A': same device_session_id as A, wider range 01:00–08:00.
+        # Covers A entirely but only partially overlaps B (08:00 < 09:00).
+        incoming = _make_unified(_SERIAL, "20260112_010000", _dt(12, 1), _dt(12, 8))
+
+        with caplog.at_level(logging.WARNING, logger="snore.database.importers"):
+            async with async_db_session.begin_nested():
+                (
+                    was_imported,
+                    day_id,
+                    new_id,
+                    extra_day_ids,
+                ) = await importer._import_single_session(
+                    async_db_session, incoming, force=True
+                )
+
+        # A' must NOT be imported (partial overlap with B)
+        assert was_imported is False
+        assert day_id is None
+        assert new_id is None
+        # A must still exist — nothing was deleted
+        assert await _session_exists(async_db_session, "20260112_010000")
+        assert await _count_sessions(async_db_session, device.id) == 2
+        assert "Overlap guard: skipping" in caplog.text
+
+    async def test_replacement_deletes_orphan_day_row(
+        self, async_db_session, importer, device
+    ):
+        """When a replaced session is the sole occupant of its Day, the Day row
+        is deleted after re-aggregation so it doesn't appear in day listings."""
+        from snore.database.importers import SessionImporter  # noqa: PLC0415
+
+        # Seed a session on day 15 as the ONLY session for that day.
+        await _seed_session(
+            async_db_session, device, "20260115_010000", _dt(15, 1), _dt(15, 7)
+        )
+        await async_db_session.flush()
+
+        # Wider session that fully covers the existing one and belongs to the same day.
+        incoming = _make_unified(
+            _SERIAL, "20260115_merged", _dt(15, 0, 30), _dt(15, 7, 30)
+        )
+
+        # import_sessions_batch owns day re-aggregation and orphan cleanup.
+        full_importer = SessionImporter(profile_id=importer.profile_id)
+        imported, skipped, failed, _ = await full_importer.import_sessions_batch(
+            [incoming], db=async_db_session
+        )
+
+        assert imported == 1
+        assert skipped == 0
+
+        # The old session must be gone, the new one present.
+        assert not await _session_exists(async_db_session, "20260115_010000")
+        assert await _session_exists(async_db_session, "20260115_merged")
+
+        # The Day row must still exist (the new session occupies it).
+        from sqlalchemy import select as sa_select  # noqa: PLC0415
+
+        from snore.database.models import Day  # noqa: PLC0415
+
+        days = (
+            (
+                await async_db_session.execute(
+                    sa_select(Day).where(Day.device_id == device.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # Exactly one Day row — the original orphan was not left behind.
+        assert len(days) == 1
+        assert days[0].session_count == 1

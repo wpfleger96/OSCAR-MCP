@@ -278,9 +278,10 @@ class BatchValidator:
             select(
                 models.Session.device_id,
                 models.Day.date,
-                func.group_concat(models.Session.import_source.distinct()).label(
-                    "sources"
-                ),
+                # SQLite group_concat(DISTINCT col, sep) is unsupported; use the
+                # single-arg form and deduplicate the comma-separated result in
+                # Python.  import_source values never contain commas.
+                func.group_concat(models.Session.import_source).label("sources"),
             )
             .join(models.Day, models.Session.day_id == models.Day.id)
             .where(
@@ -296,7 +297,7 @@ class BatchValidator:
             CrossParserSameDay(
                 device_id=row.device_id,
                 day_date=row.date,
-                import_sources=sorted(s for s in row.sources.split(",") if s),
+                import_sources=sorted({s for s in row.sources.split(",") if s}),
             )
             for row in cross_rows
         ]

@@ -82,6 +82,9 @@ def validate(
     if db and not Path(db).expanduser().exists():
         raise click.ClickException(f"Database not found: {db}")
 
+    if device_id is not None and not integrity:
+        raise click.UsageError("--device-id requires --integrity")
+
     if integrity:
         asyncio.run(_run_integrity(db, actor_user, actor_profile, device_id))
         return
@@ -293,5 +296,11 @@ async def _run_integrity(
 
     print_footer()
 
-    if report.total_issues > 0:
+    # Cross-parser same-day is surfaced as a warning, not an error: having two
+    # parsers record the same night is unusual but not corrupt.  Only hard
+    # structural issues (NULL day_id, overlapping session pairs) exit nonzero.
+    hard_issue_count = len(report.null_day_id_sessions) + len(
+        report.overlapping_session_pairs
+    )
+    if hard_issue_count > 0:
         sys.exit(1)
