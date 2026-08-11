@@ -123,7 +123,12 @@
                                 :to="{ name: 'session-detail', params: { id: session.id } }"
                                 class="text-primary no-underline hover:underline"
                             >
-                                {{ formatDateTime(session.start_time) }}
+                                <span class="block">{{
+                                    formatDateWithWeekday(session.therapy_day)
+                                }}</span>
+                                <span class="block text-xs text-muted-foreground">{{
+                                    formatDateTime(session.start_time)
+                                }}</span>
                             </RouterLink>
                         </TableCell>
                         <TableCell>{{ session.duration_hours.toFixed(1) }}h</TableCell>
@@ -259,7 +264,7 @@ import {
     getBulkDeletePreview,
 } from '@/api/sessions'
 import { getDevices } from '@/api/devices'
-import { ahiClass, formatDateTime } from '@/utils/formatting'
+import { ahiClass, formatDateTime, formatDateWithWeekday } from '@/utils/formatting'
 import type { SessionListItem, DeletePreview, DeviceInfo } from '@/types'
 import { useAuth } from '@/composables/useAuth'
 import { useAvailableDates } from '@/composables/useAvailableDates'
@@ -384,7 +389,7 @@ async function toggleEnabled(session: SessionListItem): Promise<void> {
 
 async function confirmDelete(session: SessionListItem): Promise<void> {
     deleteTargetId.value = session.id
-    deleteMessage.value = `Delete session from ${formatDateTime(session.start_time)}? This cannot be undone.`
+    deleteMessage.value = `Delete session for ${formatDateWithWeekday(session.therapy_day)} (started ${formatDateTime(session.start_time)})? This cannot be undone.`
     deleteDialogVisible.value = true
     deletePreviewLoading.value = true
     deletePreview.value = null

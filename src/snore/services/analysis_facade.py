@@ -197,10 +197,9 @@ class AnalysisFacade:
         for session in sessions:
             analysis_id = latest_analysis.get(session.id)
 
-            # day is loaded via joinedload; use start_time.date() as fallback.
-            session_date = (
-                session.day.date if session.day else session.start_time.date()
-            )
+            # day is loaded via joinedload; _status_select inner-joins Day so
+            # session.day is always present here.
+            session_date = session.day.date
 
             results.append(
                 AnalysisListItem(

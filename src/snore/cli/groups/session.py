@@ -98,7 +98,7 @@ def session_list(
                 rows.append(
                     (
                         str(sess.id),
-                        f"{sess.start_time:%Y-%m-%d}",
+                        f"{sess.therapy_day}",
                         f"{sess.start_time:%H:%M:%S}",
                         f"{sess.duration_hours:>6.1f}h",
                         device_name,
@@ -110,7 +110,7 @@ def session_list(
             print_table(
                 [
                     ("ID", 5),
-                    ("Date", 12),
+                    ("Therapy Day", 12),
                     ("Time", 8),
                     ("Duration", 10),
                     ("Device", 30),
@@ -236,7 +236,7 @@ def session_delete(
             print_table(
                 [
                     ("ID", 5),
-                    ("Date", 12),
+                    ("Therapy Day", 12),
                     ("Time", 8),
                     ("Duration", 10),
                     ("Device", 30),
@@ -245,7 +245,7 @@ def session_delete(
                 (
                     (
                         str(sess.id),
-                        f"{sess.start_time:%Y-%m-%d}",
+                        f"{sess.therapy_day}",
                         f"{sess.start_time:%H:%M:%S}",
                         f"{sess.duration_hours:>6.1f}h",
                         f"{sess.manufacturer} {sess.model}",
