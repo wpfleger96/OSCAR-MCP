@@ -42,6 +42,10 @@ COPY --from=python-builder /app/pyproject.toml ./
 # for an editable install where __file__ == /app/src/snore/api/app.py.
 COPY --from=ui-builder /app/ui/dist ./ui/dist/
 
+# Lifecycle hook — named explicitly so dev-only scripts (export_openapi.py,
+# post-screenshots.sh) are not shipped into the prod image.
+COPY --chmod=755 scripts/watchtower-pre-update.sh ./scripts/watchtower-pre-update.sh
+
 # Non-root user; HOME=/data is load-bearing — the app resolves all state
 # ($HOME/.snore/snore.db, $HOME/.snore/raw/, $HOME/.snore/logs/) relative to
 # $HOME.  Changing HOME requires a matching change to the volume mount path.

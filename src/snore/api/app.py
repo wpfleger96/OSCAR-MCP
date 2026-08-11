@@ -799,6 +799,31 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    # Watchtower pre-update gate — excluded from schema for the same reason.
+    # Unauthenticated: the endpoint exposes no user data, only a boolean signal
+    # read by the lifecycle hook running inside the same container.  Reasons are
+    # computed internally and logged at debug level for operator diagnostics but
+    # not included in the response — the hook only reads `busy`, and the reasons
+    # categories would leak activity timing on a tunnel-exposed endpoint.
+    @app.get("/health/busy", include_in_schema=False)
+    async def health_busy() -> dict[str, bool]:
+        from snore.api import analysis_jobs as _analysis_jobs  # noqa: PLC0415
+        from snore.api.deps import is_reset_locked  # noqa: PLC0415
+        from snore.api.import_jobs import has_active_jobs  # noqa: PLC0415
+
+        reasons: list[str] = []
+        # Import jobs gate on PENDING_UPLOAD/PENDING/RUNNING — all three states
+        # represent in-flight work.  Analysis gates on RUNNING only: QUEUED jobs
+        # have no in-progress data writes and are safe to interrupt.
+        if has_active_jobs():
+            reasons.append("imports")
+        if _analysis_jobs.has_running_jobs():
+            reasons.append("analysis")
+        if is_reset_locked():
+            reasons.append("reset")
+        logger.debug("health/busy: %s", reasons)
+        return {"busy": bool(reasons)}
+
     _mount_spa(app)
 
     # Mount the embedded MCP sub-app last — after all API and SPA routes so

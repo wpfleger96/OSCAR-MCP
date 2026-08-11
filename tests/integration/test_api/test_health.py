@@ -1,4 +1,4 @@
-"""Integration tests for the /health endpoint and SPA fallback serving."""
+"""Integration tests for the /health and /health/busy endpoints and SPA fallback serving."""
 
 from __future__ import annotations
 
@@ -38,6 +38,136 @@ class TestHealthEndpoint:
         client = TestClient(app, raise_server_exceptions=True)
         schema = client.get("/openapi.json").json()
         assert "/health" not in schema.get("paths", {})
+
+
+class TestHealthBusyEndpoint:
+    """Tests for the GET /health/busy watchtower pre-update gate endpoint."""
+
+    def _make_client(self) -> TestClient:
+        from snore.api.app import create_app
+
+        app = create_app()
+        # No 'with' — skips lifespan; no DB needed for /health/busy.
+        return TestClient(app, raise_server_exceptions=True)
+
+    def test_health_busy_idle_returns_not_busy(self) -> None:
+        """Baseline: no active jobs → {"busy": false}."""
+        resp = self._make_client().get("/health/busy")
+        assert resp.status_code == 200
+        assert resp.json() == {"busy": False}
+
+    def test_health_busy_with_active_import_job(self) -> None:
+        """A PENDING_UPLOAD import job → busy=true."""
+        import snore.api.import_jobs as ij
+
+        # reserve_slot() creates a PENDING_UPLOAD job (active state).
+        # The reset_import_job_store autouse fixture cleans this up after the test.
+        job = ij.reserve_slot(None)
+        assert job is not None
+
+        resp = self._make_client().get("/health/busy")
+        assert resp.status_code == 200
+        assert resp.json() == {"busy": True}
+
+    def test_health_busy_with_held_reset_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Held reset lock → busy=true."""
+        import snore.api.deps as deps
+
+        # Monkeypatch the accessor so the endpoint sees the lock as held
+        # without needing a live asyncio event loop in this sync test.
+        monkeypatch.setattr(deps, "is_reset_locked", lambda: True)
+
+        resp = self._make_client().get("/health/busy")
+        assert resp.status_code == 200
+        assert resp.json() == {"busy": True}
+
+    def test_health_busy_queued_analysis_job_is_not_busy(self) -> None:
+        """A QUEUED (not yet started) analysis job → busy=false.
+
+        QUEUED jobs have no in-progress data writes; interrupting them is safe
+        because sessions are already committed and analysis re-triggers on the
+        next import or manual batch run.
+        """
+        import snore.api.analysis_jobs as aj
+
+        job = aj.enqueue(
+            profile_id=1, session_ids=[1], source=aj.AnalysisJobSource.BATCH
+        )
+        assert job is not None
+        # Deliberately do NOT call try_start() — job stays QUEUED.
+
+        try:
+            resp = self._make_client().get("/health/busy")
+            assert resp.status_code == 200
+            assert resp.json() == {"busy": False}
+        finally:
+            aj._all_jobs.clear()
+            aj._queue.clear()
+
+    def test_health_busy_with_running_analysis_job(self) -> None:
+        """A RUNNING analysis job → busy=true."""
+        import snore.api.analysis_jobs as aj
+
+        job = aj.enqueue(
+            profile_id=1, session_ids=[1], source=aj.AnalysisJobSource.BATCH
+        )
+        assert job is not None
+        started = job.try_start()  # QUEUED → RUNNING (no real worker started)
+        assert started
+
+        try:
+            resp = self._make_client().get("/health/busy")
+            assert resp.status_code == 200
+            assert resp.json() == {"busy": True}
+        finally:
+            # Clean up: mark finished so the job doesn't leak into other tests.
+            job.finish(succeeded=False, error_message="test cleanup")
+            aj._all_jobs.clear()
+            aj._queue.clear()
+
+    def test_health_busy_multiple_signals(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Active import + running analysis simultaneously → busy=true.
+
+        Also verifies the debug log contains the reason tokens so operators
+        can diagnose why a deploy was deferred via container logs.
+        """
+        import logging
+
+        import snore.api.analysis_jobs as aj
+        import snore.api.import_jobs as ij
+
+        import_job = ij.reserve_slot(None)
+        assert import_job is not None
+
+        analysis_job = aj.enqueue(
+            profile_id=1, session_ids=[1], source=aj.AnalysisJobSource.BATCH
+        )
+        assert analysis_job is not None
+        analysis_job.try_start()
+
+        try:
+            with caplog.at_level(logging.DEBUG, logger="snore.api.app"):
+                resp = self._make_client().get("/health/busy")
+            assert resp.status_code == 200
+            assert resp.json() == {"busy": True}
+            # Reasons are internal-only; verify they appear in the debug log.
+            assert any(
+                "imports" in r.message and "analysis" in r.message
+                for r in caplog.records
+            )
+        finally:
+            analysis_job.finish(succeeded=False, error_message="test cleanup")
+            aj._all_jobs.clear()
+            aj._queue.clear()
+
+    def test_health_busy_absent_from_openapi_schema(self) -> None:
+        """/health/busy must not appear in the OpenAPI schema (include_in_schema=False)."""
+        resp = self._make_client().get("/openapi.json")
+        assert "/health/busy" not in resp.json().get("paths", {})
 
 
 class TestSPAFallback:

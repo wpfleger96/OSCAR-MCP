@@ -95,6 +95,14 @@ ActorDep = Annotated[ActorContext, Depends(get_actor)]
 _reset_lock = asyncio.Lock()
 
 
+def is_reset_locked() -> bool:
+    """Return True if the destructive-operation reset lock is currently held.
+
+    Used by the /health/busy endpoint to gate watchtower container replacement.
+    """
+    return _reset_lock.locked()
+
+
 async def require_reset_lock(_actor: ActorDep) -> AsyncGenerator[None]:
     """Serialize destructive DB operations (admin reset, per-user delete-all).
 
