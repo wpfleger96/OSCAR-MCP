@@ -115,9 +115,9 @@
         </div>
 
         <!-- Sleep stage hypnogram -->
-        <div v-if="sleepSamples.length" class="chart-section">
+        <div v-if="samples.length" class="chart-section">
             <h2 class="section-heading">Sleep Stages</h2>
-            <SleepStageChart :samples="sleepSamples" :height="220" />
+            <SleepStageChart :samples="samples" :height="220" />
         </div>
 
         <div class="footer-links">
@@ -130,14 +130,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, shallowRef, watch } from 'vue'
+import { onMounted, ref, shallowRef, watch } from 'vue'
 import { isAxiosError } from 'axios'
 import { ArrowLeft, ArrowRight, Loader2 } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import SleepStageChart from '@/components/SleepStageChart.vue'
 import { getHealthNight, getHealthNightSamples } from '@/api/health'
-import { formatDateWithWeekday } from '@/utils/formatting'
+import { formatDateWithWeekday, secToHours } from '@/utils/formatting'
 import type { HealthNightDetailRead, HealthSampleRead } from '@/types'
 
 const props = defineProps<{ nightDate: string }>()
@@ -147,19 +147,6 @@ const error = ref<string | null>(null)
 const notFound = ref(false)
 const night = shallowRef<HealthNightDetailRead | null>(null)
 const samples = shallowRef<HealthSampleRead[]>([])
-
-// Only sleep-stage samples are meaningful for the hypnogram
-const SLEEP_STAGE_VALUES = new Set([
-    'InBed',
-    'Awake',
-    'AsleepCore',
-    'AsleepDeep',
-    'AsleepREM',
-    'AsleepUnspecified',
-])
-const sleepSamples = computed(() =>
-    samples.value.filter((s) => s.value_text && SLEEP_STAGE_VALUES.has(s.value_text)),
-)
 
 async function loadData(): Promise<void> {
     loading.value = true
@@ -181,10 +168,6 @@ async function loadData(): Promise<void> {
     } finally {
         loading.value = false
     }
-}
-
-function secToHours(sec: number | null | undefined): number | null {
-    return sec != null ? sec / 3600 : null
 }
 
 onMounted(() => void loadData())

@@ -1,5 +1,5 @@
 <template>
-    <div v-if="!props.samples.length" class="chart-empty">No sleep stage data to display.</div>
+    <div v-if="!knownSamples.length" class="chart-empty">No sleep stage data to display.</div>
     <template v-else>
         <div ref="containerRef" class="sleep-stage-chart" />
         <div class="legend">
@@ -37,6 +37,12 @@ const STAGE_LANE: Record<string, number> = {
     AsleepDeep: 3,
     AsleepREM: 4,
 }
+
+// Single source of truth for stage filtering: drops samples whose value_text maps
+// to no known lane so they cannot distort x-range or draw spurious bars.
+const knownSamples = computed(() =>
+    props.samples.filter((s) => s.value_text != null && STAGE_LANE[s.value_text] !== undefined),
+)
 
 const LANE_LABELS: Record<number, string> = {
     0: 'In Bed',
@@ -100,20 +106,20 @@ const legendItems = computed(() => {
 })
 
 function createChart(): void {
-    if (!containerRef.value || !props.samples.length) return
+    if (!containerRef.value || !knownSamples.value.length) return
     chart?.destroy()
 
     const stageColors = getColors()
     const axisStroke = isDark.value ? '#a1a1aa' : '#888'
     const gridStroke = isDark.value ? '#27272a' : '#eee'
 
-    // Snapshot samples and pre-compute timestamps to avoid re-parsing in the draw hook
-    const snapSamples = [...props.samples]
+    // Snapshot filtered samples and pre-compute timestamps to avoid re-parsing in the draw hook
+    const snapSamples = [...knownSamples.value]
     const startSec = snapSamples.map((s) => parseLocalDateTime(s.start_time).getTime() / 1000)
     const endSec = snapSamples.map((s) => parseLocalDateTime(s.end_time).getTime() / 1000)
 
-    const xMin = Math.min(...startSec)
-    const xMax = Math.max(...endSec)
+    const xMin = startSec.reduce((a, b) => Math.min(a, b), Infinity)
+    const xMax = endSec.reduce((a, b) => Math.max(a, b), -Infinity)
 
     const drawPlugin: uPlot.Plugin = {
         hooks: {

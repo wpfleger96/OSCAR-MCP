@@ -840,11 +840,7 @@
                     <div class="stats-grid mb-4">
                         <StatCard
                             label="Total Sleep"
-                            :value="
-                                healthNight.total_sleep_seconds != null
-                                    ? healthNight.total_sleep_seconds / 3600
-                                    : null
-                            "
+                            :value="secToHours(healthNight.total_sleep_seconds)"
                             unit="hr"
                             :decimals="1"
                             glossary-key="total_sleep"
@@ -858,22 +854,14 @@
                         />
                         <StatCard
                             label="Deep"
-                            :value="
-                                healthNight.deep_seconds != null
-                                    ? healthNight.deep_seconds / 3600
-                                    : null
-                            "
+                            :value="secToHours(healthNight.deep_seconds)"
                             unit="hr"
                             :decimals="1"
                             glossary-key="deep_sleep"
                         />
                         <StatCard
                             label="REM"
-                            :value="
-                                healthNight.rem_seconds != null
-                                    ? healthNight.rem_seconds / 3600
-                                    : null
-                            "
+                            :value="secToHours(healthNight.rem_seconds)"
                             unit="hr"
                             :decimals="1"
                             glossary-key="rem_sleep"
@@ -986,6 +974,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, toRef } from 'vue'
+import { isAxiosError } from 'axios'
 import { useRoute, useRouter } from 'vue-router'
 import type { DateValue } from 'reka-ui'
 import { Badge } from '@/components/ui/badge'
@@ -1016,7 +1005,13 @@ import {
     calendarDateToStr,
     adjacentDates,
 } from '@/composables/useAvailableDates'
-import { ahiClass, formatDateWithWeekday, formatDateFull, formatDateTime } from '@/utils/formatting'
+import {
+    ahiClass,
+    formatDateWithWeekday,
+    formatDateFull,
+    formatDateTime,
+    secToHours,
+} from '@/utils/formatting'
 import { maskEntryName, styleLabel } from '@/utils/maskOptions'
 import type { SessionDetail, EventItem, HealthNightDetailRead } from '@/types'
 
@@ -1318,8 +1313,7 @@ async function fetchHealthNight(): Promise<void> {
     try {
         healthNight.value = await getHealthNight(dayDate)
     } catch (err: unknown) {
-        const axiosErr = err as { response?: { status?: number } }
-        if (axiosErr.response?.status === 404) {
+        if (isAxiosError(err) && err.response?.status === 404) {
             healthNotFound.value = true
         } else {
             healthError.value =

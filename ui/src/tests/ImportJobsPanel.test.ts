@@ -194,4 +194,17 @@ describe('ImportJobsPanel', () => {
         expect(wrapper.text()).toContain('4 session(s) imported')
         expect(wrapper.find('.job-result-summary').exists()).toBe(false)
     })
+
+    it('test_health_upload_non_done_stage_does_not_show_health_result_summary', () => {
+        // The health_import_result block is gated on stage === 'done'.
+        // An importing-stage health_upload job with a partial health_import_result
+        // (e.g. from a cancel mid-flight) must not render .job-result-summary.
+        const job = {
+            ...makeJob({ job_type: 'health_upload', stage: 'importing' }),
+            health_import_result: { inserted: 5, skipped: 2, nights_recomputed: 1 },
+        } as unknown as PipelineJobStatus
+        const wrapper = mount(ImportJobsPanel, { props: { jobs: [job] } })
+
+        expect(wrapper.find('.job-result-summary').exists()).toBe(false)
+    })
 })

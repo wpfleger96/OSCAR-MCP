@@ -5,6 +5,13 @@
 
     <ErrorState v-else-if="error" :message="error" :retry="reload" />
 
+    <div v-else-if="notFound" class="empty-day">
+        <p class="empty-message">No CPAP data recorded for this date.</p>
+        <RouterLink :to="`/apple-health/${props.dayDate}`" class="back-link">
+            <ArrowLeft class="inline h-4 w-4" /> Apple Health night detail
+        </RouterLink>
+    </div>
+
     <div v-else-if="data" class="day-detail">
         <RouterLink to="/" class="back-link">
             <ArrowLeft class="inline h-4 w-4" /> Dashboard
@@ -280,6 +287,8 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted, ref, shallowRef } from 'vue'
+import { isAxiosError } from 'axios'
 import StatCard from '@/components/StatCard.vue'
 import {
     Table,
@@ -290,18 +299,36 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { Loader2, ArrowLeft } from '@lucide/vue'
-import { useApiLoad } from '@/composables/useApiLoad'
 import { getDay } from '@/api/days'
-import { formatDateWithWeekday } from '@/utils/formatting'
+import { formatDateWithWeekday, secToHours } from '@/utils/formatting'
 import ErrorState from '@/components/ErrorState.vue'
+import type { DayDetail } from '@/types'
 
 const props = defineProps<{ dayDate: string }>()
 
-const { data, loading, error, reload } = useApiLoad(() => getDay(props.dayDate))
+const data = shallowRef<DayDetail | null>(null)
+const loading = ref(true)
+const error = ref<string | null>(null)
+const notFound = ref(false)
 
-function secToHours(sec: number | null | undefined): number | null {
-    return sec != null ? sec / 3600 : null
+async function reload(): Promise<void> {
+    loading.value = true
+    error.value = null
+    notFound.value = false
+    try {
+        data.value = await getDay(props.dayDate)
+    } catch (err) {
+        if (isAxiosError(err) && err.response?.status === 404) {
+            notFound.value = true
+        } else {
+            error.value = err instanceof Error ? err.message : 'Failed to load day'
+        }
+    } finally {
+        loading.value = false
+    }
 }
+
+onMounted(() => void reload())
 </script>
 
 <style scoped>
@@ -338,6 +365,18 @@ function secToHours(sec: number | null | undefined): number | null {
     font-size: 1.1rem;
     font-weight: 600;
     margin-bottom: 0.75rem;
+}
+
+.empty-day {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 2rem 0;
+}
+
+.empty-message {
+    color: var(--color-muted-foreground);
 }
 
 .session-link {

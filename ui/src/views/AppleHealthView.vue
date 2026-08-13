@@ -38,6 +38,7 @@
                 glossary-key="rem_sleep"
             />
         </div>
+        <p class="stats-caption">Averages over {{ data.items.length }} displayed nights</p>
 
         <div v-if="data.items.length === 0" class="empty-state">
             <p class="empty-message">No Apple Health sleep data found.</p>
@@ -123,7 +124,7 @@ import PaginationBar from '@/components/PaginationBar.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { getHealthNights } from '@/api/health'
-import { formatDateFull } from '@/utils/formatting'
+import { avg, formatDateFull } from '@/utils/formatting'
 
 const router = useRouter()
 
@@ -145,11 +146,6 @@ function fmtHours(seconds: number | null | undefined): string {
 
 function fmtPct(pct: number | null | undefined): string {
     return pct != null ? pct.toFixed(1) : '---'
-}
-
-function avg(vals: (number | null | undefined)[]): number | null {
-    const nonNull = vals.filter((v): v is number => v != null)
-    return nonNull.length ? nonNull.reduce((a, b) => a + b, 0) / nonNull.length : null
 }
 
 const avgTotalSleep = computed(() => {
@@ -222,6 +218,12 @@ const avgRem = computed(() => {
     align-items: center;
     gap: 0.75rem;
     text-align: center;
+}
+
+.stats-caption {
+    font-size: 0.75rem;
+    color: var(--color-muted-foreground);
+    margin-bottom: 1.5rem;
 }
 
 .empty-message {
