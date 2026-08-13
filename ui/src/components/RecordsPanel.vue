@@ -52,6 +52,7 @@ const METRIC_CONFIG: Record<string, { label: string; decimals: number; glossaryK
     leak: { label: 'Leak (L/min)', decimals: 1, glossaryKey: 'leak' },
     therapy_hours: { label: 'Therapy Hours', decimals: 1, glossaryKey: 'usage' },
     spo2_min: { label: 'SpO₂ Min (%)', decimals: 0, glossaryKey: 'spo2' },
+    total_sleep_hours: { label: 'Total Sleep (hrs)', decimals: 1, glossaryKey: 'total_sleep' },
 }
 
 const displayMetrics = computed(() => {

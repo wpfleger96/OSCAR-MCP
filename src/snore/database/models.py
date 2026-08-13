@@ -45,6 +45,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -287,7 +288,18 @@ class Profile(Base):
         cascade="all, delete-orphan",
         lazy="raise",
     )
-
+    health_samples = relationship(
+        "HealthSample",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
+    health_nightly_summaries = relationship(
+        "HealthNightlySummary",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_profile_user_name"),
         CheckConstraint("length(name) > 0", name="chk_profile_name"),
@@ -387,6 +399,125 @@ class MaskLogEntry(Base):
 
     def __repr__(self) -> str:
         return f"<MaskLogEntry(id={self.id}, profile_id={self.profile_id}, brand={self.brand}, model={self.model}, style={self.style})>"
+
+
+# ---------------------------------------------------------------------------
+# Apple Health data tables
+# ---------------------------------------------------------------------------
+
+
+class HealthSample(Base):
+    """Raw Apple Health sample, one row per HKSample; source-preserving."""
+
+    __tablename__ = "health_samples"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE")
+    )
+    # Canonical HealthKit type identifier, e.g. HKCategoryTypeIdentifierSleepAnalysis.
+    record_type: Mapped[str] = mapped_column(String(100))
+    source_name: Mapped[str] = mapped_column(String(200))
+    source_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    device_info: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Apple Health local wall-clock times: no source timezone, never convert.
+    start_time: Mapped[datetime] = mapped_column(DateTime)
+    end_time: Mapped[datetime] = mapped_column(DateTime)
+    # value_text: sleep stage name for category records; NULL for quantity records.
+    value_text: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # value_num: quantity value for numeric records; NULL for category records.
+    value_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Therapy-night date derived via noon-split at parse time.
+    night_date: Mapped[date] = mapped_column(Date)
+    utc_offset_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ingest_channel: Mapped[str] = mapped_column(String(20))
+    # Absolute audit instant.
+    imported_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+    profile = relationship("Profile", back_populates="health_samples", lazy="raise")
+
+    __table_args__ = (
+        # Dedup unique expression index with COALESCE sentinels closing the NULL hole.
+        # SQLite treats NULLs as distinct in UNIQUE constraints, so category rows
+        # (value_num IS NULL) would never conflict on re-import without the sentinel.
+        # -1.0 is safe: SpO2 %, respiratory rate, and disturbance counts are all >= 0.
+        Index(
+            "uq_health_sample_dedup",
+            "profile_id",
+            "record_type",
+            "source_name",
+            "start_time",
+            "end_time",
+            text("coalesce(value_text, '')"),
+            text("coalesce(value_num, -1.0)"),
+            unique=True,
+        ),
+        Index(
+            "ix_health_samples_profile_type_night",
+            "profile_id",
+            "record_type",
+            "night_date",
+        ),
+        Index(
+            "ix_health_samples_profile_night_source",
+            "profile_id",
+            "night_date",
+            "source_name",
+        ),
+        CheckConstraint(
+            "value_text IS NOT NULL OR value_num IS NOT NULL",
+            name="chk_health_sample_value",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<HealthSample(id={self.id}, profile_id={self.profile_id}, "
+            f"record_type={self.record_type}, night_date={self.night_date})>"
+        )
+
+
+class HealthNightlySummary(Base):
+    """Derived per-night sleep cache; rebuilt by delete-and-recompute."""
+
+    __tablename__ = "health_nightly_summaries"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE")
+    )
+    night_date: Mapped[date] = mapped_column(Date)
+    preferred_source: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    time_in_bed_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_sleep_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    core_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    deep_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rem_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    awake_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unspecified_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sleep_efficiency_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stage_coverage_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Absolute audit instant.
+    computed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+    profile = relationship(
+        "Profile", back_populates="health_nightly_summaries", lazy="raise"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_id",
+            "night_date",
+            name="uq_health_nightly_summaries_profile_night",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<HealthNightlySummary(id={self.id}, profile_id={self.profile_id}, "
+            f"night_date={self.night_date})>"
+        )
 
 
 class Day(Base):

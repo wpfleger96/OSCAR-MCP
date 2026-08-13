@@ -105,3 +105,14 @@ export function formatWallClockTime(epochSecs: number, foundIncr: number): strin
     })
     return _fmtNoSecs.format(d)
 }
+
+/** Convert seconds to fractional hours; returns null when the input is null or undefined. */
+export function secToHours(sec: number | null | undefined): number | null {
+    return sec != null ? sec / 3600 : null
+}
+
+/** Average of a nullable array; returns null when there are no non-null values. */
+export function avg(vals: (number | null | undefined)[]): number | null {
+    const nonNull = vals.filter((v): v is number => v != null)
+    return nonNull.length ? nonNull.reduce((a, b) => a + b, 0) / nonNull.length : null
+}

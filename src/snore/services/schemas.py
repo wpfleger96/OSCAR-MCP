@@ -59,6 +59,12 @@ __all__ = [
     "DeleteDataResult",
     # Stats range schema
     "DataRange",
+    # Apple Health import schema
+    "HealthImportResult",
+    # Apple Health read schemas
+    "HealthNightSummaryRead",
+    "HealthNightDetailRead",
+    "HealthSampleRead",
 ]
 
 
@@ -86,6 +92,13 @@ class PeriodStatistics(BaseModel):
 
     avg_spo2: float | None = Field(default=None, description="Average SpO₂ (%)")
     min_spo2: float | None = Field(default=None, description="Minimum SpO₂ (%)")
+
+    avg_total_sleep_hours: float | None = Field(
+        default=None, description="Average total sleep hours per night (Apple Health)"
+    )
+    avg_sleep_efficiency_pct: float | None = Field(
+        default=None, description="Average sleep efficiency % per night (Apple Health)"
+    )
 
     avg_oai: float | None = Field(default=None, description="Average OAI (events/hour)")
     avg_cai: float | None = Field(default=None, description="Average CAI (events/hour)")
@@ -509,6 +522,49 @@ class DeviceDetail(DeviceInfo):
     settings_history: list[SettingsChange]
 
 
+class HealthNightSummaryRead(BaseModel):
+    """Derived nightly sleep summary from Apple Health data."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    night_date: date
+    preferred_source: str | None = None
+    time_in_bed_seconds: float | None = None
+    total_sleep_seconds: float | None = None
+    core_seconds: float | None = None
+    deep_seconds: float | None = None
+    rem_seconds: float | None = None
+    awake_seconds: float | None = None
+    unspecified_seconds: float | None = None
+    sleep_efficiency_pct: float | None = None
+    stage_coverage_pct: float | None = None
+    computed_at: datetime
+
+
+class HealthNightDetailRead(HealthNightSummaryRead):
+    """Nightly sleep summary with aggregated oximetry and respiratory rate metrics."""
+
+    avg_spo2_pct: float | None = None
+    min_spo2_pct: float | None = None
+    avg_rr: float | None = None
+
+
+class HealthSampleRead(BaseModel):
+    """Single Apple Health sample (sleep stage or quantity record)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    record_type: str
+    source_name: str
+    start_time: datetime
+    end_time: datetime
+    value_text: str | None = None
+    value_num: float | None = None
+    unit: str | None = None
+    night_date: date
+
+
 class DayListItem(BaseModel):
     """Summary of a single therapy day."""
 
@@ -555,6 +611,7 @@ class DayDetail(DayListItem):
     hypopneas: int = 0
     reras: int = 0
     session_ids: list[int] = Field(default_factory=list)
+    health_sleep: HealthNightSummaryRead | None = None
 
 
 class RxPeriodResponse(BaseModel):
@@ -777,6 +834,27 @@ class DataRange(BaseModel):
 
     earliest_date: date | None = None
     latest_date: date | None = None
+
+
+class HealthImportResult(BaseModel):
+    """Result of an Apple Health export.xml import operation."""
+
+    inserted: int = Field(default=0, description="Health samples successfully inserted")
+    skipped: int = Field(default=0, description="Samples skipped as duplicates")
+    unknown_metrics: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Unhandled HealthKit record types from the XML export with their record counts."
+        ),
+    )
+    nights_recomputed: int = Field(
+        default=0,
+        description="Nightly sleep summaries recomputed (0 on dry_run)",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="True when no writes were performed",
+    )
 
 
 class DeleteDataResult(BaseModel):

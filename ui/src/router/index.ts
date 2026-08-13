@@ -145,6 +145,17 @@ const router = createRouter({
                     : route.params.date,
             }),
         },
+        {
+            path: '/apple-health',
+            name: 'apple-health',
+            component: () => import('@/views/AppleHealthView.vue'),
+        },
+        {
+            path: '/apple-health/:date',
+            name: 'apple-health-night',
+            component: () => import('@/views/AppleHealthNightView.vue'),
+            props: (route: RouteLocationNormalized) => ({ nightDate: route.params.date }),
+        },
 
         // Multiuser-only routes
         {

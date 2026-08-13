@@ -24,6 +24,7 @@ vi.mock('@/api/import', async (importActual) => {
         ...actual,
         importFiles: vi.fn(),
         precheckFiles: vi.fn(),
+        importHealthFile: vi.fn(),
     }
 })
 vi.mock('@/utils/formatting', () => ({
@@ -47,7 +48,7 @@ import { makeAuthMock } from './helpers/mockUseAuth'
 import { useAuth } from '@/composables/useAuth'
 import { getImportJobs, cancelImport } from '@/api/importJobs'
 import { cancelAnalysisJob } from '@/api/analysis'
-import { importFiles, precheckFiles } from '@/api/import'
+import { importFiles, precheckFiles, importHealthFile } from '@/api/import'
 import ImportView from '@/views/ImportView.vue'
 
 function makeJob(overrides: Partial<PipelineJobStatus> = {}): PipelineJobStatus {
@@ -186,9 +187,13 @@ function makeDeferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
     return { promise, resolve }
 }
 
+// Two session nights so that when BRP.edf is marked skippable, BRP2.edf
+// keeps uploadCount > 0 — enabling the Import button and allowing handleImport
+// to reach the importFiles call rather than short-circuiting via resetUpload().
 const resMedFiles = [
     makeFile('STR.edf', 200, 'MySD/STR.edf'),
     makeFile('BRP.edf', 1000, 'MySD/DATALOG/20240101_010000_BRP.edf'),
+    makeFile('BRP2.edf', 800, 'MySD/DATALOG/20240102_010000_BRP2.edf'),
     makeFile('Identification.json', 100, 'MySD/Identification.json'),
 ]
 
@@ -385,24 +390,6 @@ describe('ImportView precheck', () => {
         expect(sentPaths).not.toContain('MySD/DATALOG/20240101_010000_BRP.edf')
     })
 
-    it('double-click on Import triggers importFiles exactly once', async () => {
-        vi.mocked(precheckFiles).mockResolvedValue(new Set())
-        // Keep importFiles pending so the uploading phase stays active during the test.
-        vi.mocked(importFiles).mockReturnValue(new Promise(() => {}))
-
-        const wrapper = mount(ImportView)
-        await flushPromises()
-        await triggerFileSelection(wrapper, resMedFiles)
-
-        const btn = wrapper.findAll('button').at(-1)!
-        // Two rapid clicks — second must be rejected by the re-entrancy guard.
-        void btn.trigger('click')
-        void btn.trigger('click')
-        await flushPromises()
-
-        expect(importFiles).toHaveBeenCalledTimes(1)
-    })
-
     it('profile switch after precheck uses new profile skip set, not stale one', async () => {
         vi.mocked(useAuth).mockReturnValue(
             makeAuthMock({
@@ -436,6 +423,24 @@ describe('ImportView precheck', () => {
             .mocked(importFiles)
             .mock.calls[0][0].map((e: { path: string }) => e.path)
         expect(sentPaths).toHaveLength(resMedFiles.length)
+    })
+
+    it('double-click on Import triggers importFiles exactly once', async () => {
+        vi.mocked(precheckFiles).mockResolvedValue(new Set())
+        // Keep importFiles pending so the uploading phase stays active during the test.
+        vi.mocked(importFiles).mockReturnValue(new Promise(() => {}))
+
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        const btn = wrapper.findAll('button').at(-1)!
+        // Two rapid clicks — second must be rejected by the re-entrancy guard.
+        void btn.trigger('click')
+        void btn.trigger('click')
+        await flushPromises()
+
+        expect(importFiles).toHaveBeenCalledTimes(1)
     })
 
     it('profile switch in error phase re-triggers precheck', async () => {
@@ -485,5 +490,103 @@ describe('ImportView precheck', () => {
 
         expect(wrapper.find('.skip-summary').exists()).toBe(true)
         expect(wrapper.find('.skip-summary').text()).toContain('Skipped 1 files already on server')
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Apple Health tab tests
+// ---------------------------------------------------------------------------
+
+describe('ImportView Apple Health tab', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        vi.mocked(useAuth).mockReturnValue(
+            makeAuthMock({
+                profiles: ref([{ id: 1, name: 'Test' }]),
+                activeProfileId: ref(1),
+            }) as never,
+        )
+        vi.mocked(getImportJobs).mockResolvedValue({ jobs: [] })
+        vi.mocked(importFiles).mockResolvedValue({ job_id: 'cpap-job' } as never)
+        vi.mocked(importHealthFile).mockResolvedValue({ job_id: 'health-job' } as never)
+        vi.mocked(precheckFiles).mockResolvedValue(new Set())
+    })
+
+    it('test_default_tab_is_cpap', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        expect((wrapper.vm as unknown as { activeTab: string }).activeTab).toBe('cpap')
+    })
+
+    it('test_switching_to_health_tab_hides_cpap_pane', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        // Switch to health tab by directly setting the reactive state.
+        ;(wrapper.vm as unknown as { activeTab: string }).activeTab = 'health'
+        await flushPromises()
+
+        // The CPAP file input lives inside the v-show="activeTab === 'cpap'" div.
+        // When health tab is active that div gets display:none.
+        const cpapFileInput = wrapper.find('input[type="file"][multiple]')
+        expect(cpapFileInput.element.parentElement!.style.display).toBe('none')
+
+        // The health file input's parent div should not be hidden.
+        const healthFileInput = wrapper.find('input[type="file"][accept=".zip"]')
+        expect(healthFileInput.element.parentElement!.style.display).not.toBe('none')
+    })
+
+    it('test_health_import_calls_importHealthFile_with_file_and_selected_profile_id', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        // Switch to health tab and set a non-default profile.
+        const vm = wrapper.vm as unknown as { activeTab: string; selectedProfileId: number | null }
+        vm.activeTab = 'health'
+        vm.selectedProfileId = 3
+        await flushPromises()
+
+        // Select a zip file via the health file input.
+        const zipFile = new File([new Uint8Array(512)], 'export.zip', { type: 'application/zip' })
+        const healthInput = wrapper.find('input[type="file"][accept=".zip"]')
+        Object.defineProperty(healthInput.element, 'files', {
+            value: { length: 1, 0: zipFile, item: (i: number) => (i === 0 ? zipFile : null) },
+            configurable: true,
+        })
+        await healthInput.trigger('change')
+        await flushPromises()
+
+        // Click the Import button (last button in the DOM — health pane selected phase).
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        expect(importHealthFile).toHaveBeenCalledOnce()
+        expect(importHealthFile).toHaveBeenCalledWith(zipFile, 3, expect.any(Function))
+        // CPAP importFiles must not be called from the health tab path.
+        expect(importFiles).not.toHaveBeenCalled()
+    })
+
+    it('test_health_tab_import_does_not_invoke_cpap_importFiles', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        ;(wrapper.vm as unknown as { activeTab: string }).activeTab = 'health'
+        await flushPromises()
+
+        const zipFile = new File([new Uint8Array(100)], 'export.zip', { type: 'application/zip' })
+        const healthInput = wrapper.find('input[type="file"][accept=".zip"]')
+        Object.defineProperty(healthInput.element, 'files', {
+            value: { length: 1, 0: zipFile, item: (i: number) => (i === 0 ? zipFile : null) },
+            configurable: true,
+        })
+        await healthInput.trigger('change')
+        await flushPromises()
+
+        await wrapper.findAll('button').at(-1)!.trigger('click')
+        await flushPromises()
+
+        expect(importFiles).not.toHaveBeenCalled()
+        expect(importHealthFile).toHaveBeenCalledOnce()
     })
 })

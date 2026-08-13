@@ -11,6 +11,7 @@ from snore.services.day_service import DayService
 from snore.services.device_service import DeviceService
 from snore.services.event_service import EventService
 from snore.services.export_service import ExportService
+from snore.services.health_service import HealthService
 from snore.services.import_service import ImportService
 from snore.services.mask_epoch_service import MaskEpochService
 from snore.services.mask_log_service import MaskLogService
@@ -28,6 +29,7 @@ __all__ = [
     "DeviceService",
     "ExportService",
     "EventService",
+    "HealthService",
     "ImportService",
     "MaskEpochService",
     "MaskLogService",

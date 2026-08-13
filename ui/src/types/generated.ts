@@ -963,6 +963,89 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/health/nights': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Nights
+         * @description Return paginated nightly sleep summaries, most-recent first.
+         */
+        get: operations['list_nights_api_v1_health_nights_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/health/nights/dates': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Night Dates
+         * @description Return all night dates that have Apple Health sleep data for this profile.
+         */
+        get: operations['list_night_dates_api_v1_health_nights_dates_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/health/nights/{night_date}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Night Detail
+         * @description Return nightly sleep detail with aggregated SpO2 and respiratory rate metrics.
+         */
+        get: operations['get_night_detail_api_v1_health_nights__night_date__get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/health/nights/{night_date}/samples': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Night Samples
+         * @description Return sleep-stage samples for the night ordered by start time.
+         *
+         *     When source_name is omitted, samples are filtered to the night's preferred
+         *     source (no filter if preferred_source is also unset).
+         */
+        get: operations['get_night_samples_api_v1_health_nights__night_date__samples_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/import/': {
         parameters: {
             query?: never
@@ -2345,6 +2428,7 @@ export interface components {
             epap_median?: number | null
             /** Epap Min */
             epap_min?: number | null
+            health_sleep?: components['schemas']['HealthNightSummaryRead'] | null
             /** Hi */
             hi?: number | null
             /**
@@ -2878,6 +2962,129 @@ export interface components {
             detail?: components['schemas']['ValidationError'][]
         }
         /**
+         * HealthImportResultSummary
+         * @description Summary of an Apple Health import result attached to a pipeline job.
+         */
+        HealthImportResultSummary: {
+            /** Inserted */
+            inserted: number
+            /** Nights Recomputed */
+            nights_recomputed: number
+            /** Skipped */
+            skipped: number
+        }
+        /**
+         * HealthNightDetailRead
+         * @description Nightly sleep summary with aggregated oximetry and respiratory rate metrics.
+         */
+        HealthNightDetailRead: {
+            /** Avg Rr */
+            avg_rr?: number | null
+            /** Avg Spo2 Pct */
+            avg_spo2_pct?: number | null
+            /** Awake Seconds */
+            awake_seconds?: number | null
+            /**
+             * Computed At
+             * Format: date-time
+             */
+            computed_at: string
+            /** Core Seconds */
+            core_seconds?: number | null
+            /** Deep Seconds */
+            deep_seconds?: number | null
+            /** Min Spo2 Pct */
+            min_spo2_pct?: number | null
+            /**
+             * Night Date
+             * Format: date
+             */
+            night_date: string
+            /** Preferred Source */
+            preferred_source?: string | null
+            /** Rem Seconds */
+            rem_seconds?: number | null
+            /** Sleep Efficiency Pct */
+            sleep_efficiency_pct?: number | null
+            /** Stage Coverage Pct */
+            stage_coverage_pct?: number | null
+            /** Time In Bed Seconds */
+            time_in_bed_seconds?: number | null
+            /** Total Sleep Seconds */
+            total_sleep_seconds?: number | null
+            /** Unspecified Seconds */
+            unspecified_seconds?: number | null
+        }
+        /**
+         * HealthNightSummaryRead
+         * @description Derived nightly sleep summary from Apple Health data.
+         */
+        HealthNightSummaryRead: {
+            /** Awake Seconds */
+            awake_seconds?: number | null
+            /**
+             * Computed At
+             * Format: date-time
+             */
+            computed_at: string
+            /** Core Seconds */
+            core_seconds?: number | null
+            /** Deep Seconds */
+            deep_seconds?: number | null
+            /**
+             * Night Date
+             * Format: date
+             */
+            night_date: string
+            /** Preferred Source */
+            preferred_source?: string | null
+            /** Rem Seconds */
+            rem_seconds?: number | null
+            /** Sleep Efficiency Pct */
+            sleep_efficiency_pct?: number | null
+            /** Stage Coverage Pct */
+            stage_coverage_pct?: number | null
+            /** Time In Bed Seconds */
+            time_in_bed_seconds?: number | null
+            /** Total Sleep Seconds */
+            total_sleep_seconds?: number | null
+            /** Unspecified Seconds */
+            unspecified_seconds?: number | null
+        }
+        /**
+         * HealthSampleRead
+         * @description Single Apple Health sample (sleep stage or quantity record).
+         */
+        HealthSampleRead: {
+            /**
+             * End Time
+             * Format: date-time
+             */
+            end_time: string
+            /** Id */
+            id: number
+            /**
+             * Night Date
+             * Format: date
+             */
+            night_date: string
+            /** Record Type */
+            record_type: string
+            /** Source Name */
+            source_name: string
+            /**
+             * Start Time
+             * Format: date-time
+             */
+            start_time: string
+            /** Unit */
+            unit?: string | null
+            /** Value Num */
+            value_num?: number | null
+            /** Value Text */
+            value_text?: string | null
+        }
+        /**
          * HypopneaEvent
          * @description Detected hypopnea event.
          *
@@ -3270,6 +3477,17 @@ export interface components {
             /** Total */
             total: number
         }
+        /** PaginatedResponse[HealthNightSummaryRead] */
+        PaginatedResponse_HealthNightSummaryRead_: {
+            /** Items */
+            items: components['schemas']['HealthNightSummaryRead'][]
+            /** Limit */
+            limit: number
+            /** Offset */
+            offset: number
+            /** Total */
+            total: number
+        }
         /** PaginatedResponse[SessionListItem] */
         PaginatedResponse_SessionListItem_: {
             /** Items */
@@ -3362,10 +3580,20 @@ export interface components {
              */
             avg_rera?: number | null
             /**
+             * Avg Sleep Efficiency Pct
+             * @description Average sleep efficiency % per night (Apple Health)
+             */
+            avg_sleep_efficiency_pct?: number | null
+            /**
              * Avg Spo2
              * @description Average SpO₂ (%)
              */
             avg_spo2?: number | null
+            /**
+             * Avg Total Sleep Hours
+             * @description Average total sleep hours per night (Apple Health)
+             */
+            avg_total_sleep_hours?: number | null
             /**
              * Days In Period
              * @description Total days in period
@@ -3423,6 +3651,7 @@ export interface components {
             file_count: number
             /** Finished At */
             finished_at: string | null
+            health_import_result?: components['schemas']['HealthImportResultSummary'] | null
             import_result: components['schemas']['ImportResultSummary'] | null
             /** Job Id */
             job_id: string
@@ -5664,6 +5893,124 @@ export interface operations {
             }
         }
     }
+    list_nights_api_v1_health_nights_get: {
+        parameters: {
+            query?: {
+                limit?: number
+                offset?: number
+                from_date?: string | null
+                to_date?: string | null
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['PaginatedResponse_HealthNightSummaryRead_']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_night_dates_api_v1_health_nights_dates_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DateListResponse']
+                }
+            }
+        }
+    }
+    get_night_detail_api_v1_health_nights__night_date__get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                night_date: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HealthNightDetailRead']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_night_samples_api_v1_health_nights__night_date__samples_get: {
+        parameters: {
+            query?: {
+                source_name?: string | null
+            }
+            header?: never
+            path: {
+                night_date: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HealthSampleRead'][]
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
     import_files_api_v1_import__post: {
         parameters: {
             query?: never
@@ -5675,6 +6022,11 @@ export interface operations {
             content: {
                 'multipart/form-data': {
                     files: string[]
+                    /**
+                     * @description Type of import: 'cpap' for CPAP device uploads (default), 'health' for Apple Health export.zip
+                     * @enum {string}
+                     */
+                    import_type?: 'cpap' | 'health'
                     /** @description Target profile ID (defaults to actor's active profile) */
                     profile_id?: number
                 }

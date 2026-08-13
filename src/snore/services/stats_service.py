@@ -23,6 +23,11 @@ from snore.services.schemas import (
     TherapySummary,
 )
 
+# ---------------------------------------------------------------------------
+# Type alias for the health nights list used across multiple helpers.
+# ---------------------------------------------------------------------------
+_HealthNights = list[models.HealthNightlySummary]
+
 __all__ = ["StatsService"]
 
 
@@ -57,6 +62,94 @@ class StatsService:
         if to_date is not None:
             query = query.where(models.Day.date <= to_date)
         return list((await self.db_session.execute(query)).scalars().all())
+
+    async def _query_health_nights(
+        self,
+        days_limit: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> _HealthNights:
+        """Query HealthNightlySummary records for this profile, optional date range."""
+        query = select(models.HealthNightlySummary).where(
+            models.HealthNightlySummary.profile_id == self.profile_id
+        )
+        if days_limit:
+            cutoff_date = date.today() - timedelta(days=days_limit)
+            query = query.where(models.HealthNightlySummary.night_date >= cutoff_date)
+        if from_date is not None:
+            query = query.where(models.HealthNightlySummary.night_date >= from_date)
+        if to_date is not None:
+            query = query.where(models.HealthNightlySummary.night_date <= to_date)
+        return list((await self.db_session.execute(query)).scalars().all())
+
+    @staticmethod
+    def _bin_nights_by_period(
+        nights: _HealthNights,
+        period_stats: list[PeriodStatistics],
+    ) -> dict[date, _HealthNights]:
+        """Bin health nights into their corresponding period_start buckets."""
+        if not nights or not period_stats:
+            return {ps.period_start: [] for ps in period_stats}
+
+        sorted_starts = sorted(ps.period_start for ps in period_stats)
+        period_end_by_start: dict[date, date] = {
+            ps.period_start: ps.period_end for ps in period_stats
+        }
+        binned: dict[date, _HealthNights] = {ps.period_start: [] for ps in period_stats}
+
+        for night in nights:
+            idx = bisect_right(sorted_starts, night.night_date) - 1
+            if idx < 0:
+                continue
+            pstart = sorted_starts[idx]
+            if night.night_date <= period_end_by_start[pstart]:
+                binned[pstart].append(night)
+
+        return binned
+
+    @staticmethod
+    def _per_period_sleep_avgs(
+        binned: dict[date, _HealthNights],
+        periods: list[PeriodStatistics],
+    ) -> dict[date, tuple[float | None, float | None]]:
+        """Return (avg_sleep_hours, avg_sleep_efficiency_pct) keyed by period_start.
+
+        Values are None when no nights with valid data fall in the period.
+        Rounding: hours → 2 decimal places, efficiency → 1.
+        """
+        result: dict[date, tuple[float | None, float | None]] = {}
+        for ps in periods:
+            ns = binned.get(ps.period_start, [])
+            h_vals = [
+                n.total_sleep_seconds / 3600
+                for n in ns
+                if n.total_sleep_seconds is not None
+            ]
+            e_vals = [
+                n.sleep_efficiency_pct for n in ns if n.sleep_efficiency_pct is not None
+            ]
+            result[ps.period_start] = (
+                round(sum(h_vals) / len(h_vals), 2) if h_vals else None,
+                round(sum(e_vals) / len(e_vals), 1) if e_vals else None,
+            )
+        return result
+
+    @staticmethod
+    def _augment_period_stats(
+        period_stats: list[PeriodStatistics],
+        binned: dict[date, _HealthNights],
+    ) -> list[PeriodStatistics]:
+        """Return period stats with avg_total_sleep_hours and avg_sleep_efficiency_pct populated."""
+        avgs = StatsService._per_period_sleep_avgs(binned, period_stats)
+        return [
+            ps.model_copy(
+                update={
+                    "avg_total_sleep_hours": avgs[ps.period_start][0],
+                    "avg_sleep_efficiency_pct": avgs[ps.period_start][1],
+                }
+            )
+            for ps in period_stats
+        ]
 
     async def get_summary(
         self,
@@ -234,7 +327,14 @@ class StatsService:
         day_records = await self._query_days(
             days_limit, from_date=from_date, to_date=to_date
         )
-        return calculate_period_statistics(day_records, period_type)
+        period_stats = calculate_period_statistics(day_records, period_type)
+        if not period_stats:
+            return period_stats
+        health_nights = await self._query_health_nights(
+            days_limit, from_date=from_date, to_date=to_date
+        )
+        binned = self._bin_nights_by_period(health_nights, period_stats)
+        return self._augment_period_stats(period_stats, binned)
 
     async def _aggregate_session_stats_per_period(
         self,
@@ -328,14 +428,50 @@ class StatsService:
         session_extras = await self._aggregate_session_stats_per_period(
             day_records, period_stats
         )
-        return calculate_trends_extended(period_stats, session_extras)
+        trends = calculate_trends_extended(period_stats, session_extras)
+
+        if period_stats:
+            health_nights = await self._query_health_nights(
+                days_limit, from_date=from_date, to_date=to_date
+            )
+            binned = self._bin_nights_by_period(health_nights, period_stats)
+            avgs = self._per_period_sleep_avgs(binned, period_stats)
+            sleep_hours_series: list[tuple[date, float | None]] = [
+                (ps.period_start, avgs[ps.period_start][0]) for ps in period_stats
+            ]
+            sleep_eff_series: list[tuple[date, float | None]] = [
+                (ps.period_start, avgs[ps.period_start][1]) for ps in period_stats
+            ]
+
+            # Only add health series when data exists; keeps response shape
+            # backward-compatible for profiles with no Apple Health import.
+            if any(v is not None for _, v in sleep_hours_series):
+                trends["total_sleep_hours"] = sleep_hours_series
+            if any(v is not None for _, v in sleep_eff_series):
+                trends["sleep_efficiency"] = sleep_eff_series
+
+        return trends
 
     async def get_records(
         self, days_limit: int | None = None, top_n: int = 5
     ) -> dict[str, dict[str, list[tuple[date, float]]]]:
         """Calculate top best/worst days for key metrics."""
         day_records = await self._query_days(days_limit)
-        return calculate_records(day_records, top_n)
+        records = calculate_records(day_records, top_n)
+
+        health_nights = await self._query_health_nights(days_limit)
+        sleep_pairs = [
+            (n.night_date, round(n.total_sleep_seconds / 3600, 2))
+            for n in health_nights
+            if n.total_sleep_seconds is not None
+        ]
+        if sleep_pairs:
+            records["total_sleep_hours"] = {
+                "best": sorted(sleep_pairs, key=lambda x: x[1], reverse=True)[:top_n],
+                "worst": sorted(sleep_pairs, key=lambda x: x[1])[:top_n],
+            }
+
+        return records
 
     async def get_data_range(self) -> DataRange:
         """Return the profile's earliest and latest Day.date (all-time, ignores days_limit)."""

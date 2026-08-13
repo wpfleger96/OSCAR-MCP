@@ -95,6 +95,26 @@
             />
         </div>
         <div v-else-if="!loading" class="no-data">No therapy data available.</div>
+        <!-- Apple Health sleep summary row -->
+        <div
+            v-if="summary && !loading && (avgTotalSleepHours != null || avgSleepEfficiency != null)"
+            class="summary-row"
+        >
+            <StatCard
+                label="Avg Sleep"
+                :value="avgTotalSleepHours"
+                unit="hrs"
+                :decimals="1"
+                glossary-key="total_sleep"
+            />
+            <StatCard
+                label="Avg Sleep Efficiency"
+                :value="avgSleepEfficiency"
+                unit="%"
+                :decimals="1"
+                glossary-key="sleep_efficiency"
+            />
+        </div>
 
         <div v-if="summary?.event_counts?.length" class="section-card">
             <h2>
@@ -206,27 +226,36 @@ import CalendarHeatmap from '@/components/CalendarHeatmap.vue'
 import { getSummary, getTrends } from '@/api/stats'
 import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
+import { getHealthNights } from '@/api/health'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { formatDateFull } from '@/utils/formatting'
 import { AHI_COLOR_SCALE } from '@/utils/ahiScale'
 import { EVENT_COLORS } from '@/types'
-import type { SessionListItem } from '@/types'
+import type { HealthNightSummaryRead, SessionListItem } from '@/types'
+
+function thirtyDaysAgo(): string {
+    const d = new Date()
+    d.setDate(d.getDate() - 30)
+    return d.toISOString().split('T')[0]
+}
 
 const router = useRouter()
 
 // Dashboard gracefully shows empty sections on error, so `error` is unused.
 const { data, loading } = useApiLoad(async () => {
-    const [summaryRes, trendsRes, daysRes, sessionsRes] = await Promise.allSettled([
+    const [summaryRes, trendsRes, daysRes, sessionsRes, healthRes] = await Promise.allSettled([
         getSummary(),
         getTrends('week'),
         getDays({ limit: 365 }),
         getSessions({ limit: 5, sort_by: 'date-desc' }),
+        getHealthNights({ limit: 30, from_date: thirtyDaysAgo() }),
     ])
     return {
         summary: summaryRes.status === 'fulfilled' ? summaryRes.value : null,
         trends: trendsRes.status === 'fulfilled' ? trendsRes.value : null,
         days: daysRes.status === 'fulfilled' ? daysRes.value.items : null,
         recentSessions: sessionsRes.status === 'fulfilled' ? sessionsRes.value.items : null,
+        healthNights: healthRes.status === 'fulfilled' ? healthRes.value.items : null,
     }
 })
 
@@ -234,16 +263,42 @@ const summary = computed(() => data.value?.summary ?? null)
 const trends = computed(() => data.value?.trends ?? null)
 const days = computed(() => data.value?.days ?? [])
 const recentSessions = computed(() => data.value?.recentSessions ?? [])
+const healthNights = computed(() => data.value?.healthNights ?? null)
+
+const avgTotalSleepHours = computed(() => {
+    const nights = healthNights.value as HealthNightSummaryRead[] | null
+    if (!nights?.length) return null
+    const valid = nights.filter((n) => n.total_sleep_seconds != null)
+    if (!valid.length) return null
+    return valid.reduce((sum, n) => sum + n.total_sleep_seconds! / 3600, 0) / valid.length
+})
+
+const avgSleepEfficiency = computed(() => {
+    const nights = healthNights.value as HealthNightSummaryRead[] | null
+    if (!nights?.length) return null
+    const valid = nights.filter((n) => n.sleep_efficiency_pct != null)
+    if (!valid.length) return null
+    return valid.reduce((sum, n) => sum + n.sleep_efficiency_pct!, 0) / valid.length
+})
 
 const trendLabels = computed(() => trends.value?.ahi.map((t) => t[0]) ?? [])
 const trendDatasets = computed(() => {
     if (!trends.value) return []
-    return [
+    const datasets: { label: string; values: (number | null)[]; color: string }[] = [
         { label: 'AHI', values: trends.value.ahi.map((t) => t[1]), color: '#2563eb' },
         { label: 'Usage (hrs)', values: trends.value.usage.map((t) => t[1]), color: '#16a34a' },
         { label: 'SpO₂ (%)', values: trends.value.spo2.map((t) => t[1]), color: '#f59e0b' },
         { label: 'Leak (L/min)', values: trends.value.leak.map((t) => t[1]), color: '#ef4444' },
     ]
+    const sleepEff = trends.value.sleep_efficiency
+    if (sleepEff && sleepEff.some((t) => t[1] != null)) {
+        datasets.push({
+            label: 'Sleep Efficiency (%)',
+            values: sleepEff.map((t) => t[1]),
+            color: '#8b5cf6',
+        })
+    }
+    return datasets
 })
 
 function effectivenessBadgeAttrs(e: string): Record<string, string> {

@@ -51,7 +51,6 @@ _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # Conservative body ceiling for all /api/v1/auth/ endpoints.
 _AUTH_BODY_LIMIT = 16 * 1024  # 16 KiB
 
-
 # ---------------------------------------------------------------------------
 # AuthMiddleware
 # ---------------------------------------------------------------------------

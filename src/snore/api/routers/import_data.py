@@ -24,6 +24,7 @@ from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.import_jobs import (
     ImportJob,
     JobState,
+    JobType,
     cancel_job,
     enqueue_for_execution,
     get_job,
@@ -32,6 +33,7 @@ from snore.api.import_jobs import (
     reserve_slot,
 )
 from snore.api.schemas import (
+    HealthImportResultSummary,
     ImportResultSummary,
     ImportSourceResultSummary,
     LinkedAnalysisSummary,
@@ -297,6 +299,14 @@ async def _resolve_profile_id(
                                 "type": "integer",
                                 "description": "Target profile ID (defaults to actor's active profile)",
                             },
+                            "import_type": {
+                                "type": "string",
+                                "enum": ["cpap", "health"],
+                                "description": (
+                                    "Type of import: 'cpap' for CPAP device uploads (default), "
+                                    "'health' for Apple Health export.zip"
+                                ),
+                            },
                         },
                     }
                 }
@@ -355,8 +365,43 @@ async def import_files(
                         status_code=422, detail="profile_id must be an integer"
                     ) from None
 
+            # ── import type ───────────────────────────────────────────
+            _import_type_raw = form.get("import_type")
+            import_type = (
+                str(_import_type_raw) if isinstance(_import_type_raw, str) else "cpap"
+            )
+            if import_type not in ("cpap", "health"):
+                raise HTTPException(
+                    status_code=422,
+                    detail="import_type must be 'cpap' or 'health'",
+                )
+
+            # Health imports are single-request only — batch continuation is not supported.
+            if import_type == "health":
+                if batch_id is not None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Batch uploads are not supported for health imports",
+                    )
+                if (
+                    isinstance(_batch_final_raw, str)
+                    and str(_batch_final_raw).lower() == "false"
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Batch uploads are not supported for health imports",
+                    )
+
             # ── job acquisition ───────────────────────────────────────
-            if batch_id is not None:
+            if import_type == "health":
+                # Health uploads reserve a dedicated slot with the HEALTH_UPLOAD type.
+                job = reserve_slot(actor.user_id, job_type=JobType.HEALTH_UPLOAD)
+                if job is None:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Too many active imports. Please wait for existing imports to complete.",
+                    )
+            elif batch_id is not None:
                 # Continuation of an existing batch upload.
                 job = get_job(batch_id)
                 if job is None:
@@ -373,7 +418,7 @@ async def import_files(
                 # reclaim this job while a slow continuation chunk is in flight.
                 job.touch()
             else:
-                # New upload — reserve an admission slot.
+                # New CPAP upload — reserve an admission slot.
                 job = reserve_slot(actor.user_id)
                 if job is None:
                     raise HTTPException(
@@ -386,23 +431,41 @@ async def import_files(
             ]
             if not uploads:
                 raise HTTPException(status_code=422, detail="No files provided")
-            # Per-file limit: reject any individual file exceeding the cap.
-            oversized = [f for f in uploads if (f.size or 0) > max_file_bytes]
-            if oversized:
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        f"One or more files exceed the "
-                        f"{max_file_bytes // (1024**2)} MiB per-file limit"
-                    ),
-                )
-            # Defense-in-depth: also check post-spool total size (catches absent/lying CL).
-            total_size = sum(f.size or 0 for f in uploads)
-            if total_size > max_upload_bytes:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"Total upload size exceeds {max_upload_bytes // (1024**2)} MiB limit",
-                )
+
+            if import_type == "health":
+                # Health imports require exactly one file; the per-upload ceiling
+                # applies (real exports exceed the per-file CPAP cap of 256 MiB).
+                if len(uploads) != 1:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Health imports require exactly one file",
+                    )
+                if (uploads[0].size or 0) > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"File exceeds the "
+                            f"{max_upload_bytes // (1024**2)} MiB per-upload limit"
+                        ),
+                    )
+            else:
+                # Per-file limit: reject any individual file exceeding the cap.
+                oversized = [f for f in uploads if (f.size or 0) > max_file_bytes]
+                if oversized:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"One or more files exceed the "
+                            f"{max_file_bytes // (1024**2)} MiB per-file limit"
+                        ),
+                    )
+                # Defense-in-depth: also check post-spool total size (catches absent/lying CL).
+                total_size = sum(f.size or 0 for f in uploads)
+                if total_size > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Total upload size exceeds {max_upload_bytes // (1024**2)} MiB limit",
+                    )
 
             # ── staging directory ─────────────────────────────────────
             if _is_continuation:
@@ -418,6 +481,14 @@ async def import_files(
                 job.temp_dir = tmp_path
 
             tmp_root = tmp_path.resolve()
+            # Health imports use the full per-upload ceiling; CPAP uses the per-file cap.
+            per_file_limit = (
+                max_upload_bytes if import_type == "health" else max_file_bytes
+            )
+            per_file_limit_mb = per_file_limit // (1024**2)
+            per_file_limit_label = (
+                "per-upload" if import_type == "health" else "per-file"
+            )
             for upload in uploads:
                 filename = upload.filename or "unknown"
                 rel = safe_relative_path(filename) or "unknown"
@@ -432,7 +503,7 @@ async def import_files(
                 # under task cancellation so the copy thread runs to completion
                 # before we clean up.
                 copy_task = asyncio.create_task(
-                    asyncio.to_thread(_copy_chunked, upload.file, dest, max_file_bytes)
+                    asyncio.to_thread(_copy_chunked, upload.file, dest, per_file_limit)
                 )
                 try:
                     await asyncio.shield(copy_task)
@@ -452,7 +523,7 @@ async def import_files(
                         status_code=413,
                         detail=(
                             f"File '{filename}' exceeds the "
-                            f"{max_file_bytes // (1024**2)} MiB per-file limit"
+                            f"{per_file_limit_mb} MiB {per_file_limit_label} limit"
                         ),
                     ) from None
                 await upload.close()
@@ -569,6 +640,8 @@ def _derive_stage(
     if analysis_job_id is None and analysis_queued is False:
         return "analysis_skipped"
     if analysis_job_id is None:
+        # health_upload jobs never enqueue analysis; they reach here with
+        # analysis_queued=None (not False) and return "done" directly.
         return "done"
     if linked is None:
         # Analysis job was reaped after the import job stored the link.
@@ -646,9 +719,17 @@ async def list_pipeline_jobs(
         stage = _derive_stage(import_state, analysis_id, job.analysis_queued, linked)
 
         import_result_summary: ImportResultSummary | None = None
+        health_import_result_summary: HealthImportResultSummary | None = None
         snapshot = job.import_result_snapshot
         if snapshot is not None:
-            import_result_summary = _to_import_result_summary(snapshot)
+            if job.job_type == JobType.HEALTH_UPLOAD:
+                health_import_result_summary = HealthImportResultSummary(
+                    inserted=snapshot.get("inserted", 0),
+                    skipped=snapshot.get("skipped", 0),
+                    nights_recomputed=snapshot.get("nights_recomputed", 0),
+                )
+            else:
+                import_result_summary = _to_import_result_summary(snapshot)
 
         result.append(
             PipelineJobStatus(
@@ -664,6 +745,7 @@ async def list_pipeline_jobs(
                 progress_message=job.latest_progress_message,
                 sessions_imported=job.sessions_imported,
                 import_result=import_result_summary,
+                health_import_result=health_import_result_summary,
                 error_message=job.error_message,
                 analysis_job_id=analysis_id,
                 analysis_queued=job.analysis_queued,
@@ -698,9 +780,21 @@ async def list_pipeline_jobs(
         rec_state = JobState(rec.state)
         stage = _derive_stage(rec_state, None, rec.analysis_queued, None)
 
-        import_result_summary = None
+        rec_import_result_summary: ImportResultSummary | None = None
+        rec_health_import_result_summary: HealthImportResultSummary | None = None
         if rec.import_result_json:
-            import_result_summary = _to_import_result_summary(rec.import_result_json)
+            if rec.job_type == "health_upload":
+                rec_health_import_result_summary = HealthImportResultSummary(
+                    inserted=rec.import_result_json.get("inserted", 0),
+                    skipped=rec.import_result_json.get("skipped", 0),
+                    nights_recomputed=rec.import_result_json.get(
+                        "nights_recomputed", 0
+                    ),
+                )
+            else:
+                rec_import_result_summary = _to_import_result_summary(
+                    rec.import_result_json
+                )
 
         result.append(
             PipelineJobStatus(
@@ -715,7 +809,8 @@ async def list_pipeline_jobs(
                 else None,
                 progress_message=None,
                 sessions_imported=rec.sessions_imported,
-                import_result=import_result_summary,
+                import_result=rec_import_result_summary,
+                health_import_result=rec_health_import_result_summary,
                 error_message=rec.error_message,
                 analysis_job_id=None,
                 analysis_queued=rec.analysis_queued,

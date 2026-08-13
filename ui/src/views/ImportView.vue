@@ -4,7 +4,7 @@
 
         <!-- Upload hero card -->
         <div class="hero-card">
-            <!-- Profile selector (multiuser mode with multiple profiles) -->
+            <!-- Profile selector (shared between both tabs) -->
             <div v-if="profiles.length > 1" class="profile-selector">
                 <label for="import-profile" class="profile-selector-label"
                     >Import into profile</label
@@ -14,120 +14,199 @@
                 </select>
             </div>
 
-            <!-- Always-present hidden file input so fileInputRef is always bound -->
-            <input
-                ref="fileInputRef"
-                type="file"
-                webkitdirectory
-                multiple
-                class="hidden"
-                @change="onFileChange"
-            />
-
-            <!-- idle: drop zone -->
-            <div
-                v-if="uploadPhase === 'idle'"
-                class="drop-zone"
-                :class="{ dragging: isDragging }"
-                @click="fileInputRef?.click()"
-                @dragover.prevent="isDragging = true"
-                @dragleave.prevent="isDragging = false"
-                @drop.prevent="onDrop"
+            <!-- Tab toggle -->
+            <ToggleGroup
+                type="single"
+                variant="outline"
+                class="tab-toggle"
+                :model-value="activeTab"
+                @update:model-value="
+                    (v) => {
+                        if (v) activeTab = v as ImportTab
+                    }
+                "
             >
-                <Upload class="drop-icon" />
-                <p class="drop-text">Drop SD card folder here or click to browse</p>
-                <p class="drop-text drop-subtext">Select the root folder of your CPAP SD card</p>
-                <p v-if="dropError" class="error-text">{{ dropError }}</p>
+                <ToggleGroupItem value="cpap">CPAP Data</ToggleGroupItem>
+                <ToggleGroupItem value="health">Apple Health</ToggleGroupItem>
+            </ToggleGroup>
+
+            <!-- ====== CPAP Data tab ====== -->
+            <div v-show="activeTab === 'cpap'">
+                <!-- Always-present hidden file input so fileInputRef is always bound -->
+                <input
+                    ref="fileInputRef"
+                    type="file"
+                    webkitdirectory
+                    multiple
+                    class="hidden"
+                    @change="onFileChange"
+                />
+
+                <!-- idle: drop zone -->
+                <div
+                    v-if="uploadPhase === 'idle'"
+                    class="drop-zone"
+                    :class="{ dragging: isDragging }"
+                    @click="fileInputRef?.click()"
+                    @dragover.prevent="isDragging = true"
+                    @dragleave.prevent="isDragging = false"
+                    @drop.prevent="onDrop"
+                >
+                    <Upload class="drop-icon" />
+                    <p class="drop-text">Drop SD card folder here or click to browse</p>
+                    <p class="drop-text drop-subtext">
+                        Select the root folder of your CPAP SD card
+                    </p>
+                    <p v-if="dropError" class="error-text">{{ dropError }}</p>
+                </div>
+
+                <!-- selected: folder summary + structure indicator + actions -->
+                <template v-else-if="uploadPhase === 'selected'">
+                    <div class="folder-info">
+                        <Folder class="folder-info-icon" />
+                        <span class="folder-name">{{ folderName }}</span>
+                        <span class="folder-sep">·</span>
+                        <span class="folder-meta">{{ fileEntries.length }} files</span>
+                        <span class="folder-sep">·</span>
+                        <span class="folder-meta">{{ formatBytes(totalSize) }}</span>
+                    </div>
+                    <p v-if="hasResMedStructure" class="structure-ok">
+                        <CheckCircle2 class="h-4 w-4" />
+                        ResMed SD card structure detected
+                    </p>
+                    <p v-else class="structure-warn">
+                        <AlertTriangle class="h-4 w-4" />
+                        Doesn't look like a ResMed SD card — import will still be attempted
+                    </p>
+                    <p v-if="precheckPending" class="folder-meta precheck-hint">
+                        Checking for files already on server…
+                    </p>
+                    <template v-else-if="skippedCount > 0">
+                        <p class="structure-ok">
+                            <CheckCircle2 class="h-4 w-4" />
+                            <template v-if="forceUploadAll">
+                                Uploading all {{ fileEntries.length }} files (dedupe skipped)
+                            </template>
+                            <template v-else-if="uploadCount === 0">
+                                All {{ sessionEntries.length }} session files already on server
+                            </template>
+                            <template v-else>
+                                {{ skippedCount }} of {{ sessionEntries.length }} session files
+                                already on server — will upload {{ uploadCount }} files ({{
+                                    formatBytes(uploadBytes)
+                                }})
+                            </template>
+                        </p>
+                        <label v-if="uploadCount > 0" class="dedupe-skip-label">
+                            <input
+                                v-model="forceUploadAll"
+                                type="checkbox"
+                                class="dedupe-skip-checkbox"
+                            />
+                            Upload all files (skip dedupe)
+                        </label>
+                    </template>
+                    <div class="card-actions">
+                        <Button variant="outline" @click="resetUpload">Change folder</Button>
+                        <Button
+                            :disabled="skippedCount > 0 && uploadCount === 0 && !forceUploadAll"
+                            @click="handleImport"
+                        >
+                            <Upload class="mr-2 h-4 w-4" />
+                            Import
+                        </Button>
+                    </div>
+                </template>
+
+                <!-- uploading: progress bar -->
+                <template v-else-if="uploadPhase === 'uploading'">
+                    <p v-if="skipSummary" class="skip-summary">
+                        Skipped {{ skipSummary.count }} files already on server ({{
+                            formatBytes(skipSummary.bytes)
+                        }}
+                        saved)
+                    </p>
+                    <p class="progress-label">
+                        {{ batchLabel ?? 'Uploading' }}… {{ uploadProgress }}%
+                        <span v-if="uploadTotal > 0">
+                            ({{ formatBytes(uploadLoaded) }} / {{ formatBytes(uploadTotal) }})
+                        </span>
+                    </p>
+                    <div class="progress-track">
+                        <div class="progress-fill" :style="{ width: uploadProgress + '%' }" />
+                    </div>
+                </template>
+
+                <!-- error: message + retry actions -->
+                <template v-else-if="uploadPhase === 'error'">
+                    <p class="error-text">{{ importError }}</p>
+                    <div class="card-actions">
+                        <Button variant="outline" @click="resetUpload">Change folder</Button>
+                        <Button @click="handleImport">Try again</Button>
+                    </div>
+                </template>
             </div>
 
-            <!-- selected: folder summary + structure indicator + actions -->
-            <template v-else-if="uploadPhase === 'selected'">
-                <div class="folder-info">
-                    <Folder class="folder-info-icon" />
-                    <span class="folder-name">{{ folderName }}</span>
-                    <span class="folder-sep">·</span>
-                    <span class="folder-meta">{{ fileEntries.length }} files</span>
-                    <span class="folder-sep">·</span>
-                    <span class="folder-meta">{{ formatBytes(totalSize) }}</span>
-                </div>
-                <p v-if="hasResMedStructure" class="structure-ok">
-                    <CheckCircle2 class="h-4 w-4" />
-                    ResMed SD card structure detected
-                </p>
-                <p v-else class="structure-warn">
-                    <AlertTriangle class="h-4 w-4" />
-                    Doesn't look like a ResMed SD card — import will still be attempted
-                </p>
-                <p v-if="precheckPending" class="folder-meta precheck-hint">
-                    Checking for files already on server…
-                </p>
-                <template v-else-if="skippedCount > 0">
-                    <p class="structure-ok">
-                        <CheckCircle2 class="h-4 w-4" />
-                        <template v-if="forceUploadAll">
-                            Uploading all {{ fileEntries.length }} files (dedupe skipped)
-                        </template>
-                        <template v-else-if="uploadCount === 0">
-                            All {{ sessionEntries.length }} session files already on server
-                        </template>
-                        <template v-else>
-                            {{ skippedCount }} of {{ sessionEntries.length }} session files already
-                            on server — will upload {{ uploadCount }} files ({{
-                                formatBytes(uploadBytes)
-                            }})
-                        </template>
+            <!-- ====== Apple Health tab ====== -->
+            <div v-show="activeTab === 'health'">
+                <input
+                    ref="healthFileInputRef"
+                    type="file"
+                    accept=".zip"
+                    class="hidden"
+                    @change="onHealthFileChange"
+                />
+
+                <!-- idle: file picker zone -->
+                <div
+                    v-if="healthUploadPhase === 'idle'"
+                    class="drop-zone"
+                    @click="healthFileInputRef?.click()"
+                >
+                    <Upload class="drop-icon" />
+                    <p class="drop-text">Click to choose export.zip</p>
+                    <p class="drop-text drop-subtext">
+                        On your iPhone: Health app → profile icon → Export All Health Data
                     </p>
-                    <label v-if="uploadCount > 0" class="dedupe-skip-label">
-                        <input
-                            v-model="forceUploadAll"
-                            type="checkbox"
-                            class="dedupe-skip-checkbox"
-                        />
-                        Upload all files (skip dedupe)
-                    </label>
+                </div>
+
+                <!-- selected: file info + import button -->
+                <template v-else-if="healthUploadPhase === 'selected'">
+                    <div class="folder-info">
+                        <FileArchive class="folder-info-icon" />
+                        <span class="folder-name">{{ healthFile?.name }}</span>
+                        <span class="folder-sep">·</span>
+                        <span class="folder-meta">{{ formatBytes(healthFile?.size ?? 0) }}</span>
+                    </div>
+                    <div class="card-actions">
+                        <Button variant="outline" @click="resetHealthUpload">Change file</Button>
+                        <Button @click="handleHealthImport">
+                            <Upload class="mr-2 h-4 w-4" />
+                            Import
+                        </Button>
+                    </div>
                 </template>
-                <div class="card-actions">
-                    <Button variant="outline" @click="resetUpload">Change folder</Button>
-                    <Button
-                        :disabled="skippedCount > 0 && uploadCount === 0 && !forceUploadAll"
-                        @click="handleImport"
-                    >
-                        <Upload class="mr-2 h-4 w-4" />
-                        Import
-                    </Button>
-                </div>
-            </template>
 
-            <!-- uploading: progress bar -->
-            <template v-else-if="uploadPhase === 'uploading'">
-                <p v-if="skipSummary" class="skip-summary">
-                    Skipped {{ skipSummary.count }} files already on server ({{
-                        formatBytes(skipSummary.bytes)
-                    }}
-                    saved)
-                </p>
-                <p class="progress-label">
-                    {{ batchLabel ?? 'Uploading' }}… {{ uploadProgress }}%
-                    <span v-if="uploadTotal > 0">
-                        ({{ formatBytes(uploadLoaded) }} / {{ formatBytes(uploadTotal) }})
-                    </span>
-                </p>
-                <div class="progress-track">
-                    <div class="progress-fill" :style="{ width: uploadProgress + '%' }" />
-                </div>
-            </template>
+                <!-- uploading: progress bar -->
+                <template v-else-if="healthUploadPhase === 'uploading'">
+                    <p class="progress-label">Uploading… {{ healthUploadProgress }}%</p>
+                    <div class="progress-track">
+                        <div class="progress-fill" :style="{ width: healthUploadProgress + '%' }" />
+                    </div>
+                </template>
 
-            <!-- error: message + retry actions -->
-            <template v-else-if="uploadPhase === 'error'">
-                <p class="error-text">{{ importError }}</p>
-                <div class="card-actions">
-                    <Button variant="outline" @click="resetUpload">Change folder</Button>
-                    <Button @click="handleImport">Try again</Button>
-                </div>
-            </template>
+                <!-- error: message + retry actions -->
+                <template v-else-if="healthUploadPhase === 'error'">
+                    <p class="error-text">{{ healthImportError }}</p>
+                    <div class="card-actions">
+                        <Button variant="outline" @click="resetHealthUpload">Change file</Button>
+                        <Button @click="handleHealthImport">Try again</Button>
+                    </div>
+                </template>
+            </div>
         </div>
 
-        <!-- Active / recent import jobs -->
+        <!-- Active / recent import jobs (shared) -->
         <ImportJobsPanel :jobs="importJobs" @cancel="handleCancelImportJob" />
     </div>
 </template>
@@ -137,6 +216,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { PipelineJobStatus } from '@/types'
 import {
     importFiles,
+    importHealthFile,
     precheckFiles,
     isAnchorFile,
     isImportableFile,
@@ -147,19 +227,27 @@ import { getImportJobs, cancelImport, ACTIVE_PIPELINE_STAGES } from '@/api/impor
 import { cancelAnalysisJob } from '@/api/analysis'
 import { formatBytes } from '@/utils/formatting'
 import { Button } from '@/components/ui/button'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import ImportJobsPanel from '@/components/ImportJobsPanel.vue'
-import { Upload, Folder, CheckCircle2, AlertTriangle } from '@lucide/vue'
+import { Upload, Folder, CheckCircle2, AlertTriangle, FileArchive } from '@lucide/vue'
 import { useAuth } from '@/composables/useAuth'
 
 // ---------------------------------------------------------------------------
-// Profile selection
+// Profile selection (shared between tabs)
 // ---------------------------------------------------------------------------
 
 const { profiles, activeProfileId } = useAuth()
 const selectedProfileId = ref<number | null>(activeProfileId.value)
 
 // ---------------------------------------------------------------------------
-// Upload flow state
+// Tab state
+// ---------------------------------------------------------------------------
+
+type ImportTab = 'cpap' | 'health'
+const activeTab = ref<ImportTab>('cpap')
+
+// ---------------------------------------------------------------------------
+// CPAP upload flow state
 // ---------------------------------------------------------------------------
 
 type UploadPhase = 'idle' | 'selected' | 'uploading' | 'error'
@@ -413,6 +501,57 @@ function resetUpload() {
 }
 
 // ---------------------------------------------------------------------------
+// Apple Health upload flow
+// ---------------------------------------------------------------------------
+
+type HealthUploadPhase = 'idle' | 'selected' | 'uploading' | 'error'
+
+const healthUploadPhase = ref<HealthUploadPhase>('idle')
+const healthFile = ref<File | null>(null)
+const healthUploadProgress = ref(0)
+const healthImportError = ref<string | null>(null)
+const healthFileInputRef = ref<HTMLInputElement | null>(null)
+
+function onHealthFileChange(event: Event) {
+    const input = event.target as HTMLInputElement
+    if (!input.files || input.files.length === 0) return
+    healthFile.value = input.files[0]
+    healthUploadProgress.value = 0
+    healthImportError.value = null
+    healthUploadPhase.value = 'selected'
+}
+
+function resetHealthUpload() {
+    healthUploadPhase.value = 'idle'
+    healthFile.value = null
+    healthUploadProgress.value = 0
+    healthImportError.value = null
+    if (healthFileInputRef.value) healthFileInputRef.value.value = ''
+}
+
+async function handleHealthImport() {
+    // Re-entrancy guard.
+    if (healthUploadPhase.value === 'uploading' || !healthFile.value) return
+    healthUploadPhase.value = 'uploading'
+    healthUploadProgress.value = 0
+    healthImportError.value = null
+
+    const file = healthFile.value
+    const profileId = selectedProfileId.value
+
+    try {
+        await importHealthFile(file, profileId, (fraction: number) => {
+            healthUploadProgress.value = Math.round(fraction * 100)
+        })
+        resetHealthUpload()
+        void fetchImportJobs()
+    } catch (e: unknown) {
+        healthImportError.value = e instanceof Error ? e.message : 'Import failed'
+        healthUploadPhase.value = 'error'
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Import jobs polling
 // ---------------------------------------------------------------------------
 
@@ -493,6 +632,12 @@ onUnmounted(() => {
     font-weight: 500;
     color: var(--color-foreground);
     white-space: nowrap;
+}
+
+/* ---- Tab toggle ---- */
+
+.tab-toggle {
+    align-self: flex-start;
 }
 
 /* ---- Hero card ---- */

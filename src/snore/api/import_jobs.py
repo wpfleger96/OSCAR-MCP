@@ -110,6 +110,7 @@ class JobType(Enum):
     # This member is retained so existing DB rows with job_type='path' can be
     # surfaced by in-memory jobs without a ValueError on enum lookup.
     PATH = "path"
+    HEALTH_UPLOAD = "health_upload"
 
 
 class JobPhase(StrEnum):
@@ -642,10 +643,18 @@ def has_active_jobs() -> bool:
         return any(j.state in ACTIVE_STATES for j in _jobs.values())
 
 
-def reserve_slot(owner_user_id: int | None) -> ImportJob | None:
+def reserve_slot(
+    owner_user_id: int | None,
+    *,
+    job_type: JobType = JobType.UPLOAD,
+) -> ImportJob | None:
     """Atomically check caps and create a PENDING_UPLOAD reservation.
 
     Must be called BEFORE reading any body bytes.
+
+    Args:
+        owner_user_id: The user who will own this job.
+        job_type: The type of import job (default: UPLOAD for CPAP uploads).
 
     Returns:
         A new ImportJob in PENDING_UPLOAD state, or None if over-limit (429).
@@ -655,7 +664,7 @@ def reserve_slot(owner_user_id: int | None) -> ImportJob | None:
     _reap_terminal()
     job = ImportJob(
         job_id=uuid.uuid4().hex,
-        job_type=JobType.UPLOAD,
+        job_type=job_type,
         owner_user_id=owner_user_id,
     )
     with _lock:

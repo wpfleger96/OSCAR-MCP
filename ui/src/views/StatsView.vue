@@ -83,6 +83,7 @@
                 :periods="periods"
                 :loading="periodsLoading || dataRangeLoading"
                 :empty-message="periodsEmptyMessage"
+                :show-sleep-columns="hasSleepPeriodData"
             />
         </div>
 
@@ -209,6 +210,18 @@ const METRIC_CONFIG: Record<
         color: '#ca8a04',
     },
     rera: { label: 'RERA (events/hr)', glossaryKey: 'rera', key: 'rera', color: '#ea580c' },
+    total_sleep_hours: {
+        label: 'Avg Sleep (hrs)',
+        glossaryKey: 'total_sleep',
+        key: 'total_sleep_hours',
+        color: '#4f46e5',
+    },
+    sleep_efficiency: {
+        label: 'Sleep Efficiency (%)',
+        glossaryKey: 'sleep_efficiency',
+        key: 'sleep_efficiency',
+        color: '#8b5cf6',
+    },
 }
 
 const VALID_METRICS = new Set(Object.keys(METRIC_CONFIG))
@@ -312,6 +325,9 @@ const {
 const periods = computed<PeriodStatistics[]>(() => periodData.value?.periods ?? [])
 const summary = computed(() => periodData.value?.summary ?? null)
 const trends = computed(() => periodData.value?.trends ?? null)
+const hasSleepPeriodData = computed(() =>
+    periods.value.some((p) => p.avg_total_sleep_hours != null),
+)
 
 watch([granularity, daysRange], () => {
     void reloadPeriods()

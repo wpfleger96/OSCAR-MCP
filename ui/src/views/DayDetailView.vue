@@ -5,6 +5,13 @@
 
     <ErrorState v-else-if="error" :message="error" :retry="reload" />
 
+    <div v-else-if="notFound" class="empty-day">
+        <p class="empty-message">No CPAP data recorded for this date.</p>
+        <RouterLink :to="`/apple-health/${props.dayDate}`" class="back-link">
+            <ArrowLeft class="inline h-4 w-4" /> Apple Health night detail
+        </RouterLink>
+    </div>
+
     <div v-else-if="data" class="day-detail">
         <RouterLink to="/" class="back-link">
             <ArrowLeft class="inline h-4 w-4" /> Dashboard
@@ -201,6 +208,60 @@
             />
         </div>
 
+        <!-- Apple Health group -->
+        <template v-if="data.health_sleep">
+            <div class="apple-health-section">
+                <h2>Apple Health</h2>
+                <div class="stats-grid mb-4">
+                    <StatCard
+                        label="Time in Bed"
+                        :value="secToHours(data.health_sleep.time_in_bed_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="time_in_bed"
+                    />
+                    <StatCard
+                        label="Total Sleep"
+                        :value="secToHours(data.health_sleep.total_sleep_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="total_sleep"
+                    />
+                    <StatCard
+                        label="Efficiency"
+                        :value="data.health_sleep.sleep_efficiency_pct ?? null"
+                        unit="%"
+                        :decimals="1"
+                        glossary-key="sleep_efficiency"
+                    />
+                    <StatCard
+                        label="Core"
+                        :value="secToHours(data.health_sleep.core_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="core_sleep"
+                    />
+                    <StatCard
+                        label="Deep"
+                        :value="secToHours(data.health_sleep.deep_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="deep_sleep"
+                    />
+                    <StatCard
+                        label="REM"
+                        :value="secToHours(data.health_sleep.rem_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="rem_sleep"
+                    />
+                </div>
+                <RouterLink :to="`/apple-health/${data.date}`" class="session-link">
+                    Apple Health night detail →
+                </RouterLink>
+            </div>
+        </template>
+
         <div v-if="data.session_ids?.length" class="sessions-section">
             <h2>Sessions</h2>
             <Table>
@@ -226,6 +287,8 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted, ref, shallowRef } from 'vue'
+import { isAxiosError } from 'axios'
 import StatCard from '@/components/StatCard.vue'
 import {
     Table,
@@ -236,14 +299,36 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { Loader2, ArrowLeft } from '@lucide/vue'
-import { useApiLoad } from '@/composables/useApiLoad'
 import { getDay } from '@/api/days'
-import { formatDateWithWeekday } from '@/utils/formatting'
+import { formatDateWithWeekday, secToHours } from '@/utils/formatting'
 import ErrorState from '@/components/ErrorState.vue'
+import type { DayDetail } from '@/types'
 
 const props = defineProps<{ dayDate: string }>()
 
-const { data, loading, error, reload } = useApiLoad(() => getDay(props.dayDate))
+const data = shallowRef<DayDetail | null>(null)
+const loading = ref(true)
+const error = ref<string | null>(null)
+const notFound = ref(false)
+
+async function reload(): Promise<void> {
+    loading.value = true
+    error.value = null
+    notFound.value = false
+    try {
+        data.value = await getDay(props.dayDate)
+    } catch (err) {
+        if (isAxiosError(err) && err.response?.status === 404) {
+            notFound.value = true
+        } else {
+            error.value = err instanceof Error ? err.message : 'Failed to load day'
+        }
+    } finally {
+        loading.value = false
+    }
+}
+
+onMounted(() => void reload())
 </script>
 
 <style scoped>
@@ -266,10 +351,32 @@ const { data, loading, error, reload } = useApiLoad(() => getDay(props.dayDate))
     gap: 0.75rem;
 }
 
+.apple-health-section {
+    margin-bottom: 1.5rem;
+}
+
+.apple-health-section h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+}
+
 .sessions-section h2 {
     font-size: 1.1rem;
     font-weight: 600;
     margin-bottom: 0.75rem;
+}
+
+.empty-day {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 2rem 0;
+}
+
+.empty-message {
+    color: var(--color-muted-foreground);
 }
 
 .session-link {

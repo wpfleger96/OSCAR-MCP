@@ -64,6 +64,20 @@
                             ></template
                         >
                     </div>
+                    <div
+                        v-else-if="job.stage === 'done' && job.health_import_result"
+                        class="job-result-summary"
+                    >
+                        <span class="count-imported"
+                            >{{ job.health_import_result.inserted }} samples</span
+                        ><span class="count-sep"> · </span
+                        ><span class="count-imported"
+                            >{{ job.health_import_result.nights_recomputed }} nights</span
+                        ><span class="count-sep"> · </span
+                        ><span class="count-skipped"
+                            >{{ job.health_import_result.skipped }} duplicates</span
+                        >
+                    </div>
                 </div>
                 <Button
                     v-if="isActive(job.stage)"
@@ -97,6 +111,7 @@ function isSpinning(stage: string): boolean {
 }
 
 function jobLabel(job: PipelineJobStatus): string {
+    if (job.job_type === 'health_upload') return 'Apple Health'
     const unit = job.job_type === 'path' ? 'source(s)' : 'file(s)'
     return `${job.file_count} ${unit}`
 }
