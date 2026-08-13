@@ -282,3 +282,65 @@ class TestCancellation:
         assert len(nights_in_db) <= result.nights_recomputed, (
             "nights_in_db must be a subset of the nights that were recomputed"
         )
+
+
+# ---------------------------------------------------------------------------
+# nights_recomputed semantics
+# ---------------------------------------------------------------------------
+
+
+class TestNightsRecomputed:
+    async def test_sleep_nights_counted_quantity_only_nights_excluded(
+        self, temp_db, tmp_path
+    ):
+        """nights_recomputed counts only nights that received SLEEP records.
+
+        The fixture has 2 sleep nights (2024-03-10, 2024-03-11) and 1 night
+        with only a SpO2 record (2024-03-12, because the record starts at
+        04:00 on the 13th which is before noon → prior night).  The SpO2-only
+        night produces no nightly summary (recompute is a no-op), so
+        nights_recomputed must equal 2, not 3.
+        """
+        # Build a minimal export.xml: 2 sleep nights + 1 SpO2-only night.
+        (tmp_path / "export.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<HealthData>"
+            ' <ExportDate value="2024-03-15 09:00:00 +0000"/>'
+            " <Me/>"
+            # Night 2024-03-10: sleep record (start 22:00 ≥ noon → same day)
+            ' <Record type="HKCategoryTypeIdentifierSleepAnalysis"'
+            ' sourceName="Watch" sourceVersion="1.0" device=""'
+            ' creationDate="2024-03-11 06:00:00 +0000"'
+            ' startDate="2024-03-10 22:00:00 +0000"'
+            ' endDate="2024-03-11 06:00:00 +0000"'
+            ' value="HKCategoryValueSleepAnalysisAsleepREM" unit=""/>'
+            # Night 2024-03-11: sleep record (start 22:00 ≥ noon → same day)
+            ' <Record type="HKCategoryTypeIdentifierSleepAnalysis"'
+            ' sourceName="Watch" sourceVersion="1.0" device=""'
+            ' creationDate="2024-03-12 06:00:00 +0000"'
+            ' startDate="2024-03-11 22:00:00 +0000"'
+            ' endDate="2024-03-12 06:00:00 +0000"'
+            ' value="HKCategoryValueSleepAnalysisAsleepREM" unit=""/>'
+            # Night 2024-03-12: SpO2 ONLY (start 04:00 < noon → previous day)
+            ' <Record type="HKQuantityTypeIdentifierOxygenSaturation"'
+            ' sourceName="Watch" sourceVersion="1.0" device=""'
+            ' creationDate="2024-03-13 04:00:00 +0000"'
+            ' startDate="2024-03-13 04:00:00 +0000"'
+            ' endDate="2024-03-13 04:00:00 +0000"'
+            ' value="0.95" unit="%"/>'
+            "</HealthData>"
+        )
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        svc = HealthImportService()
+        result = await svc.import_file(tmp_path, profile_id)
+
+        # 2 sleep nights, not 3 — quantity-only night excluded from count.
+        assert result.nights_recomputed == 2
+        nights = await _summary_nights(profile_id)
+        assert date(2024, 3, 10) in nights
+        assert date(2024, 3, 11) in nights
+        assert date(2024, 3, 12) not in nights, (
+            "SpO2-only night must not produce a nightly summary"
+        )

@@ -9,25 +9,34 @@ from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.database.health_importers import (
-    HealthSampleImporter,
-    _check_sample_exists_clause,
-)
-from snore.database.models import HealthSample
+from snore.database.health_importers import HealthSampleImporter
 from snore.database.session import session_scope
 from snore.database.txn import run_txn
 from snore.database.write_gate import write_gate
 from snore.parsers.apple_health import xml_reader
 from snore.parsers.apple_health.models import RawHealthRecord
 from snore.parsers.apple_health.parser import AppleHealthParser
+from snore.parsers.apple_health.type_handlers import SLEEP_TYPE
 from snore.services.schemas import HealthImportResult
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["HealthImportService"]
+
+# Number of nights per recompute transaction. Batching avoids O(N) separate
+# write_gate acquisitions for multi-year backfills (e.g. 1 095 nights = 3 years).
+_RECOMPUTE_BATCH_SIZE = 50
+
+
+class _DryRunRollback(BaseException):
+    """Sentinel raised inside a dry-run transaction to force rollback after rowcount capture.
+
+    BaseException (not Exception) ensures session_scope's ``except Exception``
+    clause does not swallow it; the session.begin() context manager still rolls
+    back on any BaseException, and the finally block still closes the session.
+    """
 
 
 class HealthImportService:
@@ -106,6 +115,9 @@ class HealthImportService:
 
         Returns (inserted, skipped, nights_recomputed).
 
+        nights_recomputed counts only nights that received SLEEP records —
+        recomputing a quantity-only night is a no-op and excluded from the count.
+
         When *cancel_predicate* is provided it is called at the start of each
         batch iteration. If it returns True, record consumption stops and no
         further batches are written. Batches already committed to the DB are
@@ -139,28 +151,38 @@ class HealthImportService:
                     *,
                     _c: list[RawHealthRecord] = chunk,
                     _i: HealthSampleImporter = importer,
-                ) -> tuple[int, int, set[date]]:
-                    return await _i.insert_samples_batch(_c, profile_id, db)
+                ) -> tuple[int, int]:
+                    ci, cs, _ = await _i.insert_samples_batch(_c, profile_id, db)
+                    return ci, cs
 
                 async with write_gate():
-                    ci, cs, nights = await run_txn(_insert)
+                    ci, cs = await run_txn(_insert)
                 inserted_total += ci
                 skipped_total += cs
-                affected_nights.update(nights)
+                # Only track nights that received SLEEP records: recomputing a
+                # quantity-only night (SpO2, RR) is a no-op and inflates the count.
+                affected_nights.update(
+                    s.night_date for s in chunk if s.record_type == SLEEP_TYPE
+                )
 
             if progress_callback is not None:
                 progress_callback(processed)
 
         if not dry_run and affected_nights:
-            for night in sorted(affected_nights):
+            sorted_nights = sorted(affected_nights)
+            for slice_start in range(0, len(sorted_nights), _RECOMPUTE_BATCH_SIZE):
+                night_slice = sorted_nights[
+                    slice_start : slice_start + _RECOMPUTE_BATCH_SIZE
+                ]
 
                 async def _recompute(
                     db: AsyncSession,
                     *,
-                    _n: date = night,
+                    _nights: list[date] = night_slice,
                     _i: HealthSampleImporter = importer,
                 ) -> None:
-                    await _i.recompute_nightly_summary(profile_id, _n, db)
+                    for n in _nights:
+                        await _i.recompute_nightly_summary(profile_id, n, db)
 
                 async with write_gate():
                     await run_txn(_recompute)
@@ -173,21 +195,21 @@ async def _count_new_vs_dup(
     chunk: list[RawHealthRecord],
     profile_id: int,
 ) -> tuple[int, int]:
-    """Count how many records in chunk are new vs already present in the DB.
+    """Count new vs duplicate records using a rolled-back INSERT OR IGNORE.
 
-    Uses COALESCE expressions matching the dedup index so NULL value_text/value_num
-    records compare correctly.
+    Runs the same bulk INSERT OR IGNORE as the real import path inside a
+    ``BEGIN IMMEDIATE`` transaction that is always rolled back, deriving
+    new-vs-dup from the SQLite changes() rowcount exactly as the live path does.
+    Dedup semantics are guaranteed identical — including COALESCE NULL-sentinel
+    handling in the expression index — with no duplicated logic.
     """
-    new = 0
-    dup = 0
-    async with session_scope() as db:
-        for s in chunk:
-            clauses = _check_sample_exists_clause(profile_id, s)
-            result = await db.execute(
-                select(func.count()).select_from(HealthSample).where(*clauses)
+    inserted = 0
+    try:
+        async with session_scope(immediate=True) as db:
+            inserted, _, _ = await HealthSampleImporter().insert_samples_batch(
+                chunk, profile_id, db
             )
-            if (result.scalar() or 0) > 0:
-                dup += 1
-            else:
-                new += 1
-    return new, dup
+            raise _DryRunRollback()
+    except _DryRunRollback:
+        pass
+    return inserted, len(chunk) - inserted
