@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import time
+
+from pathlib import Path
+
 import pytest
 
 from fastapi.testclient import TestClient
@@ -65,3 +70,105 @@ class TestAboutEndpoint:
         client = TestClient(app, raise_server_exceptions=True)
         schema = client.get("/openapi.json").json()
         assert "/api/v1/about" not in schema.get("paths", {})
+
+
+class TestAboutUpdatePending:
+    def test_update_pending_false_when_no_marker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Absent marker -> update_pending is False and update_deferred_since is None."""
+        marker = tmp_path / "deploy-deferred.pending"
+        # marker does not exist
+
+        import snore.api.routers.about as about_mod
+
+        monkeypatch.setattr(about_mod, "DEFAULT_DEPLOY_DEFERRED_MARKER", marker)
+
+        from snore.api.app import create_app
+
+        app = create_app()
+        client = TestClient(app, raise_server_exceptions=True)
+        data = client.get("/api/v1/about").json()
+        assert data["update_pending"] is False
+        assert data["update_deferred_since"] is None
+
+    def test_update_pending_true_when_marker_exists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Fresh marker with ISO8601 content -> True; since round-trips."""
+        marker = tmp_path / "deploy-deferred.pending"
+        since_str = "2026-08-13T20:00:00+00:00"
+        marker.write_text(since_str)
+
+        import snore.api.routers.about as about_mod
+
+        monkeypatch.setattr(about_mod, "DEFAULT_DEPLOY_DEFERRED_MARKER", marker)
+
+        from snore.api.app import create_app
+
+        app = create_app()
+        client = TestClient(app, raise_server_exceptions=True)
+        data = client.get("/api/v1/about").json()
+        assert data["update_pending"] is True
+        assert data["update_deferred_since"] is not None
+
+    def test_update_deferred_since_fallback_when_content_malformed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Malformed marker content -> still True; since is a non-null string (mtime fallback)."""
+        marker = tmp_path / "deploy-deferred.pending"
+        marker.write_text("garbage")
+
+        import snore.api.routers.about as about_mod
+
+        monkeypatch.setattr(about_mod, "DEFAULT_DEPLOY_DEFERRED_MARKER", marker)
+
+        from snore.api.app import create_app
+
+        app = create_app()
+        client = TestClient(app, raise_server_exceptions=True)
+        data = client.get("/api/v1/about").json()
+        assert data["update_pending"] is True
+        assert isinstance(data["update_deferred_since"], str)
+        assert data["update_deferred_since"] != ""
+
+    def test_update_pending_false_when_marker_stale(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Marker older than 30 minutes -> False and None."""
+        marker = tmp_path / "deploy-deferred.pending"
+        marker.write_text("2026-08-13T18:00:00+00:00")
+        # Age the mtime by 31 minutes
+        stale_time = time.time() - (31 * 60)
+        os.utime(marker, (stale_time, stale_time))
+
+        import snore.api.routers.about as about_mod
+
+        monkeypatch.setattr(about_mod, "DEFAULT_DEPLOY_DEFERRED_MARKER", marker)
+
+        from snore.api.app import create_app
+
+        app = create_app()
+        client = TestClient(app, raise_server_exceptions=True)
+        data = client.get("/api/v1/about").json()
+        assert data["update_pending"] is False
+        assert data["update_deferred_since"] is None
+
+    def test_startup_clears_deploy_marker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """App startup removes the deploy-deferred marker if it exists."""
+        marker = tmp_path / "deploy-deferred.pending"
+        marker.write_text("2026-08-13T20:00:00+00:00")
+        assert marker.exists()
+
+        import snore.constants as constants_mod
+
+        monkeypatch.setattr(constants_mod, "DEFAULT_DEPLOY_DEFERRED_MARKER", marker)
+
+        from snore.api.app import create_app
+
+        app = create_app()
+        with TestClient(app, raise_server_exceptions=True):
+            # Lifespan has run; marker should be gone
+            assert not marker.exists()

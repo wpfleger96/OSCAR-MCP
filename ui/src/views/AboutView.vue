@@ -13,6 +13,18 @@
         </div>
 
         <template v-else-if="data">
+            <div v-if="data.update_pending" class="update-banner">
+                <Download class="update-banner-icon" />
+                <div class="update-banner-body">
+                    <span class="update-banner-title">New version waiting to deploy</span>
+                    <span class="update-banner-desc">
+                        Held while jobs are running<template v-if="data.update_deferred_since">
+                            (since {{ formatSince(data.update_deferred_since) }})</template
+                        >. Deploys automatically a few minutes after jobs finish.
+                    </span>
+                </div>
+            </div>
+
             <section class="section">
                 <h2 class="section-heading">Build</h2>
                 <div class="overview-card">
@@ -73,11 +85,55 @@
 </template>
 
 <script setup lang="ts">
-import { Loader2, AlertTriangle } from '@lucide/vue'
-import { useApiLoad } from '@/composables/useApiLoad'
+import { ref, onUnmounted } from 'vue'
+import { Loader2, AlertTriangle, Download } from '@lucide/vue'
 import { getAbout } from '@/api/about'
+import type { AboutInfo } from '@/types'
 
-const { data, loading, error } = useApiLoad(() => getAbout())
+const data = ref<AboutInfo | null>(null)
+const loading = ref(true)
+const error = ref<string | null>(null)
+
+let stopped = false
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+
+function schedulePoll() {
+    if (stopped || pollTimer !== null) return
+    pollTimer = setTimeout(async () => {
+        pollTimer = null
+        if (stopped) return
+        await fetchAbout()
+    }, 30000)
+}
+
+async function fetchAbout() {
+    try {
+        const result = await getAbout()
+        if (stopped) return
+        data.value = result
+        error.value = null
+    } catch (err: unknown) {
+        if (data.value === null) {
+            error.value = err instanceof Error ? err.message : 'Failed to load info'
+        }
+        // silently swallow poll errors once data exists
+    } finally {
+        if (!stopped) {
+            loading.value = false
+            schedulePoll()
+        }
+    }
+}
+
+void fetchAbout()
+
+onUnmounted(() => {
+    stopped = true
+    if (pollTimer !== null) {
+        clearTimeout(pollTimer)
+        pollTimer = null
+    }
+})
 
 function formatUptime(seconds: number): string {
     const d = Math.floor(seconds / 86400)
@@ -88,6 +144,14 @@ function formatUptime(seconds: number): string {
     if (h > 0) parts.push(`${h}h`)
     parts.push(`${m}m`)
     return parts.join(' ')
+}
+
+function formatSince(iso: string): string {
+    try {
+        return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    } catch {
+        return iso
+    }
 }
 </script>
 
@@ -173,5 +237,40 @@ function formatUptime(seconds: number): string {
 
 .mono {
     font-family: ui-monospace, monospace;
+}
+
+.update-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.875rem 1.25rem;
+    border: 1px solid var(--color-warning);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+}
+
+.update-banner-icon {
+    flex-shrink: 0;
+    margin-top: 0.125rem;
+    color: var(--color-warning);
+    width: 1rem;
+    height: 1rem;
+}
+
+.update-banner-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.update-banner-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--color-foreground);
+}
+
+.update-banner-desc {
+    font-size: 0.825rem;
+    color: var(--color-muted-foreground);
 }
 </style>

@@ -364,6 +364,7 @@ DEFAULT_RAW_BACKUP_DIR = Path.home() / ".snore" / "raw"
 # file path so startup can re-derive the target without environment variables.
 # Removed by _vacuum_background after a successful VACUUM.
 DEFAULT_VACUUM_PENDING_MARKER = Path.home() / ".snore" / "vacuum.pending"
+DEFAULT_DEPLOY_DEFERRED_MARKER = Path.home() / ".snore" / "deploy-deferred.pending"
 
 # Upload staging spool directory (durable across restarts)
 DEFAULT_UPLOAD_SPOOL_DIR = Path.home() / ".snore" / "spool"

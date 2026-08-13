@@ -16,6 +16,7 @@
 
 URL="http://localhost:8000/health/busy"
 TIMEOUT=5
+MARKER=/data/.snore/deploy-deferred.pending
 
 busy=$(python -c "
 import sys
@@ -29,6 +30,13 @@ except Exception:
 " 2>/dev/null) || busy=false
 
 if [ "$busy" = "true" ]; then
+    # Record the deferral for the About page. Best-effort: no failure here
+    # may ever change the exit code (script must exit only 0 or 75).
+    {
+        mkdir -p /data/.snore
+        [ -f "$MARKER" ] || date -u +%Y-%m-%dT%H:%M:%SZ > "$MARKER"
+        touch "$MARKER"
+    } 2>/dev/null || true
     exit 75
 fi
 exit 0
