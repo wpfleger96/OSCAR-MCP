@@ -174,6 +174,11 @@ defineExpose({
         }
         chartRefs.value.forEach((r) => r?.resetZoom())
     },
+    zoomTo(startSec: number, endSec: number) {
+        for (const chart of charts.value) {
+            void loadChart(chart, startSec, endSec)
+        }
+    },
     get chartCount() {
         return charts.value.length
     },

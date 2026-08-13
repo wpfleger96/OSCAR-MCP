@@ -37,6 +37,12 @@
                 <Square v-else class="mr-2 h-4 w-4" />
                 {{ multiWaveform ? 'Multi' : 'Single' }}
             </Toggle>
+            <Button variant="outline" size="sm" :disabled="!canZoomIn" @click="$emit('zoom-in')">
+                <ZoomIn class="h-4 w-4" />
+            </Button>
+            <Button variant="outline" size="sm" :disabled="!canZoomOut" @click="$emit('zoom-out')">
+                <ZoomOut class="h-4 w-4" />
+            </Button>
             <Button variant="outline" size="sm" @click="$emit('reset-zoom')">
                 <ZoomOut class="mr-2 h-4 w-4" />
                 Reset Zoom
@@ -47,7 +53,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Plus, ZoomOut, LayoutGrid, Square } from '@lucide/vue'
+import { Plus, ZoomIn, ZoomOut, LayoutGrid, Square } from '@lucide/vue'
 import {
     Select,
     SelectContent,
@@ -66,12 +72,16 @@ const props = defineProps<{
     modelValue: string
     multiWaveform: boolean
     chartCount: number
+    canZoomIn: boolean
+    canZoomOut: boolean
 }>()
 
 defineEmits<{
     'update:modelValue': [value: string]
     'update:multiWaveform': [value: boolean]
     'reset-zoom': []
+    'zoom-in': []
+    'zoom-out': []
     'add-chart': []
 }>()
 

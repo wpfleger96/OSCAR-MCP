@@ -101,7 +101,11 @@
                 :available-types="session.waveform_types"
                 v-model:multi-waveform="multiMode"
                 :chart-count="multiViewRef?.chartCount ?? 1"
+                :can-zoom-in="canZoomIn"
+                :can-zoom-out="canZoomOut"
                 @reset-zoom="handleResetZoom"
+                @zoom-in="handleZoomIn"
+                @zoom-out="handleZoomOut"
                 @add-chart="handleAddChart"
             />
 
@@ -927,6 +931,7 @@ const error = ref<string | null>(null)
 
 const selectedType = ref('')
 const multiMode = ref(false)
+const currentZoomRange = ref<{ start: number; end: number } | null>(null)
 const settingsOpen = ref(false)
 const respiratoryOpen = ref(true)
 const pressureOpen = ref(false)
@@ -1045,28 +1050,76 @@ if (jumpToTime != null) {
             stopWatch()
             nextTick(() => {
                 const padding = 300
-                singleChartRef.value?.setScaleX(
-                    Math.max(0, jumpToTime - padding),
-                    jumpToTime + padding,
-                )
+                const start = Math.max(0, jumpToTime - padding)
+                const end = jumpToTime + padding
+                currentZoomRange.value = { start, end }
+                singleChartRef.value?.setScaleX(start, end)
             })
         }
     })
 }
 
 async function handleZoom(startSec: number, endSec: number): Promise<void> {
+    currentZoomRange.value = { start: startSec, end: endSec }
     if (!multiMode.value) {
         await loadData(startSec, endSec)
     }
 }
 
 function handleResetZoom(): void {
+    currentZoomRange.value = null
     if (multiMode.value) {
         multiViewRef.value?.resetZoom()
     } else {
         void loadData()
         singleChartRef.value?.resetZoom()
     }
+}
+
+function applyZoom(startSec: number, endSec: number): void {
+    currentZoomRange.value = { start: startSec, end: endSec }
+    if (multiMode.value) {
+        multiViewRef.value?.zoomTo(startSec, endSec)
+    } else {
+        void loadData(startSec, endSec)
+    }
+}
+
+function handleZoomIn(): void {
+    if (!session.value) return
+    const duration = fullDuration.value
+    const range = currentZoomRange.value ?? { start: 0, end: duration }
+    const currentWindow = range.end - range.start
+    if (currentWindow <= MIN_ZOOM_WINDOW) return
+
+    const center = (range.start + range.end) / 2
+    const newHalf = Math.max(MIN_ZOOM_WINDOW / 2, currentWindow / 4)
+    let start = Math.max(0, center - newHalf)
+    let end = Math.min(duration, center + newHalf)
+    const desired = newHalf * 2
+    if (start === 0) end = Math.min(duration, desired)
+    else if (end === duration) start = Math.max(0, duration - desired)
+    applyZoom(start, end)
+}
+
+function handleZoomOut(): void {
+    if (!session.value || !currentZoomRange.value) return
+    const duration = fullDuration.value
+    const range = currentZoomRange.value
+    const currentWindow = range.end - range.start
+    if (currentWindow * 2 >= duration) {
+        handleResetZoom()
+        return
+    }
+
+    const center = (range.start + range.end) / 2
+    const newHalf = currentWindow
+    let start = Math.max(0, center - newHalf)
+    let end = Math.min(duration, center + newHalf)
+    const desired = newHalf * 2
+    if (start === 0) end = Math.min(duration, desired)
+    else if (end === duration) start = Math.max(0, duration - desired)
+    applyZoom(start, end)
 }
 
 function handleAddChart(): void {
@@ -1081,6 +1134,20 @@ const startEpoch = computed(() => {
     const ms = new Date(session.value.start_time).getTime()
     return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
 })
+
+const fullDuration = computed(() => (session.value ? session.value.duration_hours * 3600 : 0))
+
+const MIN_ZOOM_WINDOW = 10
+
+const canZoomIn = computed(() => {
+    if (!session.value) return false
+    const window = currentZoomRange.value
+        ? currentZoomRange.value.end - currentZoomRange.value.start
+        : fullDuration.value
+    return window > MIN_ZOOM_WINDOW
+})
+
+const canZoomOut = computed(() => currentZoomRange.value !== null)
 
 const datePickerOpen = ref(false)
 
@@ -1136,6 +1203,7 @@ watch(
         loading.value = true
         selectedType.value = ''
         multiMode.value = false
+        currentZoomRange.value = null
         resetWaveformData()
         void loadDates()
 
