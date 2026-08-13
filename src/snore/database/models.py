@@ -300,13 +300,6 @@ class Profile(Base):
         cascade="all, delete-orphan",
         lazy="raise",
     )
-    health_ingest_tokens = relationship(
-        "HealthIngestToken",
-        back_populates="profile",
-        cascade="all, delete-orphan",
-        lazy="raise",
-    )
-
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_profile_user_name"),
         CheckConstraint("length(name) > 0", name="chk_profile_name"),
@@ -524,35 +517,6 @@ class HealthNightlySummary(Base):
         return (
             f"<HealthNightlySummary(id={self.id}, profile_id={self.profile_id}, "
             f"night_date={self.night_date})>"
-        )
-
-
-class HealthIngestToken(Base):
-    """Machine-auth token for the push ingest endpoint; only the hash is stored."""
-
-    __tablename__ = "health_ingest_tokens"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    profile_id: Mapped[int] = mapped_column(
-        ForeignKey("profiles.id", ondelete="CASCADE")
-    )
-    # SHA-256 hex digest — mirrors Invite.token_hash sizing.
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
-    label: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # Absolute audit instants.
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
-    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-    # Revoke = set timestamp; keep row for audit trail.
-    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-
-    profile = relationship(
-        "Profile", back_populates="health_ingest_tokens", lazy="raise"
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<HealthIngestToken(id={self.id}, profile_id={self.profile_id}, "
-            f"label={self.label})>"
         )
 
 

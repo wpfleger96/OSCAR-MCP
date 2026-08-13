@@ -40,7 +40,6 @@ from snore.api.routers import (
     equipment,
     events,
     export,
-    health,
     import_data,
     profiles,
     reports,
@@ -807,10 +806,6 @@ def create_app() -> FastAPI:
         equipment.router, prefix=f"{API_V1_PREFIX}/equipment", tags=["equipment"]
     )
 
-    # Health ingest — machine-auth push endpoint (bearer token, no session cookie).
-    # Exempted from AuthPathMiddleware CSRF check via _HEALTH_INGEST_PATH in middleware.py.
-    app.include_router(health.router, prefix=f"{API_V1_PREFIX}/health", tags=["health"])
-
     # /import/detect and /import/path are local-mode-only (server-path import).
     # In multiuser mode these routes are NOT registered — the loopback-peer
     # check is worthless behind Cloudflare; uploads-only is the contract.
@@ -847,7 +842,7 @@ def create_app() -> FastAPI:
     # Excluded from the OpenAPI schema deliberately — keeps the health probe
     # out of generated API clients and avoids ui/src/types/generated.ts churn.
     @app.get("/health", include_in_schema=False)
-    async def _health_probe() -> dict[str, str]:
+    async def health() -> dict[str, str]:
         return {"status": "ok"}
 
     # Watchtower pre-update gate — excluded from schema for the same reason.

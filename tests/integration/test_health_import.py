@@ -7,7 +7,6 @@ init_database() — write_gate / run_txn / session_scope all resolve to the same
 
 from __future__ import annotations
 
-import json
 import uuid
 
 from datetime import date
@@ -25,7 +24,6 @@ FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "health_data"
 # Pass the directory to import_file — AppleHealthParser.detect() requires a directory
 # or zip, not a bare XML file (xml_reader handles bare XML but detect() does not).
 EXPORT_DIR = FIXTURE_DIR
-HAE_JSON = FIXTURE_DIR / "hae_payload.json"
 
 # Sleep nights present in export.xml (from parser/fixture analysis):
 # - 2024-01-14: Watch AsleepREM (11:30–11:45 on Jan 15, noon-split → Jan 14)
@@ -90,7 +88,6 @@ class TestImportFile:
         assert result.dry_run is False
         assert result.inserted > 0, "At least some records should be inserted"
         assert result.skipped == 0, "First import should skip nothing"
-        assert result.malformed_points == 0
         # StepCount is the one unhandled HK type in the fixture.
         assert "HKQuantityTypeIdentifierStepCount" in result.unknown_metrics
 
@@ -222,62 +219,3 @@ class TestImportFile:
         assert calls[-1] > 0
         # Counts must be monotonically non-decreasing.
         assert calls == sorted(calls)
-
-
-# ---------------------------------------------------------------------------
-# HAE payload import tests
-# ---------------------------------------------------------------------------
-
-
-class TestImportPayload:
-    async def test_payload_import_lands_rows_and_summaries(self, temp_db):
-        """import_payload with the fixture JSON inserts records and recomputes summaries."""
-        await init_database(str(temp_db))
-        profile_id = await _create_profile_id()
-
-        payload = json.loads(HAE_JSON.read_text())
-
-        svc = HealthImportService()
-        result = await svc.import_payload(payload, profile_id)
-
-        assert result.inserted > 0
-        assert result.skipped == 0
-        assert result.dry_run is False
-        # step_count is the unknown metric in hae_payload.json.
-        assert len(result.unknown_metrics) >= 1
-        # The empty {} point in the fixture is a malformed point.
-        assert result.malformed_points >= 1
-
-        count = await _sample_count(profile_id)
-        assert count == result.inserted
-
-        nights = await _summary_nights(profile_id)
-        assert len(nights) >= 1, "At least one nightly summary should be created"
-        assert result.nights_recomputed == len(nights)
-
-    async def test_payload_import_idempotent(self, temp_db):
-        """Second import_payload skips all records."""
-        await init_database(str(temp_db))
-        profile_id = await _create_profile_id()
-
-        payload = json.loads(HAE_JSON.read_text())
-        svc = HealthImportService()
-
-        first = await svc.import_payload(payload, profile_id)
-        second = await svc.import_payload(payload, profile_id)
-
-        assert second.inserted == 0
-        assert second.skipped == first.inserted
-
-    async def test_payload_unknown_metric_counted(self, temp_db):
-        """Unknown metric names are counted in unknown_metrics with original spelling."""
-        await init_database(str(temp_db))
-        profile_id = await _create_profile_id()
-
-        payload = json.loads(HAE_JSON.read_text())
-        svc = HealthImportService()
-        result = await svc.import_payload(payload, profile_id)
-
-        # The fixture has "step_count" which is not in HAE_METRIC_NAME_MAP.
-        assert "step_count" in result.unknown_metrics
-        assert result.unknown_metrics["step_count"] > 0

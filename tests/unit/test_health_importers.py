@@ -268,14 +268,14 @@ class TestCrossChannelDedup:
         )
 
         xml_rec = RawHealthRecord(**{**base.__dict__, "ingest_channel": "export_xml"})
-        hae_rec = RawHealthRecord(**{**base.__dict__, "ingest_channel": "hae_json"})
+        ios_rec = RawHealthRecord(**{**base.__dict__, "ingest_channel": "ios_app"})
 
         ins1, skip1, _ = await importer.insert_samples_batch(
             [xml_rec], profile_id, async_db_session
         )
         await async_db_session.flush()
         ins2, skip2, _ = await importer.insert_samples_batch(
-            [hae_rec], profile_id, async_db_session
+            [ios_rec], profile_id, async_db_session
         )
         await async_db_session.flush()
 

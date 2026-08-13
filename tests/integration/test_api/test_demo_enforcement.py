@@ -44,9 +44,6 @@ DEMO_ALLOWED_MUTATING = {
     # Signal validation endpoints are read-only (no writes performed).
     "POST /api/v1/validate/fl",
     "POST /api/v1/validate/breaths",
-    # Machine-auth ingest: authenticated by X-SNORE-Ingest-Token, not the
-    # session actor — a demo actor without a valid token gets 401, not 403.
-    "POST /api/v1/health/ingest",
     # Local-only route: protected by require_local_only (→ 403 in multiuser
     # where demo users actually live). In local mode (test default) it passes
     # require_local_only but demo users don't exist in practice.

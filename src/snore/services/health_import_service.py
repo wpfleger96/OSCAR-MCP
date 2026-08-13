@@ -1,4 +1,4 @@
-"""HealthImportService — orchestrates the Apple Health ingestion pipeline."""
+"""HealthImportService — orchestrates the Apple Health export.xml ingestion pipeline."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from snore.database.models import HealthSample
 from snore.database.session import session_scope
 from snore.database.txn import run_txn
 from snore.database.write_gate import write_gate
-from snore.parsers.apple_health import hae_json, xml_reader
+from snore.parsers.apple_health import xml_reader
 from snore.parsers.apple_health.models import RawHealthRecord
 from snore.parsers.apple_health.parser import AppleHealthParser
 from snore.services.schemas import HealthImportResult
@@ -31,7 +31,7 @@ __all__ = ["HealthImportService"]
 
 
 class HealthImportService:
-    """Orchestrates the Apple Health import pipeline for file and HAE-push channels."""
+    """Orchestrates the Apple Health import pipeline for export.xml files."""
 
     async def import_file(
         self,
@@ -79,35 +79,8 @@ class HealthImportService:
             inserted=inserted,
             skipped=skipped,
             unknown_metrics=skip_counter,
-            malformed_points=0,
             nights_recomputed=nights_recomputed,
             dry_run=dry_run,
-        )
-
-    async def import_payload(
-        self,
-        payload: dict[str, object],
-        profile_id: int,
-    ) -> HealthImportResult:
-        """Import a Health Auto Export (HAE) JSON push payload.
-
-        Args:
-            payload: Decoded JSON body, e.g. ``{"data": {"metrics": [...]}}``.
-            profile_id: Target profile for the imported samples.
-        """
-        parse_result = hae_json.parse_payload(payload)
-
-        inserted, skipped, nights_recomputed = await self._import_records(
-            iter(parse_result.records), profile_id, 500, False, None
-        )
-
-        return HealthImportResult(
-            inserted=inserted,
-            skipped=skipped,
-            unknown_metrics=parse_result.unknown_metrics,
-            malformed_points=parse_result.skipped_points,
-            nights_recomputed=nights_recomputed,
-            dry_run=False,
         )
 
     async def _import_records(

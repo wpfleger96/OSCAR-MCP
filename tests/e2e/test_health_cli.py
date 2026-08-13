@@ -3,7 +3,6 @@
 Tests drive the real binary (no in-process imports) and exercise:
 - `health import` (dry-run and real), idempotency, invalid path
 - `health list` and `health show` after a real import
-- `health token create/list/revoke` round-trip
 """
 
 from __future__ import annotations
@@ -116,49 +115,3 @@ def test_health_show_unknown_date_exits_nonzero(snore, health_db):
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "no health data" in combined.lower()
-
-
-def test_health_token_create_list_revoke(snore, tmp_path):
-    """Token round-trip: create → list → revoke → confirm revoked in list."""
-    db = tmp_path / "tokens.db"
-    # Initialize the DB and profile via a health import.
-    init = snore("health", "import", str(HEALTH_FIXTURE), db=db)
-    assert init.returncode == 0, init.stderr or init.stdout
-
-    # Create a token.
-    create = snore("health", "token", "create", "--label", "test-token", db=db)
-    assert create.returncode == 0, create.stderr or create.stdout
-    assert "Store this token now" in create.stdout
-    assert "Token:" in create.stdout
-
-    m = re.search(r"Token ID:\s*(\d+)", create.stdout)
-    assert m, f"Could not find 'Token ID:' in output:\n{create.stdout}"
-    token_id = m.group(1)
-
-    # List tokens — should show the new token with its label.
-    listing = snore("health", "token", "list", db=db)
-    assert listing.returncode == 0, listing.stderr or listing.stdout
-    assert token_id in listing.stdout
-    assert "test-token" in listing.stdout
-
-    # Revoke the token.
-    revoke = snore("health", "token", "revoke", token_id, db=db)
-    assert revoke.returncode == 0, revoke.stderr or revoke.stdout
-    assert "revoked" in (revoke.stdout + revoke.stderr).lower()
-
-    # List again — token should still appear (kept for audit trail).
-    listing2 = snore("health", "token", "list", db=db)
-    assert listing2.returncode == 0
-    assert token_id in listing2.stdout
-
-
-def test_health_token_revoke_bogus_id_exits_nonzero(snore, tmp_path):
-    """Revoking a non-existent token ID exits nonzero with a clear message."""
-    db = tmp_path / "tokens2.db"
-    init = snore("health", "import", str(HEALTH_FIXTURE), db=db)
-    assert init.returncode == 0, init.stderr or init.stdout
-
-    result = snore("health", "token", "revoke", "99999", db=db)
-    assert result.returncode != 0
-    combined = result.stdout + result.stderr
-    assert "not found" in combined.lower()

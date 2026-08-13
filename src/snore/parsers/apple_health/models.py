@@ -1,4 +1,4 @@
-"""Canonical record model for Apple Health data from both ingest channels."""
+"""Canonical record model for Apple Health data from the export.xml reader."""
 
 from __future__ import annotations
 
@@ -21,10 +21,9 @@ def apply_noon_split(dt: datetime) -> date:
 
 @dataclass
 class RawHealthRecord:
-    """One Apple Health record, normalised from either ingest channel.
+    """One Apple Health record, normalised from the export.xml reader.
 
-    Both the export.xml reader and the HAE JSON reader produce this type.
-    The downstream importer layer consumes it without knowing the source format.
+    The downstream importer layer consumes this type directly.
 
     Canonical sleep stage names (``value_text``):
         ``InBed``, ``AsleepUnspecified``, ``Awake``, ``AsleepCore``,
@@ -60,4 +59,4 @@ class RawHealthRecord:
     """Noon split applied to ``start_time``."""
 
     ingest_channel: str
-    """``"export_xml"`` or ``"hae_json"``."""
+    """Provenance tag; currently always ``"export_xml"``.  Future channels may add values."""

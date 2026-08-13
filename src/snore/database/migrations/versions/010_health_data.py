@@ -1,9 +1,9 @@
-"""Add Apple Health data tables: health_samples, health_nightly_summaries, health_ingest_tokens.
+"""Add Apple Health data tables: health_samples, health_nightly_summaries.
 
 Stores raw Apple Health samples (sleep stages, SpO2, respiratory rate, breathing
-disturbances), derived per-night sleep summaries, and machine-auth ingest tokens
-for the push endpoint.  All three tables are profile-owned (FK to profiles, no
-device FK), matching the mask-log domain pattern.
+disturbances) and derived per-night sleep summaries.  Both tables are
+profile-owned (FK to profiles, no device FK), matching the mask-log domain
+pattern.
 
 The ``health_samples`` dedup index uses COALESCE sentinels to close the NULL hole:
 SQLite treats NULLs as distinct in UNIQUE constraints, so without sentinels a
@@ -26,7 +26,6 @@ depends_on: str | Sequence[str] | None = None
 
 _TABLE_SAMPLES = "health_samples"
 _TABLE_SUMMARIES = "health_nightly_summaries"
-_TABLE_TOKENS = "health_ingest_tokens"
 
 
 def upgrade() -> None:
@@ -117,23 +116,6 @@ def upgrade() -> None:
             ),
         )
 
-    if _TABLE_TOKENS not in existing:
-        op.create_table(
-            _TABLE_TOKENS,
-            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-            sa.Column(
-                "profile_id",
-                sa.Integer(),
-                sa.ForeignKey("profiles.id", ondelete="CASCADE"),
-                nullable=False,
-            ),
-            sa.Column("token_hash", sa.String(64), unique=True, nullable=False),
-            sa.Column("label", sa.String(100), nullable=True),
-            sa.Column("created_at", sa.DateTime(), nullable=False),
-            sa.Column("last_used_at", sa.DateTime(), nullable=True),
-            sa.Column("revoked_at", sa.DateTime(), nullable=True),
-        )
-
 
 def downgrade() -> None:
     bind = op.get_bind()
@@ -141,8 +123,6 @@ def downgrade() -> None:
 
     existing = sa_inspect(bind).get_table_names()
 
-    if _TABLE_TOKENS in existing:
-        op.drop_table(_TABLE_TOKENS)
     if _TABLE_SUMMARIES in existing:
         op.drop_table(_TABLE_SUMMARIES)
     if _TABLE_SAMPLES in existing:

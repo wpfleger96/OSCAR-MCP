@@ -782,21 +782,15 @@ class DataRange(BaseModel):
 
 
 class HealthImportResult(BaseModel):
-    """Result of an Apple Health import operation (file or HAE payload)."""
+    """Result of an Apple Health export.xml import operation."""
 
     inserted: int = Field(default=0, description="Health samples successfully inserted")
     skipped: int = Field(default=0, description="Samples skipped as duplicates")
     unknown_metrics: dict[str, int] = Field(
         default_factory=dict,
         description=(
-            "Unrecognised record types or metric names with their point counts. "
-            "For XML imports these are unhandled HK type identifiers; "
-            "for HAE imports these are unknown metric names."
+            "Unhandled HealthKit record types from the XML export with their record counts."
         ),
-    )
-    malformed_points: int = Field(
-        default=0,
-        description="HAE data points that could not be parsed (XML imports always 0)",
     )
     nights_recomputed: int = Field(
         default=0,
