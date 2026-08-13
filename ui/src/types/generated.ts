@@ -963,6 +963,28 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/health/ingest': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Ingest Health Data
+         * @description Accept a Health Auto Export JSON push and import health samples.
+         *
+         *     Returns the counts of inserted/skipped samples and recomputed summaries.
+         */
+        post: operations['ingest_health_data_api_v1_health_ingest_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/import/': {
         parameters: {
             query?: never
@@ -2876,6 +2898,49 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components['schemas']['ValidationError'][]
+        }
+        /**
+         * HealthImportResult
+         * @description Result of an Apple Health import operation (file or HAE payload).
+         */
+        HealthImportResult: {
+            /**
+             * Dry Run
+             * @description True when no writes were performed
+             * @default false
+             */
+            dry_run: boolean
+            /**
+             * Inserted
+             * @description Health samples successfully inserted
+             * @default 0
+             */
+            inserted: number
+            /**
+             * Malformed Points
+             * @description HAE data points that could not be parsed (XML imports always 0)
+             * @default 0
+             */
+            malformed_points: number
+            /**
+             * Nights Recomputed
+             * @description Nightly sleep summaries recomputed (0 on dry_run)
+             * @default 0
+             */
+            nights_recomputed: number
+            /**
+             * Skipped
+             * @description Samples skipped as duplicates
+             * @default 0
+             */
+            skipped: number
+            /**
+             * Unknown Metrics
+             * @description Unrecognised record types or metric names with their point counts. For XML imports these are unhandled HK type identifiers; for HAE imports these are unknown metric names.
+             */
+            unknown_metrics?: {
+                [key: string]: number
+            }
         }
         /**
          * HypopneaEvent
@@ -5660,6 +5725,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    ingest_health_data_api_v1_health_ingest_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HealthImportResult']
                 }
             }
         }
