@@ -149,7 +149,9 @@ class TestDeclaredTimezoneConversion:
 
         assert len(session.events) == 1
         event = session.events[0]
-        assert event.start_time == datetime(2024, 1, 14, 20, 30)
+        # OSCAR timestamps are end-of-event; parser subtracts duration (15s) to
+        # store the true start: 20:30:00 - 15s = 20:29:45.
+        assert event.start_time == datetime(2024, 1, 14, 20, 29, 45)
         assert event.start_time.tzinfo is None
         assert event.duration_seconds == 15.0
 
@@ -204,8 +206,10 @@ class TestDstTransitionNight:
 
         # The event lands in the repeated 01:30 wall-clock hour (EST fold),
         # one real hour after the session start's identical wall-clock value.
+        # OSCAR timestamps are end-of-event; parser subtracts duration (15s) to
+        # store the true start: 01:30:00 - 15s = 01:29:45.
         assert len(session.events) == 1
-        assert session.events[0].start_time == datetime(2024, 11, 3, 1, 30)
+        assert session.events[0].start_time == datetime(2024, 11, 3, 1, 29, 45)
 
     def test_therapy_date_stays_correct_across_transition(self, tmp_path):
         session = _parse_session(
