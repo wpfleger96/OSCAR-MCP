@@ -810,6 +810,104 @@
             </Collapsible>
         </div>
 
+        <!-- Apple Health -->
+        <Collapsible v-model:open="healthOpen" class="settings-panel">
+            <CollapsibleTrigger as-child>
+                <button
+                    class="flex w-full items-center justify-between rounded-lg border border-border bg-card p-4 text-left font-semibold hover:bg-accent"
+                >
+                    Apple Health
+                    <ChevronDown
+                        class="h-4 w-4 transition-transform"
+                        :class="{ 'rotate-180': healthOpen }"
+                    />
+                </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent class="px-4 pt-3 pb-4">
+                <div
+                    v-if="healthLoading"
+                    class="flex items-center gap-2 text-sm text-muted-foreground py-2"
+                >
+                    <Loader2 class="h-4 w-4 animate-spin" /> Loading...
+                </div>
+                <p v-else-if="healthNotFound" class="text-sm text-muted-foreground py-2">
+                    No Apple Health data for this night.
+                </p>
+                <p v-else-if="healthError" class="text-sm text-destructive py-2">
+                    {{ healthError }}
+                </p>
+                <template v-else-if="healthNight">
+                    <div class="stats-grid mb-4">
+                        <StatCard
+                            label="Total Sleep"
+                            :value="
+                                healthNight.total_sleep_seconds != null
+                                    ? healthNight.total_sleep_seconds / 3600
+                                    : null
+                            "
+                            unit="hr"
+                            :decimals="1"
+                            glossary-key="total_sleep"
+                        />
+                        <StatCard
+                            label="Efficiency"
+                            :value="healthNight.sleep_efficiency_pct ?? null"
+                            unit="%"
+                            :decimals="1"
+                            glossary-key="sleep_efficiency"
+                        />
+                        <StatCard
+                            label="Deep"
+                            :value="
+                                healthNight.deep_seconds != null
+                                    ? healthNight.deep_seconds / 3600
+                                    : null
+                            "
+                            unit="hr"
+                            :decimals="1"
+                            glossary-key="deep_sleep"
+                        />
+                        <StatCard
+                            label="REM"
+                            :value="
+                                healthNight.rem_seconds != null
+                                    ? healthNight.rem_seconds / 3600
+                                    : null
+                            "
+                            unit="hr"
+                            :decimals="1"
+                            glossary-key="rem_sleep"
+                        />
+                        <StatCard
+                            v-if="healthNight.avg_spo2_pct != null"
+                            label="SpO₂ Avg"
+                            :value="healthNight.avg_spo2_pct"
+                            unit="%"
+                            :decimals="1"
+                        />
+                        <StatCard
+                            v-if="healthNight.avg_rr != null"
+                            label="Resp Rate Avg"
+                            :value="healthNight.avg_rr"
+                            unit="br/min"
+                            :decimals="1"
+                        />
+                    </div>
+                    <div class="flex gap-4 text-sm flex-wrap">
+                        <RouterLink
+                            :to="`/apple-health/${session.therapy_day}`"
+                            class="session-link"
+                        >
+                            Apple Health night detail →
+                        </RouterLink>
+                        <RouterLink :to="`/days/${session.therapy_day}`" class="session-link">
+                            View therapy day →
+                        </RouterLink>
+                    </div>
+                </template>
+            </CollapsibleContent>
+        </Collapsible>
+
         <!-- Import Provenance -->
         <Collapsible
             v-if="
@@ -910,6 +1008,7 @@ import StatCard from '@/components/StatCard.vue'
 import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { getDay } from '@/api/days'
+import { getHealthNight } from '@/api/health'
 import { useWaveformData } from '@/composables/useWaveformData'
 import {
     useAvailableDates,
@@ -919,7 +1018,7 @@ import {
 } from '@/composables/useAvailableDates'
 import { ahiClass, formatDateWithWeekday, formatDateFull, formatDateTime } from '@/utils/formatting'
 import { maskEntryName, styleLabel } from '@/utils/maskOptions'
-import type { SessionDetail, EventItem } from '@/types'
+import type { SessionDetail, EventItem, HealthNightDetailRead } from '@/types'
 
 const props = defineProps<{ sessionId: number }>()
 const route = useRoute()
@@ -943,6 +1042,12 @@ const flowPressureOpen = ref(false)
 const ieTiOpen = ref(false)
 const climateOpen = ref(false)
 const provenanceOpen = ref(false)
+const healthOpen = ref(false)
+const healthLoading = ref(false)
+const healthNotFound = ref(false)
+const healthError = ref<string | null>(null)
+const healthNight = ref<HealthNightDetailRead | null>(null)
+const healthFetched = ref(false)
 
 const maskTypeFromSettings = computed(
     () => session.value?.settings?.find((s) => s.key === 'mask_type')?.value ?? null,
@@ -1197,6 +1302,34 @@ watch(selectedType, (newType) => {
 
 let loadGeneration = 0
 
+// Lazy-load Apple Health night on first open
+watch(healthOpen, (isOpen) => {
+    if (isOpen && !healthFetched.value) {
+        void fetchHealthNight()
+    }
+})
+
+async function fetchHealthNight(): Promise<void> {
+    if (healthFetched.value) return
+    healthFetched.value = true
+    const dayDate = session.value?.therapy_day
+    if (!dayDate) return
+    healthLoading.value = true
+    try {
+        healthNight.value = await getHealthNight(dayDate)
+    } catch (err: unknown) {
+        const axiosErr = err as { response?: { status?: number } }
+        if (axiosErr.response?.status === 404) {
+            healthNotFound.value = true
+        } else {
+            healthError.value =
+                err instanceof Error ? err.message : 'Failed to load Apple Health data'
+        }
+    } finally {
+        healthLoading.value = false
+    }
+}
+
 watch(
     sessionIdRef,
     async (newId) => {
@@ -1208,6 +1341,12 @@ watch(
         selectedType.value = ''
         multiMode.value = false
         currentZoomRange.value = null
+        healthOpen.value = false
+        healthFetched.value = false
+        healthLoading.value = false
+        healthNotFound.value = false
+        healthError.value = null
+        healthNight.value = null
         resetWaveformData()
         void loadDates()
 

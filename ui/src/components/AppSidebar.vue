@@ -17,6 +17,10 @@
                 <HardDrive class="h-4 w-4" />
                 <span>Equipment</span>
             </RouterLink>
+            <RouterLink to="/apple-health" class="nav-item">
+                <Moon class="h-4 w-4" />
+                <span>Apple Health</span>
+            </RouterLink>
 
             <span class="nav-group-label">Analysis</span>
             <RouterLink to="/analysis" class="nav-item">

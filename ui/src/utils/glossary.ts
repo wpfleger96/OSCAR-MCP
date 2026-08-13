@@ -321,6 +321,39 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         short: 'Median power delivered to the humidifier heater plate, in watts.',
     },
 
+    // ── Apple Health sleep metrics ────────────────────────────────────────
+    time_in_bed: {
+        label: 'Time in Bed',
+        short: 'Total recorded time from first InBed sample to last, in hours.',
+    },
+    total_sleep: {
+        label: 'Total Sleep',
+        short: 'Total time actually asleep (Core + Deep + REM stages combined), in hours.',
+    },
+    sleep_efficiency: {
+        label: 'Sleep Efficiency',
+        short: 'Total sleep divided by time in bed, expressed as a percentage.',
+        long: 'Sleep efficiency = total sleep / time in bed × 100. Values below 85% may indicate difficulty falling or staying asleep.',
+    },
+    core_sleep: {
+        label: 'Core Sleep',
+        short: "Apple Health's Core stage corresponds to NREM N1 and N2 light sleep combined.",
+        long: "Core sleep (N1 + N2) is the most common stage and forms the backbone of each sleep cycle. Apple Health labels light non-REM sleep as 'Core'.",
+    },
+    deep_sleep: {
+        label: 'Deep Sleep',
+        short: 'NREM N3 slow-wave sleep — the most restorative stage.',
+        long: 'Deep sleep supports physical repair and immune function. It is most concentrated in the first half of the night and decreases with age.',
+    },
+    rem_sleep: {
+        label: 'REM Sleep',
+        short: 'Rapid Eye Movement sleep, associated with dreaming and memory consolidation.',
+    },
+    awake_time: {
+        label: 'Awake',
+        short: 'Time spent awake after initial sleep onset, as detected by Apple Health.',
+    },
+
     // ── Primary waveform channels ─────────────────────────────────────────
     flow: {
         label: 'Flow Rate',

@@ -233,3 +233,27 @@ export async function importFiles(
 
     return lastJobResponse!
 }
+
+/**
+ * Upload a single Apple Health export file (export.xml or similar).
+ * Uses a plain multipart POST — no chunking, no precheck.
+ */
+export async function importHealthFile(
+    file: File,
+    profileId?: number | null,
+    onUploadProgress?: (fraction: number) => void,
+): Promise<{ job_id: string }> {
+    const formData = new FormData()
+    formData.append('files', file)
+    formData.append('import_type', 'health')
+    if (profileId != null) formData.append('profile_id', String(profileId))
+    const { data } = await api.post<{ job_id: string }>('/import/', formData, {
+        onUploadProgress: onUploadProgress
+            ? (event: AxiosProgressEvent) => {
+                  const fraction = event.total && event.total > 0 ? event.loaded / event.total : 0
+                  onUploadProgress(fraction)
+              }
+            : undefined,
+    })
+    return data
+}

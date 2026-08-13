@@ -75,6 +75,12 @@ export type ApneaEvent = Schemas['ApneaEvent']
 export type HypopneaEvent = Schemas['HypopneaEvent']
 export type RERAEvent = Schemas['RERAEvent']
 
+// Apple Health
+export type HealthNightSummaryRead = Schemas['HealthNightSummaryRead']
+export type HealthNightDetailRead = Schemas['HealthNightDetailRead']
+export type HealthSampleRead = Schemas['HealthSampleRead']
+export type HealthImportResultSummary = Schemas['HealthImportResultSummary']
+
 // Import
 export type ImportSource = Schemas['ImportSource']
 export type PipelineJobStatus = Schemas['PipelineJobStatus']
@@ -201,6 +207,8 @@ export interface TrendData {
     cai?: [string, number | null][]
     hi?: [string, number | null][]
     rera?: [string, number | null][]
+    total_sleep_hours?: [string, number | null][]
+    sleep_efficiency?: [string, number | null][]
 }
 
 export interface RecordsData {

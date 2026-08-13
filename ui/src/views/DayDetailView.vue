@@ -201,6 +201,60 @@
             />
         </div>
 
+        <!-- Apple Health group -->
+        <template v-if="data.health_sleep">
+            <div class="apple-health-section">
+                <h2>Apple Health</h2>
+                <div class="stats-grid mb-4">
+                    <StatCard
+                        label="Time in Bed"
+                        :value="secToHours(data.health_sleep.time_in_bed_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="time_in_bed"
+                    />
+                    <StatCard
+                        label="Total Sleep"
+                        :value="secToHours(data.health_sleep.total_sleep_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="total_sleep"
+                    />
+                    <StatCard
+                        label="Efficiency"
+                        :value="data.health_sleep.sleep_efficiency_pct ?? null"
+                        unit="%"
+                        :decimals="1"
+                        glossary-key="sleep_efficiency"
+                    />
+                    <StatCard
+                        label="Core"
+                        :value="secToHours(data.health_sleep.core_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="core_sleep"
+                    />
+                    <StatCard
+                        label="Deep"
+                        :value="secToHours(data.health_sleep.deep_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="deep_sleep"
+                    />
+                    <StatCard
+                        label="REM"
+                        :value="secToHours(data.health_sleep.rem_seconds)"
+                        unit="hr"
+                        :decimals="1"
+                        glossary-key="rem_sleep"
+                    />
+                </div>
+                <RouterLink :to="`/apple-health/${data.date}`" class="session-link">
+                    Apple Health night detail →
+                </RouterLink>
+            </div>
+        </template>
+
         <div v-if="data.session_ids?.length" class="sessions-section">
             <h2>Sessions</h2>
             <Table>
@@ -244,6 +298,10 @@ import ErrorState from '@/components/ErrorState.vue'
 const props = defineProps<{ dayDate: string }>()
 
 const { data, loading, error, reload } = useApiLoad(() => getDay(props.dayDate))
+
+function secToHours(sec: number | null | undefined): number | null {
+    return sec != null ? sec / 3600 : null
+}
 </script>
 
 <style scoped>
@@ -264,6 +322,16 @@ const { data, loading, error, reload } = useApiLoad(() => getDay(props.dayDate))
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 0.75rem;
+}
+
+.apple-health-section {
+    margin-bottom: 1.5rem;
+}
+
+.apple-health-section h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
 }
 
 .sessions-section h2 {

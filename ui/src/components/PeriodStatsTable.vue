@@ -27,6 +27,12 @@
                     <TableHead class="w-[90px] whitespace-nowrap"
                         >Avg SpO₂ <InfoHint glossary-key="spo2"
                     /></TableHead>
+                    <TableHead v-if="showSleepColumns" class="w-[100px] whitespace-nowrap"
+                        >Avg Sleep <InfoHint glossary-key="total_sleep"
+                    /></TableHead>
+                    <TableHead v-if="showSleepColumns" class="w-[90px] whitespace-nowrap"
+                        >Avg Eff <InfoHint glossary-key="sleep_efficiency"
+                    /></TableHead>
                 </TableRow>
             </TableHeader>
             <TableBody>
@@ -56,10 +62,19 @@
                         <TableCell>{{ row.avg_pressure?.toFixed(1) ?? '---' }}</TableCell>
                         <TableCell>{{ row.avg_leak?.toFixed(1) ?? '---' }}</TableCell>
                         <TableCell>{{ row.avg_spo2?.toFixed(1) ?? '---' }}</TableCell>
+                        <TableCell v-if="showSleepColumns">{{
+                            row.avg_total_sleep_hours?.toFixed(1) ?? '—'
+                        }}</TableCell>
+                        <TableCell v-if="showSleepColumns">{{
+                            row.avg_sleep_efficiency_pct?.toFixed(1) ?? '—'
+                        }}</TableCell>
                     </TableRow>
                 </template>
                 <TableRow v-else>
-                    <TableCell :colspan="8" class="h-24 text-center text-muted-foreground">
+                    <TableCell
+                        :colspan="showSleepColumns ? 10 : 8"
+                        class="h-24 text-center text-muted-foreground"
+                    >
                         {{ emptyMessage ?? 'No period data available.' }}
                     </TableCell>
                 </TableRow>
@@ -86,5 +101,6 @@ defineProps<{
     periods: PeriodStatistics[]
     loading: boolean
     emptyMessage?: string
+    showSleepColumns?: boolean
 }>()
 </script>
