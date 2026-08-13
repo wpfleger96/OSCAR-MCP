@@ -226,6 +226,88 @@ class TestGetNightDetail:
         assert data["avg_rr"] == pytest.approx(15.0, abs=0.01)
 
 
+class TestListNightsPaginationAndFiltering:
+    """Pagination, ordering, and date-range filtering for GET /health/nights."""
+
+    def _seed_five_nights(self, db_session: Session, profile_id: int) -> None:
+        """Seed summaries for 2024-01-11 through 2024-01-15 (five consecutive nights)."""
+        for d in [
+            date(2024, 1, 11),
+            date(2024, 1, 12),
+            date(2024, 1, 13),
+            date(2024, 1, 14),
+            date(2024, 1, 15),
+        ]:
+            db_session.add(
+                HealthNightlySummary(
+                    profile_id=profile_id,
+                    night_date=d,
+                    total_sleep_seconds=7 * 3600,
+                    computed_at=datetime.now(UTC),
+                )
+            )
+        db_session.flush()
+
+    def test_results_ordered_most_recent_first(
+        self, api_client, db_session, test_profile
+    ):
+        """GET /health/nights returns nights in descending date order."""
+        self._seed_five_nights(db_session, test_profile.id)
+
+        resp = api_client.get("/api/v1/health/nights")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        dates = [item["night_date"] for item in data["items"]]
+        assert dates == sorted(dates, reverse=True)
+
+    def test_limit_and_offset_return_middle_slice(
+        self, api_client, db_session, test_profile
+    ):
+        """limit=2 offset=2 on 5 nights yields the expected middle slice; total=5."""
+        self._seed_five_nights(db_session, test_profile.id)
+
+        resp = api_client.get("/api/v1/health/nights?limit=2&offset=2")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 5
+        assert len(data["items"]) == 2
+        # Most-recent-first order: 01-15, 01-14, [01-13, 01-12], 01-11
+        dates = [item["night_date"] for item in data["items"]]
+        assert dates == ["2024-01-13", "2024-01-12"]
+
+    def test_from_date_is_inclusive_excludes_earlier_nights(
+        self, api_client, db_session, test_profile
+    ):
+        """from_date boundary night is included; nights before it are excluded."""
+        self._seed_five_nights(db_session, test_profile.id)
+
+        resp = api_client.get("/api/v1/health/nights?from_date=2024-01-13")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        dates = [item["night_date"] for item in data["items"]]
+        assert "2024-01-13" in dates  # boundary is included
+        assert "2024-01-12" not in dates  # one night before is excluded
+        assert data["total"] == 3  # 01-13, 01-14, 01-15
+
+    def test_to_date_is_inclusive_excludes_later_nights(
+        self, api_client, db_session, test_profile
+    ):
+        """to_date boundary night is included; nights after it are excluded."""
+        self._seed_five_nights(db_session, test_profile.id)
+
+        resp = api_client.get("/api/v1/health/nights?to_date=2024-01-13")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        dates = [item["night_date"] for item in data["items"]]
+        assert "2024-01-13" in dates  # boundary is included
+        assert "2024-01-14" not in dates  # one night after is excluded
+        assert data["total"] == 3  # 01-11, 01-12, 01-13
+
+
 class TestGetNightSamples:
     def _seed_two_source_night(self, db_session: Session, profile_id: int) -> None:
         """Seed a night with Watch stage rows (preferred) and one iPhone InBed."""
@@ -325,6 +407,11 @@ class TestGetNightSamples:
         assert resp.status_code == 200
         samples = resp.json()
         assert all(s["record_type"] == _SLEEP_TYPE for s in samples)
+
+    def test_missing_night_returns_404(self, api_client, test_profile):
+        """GET /health/nights/{date}/samples with no summary returns 404."""
+        resp = api_client.get("/api/v1/health/nights/2030-01-01/samples")
+        assert resp.status_code == 404
 
 
 class TestListNightDates:

@@ -170,6 +170,40 @@ class TestGetNightDetailAggregates:
 
         assert detail.avg_rr == pytest.approx(15.0, abs=0.01)
 
+    async def test_mixed_unit_spo2_min_normalized_independently(
+        self, async_db_session, profile_id, night_summary
+    ):
+        """Mixed fraction+percent SpO2 sources: min is normalized by its own magnitude.
+
+        avg = (0.95 + 97.0) / 2 = ~48.975 → > 1.5 → rounds to 49.0%
+        min = 0.95 → ≤ 1.5 → multiplied → 95.0%
+
+        The bug: old code used avg's magnitude to decide how to round min, so min
+        stayed fraction-scale (0.9%) when avg exceeded 1.5.
+        """
+        for val, h in [(0.95, 2), (97.0, 3)]:
+            async_db_session.add(
+                HealthSample(
+                    profile_id=profile_id,
+                    record_type=_SPO2_TYPE,
+                    source_name=_WATCH,
+                    start_time=_dt(h),
+                    end_time=_dt(h),
+                    value_num=val,
+                    unit="%",
+                    night_date=_NIGHT,
+                    ingest_channel="export_xml",
+                )
+            )
+        await async_db_session.flush()
+
+        detail = await HealthService(async_db_session, profile_id).get_night_detail(
+            _NIGHT
+        )
+
+        assert detail.avg_spo2_pct == pytest.approx(49.0, abs=0.1)
+        assert detail.min_spo2_pct == pytest.approx(95.0, abs=0.1)
+
     async def test_no_spo2_or_rr_returns_none(
         self, async_db_session, profile_id, night_summary
     ):

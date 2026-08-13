@@ -23,6 +23,11 @@ from xml.etree.ElementTree import iterparse
 from snore.parsers.apple_health.models import RawHealthRecord
 from snore.parsers.apple_health.type_handlers import parse_xml_record
 
+# 10 GiB ceiling on decompressed XML bytes: a zip file well within the 2 GiB
+# compressed upload cap can expand to an arbitrarily large XML stream (zip bomb),
+# monopolising the serial import worker for hours.  Raise early if exceeded.
+MAX_DECOMPRESSED_BYTES = 10 * 1024**3
+
 
 class _DTDStripper:
     """Blanks any ``<!DOCTYPE...>`` region in the leading bytes of a binary stream.
@@ -34,7 +39,7 @@ class _DTDStripper:
     # 64 KB covers any Apple Health Export DOCTYPE (typically ~3–5 KB).
     _SCAN_SIZE = 65_536
 
-    def __init__(self, source: IO[bytes]) -> None:
+    def __init__(self, source: IO[bytes], max_bytes: int | None = None) -> None:
         head = bytearray(source.read(self._SCAN_SIZE))
         s = head.find(b"<!DOCTYPE")
         if s != -1:
@@ -46,20 +51,33 @@ class _DTDStripper:
                     head[s : i + 1] = b" " * (i - s + 1)
                     break
                 i += 1
+            # Bound: if DOCTYPE's closing '>' falls beyond the 64 KB scan window
+            # it is left intact — harmless because stdlib ElementTree ignores DTDs,
+            # but a latent trap if the parser backend ever changes.
         self._buf = bytes(head)
         self._pos = 0
         self._tail: IO[bytes] = source
+        self._bytes_consumed = 0
+        self._max_bytes = max_bytes
 
     def read(self, n: int = -1) -> bytes:
         if n < 0:
             rem = self._buf[self._pos :]
             self._pos = len(self._buf)
-            return rem + self._tail.read()
-        avail = self._buf[self._pos : self._pos + n]
-        self._pos += len(avail)
-        if len(avail) < n:
-            avail += self._tail.read(n - len(avail))
-        return avail
+            chunk = rem + self._tail.read()
+        else:
+            avail = self._buf[self._pos : self._pos + n]
+            self._pos += len(avail)
+            if len(avail) < n:
+                avail += self._tail.read(n - len(avail))
+            chunk = avail
+        self._bytes_consumed += len(chunk)
+        if self._max_bytes is not None and self._bytes_consumed > self._max_bytes:
+            raise ValueError(
+                f"Decompressed XML stream exceeds {self._max_bytes:,} bytes "
+                "(potential zip-bomb payload; import rejected)"
+            )
+        return chunk
 
 
 def _open_xml_stream(source: Path) -> tuple[IO[bytes], Callable[[], None]]:
@@ -125,7 +143,7 @@ def iter_records(
     """
     raw_stream, cleanup = _open_xml_stream(source)
     try:
-        stream = _DTDStripper(raw_stream)
+        stream = _DTDStripper(raw_stream, max_bytes=MAX_DECOMPRESSED_BYTES)
         yielded = 0
         for _event, elem in iterparse(stream, events=("end",)):
             if elem.tag != "Record":

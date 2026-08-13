@@ -56,7 +56,7 @@ async def get_night_detail(
 async def get_night_samples(
     night_date: date,
     service: HealthServiceDep,
-    source_name: str | None = Query(default=None),
+    source_name: str | None = Query(default=None, max_length=200),
 ) -> list[HealthSampleRead]:
     """Return sleep-stage samples for the night ordered by start time.
 

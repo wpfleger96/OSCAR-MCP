@@ -282,6 +282,47 @@ class TestLimit:
         assert len(with_none) == len(without_limit)
 
 
+class TestDecompressedSizeCap:
+    """iter_records raises ValueError when the decompressed XML exceeds MAX_DECOMPRESSED_BYTES."""
+
+    def test_oversized_stream_raises_value_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A plain XML file larger than the monkeypatched cap raises ValueError."""
+        import snore.parsers.apple_health.xml_reader as xml_reader_mod
+
+        monkeypatch.setattr(xml_reader_mod, "MAX_DECOMPRESSED_BYTES", 50)
+
+        # 200 bytes of valid XML — well over the tiny cap.
+        large_xml = b"<HealthData>" + b" " * 188 + b"</HealthData>"
+        xml_path = tmp_path / "export.xml"
+        xml_path.write_bytes(large_xml)
+
+        with pytest.raises(ValueError, match="zip-bomb"):
+            list(iter_records(xml_path))
+
+    def test_oversized_zip_member_raises_value_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A zip member larger than the monkeypatched cap raises ValueError."""
+        import snore.parsers.apple_health.xml_reader as xml_reader_mod
+
+        monkeypatch.setattr(xml_reader_mod, "MAX_DECOMPRESSED_BYTES", 50)
+
+        large_xml = b"<HealthData>" + b" " * 188 + b"</HealthData>"
+        zip_path = tmp_path / "export.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("apple_health_export/export.xml", large_xml)
+
+        with pytest.raises(ValueError, match="zip-bomb"):
+            list(iter_records(zip_path))
+
+    def test_normal_fixture_within_default_cap(self) -> None:
+        """The standard test fixture is well under the production 10 GiB cap."""
+        records = list(iter_records(FIXTURE_XML))
+        assert len(records) > 0
+
+
 class TestSkipCounter:
     """skip_counter tracks unhandled or unparseable record types."""
 

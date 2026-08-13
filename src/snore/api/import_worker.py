@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,42 @@ from snore.services.health_import_service import HealthImportService
 from snore.services.import_service import ImportService
 
 logger = logging.getLogger(__name__)
+
+# Matches unix absolute paths; used by _client_safe_error to strip spool paths
+# that may appear in ValueError/FileNotFoundError messages from parsers or services.
+_ABS_PATH_RE = re.compile(r"/\S+")
+
+
+def _client_safe_error(exc: BaseException) -> str:
+    """Return a client-safe error message with filesystem paths redacted.
+
+    Full exception details are always emitted via logger.exception before this
+    is called, so no diagnostic information is lost server-side.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return "Export file not found or is missing expected content."
+    return _ABS_PATH_RE.sub("[path redacted]", str(exc))
+
+
+def _make_terminal(
+    job: ImportJob,
+    event: str,
+    *,
+    message: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a terminal SSE payload, injecting import_committed + import_result
+    when the import phase already committed."""
+    data: dict[str, Any] = {}
+    if message is not None:
+        data["message"] = message
+    if extra:
+        data.update(extra)
+    snapshot = job.import_result_snapshot
+    if snapshot is not None:
+        data["import_committed"] = True
+        data["import_result"] = snapshot
+    return {"event": event, "data": data}
 
 
 async def _upsert_job_record(job: ImportJob) -> None:
@@ -93,25 +130,6 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         6. Release capacity (slot owns the disk it admitted).
     """
 
-    def _make_terminal(
-        event: str,
-        *,
-        message: str | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build a terminal SSE payload, injecting import_committed + import_result
-        when the import phase already committed."""
-        data: dict[str, Any] = {}
-        if message is not None:
-            data["message"] = message
-        if extra:
-            data.update(extra)
-        snapshot = job.import_result_snapshot
-        if snapshot is not None:
-            data["import_committed"] = True
-            data["import_result"] = snapshot
-        return {"event": event, "data": data}
-
     try:
         # Persist RUNNING state — the worker loop already called try_start()
         # so job.state is RUNNING by the time this function executes.
@@ -157,7 +175,7 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         if job.cancel_requested:
             job._finish(
                 succeeded=False,
-                terminal_msg=_make_terminal("error", message="Cancelled"),
+                terminal_msg=_make_terminal(job, "error", message="Cancelled"),
             )
             return
 
@@ -194,13 +212,13 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
             # Queue was full — tell the client so it can distinguish from
             # "nothing was imported" (where analysis_queued is absent).
             terminal_extra["analysis_queued"] = False
-        terminal_msg = _make_terminal("complete", extra=terminal_extra)
+        terminal_msg = _make_terminal(job, "complete", extra=terminal_extra)
         job._finish(succeeded=True, terminal_msg=terminal_msg)
     except Exception as e:
         logger.exception("Import job %s failed", job.job_id)
         job._finish(
             succeeded=False,
-            terminal_msg=_make_terminal("error", message=str(e)),
+            terminal_msg=_make_terminal(job, "error", message=_client_safe_error(e)),
         )
     finally:
         # Ordering: publish terminal (done above), persist, clean, release capacity.
@@ -240,25 +258,6 @@ def _run_health_import(job: ImportJob, profile_raw_root: Path | None = None) -> 
     summaries for all committed nights are recomputed before returning. Partial
     counts are returned and reflected in the terminal payload.
     """
-
-    def _make_terminal(
-        event: str,
-        *,
-        message: str | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build a terminal SSE payload, injecting import_committed + import_result
-        when the import phase already committed."""
-        data: dict[str, Any] = {}
-        if message is not None:
-            data["message"] = message
-        if extra:
-            data.update(extra)
-        snapshot = job.import_result_snapshot
-        if snapshot is not None:
-            data["import_committed"] = True
-            data["import_result"] = snapshot
-        return {"event": event, "data": data}
 
     try:
         # 1. Persist RUNNING state — the worker loop already called try_start()
@@ -306,7 +305,7 @@ def _run_health_import(job: ImportJob, profile_raw_root: Path | None = None) -> 
         if job.cancel_requested:
             job._finish(
                 succeeded=False,
-                terminal_msg=_make_terminal("error", message="Cancelled"),
+                terminal_msg=_make_terminal(job, "error", message="Cancelled"),
             )
             return
 
@@ -314,14 +313,14 @@ def _run_health_import(job: ImportJob, profile_raw_root: Path | None = None) -> 
         job._finish(
             succeeded=True,
             terminal_msg=_make_terminal(
-                "complete", extra={"result": import_result_dict}
+                job, "complete", extra={"result": import_result_dict}
             ),
         )
     except Exception as e:
         logger.exception("Health import job %s failed", job.job_id)
         job._finish(
             succeeded=False,
-            terminal_msg=_make_terminal("error", message=str(e)),
+            terminal_msg=_make_terminal(job, "error", message=_client_safe_error(e)),
         )
     finally:
         # Ordering: publish terminal (done above), persist, clean, release capacity.

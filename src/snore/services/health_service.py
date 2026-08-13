@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.exceptions import NotFoundError
+from snore.parsers.apple_health.type_handlers import SLEEP_TYPE
 from snore.services.schemas import (
     HealthNightDetailRead,
     HealthNightSummaryRead,
@@ -17,9 +18,13 @@ from snore.services.schemas import (
 
 __all__ = ["HealthService"]
 
-_SLEEP_RECORD_TYPE = "HKCategoryTypeIdentifierSleepAnalysis"
 _SPO2_RECORD_TYPE = "HKQuantityTypeIdentifierOxygenSaturation"
 _RR_RECORD_TYPE = "HKQuantityTypeIdentifierRespiratoryRate"
+
+
+def _normalize_spo2(v: float) -> float:
+    """Normalize a SpO₂ value to percent scale regardless of source encoding."""
+    return round(v * 100, 1) if v <= 1.5 else round(v, 1)
 
 
 class HealthService:
@@ -56,7 +61,10 @@ class HealthService:
         return items, total
 
     async def list_night_dates(self) -> list[date]:
-        """Return all night dates for the profile that have sleep summaries, ascending."""
+        """Return all night dates for the profile that have sleep summaries, ascending.
+
+        Unbounded by design — mirrors GET /days/dates; payloads are tiny date strings.
+        """
         query = (
             select(models.HealthNightlySummary.night_date)
             .where(models.HealthNightlySummary.profile_id == self.profile_id)
@@ -126,15 +134,11 @@ class HealthService:
         min_spo2: float | None = agg.min_spo2
         avg_rr: float | None = agg.avg_rr
 
-        # Normalize fraction-encoded SpO2 to percent.
-        if avg_spo2 is not None and avg_spo2 <= 1.5:
-            avg_spo2 = round(avg_spo2 * 100, 1)
-            if min_spo2 is not None:
-                min_spo2 = round(min_spo2 * 100, 1)
-        elif avg_spo2 is not None:
-            avg_spo2 = round(avg_spo2, 1)
-            if min_spo2 is not None:
-                min_spo2 = round(min_spo2, 1)
+        # Normalize each SpO2 value to percent independently — using avg's magnitude
+        # to infer both values' scale breaks when sources report mixed units (one
+        # fraction, one percent), leaving min on the wrong scale.
+        avg_spo2 = _normalize_spo2(avg_spo2) if avg_spo2 is not None else None
+        min_spo2 = _normalize_spo2(min_spo2) if min_spo2 is not None else None
 
         return HealthNightDetailRead(
             **HealthNightSummaryRead.model_validate(summary).model_dump(),
@@ -177,7 +181,7 @@ class HealthService:
             .where(
                 models.HealthSample.profile_id == self.profile_id,
                 models.HealthSample.night_date == night_date,
-                models.HealthSample.record_type == _SLEEP_RECORD_TYPE,
+                models.HealthSample.record_type == SLEEP_TYPE,
             )
             .order_by(models.HealthSample.start_time)
         )

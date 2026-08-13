@@ -640,6 +640,8 @@ def _derive_stage(
     if analysis_job_id is None and analysis_queued is False:
         return "analysis_skipped"
     if analysis_job_id is None:
+        # health_upload jobs never enqueue analysis; they reach here with
+        # analysis_queued=None (not False) and return "done" directly.
         return "done"
     if linked is None:
         # Analysis job was reaped after the import job stored the link.
