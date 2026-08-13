@@ -364,6 +364,14 @@ DEFAULT_RAW_BACKUP_DIR = Path.home() / ".snore" / "raw"
 # file path so startup can re-derive the target without environment variables.
 # Removed by _vacuum_background after a successful VACUUM.
 DEFAULT_VACUUM_PENDING_MARKER = Path.home() / ".snore" / "vacuum.pending"
+# Marker file written by scripts/watchtower-pre-update.sh when a container
+# update is deferred because the app is mid-operation.  Content is the UTC
+# timestamp of the first deferral (written once; mtime is touched on every
+# subsequent retry as the liveness signal).  Read by GET /api/v1/about, which
+# treats the marker as fresh only when mtime is under 30 minutes old.  Removed
+# unconditionally at app startup; after a same-image crash-restart watchtower
+# recreates it within one poll cycle if a deploy is still pending.
+DEFAULT_DEPLOY_DEFERRED_MARKER = Path.home() / ".snore" / "deploy-deferred.pending"
 
 # Upload staging spool directory (durable across restarts)
 DEFAULT_UPLOAD_SPOOL_DIR = Path.home() / ".snore" / "spool"

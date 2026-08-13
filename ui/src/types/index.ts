@@ -237,4 +237,6 @@ export interface AboutInfo {
     auth_mode: string
     python_version: string
     sqlite_version: string
+    update_pending: boolean
+    update_pending_since: string | null
 }
