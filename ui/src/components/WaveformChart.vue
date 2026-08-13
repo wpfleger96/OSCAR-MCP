@@ -193,7 +193,10 @@ function createChart(): void {
             },
         ],
         series: [
-            {},
+            {
+                value: (_u: uPlot, v: number | null) =>
+                    v == null ? '--' : formatWallClockTime(v, 0),
+            },
             {
                 label: props.label,
                 stroke: colors.series,
