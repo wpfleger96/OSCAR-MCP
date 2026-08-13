@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE HealthData [
+<!ELEMENT HealthData (ExportDate,Me,Record*)>
+<!ATTLIST HealthData locale #CDATA "en_US">
+<!ELEMENT ExportDate EMPTY>
+<!ATTLIST ExportDate value #CDATA "">
+<!ELEMENT Me EMPTY>
+<!ELEMENT Record (MetadataEntry*)>
+<!ATTLIST Record
+  type           #CDATA ""
+  sourceName     #CDATA ""
+  sourceVersion  #CDATA ""
+  device         #CDATA ""
+  creationDate   #CDATA ""
+  startDate      #CDATA ""
+  endDate        #CDATA ""
+  value          #CDATA ""
+  unit           #CDATA "">
+<!ELEMENT MetadataEntry EMPTY>
+<!ATTLIST MetadataEntry key #CDATA "" value #CDATA "">
+]>
+<HealthData locale="en_US">
+ <ExportDate value="2024-01-17 09:00:00 -0500"/>
+ <Me HKCharacteristicTypeIdentifierDateOfBirth="" HKCharacteristicTypeIdentifierBiologicalSex="HKBiologicalSexNotSet" HKCharacteristicTypeIdentifierBloodType="HKBloodTypeNotSet" HKCharacteristicTypeIdentifierFitzpatrickSkinType="HKFitzpatrickSkinTypeNotSet"/>
+
+ <!-- Records are deliberately NOT in chronological order to test that
+      date filtering scans the whole file. -->
+
+ <!-- Unhandled type: exercises the skip_counter path -->
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="Will's iPhone" sourceVersion="17.2" device="iPhone" creationDate="2024-01-16 08:00:00 -0500" startDate="2024-01-16 08:00:00 -0500" endDate="2024-01-16 08:00:00 -0500" value="1234" unit="count"/>
+
+ <!-- SpO2 quantity record — value is fraction (0-1) with unit "%" per HealthKit convention -->
+ <Record type="HKQuantityTypeIdentifierOxygenSaturation" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-16 02:30:00 -0500" startDate="2024-01-16 02:30:00 -0500" endDate="2024-01-16 02:30:00 -0500" value="0.962" unit="%"/>
+
+ <!-- 11:30 start on Jan 15 → night_date = 2024-01-14 (before noon: previous day) -->
+ <!-- Exercises the noon-split edge case and AsleepREM value -->
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-15 12:00:00 -0500" startDate="2024-01-15 11:30:00 -0500" endDate="2024-01-15 11:45:00 -0500" value="HKCategoryValueSleepAnalysisAsleepREM"/>
+
+ <!-- Respiratory Rate quantity -->
+ <Record type="HKQuantityTypeIdentifierRespiratoryRate" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-16 03:00:00 -0500" startDate="2024-01-16 03:00:00 -0500" endDate="2024-01-16 03:00:00 -0500" value="14.5" unit="count/min"/>
+
+ <!-- InBed from iPhone — overlapping source covering the whole night
+      (midnight-crossing: starts Jan 15 23:00, ends Jan 16 07:00) -->
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Will's iPhone" sourceVersion="17.2" device="iPhone" creationDate="2024-01-16 08:00:00 -0500" startDate="2024-01-15 23:00:00 -0500" endDate="2024-01-16 07:00:00 -0500" value="HKCategoryValueSleepAnalysisInBed"/>
+
+ <!-- AsleepDeep — out of chronological order (earlier than next record) -->
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-16 07:00:00 -0500" startDate="2024-01-16 03:15:00 -0500" endDate="2024-01-16 04:15:00 -0500" value="HKCategoryValueSleepAnalysisAsleepDeep"/>
+
+ <!-- 23:30 start on Jan 15 → night_date = 2024-01-15 (at or after noon: same day)
+      AsleepCore with a MetadataEntry child to verify iterparse handles children -->
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-16 07:14:48 -0500" startDate="2024-01-15 23:30:00 -0500" endDate="2024-01-16 00:30:00 -0500" value="HKCategoryValueSleepAnalysisAsleepCore">
+  <MetadataEntry key="HKMetadataKeyHeartRateRecoveryTestType" value="1"/>
+ </Record>
+
+ <!-- Awake -->
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-16 07:00:00 -0500" startDate="2024-01-16 03:00:00 -0500" endDate="2024-01-16 03:15:00 -0500" value="HKCategoryValueSleepAnalysisAwake"/>
+
+ <!-- Legacy "Asleep" (pre-watchOS 9) from iPhone — must map to AsleepUnspecified -->
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Will's iPhone" sourceVersion="17.2" device="iPhone" creationDate="2024-01-16 07:00:00 -0500" startDate="2024-01-16 01:00:00 -0500" endDate="2024-01-16 02:00:00 -0500" value="HKCategoryValueSleepAnalysisAsleep"/>
+
+ <!-- AsleepUnspecified (modern equivalent of legacy Asleep) -->
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-16 07:00:00 -0500" startDate="2024-01-16 02:00:00 -0500" endDate="2024-01-16 03:00:00 -0500" value="HKCategoryValueSleepAnalysisAsleepUnspecified"/>
+
+ <!-- Breathing Disturbances (covers the whole night window) -->
+ <Record type="HKQuantityTypeIdentifierAppleSleepingBreathingDisturbances" sourceName="Will's Apple Watch" sourceVersion="10.2" device="Apple Watch" creationDate="2024-01-16 07:00:00 -0500" startDate="2024-01-15 23:00:00 -0500" endDate="2024-01-16 07:00:00 -0500" value="12.3" unit="count/hr"/>
+
+</HealthData>

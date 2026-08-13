@@ -51,6 +51,10 @@ _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # Conservative body ceiling for all /api/v1/auth/ endpoints.
 _AUTH_BODY_LIMIT = 16 * 1024  # 16 KiB
 
+# Machine-to-machine bearer-token endpoint; CSRF does not apply (no cookie
+# auth, mobile app caller) and the body ceiling is handled at the route level.
+_HEALTH_INGEST_PATH = "/api/v1/health/ingest"
+
 
 # ---------------------------------------------------------------------------
 # AuthMiddleware
@@ -185,6 +189,11 @@ class AuthPathMiddleware(BaseHTTPMiddleware):
         # handles them directly.  Bearer-token auth + OAuth flows are cross-origin
         # by design.  Short-circuit before the body-ceiling and CSRF checks.
         if cfg.is_mcp_enabled and _is_mcp_path(request.url.path):
+            return await call_next(request)
+
+        # Health ingest uses X-SNORE-Ingest-Token bearer auth (mobile app
+        # caller); CSRF does not apply.  Body ceiling is enforced at the route.
+        if request.url.path == _HEALTH_INGEST_PATH:
             return await call_next(request)
 
         is_auth_path = request.url.path.startswith(_AUTH_PATH_PREFIX)

@@ -1,0 +1,87 @@
+{
+    "data": {
+        "metrics": [
+            {
+                "name": "sleep_analysis",
+                "units": "hr",
+                "data": [
+                    {
+                        "startDate": "2024-01-15 23:00:00 -0500",
+                        "endDate": "2024-01-16 00:00:00 -0500",
+                        "value": "In Bed",
+                        "qty": 1.0
+                    },
+                    {
+                        "startDate": "2024-01-16 00:00:00 -0500",
+                        "endDate": "2024-01-16 01:00:00 -0500",
+                        "value": "Asleep",
+                        "qty": 1.0,
+                        "source": "Will's Apple Watch"
+                    },
+                    {
+                        "startDate": "2024-01-16 01:00:00 -0500",
+                        "endDate": "2024-01-16 02:00:00 -0500",
+                        "value": "Core",
+                        "qty": 1.0
+                    },
+                    {
+                        "startDate": "2024-01-16 02:00:00 -0500",
+                        "endDate": "2024-01-16 02:15:00 -0500",
+                        "value": "Awake",
+                        "qty": 0.25
+                    },
+                    {
+                        "startDate": "2024-01-16 02:15:00 -0500",
+                        "endDate": "2024-01-16 04:00:00 -0500",
+                        "value": "Deep",
+                        "qty": 1.75
+                    },
+                    {
+                        "startDate": "2024-01-16 04:00:00 -0500",
+                        "endDate": "2024-01-16 05:30:00 -0500",
+                        "value": "REM",
+                        "qty": 1.5
+                    },
+                    {}
+                ]
+            },
+            {
+                "name": "blood_oxygen_saturation",
+                "units": "%",
+                "data": [
+                    {
+                        "date": "2024-01-16 02:30:00 -0500",
+                        "qty": 0.962
+                    }
+                ]
+            },
+            {
+                "name": "respiratory_rate",
+                "units": "count/min",
+                "data": [
+                    {
+                        "date": "2024-01-16 03:00:00 -0500",
+                        "qty": 15.2
+                    },
+                    {
+                        "date": "2024-01-16 04:00:00 -0500",
+                        "Min": 13.5,
+                        "Avg": 15.8,
+                        "Max": 18.2
+                    }
+                ]
+            },
+            {
+                "name": "step_count",
+                "units": "count",
+                "data": [
+                    {
+                        "date": "2024-01-16 08:00:00 -0500",
+                        "qty": 1234
+                    }
+                ]
+            }
+        ],
+        "workouts": []
+    }
+}

@@ -59,6 +59,8 @@ __all__ = [
     "DeleteDataResult",
     # Stats range schema
     "DataRange",
+    # Apple Health import schema
+    "HealthImportResult",
 ]
 
 
@@ -777,6 +779,33 @@ class DataRange(BaseModel):
 
     earliest_date: date | None = None
     latest_date: date | None = None
+
+
+class HealthImportResult(BaseModel):
+    """Result of an Apple Health import operation (file or HAE payload)."""
+
+    inserted: int = Field(default=0, description="Health samples successfully inserted")
+    skipped: int = Field(default=0, description="Samples skipped as duplicates")
+    unknown_metrics: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Unrecognised record types or metric names with their point counts. "
+            "For XML imports these are unhandled HK type identifiers; "
+            "for HAE imports these are unknown metric names."
+        ),
+    )
+    malformed_points: int = Field(
+        default=0,
+        description="HAE data points that could not be parsed (XML imports always 0)",
+    )
+    nights_recomputed: int = Field(
+        default=0,
+        description="Nightly sleep summaries recomputed (0 on dry_run)",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="True when no writes were performed",
+    )
 
 
 class DeleteDataResult(BaseModel):

@@ -1,0 +1,283 @@
+"""Integration tests for the Apple Health import pipeline.
+
+Tests the full HealthImportService flow: file import, payload import, idempotency,
+dry_run, and nightly summary generation.  Uses a real DB initialized via
+init_database() — write_gate / run_txn / session_scope all resolve to the same file.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from sqlalchemy import func, select
+
+from snore.database.models import HealthNightlySummary, HealthSample, Profile, User
+from snore.database.session import init_database, session_scope
+from snore.services.health_import_service import HealthImportService
+
+FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "health_data"
+# Pass the directory to import_file — AppleHealthParser.detect() requires a directory
+# or zip, not a bare XML file (xml_reader handles bare XML but detect() does not).
+EXPORT_DIR = FIXTURE_DIR
+HAE_JSON = FIXTURE_DIR / "hae_payload.json"
+
+# Sleep nights present in export.xml (from parser/fixture analysis):
+# - 2024-01-14: Watch AsleepREM (11:30–11:45 on Jan 15, noon-split → Jan 14)
+# - 2024-01-15: Watch stages + iPhone InBed (various records from Jan 15–16)
+EXPECTED_NIGHTS = {date(2024, 1, 14), date(2024, 1, 15)}
+WATCH_SOURCE = "Will's Apple Watch"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _create_profile_id() -> int:
+    async with session_scope() as db:
+        user = User(
+            canonical_email=f"health_{uuid.uuid4().hex[:8]}@test.local",
+            role="member",
+        )
+        db.add(user)
+        await db.flush()
+        profile = Profile(user_id=user.id, name="Health Test Profile")
+        db.add(profile)
+        await db.flush()
+        return profile.id
+
+
+async def _sample_count(profile_id: int) -> int:
+    async with session_scope() as db:
+        result = await db.execute(
+            select(func.count())
+            .select_from(HealthSample)
+            .where(HealthSample.profile_id == profile_id)
+        )
+        return result.scalar() or 0
+
+
+async def _summary_nights(profile_id: int) -> set[date]:
+    async with session_scope() as db:
+        result = await db.execute(
+            select(HealthNightlySummary.night_date).where(
+                HealthNightlySummary.profile_id == profile_id
+            )
+        )
+        return {row[0] for row in result.fetchall()}
+
+
+# ---------------------------------------------------------------------------
+# File import tests
+# ---------------------------------------------------------------------------
+
+
+class TestImportFile:
+    async def test_file_import_populates_samples_and_summaries(self, temp_db):
+        """Basic file import: samples land in DB and sleep summaries are created."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        svc = HealthImportService()
+        result = await svc.import_file(EXPORT_DIR, profile_id)
+
+        assert result.dry_run is False
+        assert result.inserted > 0, "At least some records should be inserted"
+        assert result.skipped == 0, "First import should skip nothing"
+        assert result.malformed_points == 0
+        # StepCount is the one unhandled HK type in the fixture.
+        assert "HKQuantityTypeIdentifierStepCount" in result.unknown_metrics
+
+        # Health samples in DB.
+        count = await _sample_count(profile_id)
+        assert count == result.inserted
+
+        # Nightly summaries exist for both sleep nights in the fixture.
+        nights = await _summary_nights(profile_id)
+        assert EXPECTED_NIGHTS.issubset(nights), (
+            f"Expected summary nights {EXPECTED_NIGHTS!r} but got {nights!r}"
+        )
+        assert result.nights_recomputed == len(nights)
+
+    async def test_watch_preferred_on_overlapping_source_night(self, temp_db):
+        """Night 2024-01-15 has Watch stage records and iPhone InBed → Watch preferred."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        svc = HealthImportService()
+        await svc.import_file(EXPORT_DIR, profile_id)
+
+        night = date(2024, 1, 15)
+        async with session_scope() as db:
+            result = await db.execute(
+                select(HealthNightlySummary).where(
+                    HealthNightlySummary.profile_id == profile_id,
+                    HealthNightlySummary.night_date == night,
+                )
+            )
+            summary = result.scalars().first()
+
+        assert summary is not None
+        assert summary.preferred_source == WATCH_SOURCE
+
+    async def test_idempotent_reimport(self, temp_db):
+        """Second import of the same file inserts 0 records and leaves summaries unchanged."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        svc = HealthImportService()
+        first = await svc.import_file(EXPORT_DIR, profile_id)
+
+        # Snapshot the summaries after first import.
+        async with session_scope() as db:
+            r1 = await db.execute(
+                select(HealthNightlySummary).where(
+                    HealthNightlySummary.profile_id == profile_id
+                )
+            )
+            summaries_before = {
+                s.night_date: s.total_sleep_seconds for s in r1.scalars().all()
+            }
+
+        second = await svc.import_file(EXPORT_DIR, profile_id)
+
+        assert second.inserted == 0, "Re-import must insert nothing"
+        assert second.skipped == first.inserted, (
+            "All records must be skipped on re-import"
+        )
+
+        # Summaries should be unchanged.
+        async with session_scope() as db:
+            r2 = await db.execute(
+                select(HealthNightlySummary).where(
+                    HealthNightlySummary.profile_id == profile_id
+                )
+            )
+            summaries_after = {
+                s.night_date: s.total_sleep_seconds for s in r2.scalars().all()
+            }
+
+        assert summaries_before == summaries_after, (
+            "Summaries must not change on idempotent re-import"
+        )
+
+    async def test_dry_run_reports_counts_without_writing(self, temp_db):
+        """dry_run=True counts would-be inserts but writes no rows."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        svc = HealthImportService()
+        result = await svc.import_file(EXPORT_DIR, profile_id, dry_run=True)
+
+        assert result.dry_run is True
+        assert result.inserted > 0, "dry_run must report would-be inserts"
+        assert result.nights_recomputed == 0
+
+        # No data written.
+        count = await _sample_count(profile_id)
+        assert count == 0, "dry_run must not write any samples"
+        nights = await _summary_nights(profile_id)
+        assert len(nights) == 0, "dry_run must not write any summaries"
+
+    async def test_dry_run_after_first_import_reports_all_skipped(self, temp_db):
+        """After a real import, dry_run must report all records as would-be-skipped."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        svc = HealthImportService()
+        first = await svc.import_file(EXPORT_DIR, profile_id)
+        dry = await svc.import_file(EXPORT_DIR, profile_id, dry_run=True)
+
+        assert dry.inserted == 0
+        assert dry.skipped == first.inserted
+
+    async def test_invalid_path_raises(self, temp_db, tmp_path):
+        """Non-Apple-Health path raises ValueError."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        svc = HealthImportService()
+        not_health = tmp_path / "random.xml"
+        not_health.write_text("<HealthData/>")
+
+        with pytest.raises(ValueError, match="not a supported Apple Health export"):
+            await svc.import_file(not_health, profile_id)
+
+    async def test_progress_callback_receives_increments(self, temp_db):
+        """progress_callback is called with increasing processed counts."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        calls: list[int] = []
+        svc = HealthImportService()
+        await svc.import_file(EXPORT_DIR, profile_id, progress_callback=calls.append)
+
+        assert len(calls) >= 1
+        assert calls[-1] > 0
+        # Counts must be monotonically non-decreasing.
+        assert calls == sorted(calls)
+
+
+# ---------------------------------------------------------------------------
+# HAE payload import tests
+# ---------------------------------------------------------------------------
+
+
+class TestImportPayload:
+    async def test_payload_import_lands_rows_and_summaries(self, temp_db):
+        """import_payload with the fixture JSON inserts records and recomputes summaries."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        payload = json.loads(HAE_JSON.read_text())
+
+        svc = HealthImportService()
+        result = await svc.import_payload(payload, profile_id)
+
+        assert result.inserted > 0
+        assert result.skipped == 0
+        assert result.dry_run is False
+        # step_count is the unknown metric in hae_payload.json.
+        assert len(result.unknown_metrics) >= 1
+        # The empty {} point in the fixture is a malformed point.
+        assert result.malformed_points >= 1
+
+        count = await _sample_count(profile_id)
+        assert count == result.inserted
+
+        nights = await _summary_nights(profile_id)
+        assert len(nights) >= 1, "At least one nightly summary should be created"
+        assert result.nights_recomputed == len(nights)
+
+    async def test_payload_import_idempotent(self, temp_db):
+        """Second import_payload skips all records."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        payload = json.loads(HAE_JSON.read_text())
+        svc = HealthImportService()
+
+        first = await svc.import_payload(payload, profile_id)
+        second = await svc.import_payload(payload, profile_id)
+
+        assert second.inserted == 0
+        assert second.skipped == first.inserted
+
+    async def test_payload_unknown_metric_counted(self, temp_db):
+        """Unknown metric names are counted in unknown_metrics with original spelling."""
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        payload = json.loads(HAE_JSON.read_text())
+        svc = HealthImportService()
+        result = await svc.import_payload(payload, profile_id)
+
+        # The fixture has "step_count" which is not in HAE_METRIC_NAME_MAP.
+        assert "step_count" in result.unknown_metrics
+        assert result.unknown_metrics["step_count"] > 0

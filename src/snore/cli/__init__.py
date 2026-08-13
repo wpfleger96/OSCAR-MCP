@@ -67,6 +67,7 @@ def _register_commands() -> None:
     from snore.cli.groups.completions import completions
     from snore.cli.groups.db import db
     from snore.cli.groups.export import export
+    from snore.cli.groups.health import health
     from snore.cli.groups.logs import logs
     from snore.cli.groups.profile import profile
     from snore.cli.groups.report import report
@@ -88,6 +89,7 @@ def _register_commands() -> None:
     cli.add_command(db)
     cli.add_command(session)
     cli.add_command(analysis)
+    cli.add_command(health)
     cli.add_command(completions)
     cli.add_command(logs)
     cli.add_command(report)
