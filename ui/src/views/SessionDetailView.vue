@@ -1051,7 +1051,7 @@ if (jumpToTime != null) {
             nextTick(() => {
                 const padding = 300
                 const start = Math.max(0, jumpToTime - padding)
-                const end = jumpToTime + padding
+                const end = Math.min(fullDuration.value, jumpToTime + padding)
                 currentZoomRange.value = { start, end }
                 singleChartRef.value?.setScaleX(start, end)
             })
@@ -1076,6 +1076,19 @@ function handleResetZoom(): void {
     }
 }
 
+function clampZoomRange(
+    center: number,
+    halfWidth: number,
+    duration: number,
+): { start: number; end: number } {
+    let start = Math.max(0, center - halfWidth)
+    let end = Math.min(duration, center + halfWidth)
+    const desired = halfWidth * 2
+    if (start === 0) end = Math.min(duration, desired)
+    else if (end === duration) start = Math.max(0, duration - desired)
+    return { start, end }
+}
+
 function applyZoom(startSec: number, endSec: number): void {
     currentZoomRange.value = { start: startSec, end: endSec }
     if (multiMode.value) {
@@ -1094,11 +1107,7 @@ function handleZoomIn(): void {
 
     const center = (range.start + range.end) / 2
     const newHalf = Math.max(MIN_ZOOM_WINDOW / 2, currentWindow / 4)
-    let start = Math.max(0, center - newHalf)
-    let end = Math.min(duration, center + newHalf)
-    const desired = newHalf * 2
-    if (start === 0) end = Math.min(duration, desired)
-    else if (end === duration) start = Math.max(0, duration - desired)
+    const { start, end } = clampZoomRange(center, newHalf, duration)
     applyZoom(start, end)
 }
 
@@ -1113,12 +1122,7 @@ function handleZoomOut(): void {
     }
 
     const center = (range.start + range.end) / 2
-    const newHalf = currentWindow
-    let start = Math.max(0, center - newHalf)
-    let end = Math.min(duration, center + newHalf)
-    const desired = newHalf * 2
-    if (start === 0) end = Math.min(duration, desired)
-    else if (end === duration) start = Math.max(0, duration - desired)
+    const { start, end } = clampZoomRange(center, currentWindow, duration)
     applyZoom(start, end)
 }
 
@@ -1141,10 +1145,10 @@ const MIN_ZOOM_WINDOW = 10
 
 const canZoomIn = computed(() => {
     if (!session.value) return false
-    const window = currentZoomRange.value
+    const currentWindow = currentZoomRange.value
         ? currentZoomRange.value.end - currentZoomRange.value.start
         : fullDuration.value
-    return window > MIN_ZOOM_WINDOW
+    return currentWindow > MIN_ZOOM_WINDOW
 })
 
 const canZoomOut = computed(() => currentZoomRange.value !== null)

@@ -37,10 +37,22 @@
                 <Square v-else class="mr-2 h-4 w-4" />
                 {{ multiWaveform ? 'Multi' : 'Single' }}
             </Toggle>
-            <Button variant="outline" size="sm" :disabled="!canZoomIn" @click="$emit('zoom-in')">
+            <Button
+                variant="outline"
+                size="sm"
+                aria-label="Zoom in"
+                :disabled="!canZoomIn"
+                @click="$emit('zoom-in')"
+            >
                 <ZoomIn class="h-4 w-4" />
             </Button>
-            <Button variant="outline" size="sm" :disabled="!canZoomOut" @click="$emit('zoom-out')">
+            <Button
+                variant="outline"
+                size="sm"
+                aria-label="Zoom out"
+                :disabled="!canZoomOut"
+                @click="$emit('zoom-out')"
+            >
                 <ZoomOut class="h-4 w-4" />
             </Button>
             <Button variant="outline" size="sm" @click="$emit('reset-zoom')">
