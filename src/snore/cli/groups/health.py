@@ -215,25 +215,20 @@ def health_list(
     """List nightly sleep summaries (newest first)."""
 
     async def _run() -> None:
-        from sqlalchemy import select as sa_select  # noqa: PLC0415
-
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-        from snore.database.models import HealthNightlySummary  # noqa: PLC0415
+        from snore.services.health_service import HealthService  # noqa: PLC0415
 
         async with open_db_session(db) as session:
             profile_id = await resolve_cli_profile_id(
                 session, actor_user, actor_profile
             )
-
-            stmt = sa_select(HealthNightlySummary).where(
-                HealthNightlySummary.profile_id == profile_id
+            svc = HealthService(session, profile_id)
+            rows, _ = await svc.list_nights(
+                from_date=date_from.date() if date_from else None,
+                to_date=date_to.date() if date_to else None,
+                limit=limit,
+                offset=0,
             )
-            if date_from:
-                stmt = stmt.where(HealthNightlySummary.night_date >= date_from.date())
-            if date_to:
-                stmt = stmt.where(HealthNightlySummary.night_date <= date_to.date())
-            stmt = stmt.order_by(HealthNightlySummary.night_date.desc()).limit(limit)
-            rows = list((await session.execute(stmt)).scalars().all())
 
         if not rows:
             console.print("No sleep data found")
@@ -284,51 +279,23 @@ def health_show(
         from sqlalchemy import select as sa_select  # noqa: PLC0415
 
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-        from snore.database.models import (  # noqa: PLC0415
-            HealthNightlySummary,
-            HealthSample,
-        )
+        from snore.database.models import HealthSample  # noqa: PLC0415
+        from snore.exceptions import NotFoundError  # noqa: PLC0415
+        from snore.parsers.apple_health.type_handlers import SLEEP_TYPE  # noqa: PLC0415
+        from snore.services.health_service import HealthService  # noqa: PLC0415
 
         async with open_db_session(db) as session:
             profile_id = await resolve_cli_profile_id(
                 session, actor_user, actor_profile
             )
+            svc = HealthService(session, profile_id)
 
-            summary = (
-                (
-                    await session.execute(
-                        sa_select(HealthNightlySummary).where(
-                            HealthNightlySummary.profile_id == profile_id,
-                            HealthNightlySummary.night_date == night,
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
+            try:
+                detail = await svc.get_night_detail(night)
+            except NotFoundError:
+                raise click.ClickException(f"No health data for {night}") from None
 
-            if summary is None:
-                raise click.ClickException(f"No health data for {night}")
-
-            preferred_source = summary.preferred_source
-
-            sleep_samples = list(
-                (
-                    await session.execute(
-                        sa_select(HealthSample)
-                        .where(
-                            HealthSample.profile_id == profile_id,
-                            HealthSample.night_date == night,
-                            HealthSample.record_type
-                            == "HKCategoryTypeIdentifierSleepAnalysis",
-                            HealthSample.source_name == preferred_source,
-                        )
-                        .order_by(HealthSample.start_time)
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            sleep_samples = await svc.get_night_samples(night)
 
             quantity_samples = list(
                 (
@@ -337,8 +304,7 @@ def health_show(
                         .where(
                             HealthSample.profile_id == profile_id,
                             HealthSample.night_date == night,
-                            HealthSample.record_type
-                            != "HKCategoryTypeIdentifierSleepAnalysis",
+                            HealthSample.record_type != SLEEP_TYPE,
                         )
                         .order_by(HealthSample.start_time)
                     )
@@ -349,7 +315,7 @@ def health_show(
 
         # Display sleep stage intervals from the preferred source.
         if sleep_samples:
-            source_display = preferred_source or "unknown"
+            source_display = detail.preferred_source or "unknown"
             print_header(f"Sleep Intervals — {source_display}", ICON_SCAN)
             print_table(
                 [("Start", 8), ("End", 8), ("Stage", 22), ("Duration", 0)],
@@ -368,14 +334,14 @@ def health_show(
         # Summary totals block.
         print_header("Totals", ICON_STATS)
         for label, value in [
-            ("Total sleep", _fmt_hours(summary.total_sleep_seconds)),
-            ("Time in bed", _fmt_hours(summary.time_in_bed_seconds)),
-            ("Efficiency", _fmt_pct(summary.sleep_efficiency_pct)),
-            ("Core", _fmt_hours(summary.core_seconds)),
-            ("Deep", _fmt_hours(summary.deep_seconds)),
-            ("REM", _fmt_hours(summary.rem_seconds)),
-            ("Awake", _fmt_hours(summary.awake_seconds)),
-            ("Stage coverage", _fmt_pct(summary.stage_coverage_pct)),
+            ("Total sleep", _fmt_hours(detail.total_sleep_seconds)),
+            ("Time in bed", _fmt_hours(detail.time_in_bed_seconds)),
+            ("Efficiency", _fmt_pct(detail.sleep_efficiency_pct)),
+            ("Core", _fmt_hours(detail.core_seconds)),
+            ("Deep", _fmt_hours(detail.deep_seconds)),
+            ("REM", _fmt_hours(detail.rem_seconds)),
+            ("Awake", _fmt_hours(detail.awake_seconds)),
+            ("Stage coverage", _fmt_pct(detail.stage_coverage_pct)),
         ]:
             console.print(f"  {label:<18} {value}", markup=False, highlight=False)
         print_footer()

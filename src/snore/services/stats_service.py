@@ -108,41 +108,48 @@ class StatsService:
         return binned
 
     @staticmethod
+    def _per_period_sleep_avgs(
+        binned: dict[date, _HealthNights],
+        periods: list[PeriodStatistics],
+    ) -> dict[date, tuple[float | None, float | None]]:
+        """Return (avg_sleep_hours, avg_sleep_efficiency_pct) keyed by period_start.
+
+        Values are None when no nights with valid data fall in the period.
+        Rounding: hours → 2 decimal places, efficiency → 1.
+        """
+        result: dict[date, tuple[float | None, float | None]] = {}
+        for ps in periods:
+            ns = binned.get(ps.period_start, [])
+            h_vals = [
+                n.total_sleep_seconds / 3600
+                for n in ns
+                if n.total_sleep_seconds is not None
+            ]
+            e_vals = [
+                n.sleep_efficiency_pct for n in ns if n.sleep_efficiency_pct is not None
+            ]
+            result[ps.period_start] = (
+                round(sum(h_vals) / len(h_vals), 2) if h_vals else None,
+                round(sum(e_vals) / len(e_vals), 1) if e_vals else None,
+            )
+        return result
+
+    @staticmethod
     def _augment_period_stats(
         period_stats: list[PeriodStatistics],
         binned: dict[date, _HealthNights],
     ) -> list[PeriodStatistics]:
         """Return period stats with avg_total_sleep_hours and avg_sleep_efficiency_pct populated."""
-        augmented = []
-        for ps in period_stats:
-            nights = binned.get(ps.period_start, [])
-            sleep_hours = [
-                n.total_sleep_seconds / 3600
-                for n in nights
-                if n.total_sleep_seconds is not None
-            ]
-            efficiency = [
-                n.sleep_efficiency_pct
-                for n in nights
-                if n.sleep_efficiency_pct is not None
-            ]
-            augmented.append(
-                ps.model_copy(
-                    update={
-                        "avg_total_sleep_hours": (
-                            round(sum(sleep_hours) / len(sleep_hours), 2)
-                            if sleep_hours
-                            else None
-                        ),
-                        "avg_sleep_efficiency_pct": (
-                            round(sum(efficiency) / len(efficiency), 1)
-                            if efficiency
-                            else None
-                        ),
-                    }
-                )
+        avgs = StatsService._per_period_sleep_avgs(binned, period_stats)
+        return [
+            ps.model_copy(
+                update={
+                    "avg_total_sleep_hours": avgs[ps.period_start][0],
+                    "avg_sleep_efficiency_pct": avgs[ps.period_start][1],
+                }
             )
-        return augmented
+            for ps in period_stats
+        ]
 
     async def get_summary(
         self,
@@ -428,33 +435,13 @@ class StatsService:
                 days_limit, from_date=from_date, to_date=to_date
             )
             binned = self._bin_nights_by_period(health_nights, period_stats)
-
-            sleep_hours_series: list[tuple[date, float | None]] = []
-            sleep_eff_series: list[tuple[date, float | None]] = []
-            for ps in period_stats:
-                ns = binned.get(ps.period_start, [])
-                h_vals = [
-                    n.total_sleep_seconds / 3600
-                    for n in ns
-                    if n.total_sleep_seconds is not None
-                ]
-                e_vals = [
-                    n.sleep_efficiency_pct
-                    for n in ns
-                    if n.sleep_efficiency_pct is not None
-                ]
-                sleep_hours_series.append(
-                    (
-                        ps.period_start,
-                        round(sum(h_vals) / len(h_vals), 2) if h_vals else None,
-                    )
-                )
-                sleep_eff_series.append(
-                    (
-                        ps.period_start,
-                        round(sum(e_vals) / len(e_vals), 1) if e_vals else None,
-                    )
-                )
+            avgs = self._per_period_sleep_avgs(binned, period_stats)
+            sleep_hours_series: list[tuple[date, float | None]] = [
+                (ps.period_start, avgs[ps.period_start][0]) for ps in period_stats
+            ]
+            sleep_eff_series: list[tuple[date, float | None]] = [
+                (ps.period_start, avgs[ps.period_start][1]) for ps in period_stats
+            ]
 
             # Only add health series when data exists; keeps response shape
             # backward-compatible for profiles with no Apple Health import.
