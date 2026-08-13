@@ -437,7 +437,7 @@ class TestNonEmptyChainPaths:
         )
 
     def test_at_head_skips_all_alembic(self, tmp_path):
-        """DB stamped at the current head → neither stamp nor upgrade is called."""
+        """DB at head with checksum baseline intact → neither stamp nor upgrade is called."""
         import sqlite3
 
         from unittest.mock import patch
@@ -447,10 +447,17 @@ class TestNonEmptyChainPaths:
         db_path = str(tmp_path / "at_head.db")
         sync_url = f"sqlite:///{db_path}"
 
-        # Pre-create DB with only an alembic_version table at the fake head.
+        # Pre-create DB with alembic_version at the fake head and an empty
+        # snore_migration_checksums table. The mocked ScriptDirectory yields no
+        # revisions, so computed checksums are {} and the empty stored table {}
+        # matches — the fast path fires and no Alembic command is invoked.
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
         conn.execute("INSERT INTO alembic_version VALUES ('fakehead0001')")
+        conn.execute(
+            "CREATE TABLE snore_migration_checksums"
+            " (revision TEXT PRIMARY KEY, checksum TEXT NOT NULL)"
+        )
         conn.commit()
         conn.close()
 

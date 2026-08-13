@@ -199,6 +199,8 @@ class TestAboutUpdatePending:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """App startup removes the deploy-deferred marker if it exists."""
+        monkeypatch.setenv("SNORE_DB_PATH", str(tmp_path / "snore-test.db"))
+
         marker = tmp_path / "deploy-deferred.pending"
         marker.write_text("2026-08-13T20:00:00+00:00")
         assert marker.exists()

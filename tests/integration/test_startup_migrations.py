@@ -343,3 +343,215 @@ class TestStartupMigrations:
             )
         finally:
             await cleanup_database()
+
+    async def test_checksums_recorded_on_fresh_init(self, tmp_path):
+        """snore_migration_checksums is populated with 64-char hex digests on first init.
+
+        Every revision in the migration chain must have exactly one checksum row
+        and the value must be the lowercase SHA-256 hexdigest (64 characters) of
+        the migration file's raw bytes.
+        """
+        import sqlite3
+
+        db_path = str(tmp_path / "fresh_checksum.db")
+        await init_database(db_path)
+
+        con = sqlite3.connect(db_path)
+        try:
+            rows = con.execute(
+                "SELECT checksum FROM snore_migration_checksums"
+            ).fetchall()
+            assert len(rows) > 0, "expected at least one checksum row after fresh init"
+            for (checksum,) in rows:
+                assert len(checksum) == 64, (
+                    f"checksum must be 64 hex chars, got {len(checksum)}: {checksum!r}"
+                )
+                assert all(c in "0123456789abcdef" for c in checksum), (
+                    f"checksum must be lowercase hex, got {checksum!r}"
+                )
+        finally:
+            con.close()
+            await cleanup_database()
+
+    async def test_checksum_mismatch_triggers_replay(self, tmp_path, caplog):
+        """Corrupt stored checksum triggers a WARNING and rewrites the correct hash.
+
+        After corrupting revision 009's stored checksum via raw sqlite3, the next
+        init_database call must:
+        - emit a WARNING on logger "snore.database.session" mentioning the revision;
+        - complete successfully with alembic_version still at head (009); and
+        - overwrite the stored checksum with the correct 64-char hex digest.
+        """
+        import logging
+        import sqlite3
+
+        db_path = str(tmp_path / "mismatch.db")
+        await init_database(db_path)
+        await cleanup_database()
+
+        # Corrupt the checksum for revision 009.
+        con = sqlite3.connect(db_path)
+        con.execute(
+            "UPDATE snore_migration_checksums SET checksum='cafebabe' "
+            "WHERE revision='009_mask_log_optional_fields'"
+        )
+        con.commit()
+        con.close()
+
+        with caplog.at_level(logging.WARNING, logger="snore.database.session"):
+            await init_database(db_path)
+
+        # A WARNING mentioning the edited revision must have been emitted.
+        mismatch_records = [
+            r for r in caplog.records if "Migration checksum mismatch" in r.message
+        ]
+        assert any(
+            "009_mask_log_optional_fields" in r.message for r in mismatch_records
+        ), (
+            "expected a WARNING mentioning '009_mask_log_optional_fields'; "
+            f"got records: {[r.message for r in caplog.records]}"
+        )
+
+        # DB must still be stamped at head after replay.
+        con = sqlite3.connect(db_path)
+        try:
+            row = con.execute("SELECT version_num FROM alembic_version").fetchone()
+            assert row is not None
+            assert row[0] == "009_mask_log_optional_fields"
+
+            # The stored checksum for 009 must have been corrected.
+            row = con.execute(
+                "SELECT checksum FROM snore_migration_checksums "
+                "WHERE revision='009_mask_log_optional_fields'"
+            ).fetchone()
+            assert row is not None
+            assert row[0] != "cafebabe", "stored checksum must have been overwritten"
+            assert len(row[0]) == 64, (
+                f"corrected checksum must be 64 hex chars, got {len(row[0])}"
+            )
+            assert all(c in "0123456789abcdef" for c in row[0]), (
+                f"corrected checksum must be lowercase hex, got {row[0]!r}"
+            )
+        finally:
+            con.close()
+            await cleanup_database()
+
+    async def test_backfill_no_replay_on_pre_feature_db(self, tmp_path, caplog):
+        """Pre-feature DB (checksum table absent) is backfilled without triggering replay.
+
+        A DB that predates the checksum feature has no snore_migration_checksums table.
+        The next init_database call must silently create and backfill the table — no
+        WARNING about a mismatch, no INFO about replay completion.
+        """
+        import logging
+        import sqlite3
+
+        db_path = str(tmp_path / "pre_feature.db")
+        await init_database(db_path)
+        await cleanup_database()
+
+        # Simulate a pre-feature DB by dropping the checksum table.
+        con = sqlite3.connect(db_path)
+        con.execute("DROP TABLE snore_migration_checksums")
+        con.commit()
+        con.close()
+
+        with caplog.at_level(logging.WARNING, logger="snore.database.session"):
+            await init_database(db_path)
+
+        # No mismatch or replay messages must have been logged.
+        noisy_records = [
+            r
+            for r in caplog.records
+            if "mismatch" in r.message.lower() or "replay" in r.message.lower()
+        ]
+        assert not noisy_records, (
+            "pre-feature DB must not trigger mismatch/replay logs; "
+            f"got: {[r.message for r in noisy_records]}"
+        )
+
+        # Table must be recreated and backfilled with at least one row.
+        con = sqlite3.connect(db_path)
+        try:
+            rows = con.execute(
+                "SELECT revision FROM snore_migration_checksums"
+            ).fetchall()
+            assert len(rows) > 0, (
+                "snore_migration_checksums must be backfilled after pre-feature DB init"
+            )
+        finally:
+            con.close()
+            await cleanup_database()
+
+    async def test_matching_checksums_fast_path_skips(self, tmp_path, caplog):
+        """Second init with all checksums matching takes the fast-path skip.
+
+        When the DB is already stamped at head and every stored checksum matches
+        the migration file on disk, init_database must emit a DEBUG log containing
+        "matching checksums" on logger "snore.database.session" and skip Alembic.
+        """
+        import logging
+
+        db_path = str(tmp_path / "fast_path.db")
+        await init_database(db_path)
+        await cleanup_database()
+
+        with caplog.at_level(logging.DEBUG, logger="snore.database.session"):
+            await init_database(db_path)
+
+        assert any("matching checksums" in r.message for r in caplog.records), (
+            "fast-path skip must emit a DEBUG log containing 'matching checksums'; "
+            f"got records: {[r.message for r in caplog.records]}"
+        )
+
+        await cleanup_database()
+
+    async def test_data_outside_replay_range_survives(self, tmp_path):
+        """Rows in tables untouched by revision 009 survive downgrade+upgrade replay.
+
+        import_job_records is unaffected by revision 009 (which only alters mask_log
+        column nullability and CHECK constraints).  A sentinel row inserted before
+        the checksum corruption must still be present after the downgrade(008)+
+        upgrade(head) cycle.
+        """
+        import sqlite3
+
+        db_path = str(tmp_path / "data_survives.db")
+        await init_database(db_path)
+        await cleanup_database()
+
+        # Insert a sentinel row into import_job_records — a table with no FK
+        # dependencies and untouched by revision 009.
+        sentinel_job_id = "sentinel-checksum-test-01"
+        con = sqlite3.connect(db_path)
+        con.execute(
+            "INSERT INTO import_job_records "
+            "(job_id, job_type, state, file_count, created_at, updated_at) "
+            "VALUES (?, 'edf', 'pending', 0, "
+            "'2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00')",
+            (sentinel_job_id,),
+        )
+        # Corrupt revision 009's checksum to force a replay.
+        con.execute(
+            "UPDATE snore_migration_checksums SET checksum='cafebabe' "
+            "WHERE revision='009_mask_log_optional_fields'"
+        )
+        con.commit()
+        con.close()
+
+        # Re-init: replay downgrades to 008 and re-upgrades to head.
+        await init_database(db_path)
+
+        # Sentinel row must have survived the replay.
+        con = sqlite3.connect(db_path)
+        try:
+            row = con.execute(
+                "SELECT job_id FROM import_job_records WHERE job_id=?",
+                (sentinel_job_id,),
+            ).fetchone()
+            assert row is not None, (
+                "sentinel row in import_job_records must survive the 009 downgrade+upgrade replay"
+            )
+        finally:
+            con.close()
+            await cleanup_database()

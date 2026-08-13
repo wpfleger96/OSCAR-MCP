@@ -251,6 +251,167 @@ def _sync_additive_schema(metadata: MetaData, engine: Engine) -> None:
                 )
 
 
+def _compute_migration_checksums(script_dir: Any) -> dict[str, str]:
+    """Compute SHA-256 checksums over raw file bytes for every revision script.
+
+    Returns a ``{revision_id: hexdigest}`` mapping for all revisions with a
+    non-falsy ``Script.path``.  Revisions without a path (e.g. synthetic base
+    stubs) are skipped silently.
+    """
+    import hashlib  # noqa: PLC0415
+
+    checksums: dict[str, str] = {}
+    for script in script_dir.walk_revisions():
+        if not script.path:
+            continue
+        raw = Path(script.path).read_bytes()
+        checksums[script.revision] = hashlib.sha256(raw).hexdigest()
+    return checksums
+
+
+def _read_stored_checksums(conn: Any) -> dict[str, str] | None:
+    """Read checksums from the ``snore_migration_checksums`` table.
+
+    Returns a ``{revision: checksum}`` mapping, ``{}`` if the table exists but
+    is empty, or ``None`` if the table is absent (pre-feature DB — caller should
+    treat this as a backfill case rather than a mismatch).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT revision, checksum FROM snore_migration_checksums"
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+    except Exception:
+        # Table missing → pre-feature DB; signal backfill with None.
+        return None
+
+
+def _ensure_checksum_table(engine: Engine) -> None:
+    """Create the ``snore_migration_checksums`` table if it does not yet exist.
+
+    Uses plain DDL rather than an Alembic migration for the same reason
+    ``alembic_version`` itself is not a migration: the table must exist before
+    checksums can be checked, so it cannot be managed by the very system it
+    bootstraps.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS snore_migration_checksums "
+                "(revision TEXT PRIMARY KEY, checksum TEXT NOT NULL)"
+            )
+        )
+
+
+def _write_checksums(engine: Engine, checksums: dict[str, str]) -> None:
+    """Persist *checksums* to the database, replacing any prior rows.
+
+    Runs DELETE + INSERT in one transaction so orphaned rows from renamed or
+    deleted revision IDs are always cleaned up.  Parameterised binds are used
+    throughout — never string interpolation.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM snore_migration_checksums"))
+        for revision, checksum in checksums.items():
+            conn.execute(
+                text(
+                    "INSERT INTO snore_migration_checksums (revision, checksum)"
+                    " VALUES (:revision, :checksum)"
+                ),
+                {"revision": revision, "checksum": checksum},
+            )
+
+
+def _find_earliest_edited_revision(
+    script_dir: Any,
+    stamp: str,
+    stored: dict[str, str],
+    current: dict[str, str],
+) -> Any | None:
+    """Walk the applied migration chain and return the earliest edited revision.
+
+    Traverses from *stamp* back to the chain base following ``down_revision``
+    links.  A revision is considered *edited* only when ``stored`` has a
+    checksum for it AND that checksum differs from ``current``; revisions
+    absent from ``stored`` are new migrations, not edits.
+
+    Returns the ``Script`` object closest to the base with a mismatch, or
+    ``None`` when the chain is clean or *stamp* cannot be resolved.
+    """
+    earliest: Any | None = None
+    try:
+        rev = script_dir.get_revision(stamp)
+        visited: set[str] = set()
+        while rev is not None:
+            rev_id = rev.revision
+            # Guard: a malformed or cyclic down_revision chain must degrade to
+            # "no replay", never hang startup.
+            if rev_id in visited:
+                break
+            visited.add(rev_id)
+            if rev_id in stored and stored[rev_id] != current.get(rev_id):
+                earliest = rev
+            down = rev.down_revision
+            if down is None:
+                break
+            # down_revision may be a tuple for merge points — follow first parent.
+            next_rev_id = down[0] if isinstance(down, (tuple, list)) else str(down)
+            try:
+                rev = script_dir.get_revision(next_rev_id)
+            except Exception:
+                break
+    except Exception:
+        # stamp not resolvable (stale stamp, missing file, ResolutionError) →
+        # Alembic's own upgrade handles it; no replay needed.
+        return None
+    return earliest
+
+
+def _replay_migration_edits(
+    cfg: AlembicConfig,
+    earliest_edited: Any,
+    engine: Engine,
+    current_checksums: dict[str, str],
+) -> None:
+    """Downgrade to before *earliest_edited* then upgrade to head.
+
+    If ``earliest_edited.down_revision`` is ``None`` (the baseline was edited),
+    downgrade target is ``"base"``, which drops all Alembic-managed tables.
+    Otherwise downgrade to the immediate predecessor and re-apply to head.
+
+    Writes updated checksums after a successful replay.
+    """
+    down = earliest_edited.down_revision
+    if down is None:
+        target = "base"
+    elif isinstance(down, (tuple, list)):
+        target = down[0]
+    else:
+        target = str(down)
+
+    rev_id = earliest_edited.revision
+
+    if target == "base":
+        logger.warning(
+            "Migration checksum mismatch: revision %s was edited and has no"
+            " predecessor — downgrading to base DROPS ALL Alembic-managed tables"
+            " (data loss).",
+            rev_id,
+        )
+    else:
+        logger.warning(
+            "Migration checksum mismatch: revision %s was edited."
+            " Downgrading to %s and re-applying to head.",
+            rev_id,
+            target,
+        )
+
+    alembic_command.downgrade(cfg, target)
+    alembic_command.upgrade(cfg, "head")
+    _write_checksums(engine, current_checksums)
+    logger.info("Migration checksum replay complete for revision %s.", rev_id)
+
+
 def _apply_migrations_sync(sync_url: str) -> None:
     """Apply pending migrations, or skip when the schema is already at head.
 
@@ -289,6 +450,16 @@ def _apply_migrations_sync(sync_url: str) -> None:
     only cover schema changes made after the chain was introduced, so the
     additive sync is what restores earlier drift (e.g. a pre-#200 database
     missing ``users.google_link_disabled``).
+
+    **Checksum tracking:** Every migration file's SHA-256 checksum is stored in
+    ``snore_migration_checksums`` after it is applied.  On each startup, computed
+    checksums are compared against the stored ones.  When an already-applied
+    migration file has been edited (checksum mismatch), the function downgrades
+    to just before the earliest edited revision and re-applies to head, then
+    rewrites all checksums.  The fast-path skip only fires when the stamp matches
+    head AND all checksums match.  Editing ``001_baseline`` (the no-op stamp
+    revision) forces a downgrade to ``"base"``, which drops all Alembic-managed
+    tables — data loss; avoid editing baseline in production.
     """
     import sqlite3 as _sqlite3  # noqa: PLC0415
 
@@ -306,6 +477,7 @@ def _apply_migrations_sync(sync_url: str) -> None:
     # Step 1: Read the stamped version first, before computing heads.
     # The read-only open avoids acquiring any write lock.
     stored_version: str | None = None
+    stored_checksums: dict[str, str] | None = None
     if url_obj.get_backend_name() == "sqlite":
         db_file = url_obj.database
         if db_file and db_file != ":memory:":
@@ -319,6 +491,7 @@ def _apply_migrations_sync(sync_url: str) -> None:
                         "SELECT version_num FROM alembic_version"
                     ).fetchone()
                     stored_version = row[0] if row else None
+                    stored_checksums = _read_stored_checksums(ro_conn)
                 finally:
                     ro_conn.close()
             except Exception as exc:
@@ -335,16 +508,37 @@ def _apply_migrations_sync(sync_url: str) -> None:
     # Reading the stamp before computing heads means a migration file landing
     # between the two reads can only make the comparison fail (falling through
     # to upgrade), never fast-path-skip a brand-new migration.
-    heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+    script_dir = ScriptDirectory.from_config(alembic_cfg)
+    heads = set(script_dir.get_heads())
+    current_checksums = _compute_migration_checksums(script_dir)
 
     # Fast-path: skip migrations when the database is already at the current
-    # Alembic head.
-    if stored_version is not None and {stored_version} == heads:
+    # Alembic head AND all migration file checksums match.
+    if (
+        stored_version is not None
+        and {stored_version} == heads
+        and stored_checksums is not None
+        and _find_earliest_edited_revision(
+            script_dir, stored_version, stored_checksums, current_checksums
+        )
+        is None
+    ):
         logger.debug(
-            "Schema already at head %s; skipping migrations",
+            "Schema at head %s with matching checksums; skipping migrations",
             stored_version,
         )
         return
+    elif stored_version is not None and {stored_version} == heads:
+        if stored_checksums is None:
+            logger.debug(
+                "Schema at head %s but checksum table absent; will backfill checksums",
+                stored_version,
+            )
+        else:
+            logger.debug(
+                "Schema at head %s but checksum mismatch detected; will replay edits",
+                stored_version,
+            )
 
     # Empty-chain mode: no migration files → manage schema via create_all then
     # additive sync.  No alembic_version table is written; stale rows from
@@ -367,11 +561,13 @@ def _apply_migrations_sync(sync_url: str) -> None:
     # the engine is always disposed even if alembic_command.upgrade raises.
     engine = create_engine(sync_url, connect_args={"check_same_thread": False})
     try:
+        _ensure_checksum_table(engine)
         table_names = set(inspect(engine).get_table_names())
 
         if "sessions" not in table_names:
             Base.metadata.create_all(engine)
             alembic_command.stamp(alembic_cfg, "head")
+            _write_checksums(engine, current_checksums)
             logger.info("Fresh database created and stamped at head")
         elif "alembic_version" not in table_names:
             # Existing DB from before the migration chain existed (created in
@@ -384,13 +580,27 @@ def _apply_migrations_sync(sync_url: str) -> None:
             alembic_command.stamp(alembic_cfg, "001_baseline")
             alembic_command.upgrade(alembic_cfg, "head")
             _sync_additive_schema(Base.metadata, engine)
+            _write_checksums(engine, current_checksums)
             logger.info(
                 "Stamped existing DB at 001_baseline, upgraded to head, and"
                 " synced pre-chain schema drift"
             )
         else:
-            alembic_command.upgrade(alembic_cfg, "head")
-            logger.info("Database migrations applied (upgrade to head)")
+            earliest = (
+                _find_earliest_edited_revision(
+                    script_dir, stored_version, stored_checksums, current_checksums
+                )
+                if stored_checksums is not None and stored_version is not None
+                else None
+            )
+            if earliest is not None:
+                _replay_migration_edits(
+                    alembic_cfg, earliest, engine, current_checksums
+                )
+            else:
+                alembic_command.upgrade(alembic_cfg, "head")
+                _write_checksums(engine, current_checksums)
+                logger.info("Database migrations applied (upgrade to head)")
     finally:
         engine.dispose()
 
