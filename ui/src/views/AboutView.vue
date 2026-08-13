@@ -18,8 +18,8 @@
                 <div class="update-banner-body">
                     <span class="update-banner-title">New version waiting to deploy</span>
                     <span class="update-banner-desc">
-                        Held while jobs are running<template v-if="data.update_deferred_since">
-                            (since {{ formatSince(data.update_deferred_since) }})</template
+                        Held while jobs are running<template v-if="data.update_pending_since">
+                            (since {{ formatSince(data.update_pending_since) }})</template
                         >. Deploys automatically a few minutes after jobs finish.
                     </span>
                 </div>

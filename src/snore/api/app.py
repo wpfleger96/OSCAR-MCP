@@ -146,9 +146,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Any container start means the deferred deploy either happened or is stale.
     from snore.constants import DEFAULT_DEPLOY_DEFERRED_MARKER  # noqa: PLC0415
 
-    if DEFAULT_DEPLOY_DEFERRED_MARKER.exists():
-        logger.info("Startup: clearing deploy-deferred marker")
-    DEFAULT_DEPLOY_DEFERRED_MARKER.unlink(missing_ok=True)
+    try:
+        if DEFAULT_DEPLOY_DEFERRED_MARKER.exists():
+            logger.info("Startup: clearing deploy-deferred marker")
+        DEFAULT_DEPLOY_DEFERRED_MARKER.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Startup: failed to clear deploy-deferred marker: %s", exc)
 
     # Purge expired/consumed oauth_attempts at startup.
     await _startup_purge_expired_oauth_attempts()

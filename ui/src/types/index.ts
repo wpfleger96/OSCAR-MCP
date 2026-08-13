@@ -238,5 +238,5 @@ export interface AboutInfo {
     python_version: string
     sqlite_version: string
     update_pending: boolean
-    update_deferred_since: string | null
+    update_pending_since: string | null
 }
