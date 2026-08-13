@@ -6,7 +6,8 @@ import { ref } from 'vue'
 vi.mock('@/composables/useAuth')
 
 // Import the production guard — guard logic comes from the real module, not a copy.
-import { authGuard } from '@/router'
+// The default export (router instance) is used in the route resolution tests below.
+import router, { authGuard } from '@/router'
 import { useAuth } from '@/composables/useAuth'
 import { makeAuthMock as baseMakeAuthMock } from './helpers/mockUseAuth'
 
@@ -128,6 +129,10 @@ vi.mock('@/api/auth')
 vi.mock('@/api/profiles')
 vi.mock('@/api/import', () => ({
     importFiles: vi.fn(),
+    importHealthFile: vi.fn(),
+    precheckFiles: vi.fn().mockResolvedValue(new Set()),
+    isImportableFile: vi.fn().mockReturnValue(true),
+    isAnchorFile: vi.fn().mockReturnValue(false),
     detectSources: vi.fn(),
     importFromPath: vi.fn(),
 }))
@@ -139,6 +144,12 @@ vi.mock('@/composables/useDarkMode', () => ({
     useDarkMode: () => ({ isDark: ref(false), toggleDark: vi.fn() }),
 }))
 vi.mock('@/utils/formatting', () => ({ formatBytes: (n: number) => `${n}B` }))
+vi.mock('@/api/health', () => ({
+    getHealthNights: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 }),
+    getHealthNight: vi.fn(),
+    getHealthNightSamples: vi.fn(),
+    getHealthNightDates: vi.fn().mockResolvedValue({ dates: [] }),
+}))
 
 import * as authApi from '@/api/auth'
 import * as profilesApi from '@/api/profiles'
@@ -516,5 +527,23 @@ describe('workflow: profile mutation success not shadowed by refresh failure', (
         expect(wrapper.find('.action-error').exists()).toBe(false)
         // Profile name updated in the local list from the mutation response
         expect(wrapper.text()).toContain('NewName')
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Apple Health route registration
+// ---------------------------------------------------------------------------
+
+describe('routes: apple-health routes', () => {
+    // Uses router.resolve() — no navigation, no component mount, no guards fire.
+    it('test_apple_health_base_route_resolves_to_named_route', () => {
+        const resolved = router.resolve('/apple-health')
+        expect(resolved.name).toBe('apple-health')
+    })
+
+    it('test_apple_health_night_route_resolves_with_date_param', () => {
+        const resolved = router.resolve('/apple-health/2024-01-15')
+        expect(resolved.name).toBe('apple-health-night')
+        expect(resolved.params.date).toBe('2024-01-15')
     })
 })

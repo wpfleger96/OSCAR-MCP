@@ -162,4 +162,36 @@ describe('ImportJobsPanel', () => {
 
         expect(wrapper.find('.job-icon').text()).toBe('?')
     })
+
+    // ---- Apple Health job_type ----
+
+    it('test_health_upload_job_shows_apple_health_label', () => {
+        const job = makeJob({ job_type: 'health_upload', stage: 'queued' })
+        const wrapper = mount(ImportJobsPanel, { props: { jobs: [job] } })
+
+        expect(wrapper.find('.job-label').text()).toBe('Apple Health')
+    })
+
+    it('test_done_health_job_renders_samples_nights_duplicates_summary', () => {
+        const job = {
+            ...makeJob({ job_type: 'health_upload', stage: 'done' }),
+            health_import_result: { inserted: 10, skipped: 0, nights_recomputed: 2 },
+        } as unknown as ReturnType<typeof makeJob>
+        const wrapper = mount(ImportJobsPanel, { props: { jobs: [job] } })
+
+        expect(wrapper.find('.job-result-summary').exists()).toBe(true)
+        expect(wrapper.text()).toContain('10 samples')
+        expect(wrapper.text()).toContain('2 nights')
+        expect(wrapper.text()).toContain('0 duplicates')
+    })
+
+    it('test_cpap_done_job_does_not_show_health_result_summary', () => {
+        // Regression: a CPAP done job with no import_result must not render
+        // the health-specific .job-result-summary block.
+        const job = makeJob({ job_type: 'upload', stage: 'done', sessions_imported: 4 })
+        const wrapper = mount(ImportJobsPanel, { props: { jobs: [job] } })
+
+        expect(wrapper.text()).toContain('4 session(s) imported')
+        expect(wrapper.find('.job-result-summary').exists()).toBe(false)
+    })
 })
