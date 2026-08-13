@@ -2209,6 +2209,12 @@ class ResmedEDFParser(DeviceParser):
         """Parse EVE events file."""
         from .formats.edf import EDFDiscontinuousReader, is_discontinuous_edf
 
+        if file_path.stat().st_size == 0:
+            logger.debug(
+                f"Skipping empty EVE file (zero-byte device stub): {file_path.name}"
+            )
+            return
+
         is_discontinuous = is_discontinuous_edf(file_path)
 
         if is_discontinuous:
@@ -2326,6 +2332,12 @@ class ResmedEDFParser(DeviceParser):
 
         for eve_file in eve_files:
             try:
+                if eve_file.stat().st_size == 0:
+                    logger.debug(
+                        f"Skipping empty EVE file (zero-byte device stub): {eve_file.name}"
+                    )
+                    continue
+
                 record_count = get_edf_record_count(eve_file)
                 if record_count == 0:
                     logger.debug(f"Skipping zero-record EVE file: {eve_file.name}")
@@ -2425,6 +2437,12 @@ class ResmedEDFParser(DeviceParser):
 
         for csl_file in csl_files:
             try:
+                if csl_file.stat().st_size == 0:
+                    logger.debug(
+                        f"Skipping empty CSL file (zero-byte device stub): {csl_file.name}"
+                    )
+                    continue
+
                 record_count = get_edf_record_count(csl_file)
                 if record_count == 0:
                     logger.debug(f"Skipping zero-record CSL file: {csl_file.name}")
