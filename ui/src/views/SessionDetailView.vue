@@ -911,6 +911,7 @@ import {
     useAvailableDates,
     strToCalendarDate,
     calendarDateToStr,
+    adjacentDates,
 } from '@/composables/useAvailableDates'
 import { ahiClass, formatDateWithWeekday, formatDateFull, formatDateTime } from '@/utils/formatting'
 import { maskEntryName, styleLabel } from '@/utils/maskOptions'
@@ -1075,22 +1076,22 @@ function handleAddChart(): void {
     if (next) multiViewRef.value.addChart(next)
 }
 
-const startEpoch = computed(() =>
-    session.value ? Math.floor(new Date(session.value.start_time).getTime() / 1000) : 0,
-)
+const startEpoch = computed(() => {
+    if (!session.value) return 0
+    const ms = new Date(session.value.start_time).getTime()
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
+})
 
 const datePickerOpen = ref(false)
 
 const prevDay = computed<string | null>(() => {
     if (!datesLoaded.value || !session.value) return null
-    const idx = sortedDates.value.indexOf(session.value.therapy_day)
-    return idx > 0 ? sortedDates.value[idx - 1] : null
+    return adjacentDates(sortedDates.value, session.value.therapy_day).prev
 })
 
 const nextDay = computed<string | null>(() => {
     if (!datesLoaded.value || !session.value) return null
-    const idx = sortedDates.value.indexOf(session.value.therapy_day)
-    return idx >= 0 && idx < sortedDates.value.length - 1 ? sortedDates.value[idx + 1] : null
+    return adjacentDates(sortedDates.value, session.value.therapy_day).next
 })
 
 function onCalendarSelect(val: DateValue | undefined): void {
@@ -1099,11 +1100,21 @@ function onCalendarSelect(val: DateValue | undefined): void {
     void navigateToDate(calendarDateToStr(val))
 }
 
+let navGeneration = 0
+
 async function navigateToDate(date: string): Promise<void> {
+    const gen = ++navGeneration
     try {
         const day = await getDay(date)
+        if (gen !== navGeneration) return
+        // session_ids is ordered by start_time on the backend (day_service.py), so [0] is the night's first/primary session.
         const id = day.session_ids?.[0]
-        if (id != null) void router.push({ name: 'session-detail', params: { id } })
+        if (id != null) {
+            void router.push({ name: 'session-detail', params: { id } })
+        } else {
+            // No sessions for this date — stay on current session intentionally.
+            console.warn(`navigateToDate: ${date} has no sessions`)
+        }
     } catch {
         // date resolution failed — stay on current session
     }
@@ -1113,9 +1124,12 @@ watch(selectedType, (newType) => {
     if (!multiMode.value && newType) void loadData()
 })
 
+let loadGeneration = 0
+
 watch(
     sessionIdRef,
     async (newId) => {
+        const gen = ++loadGeneration
         session.value = null
         events.value = []
         error.value = null
@@ -1126,24 +1140,29 @@ watch(
         void loadDates()
 
         try {
-            session.value = await getSession(newId)
+            const s = await getSession(newId)
+            if (gen !== loadGeneration) return
+            session.value = s
 
-            selectedType.value = session.value.waveform_types.includes('flow')
+            selectedType.value = s.waveform_types.includes('flow')
                 ? 'flow'
-                : (session.value.waveform_types[0] ?? '')
+                : (s.waveform_types[0] ?? '')
             // watcher triggers loadData() for the selected type
 
-            if (session.value.has_event_data) {
+            if (s.has_event_data) {
                 try {
-                    events.value = await getSessionEvents(newId)
+                    const evts = await getSessionEvents(newId)
+                    if (gen !== loadGeneration) return
+                    events.value = evts
                 } catch {
                     // Events failed — session still renders with empty events panel
                 }
             }
         } catch (err: unknown) {
+            if (gen !== loadGeneration) return
             error.value = err instanceof Error ? err.message : 'Failed to load session'
         } finally {
-            loading.value = false
+            if (gen === loadGeneration) loading.value = false
         }
     },
     { immediate: true },

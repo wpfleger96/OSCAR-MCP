@@ -9,6 +9,7 @@ import 'uplot/dist/uPlot.min.css'
 import { EVENT_COLORS, EVENT_SOLID_COLORS } from '@/types'
 import type { EventItem } from '@/types'
 import { useDarkMode } from '@/composables/useDarkMode'
+import { formatWallClockTime } from '@/utils/formatting'
 
 const { isDark } = useDarkMode()
 
@@ -27,6 +28,11 @@ const emit = defineEmits<{
     zoom: [startSec: number, endSec: number]
 }>()
 
+// X-scale epoch convention: the x scale runs in wall-clock epoch seconds (`time: true`).
+// Every inbound x position must add `props.startEpoch` to a session-relative offset,
+// and every outbound value (emits/exposed methods) must subtract it to restore
+// session-relative seconds. Future canvas-drawing features must follow the same rule.
+
 const containerRef = ref<HTMLDivElement>()
 let chart: uPlot | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -42,6 +48,9 @@ function buildEventPlugin(): uPlot.Plugin {
                     const { left, top, width, height } = u.bbox
 
                     ctx.save()
+                    ctx.beginPath()
+                    ctx.rect(left, top, width, height)
+                    ctx.clip()
                     for (const evt of props.events) {
                         const color = EVENT_COLORS[evt.event_type]
                         if (!color) continue
@@ -70,16 +79,22 @@ function buildEventPlugin(): uPlot.Plugin {
                     if (!props.events?.length) return
                     const ctx = u.ctx
                     const { left, top, width, height } = u.bbox
-                    let drawnCount = 0
                     const margin = 4 * uPlot.pxRatio
                     const fontSize = Math.round(11 * uPlot.pxRatio)
 
                     ctx.save()
+                    ctx.beginPath()
+                    ctx.rect(left, top, width, height)
+                    ctx.clip()
                     ctx.font = `bold ${fontSize}px sans-serif`
                     ctx.textAlign = 'center'
                     ctx.textBaseline = 'middle'
 
-                    for (const evt of props.events) {
+                    // Alternate labels top/bottom to avoid overlap when events cluster.
+                    // Index parity (not drawn-count parity) keeps each event's label on
+                    // the same side across pan/zoom, since events arrive sorted by start_time.
+                    for (let i = 0; i < props.events.length; i++) {
+                        const evt = props.events[i]
                         const solidColor = EVENT_SOLID_COLORS[evt.event_type]
                         if (!solidColor) continue
 
@@ -102,18 +117,15 @@ function buildEventPlugin(): uPlot.Plugin {
                         ctx.stroke()
 
                         const labelY =
-                            drawnCount % 2 === 0
+                            i % 2 === 0
                                 ? top + margin + fontSize / 2
                                 : top + height - margin - fontSize / 2
 
-                        ctx.save()
                         ctx.fillStyle = solidColor
-                        ctx.translate(cx, labelY)
-                        ctx.rotate(-Math.PI / 2)
+                        // Rotate -90° about the label anchor; absolute matrix, so no save/restore needed.
+                        ctx.setTransform(0, -1, 1, 0, cx, labelY)
                         ctx.fillText(evt.event_type, 0, 0)
-                        ctx.restore()
-
-                        drawnCount++
+                        ctx.setTransform(1, 0, 0, 1, 0, 0)
                     }
 
                     ctx.restore()
@@ -121,15 +133,6 @@ function buildEventPlugin(): uPlot.Plugin {
             ],
         },
     }
-}
-
-function formatWallClockTime(epochSecs: number, foundIncr: number): string {
-    const d = new Date(epochSecs * 1000)
-    return d.toLocaleTimeString(undefined, {
-        hour: 'numeric',
-        minute: '2-digit',
-        ...(foundIncr < 60 ? { second: '2-digit' as const } : {}),
-    })
 }
 
 function chartColors() {

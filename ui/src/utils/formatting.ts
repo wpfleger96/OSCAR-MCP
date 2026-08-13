@@ -82,3 +82,26 @@ export function formatBytes(bytes: number): string {
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
+
+// Lazily-created, module-cached formatters for uPlot axis tick labels (allocation-free on hot path).
+let _fmtWithSecs: Intl.DateTimeFormat | undefined
+let _fmtNoSecs: Intl.DateTimeFormat | undefined
+
+/** e.g. "10:30 PM" or "10:30:15 PM" — wall-clock time for uPlot axis ticks.
+ *  Shows seconds when the tick increment is finer than 1 minute (`foundIncr < 60`). */
+export function formatWallClockTime(epochSecs: number, foundIncr: number): string {
+    const d = new Date(epochSecs * 1000)
+    if (foundIncr < 60) {
+        _fmtWithSecs ??= new Intl.DateTimeFormat(undefined, {
+            hour: 'numeric',
+            minute: '2-digit',
+            second: '2-digit',
+        })
+        return _fmtWithSecs.format(d)
+    }
+    _fmtNoSecs ??= new Intl.DateTimeFormat(undefined, {
+        hour: 'numeric',
+        minute: '2-digit',
+    })
+    return _fmtNoSecs.format(d)
+}

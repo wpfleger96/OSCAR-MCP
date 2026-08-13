@@ -108,6 +108,8 @@ test('rx-history', async ({ page }) => {
 test('session-detail', async ({ page }) => {
     await page.goto('/sessions/1470')
     await page.waitForSelector('.session-detail .stats-section')
+    await page.waitForSelector('canvas') // chart mounted
+    await page.waitForTimeout(400) // let canvas paint settle
     await page.screenshot({ path: 'screenshots/session-detail.png' })
 })
 
@@ -131,6 +133,8 @@ test('dashboard dark', async ({ page }) => {
 test('session-detail dark', async ({ page }) => {
     await page.goto('/sessions/1470')
     await page.waitForSelector('.session-detail .stats-section')
+    await page.waitForSelector('canvas') // chart mounted
+    await page.waitForTimeout(400) // let canvas paint settle
     await page.getByText('Dark Mode').click()
     await page.waitForTimeout(300)
     await page.screenshot({ path: 'screenshots/session-detail-dark.png' })
