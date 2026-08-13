@@ -307,10 +307,16 @@ class SessionStatistics(BaseModel):
 
 
 class RespiratoryEvent(BaseModel):
-    """A single respiratory event (apnea, hypopnea, etc.)."""
+    """A single respiratory event (apnea, hypopnea, etc.).
+
+    ``start_time`` is the true start of the event. Parsers that read device
+    formats which flag events at their end (ResMed EVE EDF annotations, OSCAR
+    binary event lists) normalize to the true start by subtracting the
+    duration at parse time.
+    """
 
     event_type: RespiratoryEventType = Field(description="Event type")
-    start_time: datetime = Field(description="Event start time")
+    start_time: datetime = Field(description="True start time of the event")
     duration_seconds: float = Field(ge=0, description="Event duration (seconds)")
 
     peak_flow_limitation: float | None = Field(

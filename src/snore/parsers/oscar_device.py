@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
 from concurrent.futures import as_completed
 from concurrent.futures.process import BrokenProcessPool
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -794,10 +794,14 @@ class OscarDeviceParser(DeviceParser):
                         else DEFAULT_EVENT_DURATION_SECONDS
                     )
 
+                    clamped_duration = max(duration, 0)
+                    # OSCAR stores event timestamps at the event's end for all
+                    # event channels (its UI draws spans backward by duration);
+                    # normalize to true start.
                     event = RespiratoryEvent(
                         event_type=event_type,
-                        start_time=event_time,
-                        duration_seconds=max(duration, 0),
+                        start_time=event_time - timedelta(seconds=clamped_duration),
+                        duration_seconds=clamped_duration,
                     )
 
                     session.add_event(event)

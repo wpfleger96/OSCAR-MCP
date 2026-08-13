@@ -15,11 +15,28 @@ import {
     maskLogFixture,
     maskEpochsFixture,
     sessionDetailFixture,
+    sessionEventsFixture,
+    flowWaveformFixture,
+    dateListFixture,
+    dataRangeFixture,
 } from './tests/fixtures/api-fixtures'
 
 function routeApi(route: Route) {
     const url = route.request().url()
 
+    // Local-mode auth status so the router guard lets guarded routes render.
+    if (url.includes('/auth/status'))
+        return route.fulfill({
+            json: {
+                authenticated: false,
+                auth_mode: 'local',
+                user: null,
+                profiles: [],
+                active_profile_id: null,
+                demo_available: false,
+            },
+        })
+    if (url.includes('/stats/data-range')) return route.fulfill({ json: dataRangeFixture })
     if (url.includes('/stats/records')) return route.fulfill({ json: recordsFixture })
     if (url.includes('/stats/summary')) return route.fulfill({ json: summaryFixture })
     if (url.includes('/stats/trends')) return route.fulfill({ json: trendsFixture })
@@ -32,20 +49,11 @@ function routeApi(route: Route) {
     if (url.includes('/rx/history')) return route.fulfill({ json: rxHistoryFixture })
     if (url.includes('/devices/1')) return route.fulfill({ json: deviceDetailFixture })
     if (url.includes('/devices')) return route.fulfill({ json: devicesFixture })
-    if (url.includes('/sessions/1470/events')) return route.fulfill({ json: [] })
+    if (url.includes('/sessions/1470/events')) return route.fulfill({ json: sessionEventsFixture })
     if (url.includes('/sessions/1470/waveforms'))
-        return route.fulfill({
-            json: {
-                timestamps: [],
-                values: [],
-                sample_rate: 25,
-                unit: 'L/min',
-                total_samples: 0,
-                downsampled: false,
-                returned_samples: 0,
-            },
-        })
+        return route.fulfill({ json: flowWaveformFixture })
     if (url.includes('/sessions/1470')) return route.fulfill({ json: sessionDetailFixture })
+    if (url.includes('/days/dates')) return route.fulfill({ json: dateListFixture })
     if (url.includes('/days')) return route.fulfill({ json: daysFixture })
     if (url.includes('/sessions')) return route.fulfill({ json: sessionsFixture })
 
@@ -100,6 +108,8 @@ test('rx-history', async ({ page }) => {
 test('session-detail', async ({ page }) => {
     await page.goto('/sessions/1470')
     await page.waitForSelector('.session-detail .stats-section')
+    await page.waitForSelector('canvas') // chart mounted
+    await page.waitForTimeout(400) // let canvas paint settle
     await page.screenshot({ path: 'screenshots/session-detail.png' })
 })
 
@@ -123,6 +133,8 @@ test('dashboard dark', async ({ page }) => {
 test('session-detail dark', async ({ page }) => {
     await page.goto('/sessions/1470')
     await page.waitForSelector('.session-detail .stats-section')
+    await page.waitForSelector('canvas') // chart mounted
+    await page.waitForTimeout(400) // let canvas paint settle
     await page.getByText('Dark Mode').click()
     await page.waitForTimeout(300)
     await page.screenshot({ path: 'screenshots/session-detail-dark.png' })

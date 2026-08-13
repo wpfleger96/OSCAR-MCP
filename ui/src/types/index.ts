@@ -217,6 +217,17 @@ export const EVENT_COLORS: Record<string, string> = {
     FL: 'rgba(249, 115, 22, 0.2)', // orange — Flow Limitation
 }
 
+// Solid variants for event marker lines/labels drawn on the chart canvas;
+// EVENT_COLORS stays translucent for CSS band/badge backgrounds.
+export const EVENT_SOLID_COLORS: Record<string, string> = {
+    OA: 'rgba(220, 38, 38, 0.85)',
+    CA: 'rgba(37, 99, 235, 0.85)',
+    MA: 'rgba(168, 85, 247, 0.85)',
+    H: 'rgba(234, 179, 8, 0.85)',
+    RE: 'rgba(34, 197, 94, 0.85)',
+    FL: 'rgba(249, 115, 22, 0.85)',
+}
+
 // About / build provenance (excluded from OpenAPI schema)
 export interface AboutInfo {
     version: string

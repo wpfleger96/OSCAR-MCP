@@ -60,6 +60,7 @@
                 :waveform-type="chart.type"
                 :events="chart.type === 'flow' ? events : undefined"
                 :sync-key="syncKey"
+                :start-epoch="startEpoch"
                 @zoom="onZoom"
             />
         </div>
@@ -89,6 +90,7 @@ const props = defineProps<{
     availableTypes: string[]
     events?: EventItem[]
     initialTypes?: string[]
+    startEpoch: number
 }>()
 
 const emit = defineEmits<{

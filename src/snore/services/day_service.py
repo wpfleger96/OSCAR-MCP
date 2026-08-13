@@ -113,7 +113,9 @@ class DayService:
             row[0]
             for row in (
                 await self.db_session.execute(
-                    select(models.Session.id).where(models.Session.day_id == day.id)
+                    select(models.Session.id)
+                    .where(models.Session.day_id == day.id)
+                    .order_by(models.Session.start_time)
                 )
             ).all()
         ]

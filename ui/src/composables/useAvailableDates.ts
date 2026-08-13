@@ -19,6 +19,24 @@ export function calendarDateToStr(d: DateValue): string {
     return `${d.year}-${String(d.month).padStart(2, '0')}-${String(d.day).padStart(2, '0')}`
 }
 
+/**
+ * Returns the entries immediately before and after `current` in `sorted`.
+ * `sorted` must be an ascending list of ISO date strings (as returned by the
+ * API and stored in availableDates). If `current` is absent or `sorted` is
+ * empty, both neighbors are null so nav arrows disable.
+ */
+export function adjacentDates(
+    sorted: string[],
+    current: string,
+): { prev: string | null; next: string | null } {
+    const idx = sorted.indexOf(current)
+    if (idx === -1) return { prev: null, next: null }
+    return {
+        prev: idx > 0 ? sorted[idx - 1] : null,
+        next: idx < sorted.length - 1 ? sorted[idx + 1] : null,
+    }
+}
+
 export function useAvailableDates() {
     async function load(): Promise<void> {
         if (loaded.value || loading.value) return
@@ -50,11 +68,16 @@ export function useAvailableDates() {
         maxDateStr.value ? strToCalendarDate(maxDateStr.value) : undefined,
     )
 
+    const sortedDates = computed<string[]>(() =>
+        // ISO date strings sort lexicographically = chronologically
+        [...availableDates.value].sort(),
+    )
+
     function isDateDisabled(date: DateValue): boolean {
         if (!loaded.value) return false
         const s = `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`
         return !availableDates.value.has(s)
     }
 
-    return { load, reload, loaded, minValue, maxValue, isDateDisabled }
+    return { load, reload, loaded, minValue, maxValue, isDateDisabled, sortedDates }
 }

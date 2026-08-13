@@ -14,6 +14,10 @@ import type {
     RxComparisonResponse,
     RxChangesResponse,
     SessionDetail,
+    EventItem,
+    WaveformDataResponse,
+    DateListResponse,
+    DataRange,
 } from '../../src/types/index'
 
 export const summaryFixture: TherapySummary = {
@@ -1089,6 +1093,7 @@ export const sessionDetailFixture: SessionDetail = {
     device_serial: '23456789012',
     start_time: '2026-04-06T23:42:24',
     end_time: '2026-04-07T09:17:46',
+    therapy_day: '2026-04-06',
     duration_hours: 9.59,
     duration_seconds: 34522.0,
     therapy_mode: 'APAP',
@@ -1142,4 +1147,61 @@ export const sessionDetailFixture: SessionDetail = {
         start_date: '2025-11-02',
         notes: null,
     },
+}
+
+// Synthetic flow-rate waveform: deterministic breathing-like signal at the
+// ~1800-point resolution the LTTB endpoint returns for a full night, so the
+// session-detail chart renders without a backend.
+const FLOW_SAMPLE_COUNT = 1800
+const FLOW_DURATION_SECONDS = 34522
+const flowTimestamps: number[] = []
+const flowValues: number[] = []
+for (let i = 0; i < FLOW_SAMPLE_COUNT; i++) {
+    const envelope = 24 + 10 * Math.sin(i / 41) + 6 * Math.sin(i / 7.3)
+    const carrier = Math.sin(i * 2.1) + 0.4 * Math.sin(i * 5.7)
+    flowTimestamps.push((i / (FLOW_SAMPLE_COUNT - 1)) * FLOW_DURATION_SECONDS)
+    flowValues.push(envelope * carrier)
+}
+
+export const flowWaveformFixture: WaveformDataResponse = {
+    timestamps: flowTimestamps,
+    values: flowValues,
+    sample_rate: 25,
+    unit: 'L/min',
+    total_samples: 863050,
+    downsampled: true,
+    returned_samples: FLOW_SAMPLE_COUNT,
+}
+
+// Matches sessionDetailFixture statistics: 3 obstructive + 2 central apneas.
+const SESSION_START_EPOCH = 1775515344
+export const sessionEventsFixture: EventItem[] = [
+    { id: 9101, event_type: 'OA', offset_seconds: 2800, duration_seconds: 22 },
+    { id: 9102, event_type: 'CA', offset_seconds: 7300, duration_seconds: 16 },
+    { id: 9103, event_type: 'OA', offset_seconds: 12750, duration_seconds: 25 },
+    { id: 9104, event_type: 'CA', offset_seconds: 18400, duration_seconds: 14 },
+    { id: 9105, event_type: 'OA', offset_seconds: 29800, duration_seconds: 19 },
+].map((e) => ({
+    ...e,
+    start_time: SESSION_START_EPOCH + e.offset_seconds,
+    spo2_drop: null,
+    peak_flow_limitation: null,
+}))
+
+export const dateListFixture: DateListResponse = {
+    dates: [
+        '2026-03-30',
+        '2026-03-31',
+        '2026-04-01',
+        '2026-04-02',
+        '2026-04-03',
+        '2026-04-04',
+        '2026-04-05',
+        '2026-04-06',
+    ],
+}
+
+export const dataRangeFixture: DataRange = {
+    earliest_date: '2023-09-02',
+    latest_date: '2026-04-06',
 }

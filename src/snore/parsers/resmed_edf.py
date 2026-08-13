@@ -2258,10 +2258,13 @@ class ResmedEDFParser(DeviceParser):
                     continue
 
                 duration = annotation.duration if annotation.duration else 10.0
-
+                flag_time = annotation.to_datetime(session.start_time)
+                # ResMed flags events at their end; subtract duration to store the
+                # true start (OSCAR renders backward from the flag time for the same
+                # reason).
                 event = RespiratoryEvent(
                     event_type=event_type,
-                    start_time=annotation.to_datetime(session.start_time),
+                    start_time=flag_time - timedelta(seconds=duration),
                     duration_seconds=duration,
                 )
 
@@ -2346,7 +2349,15 @@ class ResmedEDFParser(DeviceParser):
                 for annotation in annotations:
                     event_timestamp = annotation.to_datetime(eve_start_time)
 
-                    if not (session.start_time <= event_timestamp <= session.end_time):
+                    # Duration must be computed before the window filter so the
+                    # shifted start is available for filtering below.
+                    duration = annotation.duration if annotation.duration else 10.0
+                    # ResMed flags events at their end; subtract duration to store
+                    # the true start (OSCAR renders backward from the flag time for
+                    # the same reason).
+                    event_start = event_timestamp - timedelta(seconds=duration)
+
+                    if not (session.start_time <= event_start <= session.end_time):
                         total_events_filtered += 1
                         continue
 
@@ -2363,11 +2374,9 @@ class ResmedEDFParser(DeviceParser):
                     if event_type is None:
                         continue
 
-                    duration = annotation.duration if annotation.duration else 10.0
-
                     event = RespiratoryEvent(
                         event_type=event_type,
-                        start_time=event_timestamp,
+                        start_time=event_start,
                         duration_seconds=duration,
                     )
 

@@ -28,7 +28,46 @@
         <!-- Session header -->
         <div class="session-header">
             <div>
-                <h1>{{ formatDateWithWeekday(session.therapy_day) }}</h1>
+                <div class="session-title-nav">
+                    <button
+                        type="button"
+                        class="nav-arrow"
+                        :disabled="!prevDay"
+                        aria-label="Previous night"
+                        @click="prevDay && navigateToDate(prevDay)"
+                    >
+                        <ChevronLeft class="h-5 w-5" />
+                    </button>
+
+                    <Popover v-model:open="datePickerOpen">
+                        <PopoverTrigger as-child>
+                            <button type="button" class="session-title-trigger">
+                                {{ formatDateWithWeekday(session.therapy_day) }}
+                                <ChevronDown class="h-4 w-4 opacity-60" />
+                            </button>
+                        </PopoverTrigger>
+                        <PopoverContent class="w-auto p-0" align="center">
+                            <Calendar
+                                :model-value="strToCalendarDate(session.therapy_day)"
+                                layout="month-and-year"
+                                :is-date-disabled="isDateDisabled"
+                                :min-value="minValue"
+                                :max-value="maxValue"
+                                @update:model-value="onCalendarSelect"
+                            />
+                        </PopoverContent>
+                    </Popover>
+
+                    <button
+                        type="button"
+                        class="nav-arrow"
+                        :disabled="!nextDay"
+                        aria-label="Next night"
+                        @click="nextDay && navigateToDate(nextDay)"
+                    >
+                        <ChevronRight class="h-5 w-5" />
+                    </button>
+                </div>
                 <div class="session-meta text-muted-foreground">
                     <Badge v-if="session.therapy_mode">{{ session.therapy_mode }}</Badge>
                     <span>{{ session.device_manufacturer }} {{ session.device_model }}</span>
@@ -89,6 +128,7 @@
                     :label="selectedType"
                     :waveform-type="selectedType"
                     :events="selectedType === 'flow' ? events : undefined"
+                    :start-epoch="startEpoch"
                     @zoom="handleZoom"
                 />
             </template>
@@ -100,6 +140,7 @@
                 :available-types="session.waveform_types"
                 :events="events"
                 :initial-types="[selectedType]"
+                :start-epoch="startEpoch"
                 @zoom="handleZoom"
             />
         </div>
@@ -842,19 +883,36 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, toRef } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, watch, nextTick, toRef } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import type { DateValue } from 'reka-ui'
 import { Badge } from '@/components/ui/badge'
+import { Calendar } from '@/components/ui/calendar'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Loader2, AlertTriangle, ArrowLeft, ChevronDown } from '@lucide/vue'
+import {
+    Loader2,
+    AlertTriangle,
+    ArrowLeft,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+} from '@lucide/vue'
 import WaveformChart from '@/components/WaveformChart.vue'
 import WaveformToolbar from '@/components/WaveformToolbar.vue'
 import MultiWaveformView from '@/components/MultiWaveformView.vue'
 import StatCard from '@/components/StatCard.vue'
 import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
+import { getDay } from '@/api/days'
 import { useWaveformData } from '@/composables/useWaveformData'
+import {
+    useAvailableDates,
+    strToCalendarDate,
+    calendarDateToStr,
+    adjacentDates,
+} from '@/composables/useAvailableDates'
 import { ahiClass, formatDateWithWeekday, formatDateFull, formatDateTime } from '@/utils/formatting'
 import { maskEntryName, styleLabel } from '@/utils/maskOptions'
 import type { SessionDetail, EventItem } from '@/types'
@@ -955,12 +1013,23 @@ const hasClimate = computed(() => {
     )
 })
 
+const router = useRouter()
+const {
+    load: loadDates,
+    loaded: datesLoaded,
+    minValue,
+    maxValue,
+    isDateDisabled,
+    sortedDates,
+} = useAvailableDates()
+
 const sessionIdRef = toRef(props, 'sessionId')
 const {
     data: waveformData,
     loading: waveformLoading,
     error: waveformError,
     loadData,
+    reset: resetWaveformData,
 } = useWaveformData(sessionIdRef, selectedType)
 
 const singleChartRef = ref<InstanceType<typeof WaveformChart>>()
@@ -1007,32 +1076,97 @@ function handleAddChart(): void {
     if (next) multiViewRef.value.addChart(next)
 }
 
+const startEpoch = computed(() => {
+    if (!session.value) return 0
+    const ms = new Date(session.value.start_time).getTime()
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
+})
+
+const datePickerOpen = ref(false)
+
+const prevDay = computed<string | null>(() => {
+    if (!datesLoaded.value || !session.value) return null
+    return adjacentDates(sortedDates.value, session.value.therapy_day).prev
+})
+
+const nextDay = computed<string | null>(() => {
+    if (!datesLoaded.value || !session.value) return null
+    return adjacentDates(sortedDates.value, session.value.therapy_day).next
+})
+
+function onCalendarSelect(val: DateValue | undefined): void {
+    if (!val) return
+    datePickerOpen.value = false
+    void navigateToDate(calendarDateToStr(val))
+}
+
+let navGeneration = 0
+
+async function navigateToDate(date: string): Promise<void> {
+    const gen = ++navGeneration
+    try {
+        const day = await getDay(date)
+        if (gen !== navGeneration) return
+        // session_ids is ordered by start_time on the backend (day_service.py), so [0] is the night's first/primary session.
+        const id = day.session_ids?.[0]
+        if (id != null) {
+            void router.push({ name: 'session-detail', params: { id } })
+        } else {
+            // No sessions for this date — stay on current session intentionally.
+            console.warn(`navigateToDate: ${date} has no sessions`)
+        }
+    } catch {
+        // date resolution failed — stay on current session
+    }
+}
+
 watch(selectedType, (newType) => {
     if (!multiMode.value && newType) void loadData()
 })
 
-onMounted(async () => {
-    try {
-        session.value = await getSession(props.sessionId)
+let loadGeneration = 0
 
-        selectedType.value = session.value.waveform_types.includes('flow')
-            ? 'flow'
-            : (session.value.waveform_types[0] ?? '')
-        // watcher triggers loadData() for the selected type
+watch(
+    sessionIdRef,
+    async (newId) => {
+        const gen = ++loadGeneration
+        session.value = null
+        events.value = []
+        error.value = null
+        loading.value = true
+        selectedType.value = ''
+        multiMode.value = false
+        resetWaveformData()
+        void loadDates()
 
-        if (session.value.has_event_data) {
-            try {
-                events.value = await getSessionEvents(props.sessionId)
-            } catch {
-                // Events failed — session still renders with empty events panel
+        try {
+            const s = await getSession(newId)
+            if (gen !== loadGeneration) return
+            session.value = s
+
+            selectedType.value = s.waveform_types.includes('flow')
+                ? 'flow'
+                : (s.waveform_types[0] ?? '')
+            // watcher triggers loadData() for the selected type
+
+            if (s.has_event_data) {
+                try {
+                    const evts = await getSessionEvents(newId)
+                    if (gen !== loadGeneration) return
+                    events.value = evts
+                } catch {
+                    // Events failed — session still renders with empty events panel
+                }
             }
+        } catch (err: unknown) {
+            if (gen !== loadGeneration) return
+            error.value = err instanceof Error ? err.message : 'Failed to load session'
+        } finally {
+            if (gen === loadGeneration) loading.value = false
         }
-    } catch (err: unknown) {
-        error.value = err instanceof Error ? err.message : 'Failed to load session'
-    } finally {
-        loading.value = false
-    }
-})
+    },
+    { immediate: true },
+)
 </script>
 
 <style scoped>
@@ -1044,10 +1178,52 @@ onMounted(async () => {
     margin-bottom: 1.5rem;
 }
 
-.session-header h1 {
+.session-title-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.session-title-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
     font-size: 1.5rem;
     font-weight: 600;
-    margin-bottom: 0.5rem;
+    line-height: 1.2;
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: var(--color-foreground);
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+
+.session-title-trigger:hover {
+    opacity: 0.75;
+}
+
+.nav-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 0.375rem;
+    padding: 0.25rem;
+    color: var(--color-foreground);
+    cursor: pointer;
+    transition: background-color 0.15s;
+}
+
+.nav-arrow:hover:not(:disabled) {
+    background-color: var(--color-accent);
+}
+
+.nav-arrow:disabled {
+    opacity: 0.3;
+    cursor: default;
 }
 
 .session-meta {
