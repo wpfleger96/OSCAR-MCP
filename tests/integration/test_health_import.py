@@ -219,3 +219,66 @@ class TestImportFile:
         assert calls[-1] > 0
         # Counts must be monotonically non-decreasing.
         assert calls == sorted(calls)
+
+
+# ---------------------------------------------------------------------------
+# Cancellation tests
+# ---------------------------------------------------------------------------
+
+
+class TestCancellation:
+    async def test_cancel_predicate_yields_partial_counts_and_committed_summaries(
+        self, temp_db
+    ):
+        """cancel_predicate stops import after the first batch; committed data survives.
+
+        With batch_size=2 the fixture's 10 records split into 5 batches.  A
+        closure that returns True after the first call (i.e., before the second
+        batch) means:
+          - Batch 1 (2 records) is committed.
+          - The predicate fires True before batch 2 → loop breaks.
+          - Nightly summaries are recomputed for nights touched by batch 1.
+          - result.inserted < 10 and result.inserted > 0.
+          - result.nights_recomputed > 0 (at least one night committed).
+        """
+        await init_database(str(temp_db))
+        profile_id = await _create_profile_id()
+
+        batch_calls: list[int] = [0]
+
+        def cancel_after_first_batch() -> bool:
+            batch_calls[0] += 1
+            # First call (before batch 1): allow. Second call (before batch 2): cancel.
+            return batch_calls[0] > 1
+
+        svc = HealthImportService()
+        result = await svc.import_file(
+            EXPORT_DIR,
+            profile_id,
+            batch_size=2,
+            cancel_predicate=cancel_after_first_batch,
+        )
+
+        # Partial import: some records inserted, not all.
+        assert result.inserted > 0, "At least one batch must have committed"
+        assert result.inserted < 10, (
+            "Cancel must stop before all 10 records are imported"
+        )
+        assert result.dry_run is False
+
+        # Summaries are recomputed for every night touched by committed batches.
+        assert result.nights_recomputed > 0, (
+            "At least one nightly summary must be recomputed for committed nights"
+        )
+
+        # At least one nightly summary must be present in the DB.
+        # nights_recomputed counts all nights where recompute ran; nights that
+        # had only quantity samples (SpO2, RR) end up with no sleep summary
+        # after recompute (recompute deletes the row when no sleep stages remain).
+        nights_in_db = await _summary_nights(profile_id)
+        assert len(nights_in_db) > 0, (
+            "At least one nightly summary must exist for the committed nights"
+        )
+        assert len(nights_in_db) <= result.nights_recomputed, (
+            "nights_in_db must be a subset of the nights that were recomputed"
+        )
