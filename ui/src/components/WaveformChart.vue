@@ -6,7 +6,7 @@
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
-import { EVENT_COLORS } from '@/types'
+import { EVENT_COLORS, EVENT_SOLID_COLORS } from '@/types'
 import type { EventItem } from '@/types'
 import { useDarkMode } from '@/composables/useDarkMode'
 
@@ -17,6 +17,7 @@ const props = defineProps<{
     values: number[]
     unit: string
     label: string
+    startEpoch: number
     waveformType?: string
     events?: EventItem[]
     syncKey?: uPlot.SyncPubSub
@@ -45,17 +46,76 @@ function buildEventPlugin(): uPlot.Plugin {
                         const color = EVENT_COLORS[evt.event_type]
                         if (!color) continue
 
-                        const x0 = u.valToPos(evt.offset_seconds, 'x', true)
-                        const x1 = u.valToPos(evt.offset_seconds + evt.duration_seconds, 'x', true)
+                        const x0 = u.valToPos(evt.offset_seconds + props.startEpoch, 'x', true)
+                        const x1 = u.valToPos(
+                            evt.offset_seconds + evt.duration_seconds + props.startEpoch,
+                            'x',
+                            true,
+                        )
 
                         if (x1 < left || x0 > left + width) continue
 
                         const cx0 = Math.max(x0, left)
                         const cx1 = Math.min(x1, left + width)
+                        const bandW = Math.max(cx1 - cx0, 2 * uPlot.pxRatio)
 
                         ctx.fillStyle = color
-                        ctx.fillRect(cx0, top, cx1 - cx0, height)
+                        ctx.fillRect(cx0, top, bandW, height)
                     }
+                    ctx.restore()
+                },
+            ],
+            draw: [
+                (u: uPlot) => {
+                    if (!props.events?.length) return
+                    const ctx = u.ctx
+                    const { left, top, width, height } = u.bbox
+                    let drawnCount = 0
+                    const margin = 4 * uPlot.pxRatio
+                    const fontSize = Math.round(11 * uPlot.pxRatio)
+
+                    ctx.save()
+                    ctx.font = `bold ${fontSize}px sans-serif`
+                    ctx.textAlign = 'center'
+                    ctx.textBaseline = 'middle'
+
+                    for (const evt of props.events) {
+                        const solidColor = EVENT_SOLID_COLORS[evt.event_type]
+                        if (!solidColor) continue
+
+                        const x0 = u.valToPos(evt.offset_seconds + props.startEpoch, 'x', true)
+                        const x1 = u.valToPos(
+                            evt.offset_seconds + evt.duration_seconds + props.startEpoch,
+                            'x',
+                            true,
+                        )
+
+                        if (x1 < left || x0 > left + width) continue
+
+                        const cx = (Math.max(x0, left) + Math.min(x1, left + width)) / 2
+
+                        ctx.strokeStyle = solidColor
+                        ctx.lineWidth = uPlot.pxRatio
+                        ctx.beginPath()
+                        ctx.moveTo(cx, top)
+                        ctx.lineTo(cx, top + height)
+                        ctx.stroke()
+
+                        const labelY =
+                            drawnCount % 2 === 0
+                                ? top + margin + fontSize / 2
+                                : top + height - margin - fontSize / 2
+
+                        ctx.save()
+                        ctx.fillStyle = solidColor
+                        ctx.translate(cx, labelY)
+                        ctx.rotate(-Math.PI / 2)
+                        ctx.fillText(evt.event_type, 0, 0)
+                        ctx.restore()
+
+                        drawnCount++
+                    }
+
                     ctx.restore()
                 },
             ],
@@ -63,10 +123,13 @@ function buildEventPlugin(): uPlot.Plugin {
     }
 }
 
-function formatTime(secs: number): string {
-    const h = Math.floor(secs / 3600)
-    const m = Math.floor((secs % 3600) / 60)
-    return `${h}:${String(m).padStart(2, '0')}`
+function formatWallClockTime(epochSecs: number, foundIncr: number): string {
+    const d = new Date(epochSecs * 1000)
+    return d.toLocaleTimeString(undefined, {
+        hour: 'numeric',
+        minute: '2-digit',
+        ...(foundIncr < 60 ? { second: '2-digit' as const } : {}),
+    })
 }
 
 function chartColors() {
@@ -94,7 +157,7 @@ function createChart(): void {
             drag: { x: true, y: false, setScale: true },
         },
         scales: {
-            x: { time: false },
+            x: { time: true },
             // Pin y-axis for channels that have a known fixed range so a quiet
             // night doesn't auto-scale to a misleadingly wide or narrow extent.
             y:
@@ -106,9 +169,14 @@ function createChart(): void {
         },
         axes: [
             {
-                // x-axis: show H:MM labels
-                values: (_u: uPlot, vals: number[]) => vals.map(formatTime),
-                space: 80,
+                values: (
+                    _u: uPlot,
+                    vals: number[],
+                    _axisIdx: number,
+                    _space: number,
+                    foundIncr: number,
+                ) => vals.map((v) => (v == null ? '' : formatWallClockTime(v, foundIncr))),
+                space: 90,
                 stroke: colors.axis,
                 grid: { stroke: colors.grid },
                 ticks: { stroke: colors.axis },
@@ -145,14 +213,17 @@ function createChart(): void {
 
                     if (debounceTimer) clearTimeout(debounceTimer)
                     debounceTimer = setTimeout(() => {
-                        emit('zoom', min, max)
+                        emit('zoom', min - props.startEpoch, max - props.startEpoch)
                     }, 300)
                 },
             ],
         },
     }
 
-    const data: uPlot.AlignedData = [props.timestamps, props.values]
+    const data: uPlot.AlignedData = [
+        props.timestamps.map((t) => t + props.startEpoch),
+        props.values,
+    ]
     chart = new uPlot(opts, data, containerRef.value)
 }
 
@@ -187,7 +258,7 @@ watch(
             return
         }
         isInitialRender = true
-        chart.setData([ts, vals])
+        chart.setData([ts.map((t) => t + props.startEpoch), vals])
     },
 )
 
@@ -199,20 +270,24 @@ watch(
 )
 
 watch(isDark, () => createChart())
+watch(
+    () => props.startEpoch,
+    () => createChart(),
+)
 
 defineExpose({
     resetZoom() {
         if (!chart || !props.timestamps.length) return
         isInitialRender = true
         chart.setScale('x', {
-            min: props.timestamps[0],
-            max: props.timestamps[props.timestamps.length - 1],
+            min: props.timestamps[0] + props.startEpoch,
+            max: props.timestamps[props.timestamps.length - 1] + props.startEpoch,
         })
     },
     setScaleX(min: number, max: number) {
         if (!chart) return
         isInitialRender = true
-        chart.setScale('x', { min, max })
+        chart.setScale('x', { min: min + props.startEpoch, max: max + props.startEpoch })
     },
 })
 </script>

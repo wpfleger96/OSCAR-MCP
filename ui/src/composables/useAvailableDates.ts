@@ -10,6 +10,11 @@ const maxDateStr = ref<string | null>(null)
 const loaded = ref(false)
 const loading = ref(false)
 
+const sortedDatesArr = computed<string[]>(() =>
+    // ISO date strings sort lexicographically = chronologically
+    [...availableDates.value].sort(),
+)
+
 export function strToCalendarDate(s: string): CalendarDate {
     const [y, m, d] = s.split('-').map(Number)
     return new CalendarDate(y, m, d)
@@ -56,5 +61,5 @@ export function useAvailableDates() {
         return !availableDates.value.has(s)
     }
 
-    return { load, reload, loaded, minValue, maxValue, isDateDisabled }
+    return { load, reload, loaded, minValue, maxValue, isDateDisabled, sortedDates: sortedDatesArr }
 }
