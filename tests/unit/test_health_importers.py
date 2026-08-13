@@ -452,10 +452,11 @@ class TestSummaryMath:
         # any-source fallback. Only one source anyway.
         assert summary.preferred_source == WATCH_SOURCE
 
-    async def test_no_inbed_gives_none_sleep_efficiency(
+    async def test_stages_without_inbed_derives_time_in_bed(
         self, async_db_session, profile_id, importer
     ):
-        """Preferred source with no InBed records gives sleep_efficiency_pct = None."""
+        """Preferred source with no InBed records derives time_in_bed from total_sleep + awake."""
+        # 3h Core + 3h REM, no InBed, no Awake → derived time_in_bed = 6h, efficiency = 100%
         records = [
             _sleep(
                 WATCH_SOURCE, "AsleepCore", _dt(2024, 1, 16, 0), _dt(2024, 1, 16, 3)
@@ -471,8 +472,67 @@ class TestSummaryMath:
 
         summary = await _get_summary(async_db_session, profile_id, SLEEP_NIGHT)
         assert summary is not None
-        assert summary.sleep_efficiency_pct is None
-        assert summary.time_in_bed_seconds == pytest.approx(0.0)
+        assert summary.time_in_bed_seconds == pytest.approx(6 * 3600)
+        assert summary.sleep_efficiency_pct == pytest.approx(100.0)
+
+    async def test_stages_with_awake_and_no_inbed_derives_time_in_bed(
+        self, async_db_session, profile_id, importer
+    ):
+        """Stage session with Awake but no InBed: time_in_bed = total_sleep + awake."""
+        # 2h Core + 1h Deep + 3h REM = 6h total_sleep; 0.5h Awake; no InBed
+        records = [
+            _sleep(
+                WATCH_SOURCE, "AsleepCore", _dt(2024, 1, 15, 23), _dt(2024, 1, 16, 1)
+            ),  # 2h
+            _sleep(
+                WATCH_SOURCE, "AsleepDeep", _dt(2024, 1, 16, 1), _dt(2024, 1, 16, 2)
+            ),  # 1h
+            _sleep(
+                WATCH_SOURCE, "AsleepREM", _dt(2024, 1, 16, 2), _dt(2024, 1, 16, 5)
+            ),  # 3h
+            _sleep(
+                WATCH_SOURCE, "Awake", _dt(2024, 1, 16, 5), _dt(2024, 1, 16, 5, 30)
+            ),  # 0.5h
+        ]
+        await importer.insert_samples_batch(records, profile_id, async_db_session)
+        await async_db_session.flush()
+        await importer.recompute_nightly_summary(
+            profile_id, SLEEP_NIGHT, async_db_session
+        )
+        await async_db_session.flush()
+
+        summary = await _get_summary(async_db_session, profile_id, SLEEP_NIGHT)
+        assert summary is not None
+        total_sleep = 6 * 3600
+        awake = int(0.5 * 3600)
+        expected_tib = total_sleep + awake
+        assert summary.time_in_bed_seconds == pytest.approx(expected_tib)
+        assert summary.sleep_efficiency_pct == pytest.approx(
+            total_sleep / expected_tib * 100
+        )
+
+    async def test_inbed_only_skips_fallback(
+        self, async_db_session, profile_id, importer
+    ):
+        """Night with only InBed samples: recorded InBed value is used, fallback does not apply."""
+        # total_sleep=0, awake=0, InBed=8h → efficiency = 0/28800*100 = 0.0
+        records = [
+            _sleep(
+                IPHONE_SOURCE, "InBed", _dt(2024, 1, 15, 22), _dt(2024, 1, 16, 6)
+            ),  # 8h
+        ]
+        await importer.insert_samples_batch(records, profile_id, async_db_session)
+        await async_db_session.flush()
+        await importer.recompute_nightly_summary(
+            profile_id, SLEEP_NIGHT, async_db_session
+        )
+        await async_db_session.flush()
+
+        summary = await _get_summary(async_db_session, profile_id, SLEEP_NIGHT)
+        assert summary is not None
+        assert summary.time_in_bed_seconds == pytest.approx(8 * 3600)
+        assert summary.total_sleep_seconds == pytest.approx(0.0)
+        assert summary.sleep_efficiency_pct == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

@@ -111,7 +111,7 @@ Sleep stats surface in several CPAP-keyed views when a matching Apple Health nig
 
 **Total sleep.** Computed as Core + Deep + REM + Unspecified sleep time. InBed and Awake intervals are tracked separately and excluded from the sleep total.
 
-**Sleep efficiency.** Total sleep divided by time in bed.
+**Sleep efficiency.** Total sleep divided by time in bed. When Apple Health exports include standalone `InBed` samples, the recorded in-bed duration is used directly. For exports from late-2024+ watchOS where `InBed` samples are no longer emitted, time in bed is derived from the stage session (asleep + awake), so efficiency equals asleep ÷ (asleep + awake).
 
 **Pre-watchOS 9 data.** Apple Watch did not report individual sleep stages before watchOS 9. Older records import as unspecified sleep with no stage breakdown.
 

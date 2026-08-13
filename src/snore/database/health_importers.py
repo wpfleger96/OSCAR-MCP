@@ -124,12 +124,17 @@ class HealthSampleImporter:
             stage_secs[val] = stage_secs.get(val, 0.0) + dur
 
         total_sleep = sum(stage_secs.get(v, 0.0) for v in _TOTAL_SLEEP_STAGES)
-        time_in_bed = stage_secs.get("InBed", 0.0)
         awake = stage_secs.get("Awake", 0.0)
         core = stage_secs.get("AsleepCore", 0.0)
         deep = stage_secs.get("AsleepDeep", 0.0)
         rem = stage_secs.get("AsleepREM", 0.0)
         unspecified = stage_secs.get("AsleepUnspecified", 0.0)
+
+        time_in_bed = stage_secs.get("InBed", 0.0)
+        # watchOS stopped emitting standalone InBed samples around late 2024; when absent,
+        # the stage+awake session defines the in-bed period, matching Apple's own semantics.
+        if time_in_bed == 0.0 and (total_sleep > 0 or awake > 0):
+            time_in_bed = total_sleep + awake
 
         # None only when the denominator is zero — undefined, not zero efficiency.
         sleep_efficiency = (

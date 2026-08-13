@@ -324,7 +324,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     // ── Apple Health sleep metrics ────────────────────────────────────────
     time_in_bed: {
         label: 'Time in Bed',
-        short: 'Total recorded time from first InBed sample to last, in hours.',
+        short: 'Total time in bed, in hours — from recorded InBed samples when present, or derived from the sleep stage session (asleep + awake) on exports where the OS no longer emits InBed records.',
     },
     total_sleep: {
         label: 'Total Sleep',
