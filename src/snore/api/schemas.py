@@ -15,6 +15,9 @@ from pydantic import (
 from snore.services.schemas import (
     DayDetail,
     DayListItem,
+    HealthNightDetailRead,
+    HealthNightSummaryRead,
+    HealthSampleRead,
     ImportSource,
     MaskLogEntryResponse,
     RxAllResponse,
@@ -58,9 +61,14 @@ __all__ = [
     "ImportSourceResultSummary",
     "ImportResultSummary",
     "LinkedAnalysisSummary",
+    "HealthImportResultSummary",
     "PipelineJobStatus",
     "PipelineJobsListResponse",
     "DateListResponse",
+    # Re-exported Apple Health read schemas
+    "HealthNightSummaryRead",
+    "HealthNightDetailRead",
+    "HealthSampleRead",
 ]
 
 
@@ -294,6 +302,14 @@ class LinkedAnalysisSummary(BaseModel):
     error_message: str | None
 
 
+class HealthImportResultSummary(BaseModel):
+    """Summary of an Apple Health import result attached to a pipeline job."""
+
+    inserted: int
+    skipped: int
+    nights_recomputed: int
+
+
 class PipelineJobStatus(BaseModel):
     """Stitched view of one import job and its downstream analysis job.
 
@@ -310,6 +326,7 @@ class PipelineJobStatus(BaseModel):
     progress_message: str | None
     sessions_imported: int | None
     import_result: ImportResultSummary | None
+    health_import_result: HealthImportResultSummary | None = None
     error_message: str | None
     analysis_job_id: str | None
     analysis_queued: bool | None

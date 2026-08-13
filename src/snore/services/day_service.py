@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.exceptions import NotFoundError
-from snore.services.schemas import DayDetail, DayListItem
+from snore.services.schemas import DayDetail, DayListItem, HealthNightSummaryRead
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,21 @@ class DayService:
             ).all()
         ]
 
+        health_summary_row = (
+            await self.db_session.execute(
+                select(models.HealthNightlySummary).where(
+                    models.HealthNightlySummary.profile_id == self.profile_id,
+                    models.HealthNightlySummary.night_date == day_date,
+                )
+            )
+        ).scalar_one_or_none()
+
+        health_sleep = (
+            HealthNightSummaryRead.model_validate(health_summary_row)
+            if health_summary_row is not None
+            else None
+        )
+
         return DayDetail(
             **DayListItem.model_validate(day).model_dump(),
             oai=day.oai,
@@ -148,4 +163,5 @@ class DayService:
             hypopneas=day.hypopneas or 0,
             reras=day.reras or 0,
             session_ids=session_ids,
+            health_sleep=health_sleep,
         )

@@ -44,6 +44,7 @@ class HealthImportService:
         batch_size: int = 500,
         dry_run: bool = False,
         progress_callback: Callable[[int], None] | None = None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> HealthImportResult:
         """Import an Apple Health export file (zip or directory).
 
@@ -56,6 +57,10 @@ class HealthImportService:
             batch_size: Records per write transaction chunk (default 500).
             dry_run: When True, count would-be inserts without writing anything.
             progress_callback: Called with total records processed after each batch.
+            cancel_predicate: When provided, called at the start of each batch. If
+                it returns True, record consumption stops immediately. Batches already
+                committed are kept; nightly summaries for all committed nights are still
+                recomputed so the DB remains consistent. Partial counts are returned.
         """
         if not AppleHealthParser().detect(path):
             raise ValueError(
@@ -72,7 +77,12 @@ class HealthImportService:
         )
 
         inserted, skipped, nights_recomputed = await self._import_records(
-            records_iter, profile_id, batch_size, dry_run, progress_callback
+            records_iter,
+            profile_id,
+            batch_size,
+            dry_run,
+            progress_callback,
+            cancel_predicate,
         )
 
         return HealthImportResult(
@@ -90,10 +100,17 @@ class HealthImportService:
         batch_size: int,
         dry_run: bool,
         progress_callback: Callable[[int], None] | None,
+        cancel_predicate: Callable[[], bool] | None = None,
     ) -> tuple[int, int, int]:
         """Consume records_iter in batches; persist or dry-run count each batch.
 
         Returns (inserted, skipped, nights_recomputed).
+
+        When *cancel_predicate* is provided it is called at the start of each
+        batch iteration. If it returns True, record consumption stops and no
+        further batches are written. Batches already committed to the DB are
+        kept; nightly summaries for all committed nights are still recomputed
+        so the DB remains consistent. Partial counts are returned.
         """
         inserted_total = 0
         skipped_total = 0
@@ -103,6 +120,8 @@ class HealthImportService:
         importer = HealthSampleImporter()
 
         for _chunk_num in itertools.count(1):
+            if cancel_predicate is not None and cancel_predicate():
+                break
             chunk = list(itertools.islice(records_iter, batch_size))
             if not chunk:
                 break

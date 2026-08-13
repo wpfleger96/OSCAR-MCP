@@ -50,6 +50,7 @@ from snore.api.routers import (
     waveforms,
 )
 from snore.api.routers import auth as auth_router
+from snore.api.routers import health as health_routes
 from snore.api.routers import me as me_router
 from snore.database.session import init_database, init_database_from_url
 
@@ -183,9 +184,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ),
     )
     _start_analysis_worker()
-    from snore.api.import_worker import _run_import  # noqa: PLC0415
+    from snore.api.import_worker import _run_dispatch  # noqa: PLC0415
 
-    _start_import_worker(_run_import)
+    _start_import_worker(_run_dispatch)
 
     # Resume interrupted jobs after workers are ready to process them.
     if import_resume_candidates:
@@ -534,13 +535,15 @@ def _cleanup_stale_upload_spool_dirs(
         logger.info("Removed %d stale upload spool dir(s)", cleaned)
 
 
-async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
+async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None, str]]:
     """Mark orphaned import jobs as failed; return resume candidates.
 
     Jobs in PENDING_UPLOAD, PENDING, or RUNNING state at startup are orphans
     from a previous server run.  All are marked failed.  Those whose spool
     directory still exists on disk are returned as resume candidates — the
     caller can re-enqueue them as new import jobs.
+
+    Returns 4-tuples of (spool_path, profile_id, owner_user_id, job_type_str).
     """
     from datetime import UTC, datetime  # noqa: PLC0415
 
@@ -551,7 +554,7 @@ async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
     from snore.database.session import session_scope  # noqa: PLC0415
 
     non_terminal = [s.value for s in ACTIVE_STATES]
-    resume_candidates: list[tuple[Path, int, int | None]] = []
+    resume_candidates: list[tuple[Path, int, int | None, str]] = []
     now = datetime.now(UTC)
     try:
         async with session_scope(immediate=True) as db:
@@ -562,16 +565,19 @@ async def _recover_orphaned_import_jobs() -> list[tuple[Path, int, int | None]]:
                         models.ImportJobRecord.spool_dir_path,
                         models.ImportJobRecord.target_profile_id,
                         models.ImportJobRecord.owner_user_id,
+                        models.ImportJobRecord.job_type,
                     ).where(
                         models.ImportJobRecord.state.in_(non_terminal),
                         models.ImportJobRecord.spool_dir_path.is_not(None),
                     )
                 )
             ).all()
-            for spool_path_str, profile_id, owner_user_id in rows:
+            for spool_path_str, profile_id, owner_user_id, job_type_str in rows:
                 spool_path = Path(spool_path_str)
                 if profile_id is not None and spool_path.exists():
-                    resume_candidates.append((spool_path, profile_id, owner_user_id))
+                    resume_candidates.append(
+                        (spool_path, profile_id, owner_user_id, job_type_str)
+                    )
 
             result = await db.execute(
                 update(models.ImportJobRecord)
@@ -656,7 +662,7 @@ async def _recover_orphaned_analysis_jobs() -> set[int]:
 
 
 def _startup_resume_imports(
-    candidates: list[tuple[Path, int, int | None]],
+    candidates: list[tuple[Path, int, int | None, str]],
 ) -> None:
     """Re-enqueue import jobs for which spool files survived the restart."""
     from snore.api.import_jobs import (  # noqa: PLC0415
@@ -666,11 +672,20 @@ def _startup_resume_imports(
     )
     from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
 
-    for spool_path, profile_id, owner_user_id in candidates:
+    for spool_path, profile_id, owner_user_id, job_type_str in candidates:
         try:
+            try:
+                job_type = JobType(job_type_str)
+            except ValueError:
+                logger.warning(
+                    "Startup: unknown job_type %r for spool %s — resuming as UPLOAD",
+                    job_type_str,
+                    spool_path,
+                )
+                job_type = JobType.UPLOAD
             job = ImportJob(
                 job_id=uuid.uuid4().hex,
-                job_type=JobType.UPLOAD,
+                job_type=job_type,
                 owner_user_id=owner_user_id,
                 target_profile_id=profile_id,
                 temp_dir=spool_path,
@@ -801,6 +816,9 @@ def create_app() -> FastAPI:
 
     app.include_router(analysis.router, prefix=API_V1_PREFIX, tags=["analysis"])
     app.include_router(days.router, prefix=f"{API_V1_PREFIX}/days", tags=["days"])
+    app.include_router(
+        health_routes.router, prefix=f"{API_V1_PREFIX}/health", tags=["health"]
+    )
     app.include_router(rx.router, prefix=f"{API_V1_PREFIX}/rx", tags=["rx"])
     app.include_router(
         equipment.router, prefix=f"{API_V1_PREFIX}/equipment", tags=["equipment"]

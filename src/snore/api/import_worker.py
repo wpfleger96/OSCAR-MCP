@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from snore.api.import_jobs import ImportJob, JobPhase, JobType
+from snore.services.health_import_service import HealthImportService
 from snore.services.import_service import ImportService
 
 logger = logging.getLogger(__name__)
@@ -213,3 +214,136 @@ def _run_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
         if not is_shutdown_in_progress():
             job.cleanup_files()
         job.release_capacity()
+
+
+def _run_health_import(job: ImportJob, profile_raw_root: Path | None = None) -> None:
+    """Worker function for Apple Health import jobs. Runs in a background thread.
+
+    Mirrors _run_import's ordering discipline:
+        1. Persist RUNNING state.
+        2. Validate target profile.
+        3. Locate the upload file/dir, report progress, check early cancel.
+        4. Run the HealthImportService import.
+        5. Call phase_complete(IMPORT) — non-terminal milestone for observers.
+        6. Check post-import cancellation.
+        7. Publish terminal state (no analysis enqueue for health imports).
+        8. Persist terminal record.
+        9. Clean parser spool + job temp.
+        10. Release capacity.
+
+    No analysis enqueue — health data writes to HealthSample rows, not CPAP
+    sessions, so analysis_job_id/analysis_queued remain None. The /import/jobs
+    stage derivation maps (succeeded + no analysis link) → "done".
+
+    Cancellation semantics: cancel_predicate is checked at the start of each
+    batch in HealthImportService. Already-committed batches are kept; nightly
+    summaries for all committed nights are recomputed before returning. Partial
+    counts are returned and reflected in the terminal payload.
+    """
+
+    def _make_terminal(
+        event: str,
+        *,
+        message: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a terminal SSE payload, injecting import_committed + import_result
+        when the import phase already committed."""
+        data: dict[str, Any] = {}
+        if message is not None:
+            data["message"] = message
+        if extra:
+            data.update(extra)
+        snapshot = job.import_result_snapshot
+        if snapshot is not None:
+            data["import_committed"] = True
+            data["import_result"] = snapshot
+        return {"event": event, "data": data}
+
+    try:
+        # 1. Persist RUNNING state — the worker loop already called try_start()
+        # so job.state is RUNNING by the time this function executes.
+        try:
+            asyncio.run(_upsert_job_record(job))
+        except Exception:
+            logger.exception("Failed to upsert RUNNING state for job %s", job.job_id)
+
+        # 2. Validate target profile.
+        target_profile_id = job.target_profile_id
+        if target_profile_id is None:
+            raise ValueError("Import job has no target profile — cannot proceed")
+
+        # 3. Report progress; honour early cancellation before the heavy I/O.
+        job.report_progress("Importing Apple Health data...")
+        if job.cancel_requested:
+            job._finish(succeeded=False)
+            return
+
+        # Locate the upload: single file → pass it directly (works for a zip);
+        # multiple files or just the dir → pass the temp dir itself.
+        if job.temp_dir is None:
+            raise ValueError("Import job has no temp directory — cannot proceed")
+        files = [p for p in job.temp_dir.rglob("*") if p.is_file()]
+        path = files[0] if len(files) == 1 else job.temp_dir
+
+        # 4. Run the import.
+        result = asyncio.run(
+            HealthImportService().import_file(
+                path,
+                target_profile_id,
+                progress_callback=lambda n: job.report_progress(
+                    f"Processed {n:,} records"
+                ),
+                cancel_predicate=lambda: job.cancel_requested,
+            )
+        )
+
+        # 5. Phase 1 complete: import committed.
+        import_result_dict = result.model_dump()
+        job.phase_complete(JobPhase.IMPORT, import_result_dict)
+
+        # 6. Check post-import cancellation (data already committed; report partial result).
+        if job.cancel_requested:
+            job._finish(
+                succeeded=False,
+                terminal_msg=_make_terminal("error", message="Cancelled"),
+            )
+            return
+
+        # 7. No analysis enqueue for health imports — emit terminal immediately.
+        job._finish(
+            succeeded=True,
+            terminal_msg=_make_terminal(
+                "complete", extra={"result": import_result_dict}
+            ),
+        )
+    except Exception as e:
+        logger.exception("Health import job %s failed", job.job_id)
+        job._finish(
+            succeeded=False,
+            terminal_msg=_make_terminal("error", message=str(e)),
+        )
+    finally:
+        # Ordering: publish terminal (done above), persist, clean, release capacity.
+        if job.is_terminal:
+            try:
+                asyncio.run(_upsert_job_record(job))
+            except Exception:
+                logger.exception("Failed to persist job record for %s", job.job_id)
+        from snore.api.import_jobs import is_shutdown_in_progress  # noqa: PLC0415
+
+        if not is_shutdown_in_progress():
+            job.cleanup_files()
+        job.release_capacity()
+
+
+def _run_dispatch(job: ImportJob, profile_raw_root: Path | None = None) -> None:
+    """Route import jobs to the appropriate worker function based on job type.
+
+    JobType.HEALTH_UPLOAD → _run_health_import; everything else → _run_import.
+    _run_import itself is unchanged and handles UPLOAD (CPAP) jobs.
+    """
+    if job.job_type == JobType.HEALTH_UPLOAD:
+        _run_health_import(job, profile_raw_root)
+    else:
+        _run_import(job, profile_raw_root)
