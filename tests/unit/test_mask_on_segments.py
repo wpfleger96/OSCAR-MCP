@@ -71,6 +71,7 @@ def _parse_night(
     }
     night = parser._parse_night_session(
         night_date="20250910",
+        chain_id=min(segments),
         segments=segments,
         device_info=_device_info(),
         base_path=Path("/nonexistent"),

@@ -95,22 +95,42 @@ A segment = one continuous mask-on period. New files created when:
 - After mask removal (bathroom, water, etc.)
 
 ### Night Grouping (Noon Cutoff)
-Sessions grouped into "nights" using noon boundary:
-- Before noon → previous day's night
-- At/after noon → current day's night
+
+ResMed's reporting day runs noon-to-noon. A session's night is determined by its start time:
+
+- Start before noon → attributed to the **previous** calendar day's night
+- Start at/after noon → attributed to the **current** calendar day's night
 
 **Example**:
 ```
 Night of June 21, 2024:
   20240621_013454_BRP.edf    # 1:34 AM - 5:30 AM
   20240621_053022_BRP.edf    # 5:30 AM - 7:15 AM
-  → Single session with gap between segments
 ```
+
+#### Noon Mid-Session Rollover
+
+When therapy is physically in progress at 12:00:00 local time, the device closes the active DATALOG files at ~11:59:xx and opens a new file group at ~12:00:0x. One continuous physical session becomes two file groups with a 36–47 s gap, whose filename timestamps fall on opposite sides of the noon boundary.
+
+#### Segment Chaining
+
+`chain_session_segments()` in `src/snore/parsers/resmed_file_index.py` groups DATALOG segments into sessions. It sorts all segments chronologically and chains consecutive segments while the inter-segment gap is ≤ 4 hours (`OSCAR_COMBINE_CLOSE_SECONDS`, anchored to OSCAR's "Combine Close Sessions" default of 240 min). Each chain becomes one session, filed under the night of its first segment's start time (noon rule).
+
+Gap measurement: a segment's end time is derived from its EDF header (`num_records × record_duration`, read from the first readable of `BRP`/`PLD`/`SA2`). Each physical segment also writes an annotation-only group (`CSL` + `EVE` files, stamped seconds before its waveform group) that carries no duration; such groups advance the chain's clock to their own start time (a lower bound) instead of breaking the chain, so a session's stub and waveform groups always chain together.
+
+This replaces an earlier unconditional noon-bucket merge that had no gap cutoff. The old approach produced phantom 18–24 h sessions in two cases:
+
+- A noon rollover put the post-noon half of a session into the next night's bucket, where it merged with that evening's sleep across an ~18 h gap.
+- Isolated Device Diagnostic or mask-fit blips (segments with actual data) anchored merges across multi-hour gaps.
+
+Chaining fixes both: rollover halves chain across the 36–47 s gap and file under the pre-noon start's night; blips that exceed the 4 h threshold become separate (tiny) sessions.
+
+Multi-segment chains use `device_session_id = "<YYYYMMDD_HHMMSS>_merged"` (first segment's timestamp); single-segment chains keep the segment's `YYYYMMDD_HHMMSS`. The legacy format was `YYYYMMDD_merged`.
 
 ## Special File Behaviors
 
 ### Zero-Record Files
-- **When**: Device powered on briefly but not used
+- **When**: Device powered on briefly but not used; also the dominant output of Air11 Device Diagnostic self-tests (see [Device Diagnostic Self-Test](#device-diagnostic-self-test-airsense-11--aircurve-11) below)
 - **Size**: Small stub files (1-3 KB)
 - **Header**: Valid EDF header, `num_data_records = 0`
 - **Handling**: Gracefully skip, normal occurrence
@@ -123,6 +143,14 @@ Night of June 21, 2024:
 
 ### EVE All-Day Events
 Unlike BRP/PLD/SA2 which contain only segment data, EVE files store all events from the entire day. Must filter by session timestamp range.
+
+### Device Diagnostic Self-Test (AirSense 11 / AirCurve 11)
+
+AirSense 11 and AirCurve 11 devices include a scheduled "Device Diagnostic" self-test, configurable to daily / weekly / every 2 weeks / off. It runs after therapy has stopped, briefly spinning the motor to assess internal acoustics via an acoustic sensor (source: ResMed product support, 2026). Each run writes a full `BRP` / `PLD` / `SA2` DATALOG file group.
+
+Empirically ~97% of diagnostic runs produce zero-record stubs (see [Zero-Record Files](#zero-record-files) above). The remaining ~3% contain 60–240 s of real records and parse as genuine short segments, indistinguishable from mask-fit checks or brief SmartStart mask-fiddling. With the daily setting enabled, expect approximately 2 diagnostic file groups per day.
+
+The sibling **AcousticSignal** feature captures 0.2 s acoustic samples only while therapy is running and writes no DATALOG groups — it cannot create phantom sessions.
 
 ## EDF+ Annotation Format
 

@@ -105,11 +105,18 @@ class DayManager:
         sessions: Sequence[SessionModel],
         attr: str,
     ) -> float | None:
-        """Calculate time-weighted average for a statistic across sessions."""
+        """Calculate usage-weighted average for a statistic across sessions.
+
+        Weights prefer statistics.usage_hours (actual mask-on time) over session
+        span to avoid inflating averages when gap-merged sessions have large spans.
+        """
         values = [
-            (getattr(s, attr), sess.duration_seconds / 3600)
+            (
+                getattr(s, attr),
+                s.usage_hours if s.usage_hours else (sess.duration_seconds or 0) / 3600,
+            )
             for s, sess in zip(stats_records, sessions, strict=False)
-            if getattr(s, attr) is not None and sess.duration_seconds
+            if getattr(s, attr) is not None and (s.usage_hours or sess.duration_seconds)
         ]
         if not values:
             return None
@@ -168,8 +175,12 @@ class DayManager:
 
         day.session_count = len(sessions)
 
-        total_seconds = sum(s.duration_seconds for s in sessions if s.duration_seconds)
-        day.total_therapy_hours = total_seconds / 3600.0 if total_seconds else 0.0
+        day.total_therapy_hours = sum(
+            s.statistics.usage_hours
+            if s.statistics and s.statistics.usage_hours
+            else (s.duration_seconds or 0) / 3600
+            for s in sessions
+        )
 
         stats_records = [s.statistics for s in sessions if s.statistics]
 

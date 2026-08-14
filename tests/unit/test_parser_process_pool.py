@@ -94,7 +94,7 @@ def test_resmed_broken_pool_raises_runtime_error():
     from snore.parsers.resmed_edf import ResmedEDFParser
 
     parser = ResmedEDFParser()
-    nights = [("20240101", {}), ("20240102", {})]
+    nights = [("20240101", "20240101_000000", {}), ("20240102", "20240102_000000", {})]
 
     broken_pool = MagicMock()
     broken_pool.submit.side_effect = BrokenProcessPool("simulated crash")
@@ -161,7 +161,9 @@ def test_resmed_generator_close_cancels_pending():
     from snore.parsers.resmed_edf import ResmedEDFParser
 
     parser = ResmedEDFParser()
-    nights = [(f"2024010{i}", {}) for i in range(1, 4)]  # 3 nights
+    nights = [
+        (f"2024010{i}", f"2024010{i}_000000", {}) for i in range(1, 4)
+    ]  # 3 nights
 
     # f0 is pre-resolved so as_completed yields it immediately.
     # f1 and f2 stay pending so we can assert they were cancelled.
@@ -230,7 +232,7 @@ def test_resmed_broken_pool_from_future_result_raises_runtime_error():
     from snore.parsers.resmed_edf import ResmedEDFParser
 
     parser = ResmedEDFParser()
-    nights = [("20240101", {}), ("20240102", {})]
+    nights = [("20240101", "20240101_000000", {}), ("20240102", "20240102_000000", {})]
 
     crashed_future: Future = Future()
     crashed_future.set_exception(BrokenProcessPool("worker died mid-run"))
@@ -289,18 +291,32 @@ def test_oscar_broken_pool_from_future_result_raises_runtime_error():
 
 
 def test_parallel_submits_per_night_str_cache_slices():
-    """Each pool.submit call receives a single-entry cache slice for its night.
+    """Each pool.submit call receives a per-chain cache slice, not the full cache.
 
     Before the fix, every future received the full multi-night dict —
-    O(nights²) pickle cost.  After the fix each future receives at most one
-    entry.
+    O(nights²) pickle cost.  After the fix each future receives only the
+    entries whose therapy days overlap with the chain's segments.
     """
     from snore.parsers.resmed_edf import ResmedEDFParser
 
     parser = ResmedEDFParser()
     d1 = date(2025, 1, 1)
     d2 = date(2025, 1, 2)
-    nights = [("20250101", {}), ("20250102", {})]
+    # Segment ids chosen so therapy_day (seg_start - 12h) maps to d1/d2:
+    # 20250101_220000 - 12h → 2025-01-01 10:00 → d1
+    # 20250102_220000 - 12h → 2025-01-02 10:00 → d2
+    nights = [
+        (
+            "20250101",
+            "20250101_220000",
+            {"20250101_220000": {"BRP": Path("/fake/1.edf")}},
+        ),
+        (
+            "20250102",
+            "20250102_220000",
+            {"20250102_220000": {"BRP": Path("/fake/2.edf")}},
+        ),
+    ]
 
     full_settings = {d1: {"pressure_min": 4.0}, d2: {"pressure_min": 6.0}}
     full_summaries = {d1: {"ahi": 1.0}, d2: {"ahi": 2.0}}
@@ -331,15 +347,15 @@ def test_parallel_submits_per_night_str_cache_slices():
     calls = mock_pool.submit.call_args_list
     assert len(calls) == 2
 
-    # pool.submit(callable, night_date, segments, device_info, path,
+    # pool.submit(callable, night_date, chain_id, segments, device_info, path,
     #             str_settings_cache, str_summaries_cache, ...)
-    # args indices:  [0]       [1]        [2]       [3]      [4]
-    #                [5]=settings  [6]=summaries
+    # args indices:  [0]       [1]       [2]       [3]      [4]    [5]
+    #                [6]=settings  [7]=summaries
     for call_obj in calls:
         a = call_obj.args
         night_key = datetime.strptime(a[1], "%Y%m%d").date()
-        settings_arg = a[5]
-        summaries_arg = a[6]
+        settings_arg = a[6]
+        summaries_arg = a[7]
 
         assert settings_arg == {night_key: full_settings[night_key]}, (
             f"Expected single-entry settings slice for {night_key}; got {settings_arg}"
@@ -350,14 +366,26 @@ def test_parallel_submits_per_night_str_cache_slices():
 
 
 def test_absent_str_entry_submits_none_cache():
-    """A night with no STR entry gets None (not an empty dict) as its cache slice."""
+    """A chain with no STR entry gets None (not an empty dict) as its cache slice."""
     from snore.parsers.resmed_edf import ResmedEDFParser
 
     parser = ResmedEDFParser()
     d_known = date(2025, 1, 2)
-    nights = [("20250101", {}), ("20250102", {})]
+    # Segment ids: therapy_day for 20250101_220000 → d1 (absent); for 20250102_220000 → d_known.
+    nights = [
+        (
+            "20250101",
+            "20250101_220000",
+            {"20250101_220000": {"BRP": Path("/fake/1.edf")}},
+        ),
+        (
+            "20250102",
+            "20250102_220000",
+            {"20250102_220000": {"BRP": Path("/fake/2.edf")}},
+        ),
+    ]
 
-    # Only d_known has an STR entry; 20250101 is absent.
+    # Only d_known has an STR entry; therapy day for 20250101 is absent.
     full_settings = {d_known: {"pressure_min": 6.0}}
 
     f1, f2 = Future(), Future()
@@ -383,15 +411,16 @@ def test_absent_str_entry_submits_none_cache():
     calls = mock_pool.submit.call_args_list
     assert len(calls) == 2
 
+    # Key by night_date (a[1]); settings at a[6], summaries at a[7].
     by_night = {call_obj.args[1]: call_obj.args for call_obj in calls}
 
-    # Night with no STR entry → None passed for both caches.
+    # Chain with no STR entry → None passed for both caches.
     args_missing = by_night["20250101"]
-    assert args_missing[5] is None, (
+    assert args_missing[6] is None, (
         "Missing STR entry should pass None, not an empty dict"
     )
-    assert args_missing[6] is None
+    assert args_missing[7] is None
 
-    # Night with an entry → single-entry slice.
+    # Chain with an entry → single-entry slice.
     args_present = by_night["20250102"]
-    assert args_present[5] == {d_known: {"pressure_min": 6.0}}
+    assert args_present[6] == {d_known: {"pressure_min": 6.0}}

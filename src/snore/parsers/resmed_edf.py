@@ -76,29 +76,37 @@ logger = logging.getLogger(__name__)
 _STR_NEGATIVE_OK_STATS: frozenset[str] = frozenset({"flow_5th"})
 
 
-def _slice_str_cache(
+def _slice_str_cache_for_chain(
     cache: "dict[date, dict[str, float]] | None",
-    night_key: date,
+    segments: "dict[str, dict[str, Path]]",
 ) -> "dict[date, dict[str, float]] | None":
-    """Return a single-entry slice of a STR cache for the given night.
+    """Return a multi-entry slice of a STR cache covering a session chain.
 
-    Workers look up both caches strictly by ``therapy_day``, which equals the
-    ``night_date`` key (both implement the same noon-to-noon boundary).
-    Passing a full multi-night cache to every future causes O(nights²)
-    pickle overhead; this reduces each future's payload to one entry.
+    Each segment maps to its STR therapy day via the noon-minus-12h boundary.
+    A chain that crosses noon (e.g. a noon-rollover session) spans two STR
+    therapy days, so both must be included.
 
-    Returns None (never an empty dict) when the night has no entry, because
-    downstream ``_parse_session_group`` uses truthiness (``if str_settings_cache:``)
-    to detect a cache miss.
+    Passing a full multi-night cache to every future causes O(nights²) pickle
+    overhead; this reduces each future's payload to only the entries its chain
+    needs.
+
+    Returns None (never an empty dict) when no chain segment has an entry,
+    because downstream ``_parse_session_group`` uses truthiness
+    (``if str_settings_cache:``) to detect a cache miss.
     """
     if cache is None:
         return None
-    entry = cache.get(night_key)
-    return {night_key: entry} if entry is not None else None
+    therapy_days = {
+        (datetime.strptime(seg_id, "%Y%m%d_%H%M%S") - timedelta(hours=12)).date()
+        for seg_id in segments
+    }
+    sliced = {d: cache[d] for d in therapy_days if d in cache}
+    return sliced if sliced else None
 
 
 def _resmed_parse_bundle_worker(
     night_date: str,
+    chain_id: str,
     segments: dict[str, dict[str, "Path"]],
     device_info: DeviceInfo,
     base_path: "Path",
@@ -108,7 +116,7 @@ def _resmed_parse_bundle_worker(
     date_to: str | None,
     str_series11: bool,
 ) -> UnifiedSession | None:
-    """Parse one night bundle in a subprocess.
+    """Parse one session chain in a subprocess.
 
     Instantiates a fresh ``ResmedEDFParser`` so no bound-method state is
     transferred across the process boundary.  The only instance-level flag
@@ -118,6 +126,7 @@ def _resmed_parse_bundle_worker(
     parser._str_series11 = str_series11
     return parser._parse_single_session_bundle(
         night_date,
+        chain_id,
         segments,
         device_info,
         base_path,
@@ -419,7 +428,7 @@ class ResmedEDFParser(DeviceParser):
         """Return ResMed parser metadata."""
         return ParserMetadata(
             parser_id="resmed_edf",
-            parser_version="1.1.0",
+            parser_version="1.2.0",
             manufacturer="ResMed",
             supported_formats=["EDF+", "EDF"],
             supported_models=[
@@ -734,7 +743,7 @@ class ResmedEDFParser(DeviceParser):
             # night_items up front would under-deliver. The as_completed loop
             # below enforces the limit and cancels remaining futures instead.
             logger.debug(
-                f"Parsing {len(night_items)} nights in parallel with {os.cpu_count()} workers"
+                f"Parsing {len(night_items)} chains in parallel with {os.cpu_count()} workers"
             )
 
             futures: dict[Any, Any] = {}
@@ -744,17 +753,17 @@ class ResmedEDFParser(DeviceParser):
                     pool.submit(
                         _resmed_parse_bundle_worker,
                         night_date,
+                        chain_id,
                         segments,
                         device_info,
                         path,
-                        _slice_str_cache(str_settings_cache, night_key),
-                        _slice_str_cache(str_summaries_cache, night_key),
+                        _slice_str_cache_for_chain(str_settings_cache, segments),
+                        _slice_str_cache_for_chain(str_summaries_cache, segments),
                         date_from,
                         date_to,
                         self._str_series11,
-                    ): night_date
-                    for night_date, segments in night_items
-                    for night_key in (datetime.strptime(night_date, "%Y%m%d").date(),)
+                    ): chain_id
+                    for night_date, chain_id, segments in night_items
                 }
 
                 completed = 0
@@ -768,7 +777,7 @@ class ResmedEDFParser(DeviceParser):
                         )
 
                 for future in as_completed(futures):
-                    night_date = futures[future]
+                    chain_id = futures[future]
 
                     if limit is not None and sessions_yielded >= limit:
                         logger.debug(
@@ -782,7 +791,7 @@ class ResmedEDFParser(DeviceParser):
                     except BrokenProcessPool:
                         raise
                     except Exception as e:
-                        logger.error(f"Failed to parse night {night_date}: {e}")
+                        logger.error(f"Failed to parse chain {chain_id}: {e}")
                         emit_progress()
                         continue
 
@@ -809,7 +818,7 @@ class ResmedEDFParser(DeviceParser):
                 if progress_callback:
                     progress_callback(f"Parsing session {completed}/{total_nights}...")
 
-            for night_date, segments in night_items:
+            for night_date, chain_id, segments in night_items:
                 if limit is not None and sessions_yielded >= limit:
                     logger.debug(f"Reached session limit of {limit}, stopping")
                     break
@@ -817,6 +826,7 @@ class ResmedEDFParser(DeviceParser):
                 try:
                     session = self._parse_single_session_bundle(
                         night_date,
+                        chain_id,
                         segments,
                         device_info,
                         path,
@@ -826,7 +836,7 @@ class ResmedEDFParser(DeviceParser):
                         date_to,
                     )
                 except Exception as e:
-                    logger.error(f"Failed to parse night {night_date}: {e}")
+                    logger.error(f"Failed to parse chain {chain_id}: {e}")
                     emit_progress()
                     continue
 
@@ -840,13 +850,13 @@ class ResmedEDFParser(DeviceParser):
 
     def _discover_session_files(
         self, path: Path, sort_by: str | None
-    ) -> tuple[Path, list[tuple[str, dict[str, dict[str, Path]]]]]:
+    ) -> tuple[Path, list[tuple[str, str, dict[str, dict[str, Path]]]]]:
         """
-        Resolve the data root and collect session files grouped by night.
+        Resolve the data root and discover session files as proximity-chained groups.
 
         Returns:
             (resolved_path, night_items) where night_items is a list of
-            (night_date, segments) tuples in the requested sort order
+            (night_date, chain_id, segments) tuples in the requested sort order.
         """
         if self._all_roots:
             matching_roots = [r for r in self._all_roots if r.path == path]
@@ -862,38 +872,40 @@ class ResmedEDFParser(DeviceParser):
         if not datalog_dir.exists():
             raise ParserError("DATALOG directory not found", self)
 
-        night_groups = self._group_session_files(datalog_dir)
+        from snore.parsers.resmed_file_index import chain_session_segments
 
-        if night_groups:
-            total_segments = sum(len(segments) for segments in night_groups.values())
+        chains = chain_session_segments(datalog_dir)
+
+        if chains:
+            total_segments = sum(len(segs) for _, _, segs in chains)
             logger.debug(
-                f"Found {len(night_groups)} nights with {total_segments} total segments "
-                f"(avg {total_segments / len(night_groups):.1f} segments per night)"
+                f"Found {len(chains)} chains with {total_segments} total segments "
+                f"(avg {total_segments / len(chains):.1f} segments per chain)"
             )
         else:
             logger.debug("No session files found in DATALOG directory")
 
         if sort_by == "date-asc":
-            night_items = sorted(night_groups.items(), key=lambda x: x[0])
+            night_items = sorted(chains, key=lambda x: (x[0], x[1]))
         elif sort_by == "date-desc":
-            night_items = sorted(night_groups.items(), key=lambda x: x[0], reverse=True)
+            night_items = sorted(chains, key=lambda x: (x[0], x[1]), reverse=True)
         else:
-            night_items = list(night_groups.items())
+            night_items = list(chains)
 
         return path, night_items
 
     def _filter_night_items(
         self,
-        night_items: list[tuple[str, dict[str, dict[str, Path]]]],
+        night_items: list[tuple[str, str, dict[str, dict[str, Path]]]],
         date_from: str | None,
         date_to: str | None,
-    ) -> list[tuple[str, dict[str, dict[str, Path]]]]:
-        """Filter night items by date range based on their night-date IDs."""
+    ) -> list[tuple[str, str, dict[str, dict[str, Path]]]]:
+        """Filter chain items by date range based on their night-date IDs."""
         if not (date_from or date_to):
             return night_items
 
         filtered_items = []
-        for night_date, segments in night_items:
+        for night_date, chain_id, segments in night_items:
             try:
                 night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
 
@@ -901,7 +913,7 @@ class ResmedEDFParser(DeviceParser):
                     filter_date_from = datetime.fromisoformat(date_from).date()
                     if night_date_obj < filter_date_from:
                         logger.debug(
-                            f"Skipping night {night_date}: before {filter_date_from}"
+                            f"Skipping chain {chain_id}: before {filter_date_from}"
                         )
                         continue
 
@@ -909,19 +921,20 @@ class ResmedEDFParser(DeviceParser):
                     filter_date_to = datetime.fromisoformat(date_to).date()
                     if night_date_obj > filter_date_to:
                         logger.debug(
-                            f"Skipping night {night_date}: after {filter_date_to}"
+                            f"Skipping chain {chain_id}: after {filter_date_to}"
                         )
                         continue
             except (ValueError, IndexError) as e:
                 logger.warning(f"Could not parse night date {night_date}: {e}")
 
-            filtered_items.append((night_date, segments))
+            filtered_items.append((night_date, chain_id, segments))
 
         return filtered_items
 
     def _parse_single_session_bundle(
         self,
         night_date: str,
+        chain_id: str,
         segments: dict[str, dict[str, Path]],
         device_info: DeviceInfo,
         base_path: Path,
@@ -931,13 +944,14 @@ class ResmedEDFParser(DeviceParser):
         date_to: str | None,
     ) -> UnifiedSession | None:
         """
-        Parse one night's file bundle into a finalized session.
+        Parse one session chain's file bundle into a finalized session.
 
-        Returns None when the night has no valid segments or its actual
+        Returns None when the chain has no valid segments or its actual
         start date falls outside the requested date range.
         """
         session = self._parse_night_session(
             night_date,
+            chain_id,
             segments,
             device_info,
             base_path,
@@ -1347,14 +1361,20 @@ class ResmedEDFParser(DeviceParser):
         base_path: Path,
         str_settings_cache: dict[date, dict[str, float]] | None = None,
         str_summaries_cache: dict[date, dict[str, float]] | None = None,
+        chain_id: str | None = None,
     ) -> UnifiedSession | None:
         """Lower-level public entry point for callers that pre-supply ``device_info``
         and pre-grouped segment files (used by demo fixture import).
 
+        ``chain_id`` defaults to the lexicographically smallest segment id (which
+        is the chronologically first segment) so existing callers remain compatible.
+
         Delegates to ``_parse_night_session``.
         """
+        effective_chain_id = chain_id if chain_id is not None else min(segments)
         return self._parse_night_session(
             night_date=night_date,
+            chain_id=effective_chain_id,
             segments=segments,
             device_info=device_info,
             base_path=base_path,
@@ -1365,6 +1385,7 @@ class ResmedEDFParser(DeviceParser):
     def _parse_night_session(
         self,
         night_date: str,
+        chain_id: str,
         segments: dict[str, dict[str, Path]],
         device_info: DeviceInfo,
         base_path: Path,
@@ -1372,14 +1393,15 @@ class ResmedEDFParser(DeviceParser):
         str_summaries_cache: dict[date, dict[str, float]] | None = None,
     ) -> UnifiedSession | None:
         """
-        Parse all segments for a single night into one unified session.
+        Parse all segments for a single session chain into one unified session.
 
         Multiple segments occur when the mask is removed/replaced during the night
-        (bathroom breaks, water, etc.). This matches OSCAR's behavior of combining
-        segments from the same night (noon-to-noon period).
+        (bathroom breaks, water, etc.) or from a noon-rollover split. Segments are
+        chained by chronological proximity (see ``chain_session_segments``).
 
         Args:
-            night_date: Night date (YYYYMMDD format)
+            night_date: Night date (YYYYMMDD format, noon-cutoff applied to chain start)
+            chain_id: First segment's session_id; used as the merged session identifier
             segments: Dict mapping session_id to file dict
             device_info: Device information
             base_path: Base data path
@@ -1387,7 +1409,7 @@ class ResmedEDFParser(DeviceParser):
             str_summaries_cache: Pre-loaded STR.edf summaries cache (optional)
 
         Returns:
-            Single UnifiedSession representing the entire night
+            Single UnifiedSession representing the entire chain
         """
         sorted_segments = sorted(segments.items(), key=lambda x: x[0])
 
@@ -1451,7 +1473,7 @@ class ResmedEDFParser(DeviceParser):
 
         merged_session = segment_sessions[0]
 
-        merged_session.device_session_id = f"{night_date}_merged"
+        merged_session.device_session_id = f"{chain_id}_merged"
 
         # Capture the first segment's true duration BEFORE end_time is
         # overwritten with the night's end below.

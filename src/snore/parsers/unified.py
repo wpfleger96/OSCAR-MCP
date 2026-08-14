@@ -537,8 +537,13 @@ class UnifiedSession(BaseModel):
         self.statistics.hypopneas = event_counts["H"]
         self.statistics.reras = event_counts["RE"]
 
-        if self.duration_seconds and self.duration_seconds > 0:
-            hours = self.duration_seconds / 3600
+        if self.mask_on_segments:
+            therapy_seconds = sum(end - start for start, end in self.mask_on_segments)
+        else:
+            therapy_seconds = self.duration_seconds
+
+        if therapy_seconds and therapy_seconds > 0:
+            hours = therapy_seconds / 3600
             total_events = event_counts["OA"] + event_counts["CA"] + event_counts["H"]
             self.statistics.ahi = total_events / hours if hours > 0 else None
             self.statistics.oai = event_counts["OA"] / hours if hours > 0 else None

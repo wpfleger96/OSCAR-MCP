@@ -24,10 +24,11 @@ def _fake_session(night_date: str) -> MagicMock:
 def test_limit_counts_yielded_sessions_not_nights_parallel():
     """A dropped early night must not reduce the yielded count below `limit`."""
     parser = ResmedEDFParser()
-    nights = [(f"2024010{i}", {}) for i in range(1, 5)]  # four nights
+    # 3-tuples: (night_date, chain_id, segments)
+    nights = [(f"2024010{i}", f"2024010{i}_000000", {}) for i in range(1, 5)]
 
     def fake_bundle(
-        night_date: str, *args: object, **kwargs: object
+        night_date: str, chain_id: str, *args: object, **kwargs: object
     ) -> MagicMock | None:
         # First night yields nothing (e.g. filtered out or failed to parse).
         if night_date == "20240101":

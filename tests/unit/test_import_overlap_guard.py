@@ -447,6 +447,173 @@ class TestOverlapGuardReplacement:
         assert days[0].session_count == 1
 
 
+class TestOldFormatPurge:
+    """Old noon-bucket rows (e.g. ``20260130_merged``) are purged unconditionally.
+
+    The new proximity-chained format (``20260130_225000_merged``) must NOT be
+    treated as an old-format row — it flows through the normal all_covered check.
+    """
+
+    async def test_old_format_row_replaced_by_contained_new_format(
+        self, async_db_session, importer, device
+    ):
+        """Stale noon-bucket row is deleted unconditionally; incoming new-format
+        session that falls inside its time range is imported (previously skipped)."""
+        # Wide stale row: 22:00 on day 29 through 07:00 on day 30.
+        await _seed_session(
+            async_db_session,
+            device,
+            "20260130_merged",
+            _dt(29, 22),
+            _dt(30, 7),
+        )
+        await async_db_session.flush()
+
+        # New-format chain: 22:30–06:30 — fully contained within the old row.
+        incoming = _make_unified(
+            _SERIAL, "20260129_223000_merged", _dt(29, 22, 30), _dt(30, 6, 30)
+        )
+
+        async with async_db_session.begin_nested():
+            (
+                was_imported,
+                day_id,
+                new_id,
+                extra_day_ids,
+                deleted_ids,
+            ) = await importer._import_single_session(async_db_session, incoming)
+
+        assert was_imported is True
+        assert new_id is not None
+        assert not await _session_exists(async_db_session, "20260130_merged")
+        assert await _session_exists(async_db_session, "20260129_223000_merged")
+        assert await _count_sessions(async_db_session, device.id) == 1
+
+    async def test_new_format_partial_overlap_still_skips(
+        self, async_db_session, importer, device, caplog
+    ):
+        """New-format partial overlap still triggers a skip — the old-format purge
+        path does not interfere when no old-format rows are present."""
+        await _seed_session(
+            async_db_session,
+            device,
+            "20260125_010000",
+            _dt(25, 1),
+            _dt(25, 5),
+        )
+        await async_db_session.flush()
+
+        # 03:00–08:00 overlaps 01:00–05:00 but neither covers the other.
+        incoming = _make_unified(
+            _SERIAL, "20260125_030000_merged", _dt(25, 3), _dt(25, 8)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="snore.database.importers"):
+            async with async_db_session.begin_nested():
+                was_imported, *_ = await importer._import_single_session(
+                    async_db_session, incoming
+                )
+
+        assert was_imported is False
+        assert await _session_exists(async_db_session, "20260125_010000")
+        assert not await _session_exists(async_db_session, "20260125_030000_merged")
+        assert "Overlap guard: skipping" in caplog.text
+
+    async def test_mixed_old_format_and_covered_new_format_both_deleted(
+        self, async_db_session, importer, device
+    ):
+        """Mixed overlap: old-format row deleted unconditionally; new-format row
+        that is fully covered by the incoming session is also deleted.  Import
+        proceeds."""
+        # Stale wide row: 22:00 day 19 to 09:00 day 20.
+        await _seed_session(
+            async_db_session,
+            device,
+            "20260120_merged",
+            _dt(19, 22),
+            _dt(20, 9),
+        )
+        # New-format segment: 23:30–04:00 (incoming will fully cover it).
+        await _seed_session(
+            async_db_session,
+            device,
+            "20260119_233000",
+            _dt(19, 23, 30),
+            _dt(20, 4),
+        )
+        await async_db_session.flush()
+
+        # Incoming: 22:30–07:00 — covers both the old-format row and the new-format row.
+        incoming = _make_unified(
+            _SERIAL, "20260119_223000_merged", _dt(19, 22, 30), _dt(20, 7)
+        )
+
+        async with async_db_session.begin_nested():
+            (
+                was_imported,
+                day_id,
+                new_id,
+                extra_day_ids,
+                deleted_ids,
+            ) = await importer._import_single_session(async_db_session, incoming)
+
+        assert was_imported is True
+        assert new_id is not None
+        assert not await _session_exists(async_db_session, "20260120_merged")
+        assert not await _session_exists(async_db_session, "20260119_233000")
+        assert await _session_exists(async_db_session, "20260119_223000_merged")
+        assert await _count_sessions(async_db_session, device.id) == 1
+
+    async def test_mixed_old_format_deleted_new_format_partial_overlap_skips(
+        self, async_db_session, importer, device, caplog
+    ):
+        """Mixed overlap: old-format row is deleted unconditionally, but the
+        remaining new-format row causes a skip because the incoming session only
+        partially covers it."""
+        # Stale wide row: 22:00 day 21 to 09:00 day 22.
+        await _seed_session(
+            async_db_session,
+            device,
+            "20260122_merged",
+            _dt(21, 22),
+            _dt(22, 9),
+        )
+        # New-format segment that incoming will only partially cover: 05:00–10:00.
+        await _seed_session(
+            async_db_session,
+            device,
+            "20260122_050000",
+            _dt(22, 5),
+            _dt(22, 10),
+        )
+        await async_db_session.flush()
+
+        # Incoming: 22:30–07:00 — covers old-format entirely, but only partial
+        # overlap with the new-format segment (07:00 < 10:00).
+        incoming = _make_unified(
+            _SERIAL, "20260121_223000_merged", _dt(21, 22, 30), _dt(22, 7)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="snore.database.importers"):
+            async with async_db_session.begin_nested():
+                (
+                    was_imported,
+                    day_id,
+                    new_id,
+                    extra_day_ids,
+                    deleted_ids,
+                ) = await importer._import_single_session(async_db_session, incoming)
+
+        assert was_imported is False
+        # Old-format row was unconditionally purged.
+        assert not await _session_exists(async_db_session, "20260122_merged")
+        # New-format row is untouched — skip path does not delete it.
+        assert await _session_exists(async_db_session, "20260122_050000")
+        # Incoming was not inserted.
+        assert not await _session_exists(async_db_session, "20260121_223000_merged")
+        assert "Overlap guard: skipping" in caplog.text
+
+
 class TestBatchSessionIdPruning:
     async def test_intra_batch_replacement_prunes_stale_id(
         self, async_db_session, importer, device
