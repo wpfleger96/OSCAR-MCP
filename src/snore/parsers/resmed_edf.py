@@ -1588,7 +1588,28 @@ class ResmedEDFParser(DeviceParser):
                     segment.end_time - merged_session.start_time
                 ).total_seconds()
 
-        merged_session.mask_on_segments = mask_on_segments
+        # ResMed can split one mask-on period's file types (PLD vs BRP/SA2)
+        # across adjacent second timestamps, so per-segment intervals may
+        # overlap and must be coalesced here.  finalize_statistics and the
+        # analysis validator both require mask_on_segments to be disjoint.
+        coalesced: list[tuple[float, float]] = []
+        for start, end in mask_on_segments:
+            if coalesced and start < coalesced[-1][1]:
+                # Strictly overlapping — extend the current interval.
+                coalesced[-1] = (coalesced[-1][0], max(coalesced[-1][1], end))
+            else:
+                coalesced.append((start, end))
+        n_removed = len(mask_on_segments) - len(coalesced)
+        if n_removed > 0:
+            merged_session.data_quality_notes.append(
+                f"Coalesced {n_removed} overlapping mask-on interval(s) "
+                f"(EDF file-type groups split across adjacent timestamps)"
+            )
+            logger.debug(
+                f"Night {night_date}: coalesced mask-on intervals "
+                f"{len(mask_on_segments)} → {len(coalesced)}"
+            )
+        merged_session.mask_on_segments = coalesced
 
         merged_session.data_quality_notes.insert(
             0,

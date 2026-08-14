@@ -613,7 +613,7 @@ class Session(Base):
     data_quality_notes: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, default=dict
     )
-    # Ascending [start_offset_s, end_offset_s] mask-on intervals in session
+    # Ascending, disjoint [start_offset_s, end_offset_s] mask-on intervals in session
     # offset seconds (list of 2-element lists). NULL = unknown (OSCAR imports,
     # pre-change data); a single-segment session stores [[0.0, duration]].
     mask_on_segments: Mapped[list[Any] | None] = mapped_column(

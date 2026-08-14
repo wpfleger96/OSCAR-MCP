@@ -429,7 +429,7 @@ class UnifiedSession(BaseModel):
     mask_on_segments: list[tuple[float, float]] | None = Field(
         default=None,
         description=(
-            "Ascending [start_offset_s, end_offset_s] mask-on intervals in "
+            "Ascending, disjoint [start_offset_s, end_offset_s] mask-on intervals in "
             "merged-session offset seconds. A single-segment session stores "
             "[(0.0, duration)] so 'known, no gaps' is distinguishable from "
             "None = unknown (e.g. OSCAR imports)."
