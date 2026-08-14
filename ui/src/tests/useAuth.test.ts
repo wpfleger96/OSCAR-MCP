@@ -8,7 +8,7 @@ import * as authApi from '@/api/auth'
 const mockStatus = {
     authenticated: true,
     auth_mode: 'multiuser',
-    user: { id: 1, email: 'alice@example.com', display_name: 'Alice', role: 'user' },
+    user: { id: 1, email: 'alice@example.com', display_name: 'Alice', role: 'member' },
     profiles: [{ id: 10, name: 'Primary' }],
     active_profile_id: 10,
     demo_available: false,
@@ -370,6 +370,44 @@ describe('useAuth', () => {
         } finally {
             vi.useRealTimers()
         }
+    })
+
+    describe('canWrite', () => {
+        it('canWrite_localMode_notAuthenticated_returnsFalse', async () => {
+            // Regression: old code returned true for any local-mode status object,
+            // even when the actor could not be resolved (user null, authenticated false).
+            vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce({
+                ...mockStatus,
+                authenticated: false,
+                auth_mode: 'local',
+                user: null,
+            })
+            const { fetchStatus, canWrite } = useAuth()
+            await fetchStatus()
+            expect(canWrite.value).toBe(false)
+        })
+
+        it('canWrite_localMode_authenticatedAdmin_returnsTrue', async () => {
+            vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce({
+                ...mockStatus,
+                authenticated: true,
+                auth_mode: 'local',
+                user: { id: 1, email: 'admin@example.com', display_name: 'Admin', role: 'admin' },
+            })
+            const { fetchStatus, canWrite } = useAuth()
+            await fetchStatus()
+            expect(canWrite.value).toBe(true)
+        })
+
+        it('canWrite_multiuser_authenticatedDemoRole_returnsFalse', async () => {
+            vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce({
+                ...mockStatus,
+                user: { ...mockStatus.user, role: 'demo' },
+            })
+            const { fetchStatus, canWrite } = useAuth()
+            await fetchStatus()
+            expect(canWrite.value).toBe(false)
+        })
     })
 
     it('login_generationGuard_stalePreLoginFetchCannotOverwriteAuthenticated', async () => {
