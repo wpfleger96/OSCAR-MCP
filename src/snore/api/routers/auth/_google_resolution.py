@@ -83,12 +83,14 @@ async def linked_user_ticket(
     return await ticket_for(db, cfg, user)
 
 
-async def link_identity_ticket(
-    db: AsyncSession, cfg: AppConfig, user: models.User, sub: str, email_raw: str
-) -> SessionTicket:
-    """Link a new Google identity to an existing user and log them in."""
-    if user.disabled_at is not None:
-        raise TxFailure()
+def _link_google_identity(
+    db: AsyncSession, user: models.User, sub: str, email_raw: str
+) -> None:
+    """Add an ``AuthIdentity`` row and clear the ``google_link_disabled`` flag.
+
+    Shared between the invite-signup path (``link_identity_ticket``) and the
+    authenticated connect path (``resolve_connect``).
+    """
     db.add(
         models.AuthIdentity(
             user_id=user.id,
@@ -97,15 +99,77 @@ async def link_identity_ticket(
             email=email_raw,
         )
     )
-    # A deliberate re-link via the invite-signup path clears any previous
-    # unlink flag so the auto-link path is restored for future logins.
+    # A deliberate link via Google (invite-signup or account connect page)
+    # clears any previous unlink flag so the auto-link path is restored.
     user.google_link_disabled = False
     # Audit trail: linking changes who can access the account without a
     # password, so operators need a record of when it happened.
     logger.info(
         "Linked new Google identity to user id=%s (role=%s)", user.id, user.role
     )
+
+
+async def link_identity_ticket(
+    db: AsyncSession, cfg: AppConfig, user: models.User, sub: str, email_raw: str
+) -> SessionTicket:
+    """Link a new Google identity to an existing user and log them in."""
+    if user.disabled_at is not None:
+        raise TxFailure()
+    _link_google_identity(db, user, sub, email_raw)
     return await ticket_for(db, cfg, user)
+
+
+async def resolve_connect(
+    db: AsyncSession,
+    cfg: AppConfig,
+    claims: dict[str, object],
+    *,
+    user_id: int,
+) -> None:
+    """Link a Google identity to an already-authenticated user's account.
+
+    Runs inside window 2 of the callback; raises :class:`TxFailure` on any
+    failure so the caller rolls back and returns a uniform error redirect.
+    The Google account's email must match the user's ``canonical_email`` —
+    ``fetch_google_id_token_claims`` already guarantees ``email_verified``
+    is True.  Admins are allowed (the motivating case: the auto-link path
+    excludes admins, so connect is the intentional authenticated path for
+    them).
+
+    Success is idempotent: if ``(google, sub)`` is already linked to this
+    user, the call returns without error.  No session cookie is issued; the
+    caller already holds a valid session.
+    """
+    sub = str(claims["sub"])
+    email_raw = str(claims.get("email", ""))
+    email_canonical = normalize_email(email_raw)
+
+    user = await db.get(models.User, user_id)
+    if user is None or user.disabled_at is not None or user.role == "demo":
+        raise TxFailure()
+
+    if not email_canonical or email_canonical != user.canonical_email:
+        logger.warning("Google connect: email mismatch for user id=%s", user_id)
+        raise TxFailure()
+
+    identity = (
+        (
+            await db.execute(
+                select(models.AuthIdentity).where(
+                    models.AuthIdentity.provider == "google",
+                    models.AuthIdentity.subject == sub,
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if identity is not None:
+        if identity.user_id == user_id:
+            return  # idempotent success
+        raise TxFailure()
+
+    _link_google_identity(db, user, sub, email_raw)
 
 
 async def resolve_login(
@@ -120,8 +184,8 @@ async def resolve_login(
     ``email_verified is True``.  Never provisions a new account.
 
     Admin accounts are excluded: control of a matching mailbox alone must
-    not grant admin access.  Admins link Google deliberately via an invite
-    addressed to their own email (signup path b).
+    not grant admin access.  Admins link Google deliberately via the
+    authenticated connect flow on /account.
     """
     sub = str(claims["sub"])
     ticket = await linked_user_ticket(db, cfg, sub)

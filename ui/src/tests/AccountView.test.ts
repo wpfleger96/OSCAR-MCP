@@ -26,7 +26,7 @@ import AccountView from '@/views/AccountView.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { getMe, changePassword, getPreferences, unlinkGoogle, deleteMyData } from '@/api/me'
 
 const ME_WITH_PASSWORD = {
@@ -67,6 +67,7 @@ describe('AccountView — password form', () => {
         vi.resetAllMocks()
         makeAuthMock()
         makeDateFormatMock()
+        vi.mocked(useRoute).mockReturnValue({ query: {} } as never)
         vi.mocked(getMe).mockResolvedValue(ME_WITH_PASSWORD)
         vi.mocked(getPreferences).mockResolvedValue(PREFS as never)
     })
@@ -217,13 +218,16 @@ describe('AccountView — sign-in methods / Google unlink', () => {
     }
 
     let mockPush: ReturnType<typeof vi.fn>
+    let mockReplace: ReturnType<typeof vi.fn>
     let mockClearAuth: ReturnType<typeof vi.fn>
 
     beforeEach(() => {
         vi.resetAllMocks()
         mockPush = vi.fn()
+        mockReplace = vi.fn()
         mockClearAuth = vi.fn()
-        vi.mocked(useRouter).mockReturnValue({ push: mockPush } as never)
+        vi.mocked(useRouter).mockReturnValue({ push: mockPush, replace: mockReplace } as never)
+        vi.mocked(useRoute).mockReturnValue({ query: {} } as never)
         vi.mocked(useAuth).mockReturnValue(
             baseMakeAuthMock({
                 role: ref('member') as never,
@@ -321,6 +325,61 @@ describe('AccountView — sign-in methods / Google unlink', () => {
         expect(mockClearAuth).not.toHaveBeenCalled()
         expect(mockPush).not.toHaveBeenCalled()
     })
+
+    it('test_google_not_linked_shows_connect_google_link', async () => {
+        vi.mocked(getMe).mockResolvedValue(ME_NOT_LINKED)
+        const wrapper = await mountAndLoad()
+
+        const links = wrapper.findAll('a')
+        const connectLink = links.find((a) => a.text().includes('Connect Google'))
+        expect(connectLink).toBeTruthy()
+        expect(connectLink!.attributes('href')).toBe('/api/v1/auth/google/connect')
+
+        const unlinkBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Unlink Google')
+        expect(unlinkBtn).toBeUndefined()
+    })
+
+    it('test_google_not_linked_demo_shows_disabled_connect_button', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                role: ref('demo') as never,
+                isAuthenticated: ref(true) as never,
+                clearAuth: mockClearAuth as never,
+            }) as never,
+        )
+        vi.mocked(getMe).mockResolvedValue(ME_NOT_LINKED)
+        const wrapper = await mountAndLoad()
+
+        const connectBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Connect Google'))
+        expect(connectBtn).toBeTruthy()
+        expect((connectBtn!.element as HTMLButtonElement).disabled).toBe(true)
+
+        const links = wrapper.findAll('a')
+        const connectLink = links.find((a) => a.text().includes('Connect Google'))
+        expect(connectLink).toBeUndefined()
+    })
+
+    it('test_google_connected_query_shows_success_and_cleans_url', async () => {
+        vi.mocked(useRoute).mockReturnValue({ query: { google_connected: '1' } } as never)
+        vi.mocked(getMe).mockResolvedValue(ME_LINKED_WITH_PW)
+        const wrapper = await mountAndLoad()
+
+        expect(wrapper.text()).toContain('Google account linked')
+        expect(mockReplace).toHaveBeenCalledWith({ path: '/account' })
+    })
+
+    it('test_google_connect_error_query_shows_error_message', async () => {
+        vi.mocked(useRoute).mockReturnValue({ query: { google_connect_error: '1' } } as never)
+        vi.mocked(getMe).mockResolvedValue(ME_NOT_LINKED)
+        const wrapper = await mountAndLoad()
+
+        const alerts = wrapper.findAll('[role="alert"]')
+        const errorAlert = alerts.find((a) => a.text().includes("Couldn't link Google"))
+        expect(errorAlert).toBeTruthy()
+        expect(mockReplace).toHaveBeenCalledWith({ path: '/account' })
+    })
 })
 
 describe('AccountView — danger zone (delete-data)', () => {
@@ -328,6 +387,7 @@ describe('AccountView — danger zone (delete-data)', () => {
         vi.resetAllMocks()
         makeAuthMock()
         makeDateFormatMock()
+        vi.mocked(useRoute).mockReturnValue({ query: {} } as never)
         vi.mocked(getMe).mockResolvedValue(ME_WITH_PASSWORD)
         vi.mocked(getPreferences).mockResolvedValue(PREFS as never)
     })

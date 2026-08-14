@@ -73,6 +73,7 @@ async def _make_oauth_attempt(
     invite_id: int | None = None,
     expected_canonical_email: str | None = None,
     offset_seconds: int = 0,  # positive = future, negative = expired
+    connect_user_id: int | None = None,
 ) -> models.OauthAttempt:
     """Insert and return an oauth_attempt row for testing."""
     now = datetime.now(UTC)
@@ -86,6 +87,7 @@ async def _make_oauth_attempt(
         expires_at=expires_at,
         invite_id=invite_id,
         expected_canonical_email=expected_canonical_email,
+        connect_user_id=connect_user_id,
     )
     db.add(attempt)
     await db.flush()
@@ -1798,6 +1800,907 @@ class TestExpiredInviteDuringExchangeCommitsNothing:
 async def _async_return(value: object) -> object:
     """Coroutine helper that immediately returns *value*."""
     return value
+
+
+# ---------------------------------------------------------------------------
+# Google Connect flow
+# ---------------------------------------------------------------------------
+
+
+class TestGoogleConnect:
+    async def _seed_user(
+        self,
+        db: AsyncSession,
+        email: str,
+        *,
+        role: str = "member",
+        google_link_disabled: bool = False,
+        disabled: bool = False,
+    ) -> tuple[int, int]:
+        """Create a user with a default profile; return (user_id, profile_id)."""
+        user = models.User(
+            canonical_email=email,
+            password_hash="argon2-hash-placeholder",
+            role=role,
+            session_version=0,
+            disabled_at=datetime.now(UTC) if disabled else None,
+            google_link_disabled=google_link_disabled,
+        )
+        db.add(user)
+        await db.flush()
+        profile = models.Profile(user_id=user.id, name="Default")
+        db.add(profile)
+        await db.flush()
+        user.default_profile_id = profile.id
+        return user.id, profile.id
+
+    async def _run_connect_callback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        sub: str,
+        email: str,
+        state: str,
+        nonce: str,
+        pre_auth_value: str,
+    ) -> httpx.Response:
+        monkeypatch.setattr(
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
+            lambda **kw: _async_return(_fake_claims(sub=sub, email=email, nonce=nonce)),
+        )
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            return await client.get(
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
+                headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_happy_path_member(self, temp_db, monkeypatch):
+        """Member connect: matching email → 302 to /account?google_connected=1,
+        AuthIdentity created, google_link_disabled cleared, no session cookie issued."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        email = "member@example.com"
+        sub = f"gsub_{uuid.uuid4().hex[:8]}"
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, email)
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        resp = await self._run_connect_callback(
+            monkeypatch,
+            sub=sub,
+            email=email,
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302, f"Expected 302, got {resp.status_code}"
+        assert resp.headers.get("location") == "/account?google_connected=1"
+        assert "snore_session" not in resp.cookies
+
+        async with session_scope() as db:
+            from sqlalchemy import select as sel
+
+            identity = (
+                (
+                    await db.execute(
+                        sel(models.AuthIdentity).where(
+                            models.AuthIdentity.provider == "google",
+                            models.AuthIdentity.subject == sub,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert identity is not None
+            assert identity.user_id == user_id
+
+            user = await db.get(models.User, user_id)
+            assert user is not None
+            assert user.google_link_disabled is False
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_happy_path_admin(self, temp_db, monkeypatch):
+        """Admin connect succeeds — the motivating case; auto-link excludes admins."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        email = "admin@example.com"
+        sub = f"gsub_admin_{uuid.uuid4().hex[:8]}"
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, email, role="admin")
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        resp = await self._run_connect_callback(
+            monkeypatch,
+            sub=sub,
+            email=email,
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302, f"Expected 302, got {resp.status_code}"
+        assert resp.headers.get("location") == "/account?google_connected=1"
+        assert "snore_session" not in resp.cookies
+
+        async with session_scope() as db:
+            from sqlalchemy import select as sel
+
+            identity = (
+                (
+                    await db.execute(
+                        sel(models.AuthIdentity).where(
+                            models.AuthIdentity.provider == "google",
+                            models.AuthIdentity.subject == sub,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert identity is not None
+            assert identity.user_id == user_id
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_email_mismatch(self, temp_db, monkeypatch):
+        """Google email doesn't match user canonical_email → error redirect, no identity."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, "user@example.com")
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        resp = await self._run_connect_callback(
+            monkeypatch,
+            sub="gsub-mismatch",
+            email="other@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302
+        assert "google_connect_error=1" in resp.headers.get("location", "")
+
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+        assert count == 0
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_sub_linked_to_another_user(self, temp_db, monkeypatch):
+        """Sub already linked to a different user → error redirect, no new row."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        sub = f"gsub_{uuid.uuid4().hex[:8]}"
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user1_id, _ = await self._seed_user(db, "user1@example.com")
+            user2_id, _ = await self._seed_user(db, "user2@example.com")
+            # Link the sub to user2 — connecting as user1 must fail.
+            db.add(
+                models.AuthIdentity(
+                    user_id=user2_id,
+                    provider="google",
+                    subject=sub,
+                    email="user2@example.com",
+                )
+            )
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user1_id,
+            )
+            state = attempt.state
+
+        resp = await self._run_connect_callback(
+            monkeypatch,
+            sub=sub,
+            email="user1@example.com",
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302
+        assert "google_connect_error=1" in resp.headers.get("location", "")
+
+        # Still exactly one identity row (the original, for user2).
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+        assert count == 1
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_idempotent_relink(self, temp_db, monkeypatch):
+        """Sub already linked to this user → success redirect, still one identity row."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        sub = f"gsub_{uuid.uuid4().hex[:8]}"
+        email = "user@example.com"
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, email)
+            # Pre-link the sub.
+            db.add(
+                models.AuthIdentity(
+                    user_id=user_id, provider="google", subject=sub, email=email
+                )
+            )
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        resp = await self._run_connect_callback(
+            monkeypatch,
+            sub=sub,
+            email=email,
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302
+        assert resp.headers.get("location") == "/account?google_connected=1"
+
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+        assert count == 1, f"Expected exactly 1 identity row, found {count}"
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_google_link_disabled_cleared(self, temp_db, monkeypatch):
+        """User with google_link_disabled=True connects → flag cleared after success."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        email = "user@example.com"
+        sub = f"gsub_{uuid.uuid4().hex[:8]}"
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, email, google_link_disabled=True)
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        resp = await self._run_connect_callback(
+            monkeypatch,
+            sub=sub,
+            email=email,
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302
+        assert resp.headers.get("location") == "/account?google_connected=1"
+
+        async with session_scope() as db:
+            user = await db.get(models.User, user_id)
+            assert user is not None
+            assert user.google_link_disabled is False
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_initiation_no_session_returns_401(self, temp_db, monkeypatch):
+        """GET /google/connect with no session cookie → 401."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import cleanup_database, init_database
+
+        await init_database(str(temp_db))
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get("/api/v1/auth/google/connect")
+
+        assert resp.status_code == 401, f"Expected 401, got {resp.status_code}"
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_initiation_demo_session_returns_403_no_attempt_row(
+        self, temp_db, monkeypatch
+    ):
+        """GET /google/connect with demo-user session → 403, no oauth_attempts row."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        from snore.auth.session_cookie import encode_session
+
+        async with session_scope() as db:
+            demo_id, profile_id = await self._seed_user(
+                db, "demo@example.com", role="demo"
+            )
+
+        session_token = encode_session(
+            cfg.session_secret,
+            user_id=demo_id,
+            active_profile_id=profile_id,
+            session_version=0,
+        )
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                "/api/v1/auth/google/connect",
+                cookies={"snore_session": session_token},
+            )
+
+        assert resp.status_code == 403, f"Expected 403, got {resp.status_code}"
+
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            count = (
+                await db.execute(sel(func.count()).select_from(models.OauthAttempt))
+            ).scalar_one()
+        assert count == 0, f"Expected no oauth_attempts row, found {count}"
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_initiation_valid_session_redirects_and_creates_attempt(
+        self, temp_db, monkeypatch
+    ):
+        """GET /google/connect with valid member session → 302 to accounts.google.com,
+        oauth_attempts row created with connect_user_id set."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        from snore.auth.session_cookie import encode_session
+
+        async with session_scope() as db:
+            user_id, profile_id = await self._seed_user(db, "member@example.com")
+
+        session_token = encode_session(
+            cfg.session_secret,
+            user_id=user_id,
+            active_profile_id=profile_id,
+            session_version=0,
+        )
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                "/api/v1/auth/google/connect",
+                cookies={"snore_session": session_token},
+            )
+
+        assert resp.status_code == 302, f"Expected 302, got {resp.status_code}"
+        location = resp.headers.get("location", "")
+        assert "accounts.google.com" in location, (
+            f"Expected redirect to Google, got {location!r}"
+        )
+
+        async with session_scope() as db:
+            from sqlalchemy import select as sel
+
+            attempt = (
+                (
+                    await db.execute(
+                        sel(models.OauthAttempt)
+                        .order_by(models.OauthAttempt.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        assert attempt is not None
+        assert attempt.connect_user_id == user_id
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_replay_consumed_between_windows_returns_error_redirect(
+        self, temp_db, monkeypatch
+    ):
+        """Attempt consumed between window 1 and window 2 → connect error redirect."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        email = "user@example.com"
+        sub = f"gsub_{uuid.uuid4().hex[:8]}"
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+        attempt_id_holder: list[int] = []
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, email)
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            attempt_id_holder.append(attempt.id)
+            state = attempt.state
+
+        async def _mock_exchange_then_consume(**kw: object) -> object:
+            # Consume the attempt between windows, simulating the race condition.
+            async with session_scope() as mdb:
+                row = await mdb.get(models.OauthAttempt, attempt_id_holder[0])
+                assert row is not None
+                row.consumed_at = datetime.now(UTC)
+            return _fake_claims(sub=sub, email=email, nonce=nonce)
+
+        monkeypatch.setattr(
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
+            _mock_exchange_then_consume,
+        )
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
+                headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
+            )
+
+        assert resp.status_code == 302
+        assert "google_connect_error=1" in resp.headers.get("location", "")
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_browser_cookie_mismatch_returns_error_redirect(
+        self, temp_db, monkeypatch
+    ):
+        """Browser-cookie mismatch on a connect attempt → error redirect."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        real_pre_auth = uuid.uuid4().hex
+        wrong_pre_auth = uuid.uuid4().hex
+        assert real_pre_auth != wrong_pre_auth
+        email = "user@example.com"
+        sub = f"gsub_{uuid.uuid4().hex[:8]}"
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, email)
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(real_pre_auth),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        monkeypatch.setattr(
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
+            lambda **kw: _async_return(_fake_claims(sub=sub, email=email, nonce=nonce)),
+        )
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
+                headers={"cookie": f"snore_pre_auth={wrong_pre_auth}"},
+            )
+
+        assert resp.status_code == 302
+        assert "google_connect_error=1" in resp.headers.get("location", "")
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_expired_attempt_returns_generic_400(self, temp_db, monkeypatch):
+        """Expired connect attempt → generic JSON 400 (flow kind unknowable before attempt loads)."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, "user@example.com")
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+                offset_seconds=-700,  # expired
+            )
+            state = attempt.state
+
+        monkeypatch.setattr(
+            "snore.api.routers.auth.routes_google.fetch_google_id_token_claims",
+            lambda **kw: _async_return(_fake_claims(nonce=nonce)),
+        )
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                f"/api/v1/auth/google/callback?state={state}&code=testcode",
+                headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
+            )
+
+        # Window 1 rejects expired attempt; flow kind unknowable → generic 400.
+        assert resp.status_code == 400, f"Expected 400, got {resp.status_code}"
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_disabled_user_returns_error_redirect(self, temp_db, monkeypatch):
+        """Disabled user with matching email → error redirect, no identity row."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        email = "disabled@example.com"
+        sub = f"gsub_{uuid.uuid4().hex[:8]}"
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, email, disabled=True)
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        resp = await self._run_connect_callback(
+            monkeypatch,
+            sub=sub,
+            email=email,
+            state=state,
+            nonce=nonce,
+            pre_auth_value=pre_auth_value,
+        )
+
+        assert resp.status_code == 302
+        assert "google_connect_error=1" in resp.headers.get("location", "")
+
+        async with session_scope() as db:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            count = (
+                await db.execute(sel(func.count()).select_from(models.AuthIdentity))
+            ).scalar_one()
+        assert count == 0
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_google_cancel_on_connect_returns_error_redirect(
+        self, temp_db, monkeypatch
+    ):
+        """User cancels at Google's consent screen during a connect flow →
+        302 to /account?google_connect_error=1 (not a raw JSON 400)."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            user_id, _ = await self._seed_user(db, "user@example.com")
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+                connect_user_id=user_id,
+            )
+            state = attempt.state
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                f"/api/v1/auth/google/callback?error=access_denied&state={state}",
+                headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
+            )
+
+        assert resp.status_code == 302, f"Expected 302, got {resp.status_code}"
+        assert "google_connect_error=1" in resp.headers.get("location", ""), (
+            f"Expected connect error redirect, got {resp.headers.get('location')!r}"
+        )
+
+        await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_google_cancel_on_login_returns_generic_400(
+        self, temp_db, monkeypatch
+    ):
+        """User cancels at Google's consent screen during a plain login flow →
+        generic JSON 400 (no connect_user_id, login cancel behavior unchanged)."""
+        _multiuser_env(monkeypatch)
+        cfg = load_config(
+            auth_mode_override="multiuser", bind_host_override="127.0.0.1"
+        )
+        set_config(cfg)
+
+        from snore.database.session import (
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        await init_database(str(temp_db))
+
+        pre_auth_value = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+
+        async with session_scope() as db:
+            # Plain login attempt — no connect_user_id.
+            attempt = await _make_oauth_attempt(
+                db,
+                nonce=nonce,
+                browser_session_hash=_hash(pre_auth_value),
+            )
+            state = attempt.state
+
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=_BASE_URL,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(
+                f"/api/v1/auth/google/callback?error=access_denied&state={state}",
+                headers={"cookie": f"snore_pre_auth={pre_auth_value}"},
+            )
+
+        assert resp.status_code == 400, f"Expected 400, got {resp.status_code}"
+        assert resp.json() == {"detail": "Authentication failed"}
+
+        await cleanup_database()
 
 
 # ---------------------------------------------------------------------------

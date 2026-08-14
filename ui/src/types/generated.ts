@@ -344,6 +344,41 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/auth/google/connect': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Google Connect
+         * @description Link a Google identity to the authenticated user's account.
+         *
+         *     Initiates an OAuth flow that, on callback, links the Google account to
+         *     the session user.  The Google account's email must match the user's
+         *     ``canonical_email`` (verified at callback time).
+         *
+         *     Demo role is blocked at the ``RequireWritable`` guard (403).  Admin
+         *     accounts are allowed — this is the intended path for admins, who are
+         *     deliberately excluded from the email auto-link path in ``resolve_login``.
+         *
+         *     Why GET is CSRF-safe: a forged GET can only *start* a flow bound to the
+         *     victim's ``user_id``; completing it requires Google claims whose verified
+         *     email equals the victim's ``canonical_email``, which an attacker's Google
+         *     account cannot produce.  The ``snore_pre_auth`` cookie additionally binds
+         *     the flow to the initiating browser, matching the existing pattern used by
+         *     ``GET /google/login``.
+         */
+        get: operations['google_connect_api_v1_auth_google_connect_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/auth/google/login': {
         parameters: {
             query?: never
@@ -5067,6 +5102,26 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    google_connect_api_v1_auth_google_connect_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
                 }
             }
         }
