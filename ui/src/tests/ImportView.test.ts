@@ -25,6 +25,7 @@ vi.mock('@/api/import', async (importActual) => {
         importFiles: vi.fn(),
         precheckFiles: vi.fn(),
         importHealthFile: vi.fn(),
+        triggerRescan: vi.fn(),
     }
 })
 vi.mock('@/utils/formatting', () => ({
@@ -48,7 +49,7 @@ import { makeAuthMock } from './helpers/mockUseAuth'
 import { useAuth } from '@/composables/useAuth'
 import { getImportJobs, cancelImport } from '@/api/importJobs'
 import { cancelAnalysisJob } from '@/api/analysis'
-import { importFiles, precheckFiles, importHealthFile } from '@/api/import'
+import { importFiles, precheckFiles, importHealthFile, triggerRescan } from '@/api/import'
 import ImportView from '@/views/ImportView.vue'
 
 function makeJob(overrides: Partial<PipelineJobStatus> = {}): PipelineJobStatus {
@@ -588,5 +589,153 @@ describe('ImportView Apple Health tab', () => {
 
         expect(importFiles).not.toHaveBeenCalled()
         expect(importHealthFile).toHaveBeenCalledOnce()
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Rescan tests
+// ---------------------------------------------------------------------------
+
+// All session files skippable — uploadCount === 0 state.
+const allSkippedFiles = [
+    makeFile('STR.edf', 200, 'MySD/STR.edf'),
+    makeFile('BRP.edf', 1000, 'MySD/DATALOG/20240101_010000_BRP.edf'),
+    makeFile('BRP2.edf', 800, 'MySD/DATALOG/20240102_010000_BRP2.edf'),
+    makeFile('Identification.json', 100, 'MySD/Identification.json'),
+]
+const allSkippedPaths = new Set([
+    'MySD/DATALOG/20240101_010000_BRP.edf',
+    'MySD/DATALOG/20240102_010000_BRP2.edf',
+])
+
+describe('ImportView rescan', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        vi.mocked(useAuth).mockReturnValue(
+            makeAuthMock({
+                profiles: ref([{ id: 1, name: 'Test' }]),
+                activeProfileId: ref(1),
+            }) as never,
+        )
+        vi.mocked(getImportJobs).mockResolvedValue({ jobs: [] })
+        vi.mocked(precheckFiles).mockResolvedValue(allSkippedPaths)
+        vi.mocked(triggerRescan).mockResolvedValue({ job_id: 'rescan-1' })
+    })
+
+    it('test_rescan_button_rendered_only_when_all_session_files_skipped', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+
+        // No files selected — rescan button must not exist.
+        expect(wrapper.findAll('button').some((b) => b.text() === 'Re-import from archive')).toBe(
+            false,
+        )
+
+        // Select all-skipped files — uploadCount === 0, forceUploadAll === false.
+        await triggerFileSelection(wrapper, allSkippedFiles)
+
+        expect(wrapper.findAll('button').some((b) => b.text() === 'Re-import from archive')).toBe(
+            true,
+        )
+    })
+
+    it('test_rescan_button_hidden_when_forceUploadAll_is_true', async () => {
+        // Use one skippable + one new session so forceUploadAll checkbox appears.
+        vi.mocked(precheckFiles).mockResolvedValue(
+            new Set(['MySD/DATALOG/20240101_010000_BRP.edf']),
+        )
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, resMedFiles)
+
+        // uploadCount > 0, so rescan button must not be shown.
+        expect(wrapper.findAll('button').some((b) => b.text() === 'Re-import from archive')).toBe(
+            false,
+        )
+
+        // Enable forceUploadAll — still no rescan button.
+        const checkbox = wrapper.find('input[type="checkbox"]')
+        await checkbox.setValue(true)
+        expect(wrapper.findAll('button').some((b) => b.text() === 'Re-import from archive')).toBe(
+            false,
+        )
+    })
+
+    it('test_rescan_success_calls_triggerRescan_and_refreshes_jobs', async () => {
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, allSkippedFiles)
+
+        const rescanBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text() === 'Re-import from archive')!
+        await rescanBtn.trigger('click')
+        await flushPromises()
+
+        expect(triggerRescan).toHaveBeenCalledOnce()
+        expect(triggerRescan).toHaveBeenCalledWith(1)
+        // After success, resetUpload brings view back to idle (drop zone visible).
+        expect(wrapper.find('.drop-zone').exists()).toBe(true)
+        // fetchImportJobs was called (at mount + after rescan success).
+        expect(getImportJobs).toHaveBeenCalledTimes(2)
+    })
+
+    it('test_rescan_passes_undefined_profile_when_no_profile_selected', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            makeAuthMock({
+                profiles: ref([]),
+                activeProfileId: ref(null),
+            }) as never,
+        )
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, allSkippedFiles)
+
+        const rescanBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text() === 'Re-import from archive')!
+        await rescanBtn.trigger('click')
+        await flushPromises()
+
+        expect(triggerRescan).toHaveBeenCalledWith(undefined)
+    })
+
+    it('test_rescan_error_surfaces_detail_message', async () => {
+        vi.mocked(triggerRescan).mockRejectedValue({
+            response: { data: { detail: 'Archive contains no device data' } },
+        })
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, allSkippedFiles)
+
+        const rescanBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text() === 'Re-import from archive')!
+        await rescanBtn.trigger('click')
+        await flushPromises()
+
+        expect(wrapper.find('.error-text').text()).toBe('Archive contains no device data')
+        // View stays in selected phase — the rescan action remains available.
+        // (Cannot assert on '.drop-zone' absence: the Apple Health tab renders
+        // its own drop zone inside a v-show container, so one always exists.)
+        expect(wrapper.findAll('button').some((b) => b.text() === 'Re-import from archive')).toBe(
+            true,
+        )
+    })
+
+    it('test_rescan_double_click_triggers_triggerRescan_exactly_once', async () => {
+        vi.mocked(triggerRescan).mockReturnValue(new Promise(() => {}))
+        const wrapper = mount(ImportView)
+        await flushPromises()
+        await triggerFileSelection(wrapper, allSkippedFiles)
+
+        const rescanBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text() === 'Re-import from archive')!
+        void rescanBtn.trigger('click')
+        void rescanBtn.trigger('click')
+        await flushPromises()
+
+        expect(triggerRescan).toHaveBeenCalledTimes(1)
     })
 })

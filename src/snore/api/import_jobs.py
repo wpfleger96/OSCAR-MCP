@@ -111,6 +111,7 @@ class JobType(Enum):
     # surfaced by in-memory jobs without a ValueError on enum lookup.
     PATH = "path"
     HEALTH_UPLOAD = "health_upload"
+    RESCAN = "rescan"
 
 
 class JobPhase(StrEnum):

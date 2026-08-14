@@ -393,3 +393,20 @@ class TestSetAnalysisLinkOrdering:
         assert msg["event"] == "complete"
         assert msg["data"].get("analysis_job_id") == "deadbeef"
         assert msg["data"].get("import_committed") is True
+
+
+# ---------------------------------------------------------------------------
+# JobType.RESCAN — enum value and cleanup_files no-op
+# ---------------------------------------------------------------------------
+
+
+class TestJobTypeRescan:
+    def test_rescan_enum_value(self):
+        assert JobType.RESCAN.value == "rescan"
+
+    def test_rescan_job_cleanup_files_no_op(self):
+        """A RESCAN job with temp_dir=None must not raise in cleanup_files()."""
+        job = create_job(JobType.RESCAN, owner_user_id=1)
+        assert job.temp_dir is None
+        job.cleanup_files()  # must not raise
+        job.release_capacity()

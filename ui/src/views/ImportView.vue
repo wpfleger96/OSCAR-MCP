@@ -105,9 +105,21 @@
                             />
                             Upload all files (skip dedupe)
                         </label>
+                        <p v-if="uploadCount === 0 && !forceUploadAll" class="folder-meta">
+                            Re-importing from the server's archive will restore any sessions missing
+                            from the database.
+                        </p>
+                        <p v-if="rescanError" class="error-text">{{ rescanError }}</p>
                     </template>
                     <div class="card-actions">
                         <Button variant="outline" @click="resetUpload">Change folder</Button>
+                        <Button
+                            v-if="skippedCount > 0 && uploadCount === 0 && !forceUploadAll"
+                            :disabled="rescanPending"
+                            @click="handleRescan"
+                        >
+                            Re-import from archive
+                        </Button>
                         <Button
                             :disabled="skippedCount > 0 && uploadCount === 0 && !forceUploadAll"
                             @click="handleImport"
@@ -218,6 +230,7 @@ import {
     importFiles,
     importHealthFile,
     precheckFiles,
+    triggerRescan,
     isAnchorFile,
     isImportableFile,
     type FileEntry,
@@ -270,6 +283,8 @@ const skippablePaths = ref<Set<string>>(new Set())
 const precheckProfileId = ref<number | null | undefined>(undefined)
 const forceUploadAll = ref(false)
 const skipSummary = ref<{ count: number; bytes: number } | null>(null)
+const rescanPending = ref(false)
+const rescanError = ref<string | null>(null)
 let precheckPromise: Promise<void> | null = null
 let precheckGeneration = 0
 
@@ -497,7 +512,25 @@ function resetUpload() {
     precheckPending.value = false
     precheckPromise = null
     skipSummary.value = null
+    rescanError.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
+}
+
+async function handleRescan() {
+    if (rescanPending.value) return
+    rescanPending.value = true
+    rescanError.value = null
+    try {
+        await triggerRescan(selectedProfileId.value ?? undefined)
+        resetUpload()
+        void fetchImportJobs()
+    } catch (e: unknown) {
+        const axiosErr = e as { response?: { data?: { detail?: string } } }
+        rescanError.value =
+            axiosErr.response?.data?.detail ?? (e instanceof Error ? e.message : 'Rescan failed')
+    } finally {
+        rescanPending.value = false
+    }
 }
 
 // ---------------------------------------------------------------------------

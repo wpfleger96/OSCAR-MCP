@@ -26,6 +26,7 @@ from snore.api.import_jobs import (
     JobState,
     JobType,
     cancel_job,
+    create_job,
     enqueue_for_execution,
     get_job,
     list_jobs,
@@ -131,6 +132,10 @@ class PrecheckRequest(BaseModel):
 
 class PrecheckResponse(BaseModel):
     skippable: list[str]
+
+
+class RescanRequest(BaseModel):
+    profile_id: int | None = None
 
 
 # Anchor files must never be reported as skippable. STR.edf changes daily and
@@ -614,6 +619,67 @@ async def precheck_upload(
         return PrecheckResponse(skippable=[])
 
     return PrecheckResponse(skippable=_classify_files(indexes, body.files))
+
+
+@router.post("/rescan", response_model=JobResponse, status_code=202)
+async def rescan_archive(
+    body: RescanRequest,
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JobResponse:
+    """Re-import CPAP sessions from the server-side raw archive.
+
+    Creates an import job that reads directly from the profile's backup archive
+    (~/.snore/raw/<profile_id>/<serial>/DATALOG/) without requiring a new file
+    upload.  Useful when DB sessions were deleted but the archive is intact —
+    the UNIQUE(device_id, device_session_id) upsert-skip makes this idempotent.
+
+    Returns 422 when no archive exists or the archive contains no device data.
+    Returns 429 when admission caps are exceeded.
+    """
+    from snore.constants import DEFAULT_RAW_BACKUP_DIR  # noqa: PLC0415
+
+    resolved_profile_id = await _resolve_profile_id(db, actor, body.profile_id)
+    profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(resolved_profile_id)
+
+    if not profile_raw_root.is_dir():
+        raise HTTPException(
+            status_code=422,
+            detail="No archive found for this profile. Upload data first.",
+        )
+
+    # Require at least one serial/DATALOG subtree — bare profile dirs with no
+    # device data cannot produce importable sessions.
+    has_device_data = any(
+        (d / "DATALOG").is_dir() for d in profile_raw_root.iterdir() if d.is_dir()
+    )
+    if not has_device_data:
+        raise HTTPException(
+            status_code=422,
+            detail="Archive exists but contains no device data.",
+        )
+
+    try:
+        job = create_job(JobType.RESCAN, owner_user_id=actor.user_id)
+    except RuntimeError:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many active imports. Please wait for existing imports to complete.",
+        ) from None
+
+    job.target_profile_id = resolved_profile_id
+
+    try:
+        from snore.api.import_worker import _upsert_job_record  # noqa: PLC0415
+
+        await _upsert_job_record(job)
+    except Exception:
+        logger.exception(
+            "Failed to persist PENDING state for rescan job %s", job.job_id
+        )
+
+    enqueue_for_execution(job, profile_raw_root)
+    return JobResponse(job_id=job.job_id)
 
 
 def _derive_stage(
