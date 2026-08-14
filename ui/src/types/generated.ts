@@ -55,6 +55,67 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/admin/mcp/google-bindings': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Google Bindings
+         * @description Return all Google-linked auth_identities with the owning user's details.
+         *
+         *     One item per auth_identities row — a user with two Google identities appears
+         *     twice.  Ordered by user email then linked_at for stable display.
+         */
+        get: operations['list_google_bindings_api_v1_admin_mcp_google_bindings_get']
+        put?: never
+        post?: never
+        /**
+         * Reset All Google Bindings
+         * @description Delete Google bindings for all users who have a password.
+         *
+         *     Password-less users' bindings survive — removing their only sign-in method
+         *     would lock them out.  The auth_identities row deletion immediately revokes MCP
+         *     access (the MCP server resolves every request by row lookup); bumping
+         *     session_version invalidates web session cookies.  google_link_disabled is
+         *     intentionally left untouched; members re-link automatically at next sign-in.
+         */
+        delete: operations['reset_all_google_bindings_api_v1_admin_mcp_google_bindings_delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/mcp/google-bindings/{user_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /**
+         * Reset Google Binding
+         * @description Delete all Google bindings for a single user and invalidate their sessions.
+         *
+         *     404 when the user does not exist or has no Google binding.
+         *     409 when the user has no password — resetting would leave them with no
+         *     sign-in method.  The auth_identities row deletion immediately revokes MCP
+         *     access (the MCP server resolves every request by row lookup); bumping
+         *     session_version invalidates web session cookies.  google_link_disabled is
+         *     intentionally left untouched so a fresh binding can form at next Google
+         *     sign-in (or via the account-page Connect flow for admins).
+         */
+        delete: operations['reset_google_binding_api_v1_admin_mcp_google_bindings__user_id__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/admin/mcp/status': {
         parameters: {
             query?: never
@@ -2986,6 +3047,24 @@ export interface components {
              */
             to_date: string
         }
+        /** GoogleBindingItem */
+        GoogleBindingItem: {
+            /** Display Name */
+            display_name: string | null
+            /** Google Email */
+            google_email: string | null
+            /** Has Password */
+            has_password: boolean
+            /**
+             * Linked At
+             * Format: date-time
+             */
+            linked_at: string
+            /** User Email */
+            user_email: string
+            /** User Id */
+            user_id: number
+        }
         /** GoogleInviteInitRequest */
         GoogleInviteInitRequest: {
             /** Token */
@@ -3812,6 +3891,13 @@ export interface components {
             name?: string | null
             /** Timezone */
             timezone?: string | null
+        }
+        /** ResetAllBindingsResponse */
+        ResetAllBindingsResponse: {
+            /** Reset */
+            reset: number
+            /** Skipped */
+            skipped: number
         }
         /** ResetRequest */
         ResetRequest: {
@@ -4673,6 +4759,77 @@ export interface operations {
             header?: never
             path: {
                 invite_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_google_bindings_api_v1_admin_mcp_google_bindings_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['GoogleBindingItem'][]
+                }
+            }
+        }
+    }
+    reset_all_google_bindings_api_v1_admin_mcp_google_bindings_delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ResetAllBindingsResponse']
+                }
+            }
+        }
+    }
+    reset_google_binding_api_v1_admin_mcp_google_bindings__user_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                user_id: number
             }
             cookie?: never
         }

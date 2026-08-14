@@ -10,6 +10,9 @@ POST   /invites
 GET    /invites
 DELETE /invites/{invite_id}
 GET    /mcp/status
+GET    /mcp/google-bindings
+DELETE /mcp/google-bindings
+DELETE /mcp/google-bindings/{user_id}
 
 All routes require admin role.  Registered at prefix /api/v1/admin by app.py.
 This prefix is intentionally outside the /api/v1/auth rate-limit scope;
@@ -27,6 +30,7 @@ Security controls
 
 from __future__ import annotations
 
+import logging
 import secrets
 
 from datetime import UTC, datetime, timedelta
@@ -35,7 +39,8 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.constants import NO_STORE
@@ -49,6 +54,7 @@ from snore.database import models
 from snore.database.models import AuthIdentity
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -447,3 +453,174 @@ async def get_mcp_status(
         disabled_reason=reason,
         linked_google_identities=linked_count,
     )
+
+
+# ---------------------------------------------------------------------------
+# MCP Google-binding routes
+# ---------------------------------------------------------------------------
+
+
+class GoogleBindingItem(BaseModel):
+    user_id: int
+    user_email: str
+    display_name: str | None
+    google_email: str | None
+    linked_at: datetime
+    has_password: bool
+
+
+class ResetAllBindingsResponse(BaseModel):
+    reset: int
+    skipped: int
+
+
+@router.get("/mcp/google-bindings", response_model=list[GoogleBindingItem])
+async def list_google_bindings(
+    actor: RequireAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[GoogleBindingItem]:
+    """Return all Google-linked auth_identities with the owning user's details.
+
+    One item per auth_identities row — a user with two Google identities appears
+    twice.  Ordered by user email then linked_at for stable display.
+    """
+    rows = (
+        await db.execute(
+            select(
+                AuthIdentity.user_id,
+                models.User.canonical_email,
+                models.User.display_name,
+                models.User.password_hash.is_not(None).label("has_password"),
+                AuthIdentity.email,
+                AuthIdentity.created_at,
+            )
+            .join(models.User, AuthIdentity.user_id == models.User.id)
+            .where(AuthIdentity.provider == "google")
+            .order_by(models.User.canonical_email, AuthIdentity.created_at)
+        )
+    ).all()
+
+    return [
+        GoogleBindingItem(
+            user_id=uid,
+            user_email=user_email,
+            display_name=display_name,
+            google_email=google_email,
+            linked_at=created_at,
+            has_password=has_password,
+        )
+        for uid, user_email, display_name, has_password, google_email, created_at in rows
+    ]
+
+
+@router.delete("/mcp/google-bindings", response_model=ResetAllBindingsResponse)
+async def reset_all_google_bindings(
+    actor: RequireAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ResetAllBindingsResponse:
+    """Delete Google bindings for all users who have a password.
+
+    Password-less users' bindings survive — removing their only sign-in method
+    would lock them out.  The auth_identities row deletion immediately revokes MCP
+    access (the MCP server resolves every request by row lookup); bumping
+    session_version invalidates web session cookies.  google_link_disabled is
+    intentionally left untouched; members re-link automatically at next sign-in.
+    """
+    rows = (
+        await db.execute(
+            select(
+                models.User.id,
+                models.User.password_hash.is_not(None).label("has_password"),
+            )
+            .join(
+                AuthIdentity,
+                (AuthIdentity.user_id == models.User.id)
+                & (AuthIdentity.provider == "google"),
+            )
+            .distinct()
+        )
+    ).all()
+
+    to_reset = [uid for uid, has_password in rows if has_password]
+    skipped = sum(1 for _, has_password in rows if not has_password)
+
+    if to_reset:
+        await db.execute(
+            delete(AuthIdentity).where(
+                AuthIdentity.user_id.in_(to_reset),
+                AuthIdentity.provider == "google",
+            )
+        )
+        await db.execute(
+            sa_update(models.User)
+            .where(models.User.id.in_(to_reset))
+            .values(session_version=models.User.session_version + 1)
+        )
+
+    logger.info(
+        "Admin id=%s reset all Google bindings: reset=%d skipped=%d",
+        actor.user_id,
+        len(to_reset),
+        skipped,
+    )
+
+    return ResetAllBindingsResponse(reset=len(to_reset), skipped=skipped)
+
+
+@router.delete("/mcp/google-bindings/{user_id}", response_model=MessageResponse)
+async def reset_google_binding(
+    user_id: int,
+    actor: RequireAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MessageResponse:
+    """Delete all Google bindings for a single user and invalidate their sessions.
+
+    404 when the user does not exist or has no Google binding.
+    409 when the user has no password — resetting would leave them with no
+    sign-in method.  The auth_identities row deletion immediately revokes MCP
+    access (the MCP server resolves every request by row lookup); bumping
+    session_version invalidates web session cookies.  google_link_disabled is
+    intentionally left untouched so a fresh binding can form at next Google
+    sign-in (or via the account-page Connect flow for admins).
+    """
+    user = await db.get(models.User, user_id)
+    has_binding = bool(
+        await db.scalar(
+            select(func.count()).where(
+                AuthIdentity.user_id == user_id,
+                AuthIdentity.provider == "google",
+            )
+        )
+    )
+
+    # Binding check precedes password check so a missing binding yields 404, not 409.
+    if user is None or not has_binding:
+        raise HTTPException(status_code=404, detail="No Google binding found for user")
+
+    if user.password_hash is None:
+        raise HTTPException(
+            status_code=409,
+            detail="User has no password; resetting would remove their only sign-in method",
+        )
+
+    result = await db.execute(
+        delete(AuthIdentity).where(
+            AuthIdentity.user_id == user_id,
+            AuthIdentity.provider == "google",
+        )
+    )
+    if result.rowcount == 0:  # type: ignore[attr-defined]
+        raise HTTPException(status_code=404, detail="No Google binding found for user")
+    await db.execute(
+        sa_update(models.User)
+        .where(models.User.id == user_id)
+        .values(session_version=models.User.session_version + 1)
+    )
+
+    logger.info(
+        "Admin id=%s reset Google binding for user id=%s",
+        actor.user_id,
+        user_id,
+    )
+
+    return MessageResponse(message="Google binding reset")

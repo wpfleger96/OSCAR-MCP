@@ -8,6 +8,8 @@ type InviteItem = components['schemas']['InviteItem']
 type CreateInviteRequest = components['schemas']['CreateInviteRequest']
 type InviteCreatedResponse = components['schemas']['InviteCreatedResponse']
 type MessageResponse = components['schemas']['MessageResponse']
+type GoogleBindingItem = components['schemas']['GoogleBindingItem']
+type ResetAllBindingsResponse = components['schemas']['ResetAllBindingsResponse']
 
 export const listUsers = apiGet<UserItem[]>('/admin/users')
 
@@ -36,3 +38,13 @@ export const revokeInvite = apiDelete<MessageResponse, [inviteId: number]>(
 )
 
 export const getMcpStatus = apiGet<McpStatus>('/admin/mcp/status')
+
+export const listGoogleBindings = apiGet<GoogleBindingItem[]>('/admin/mcp/google-bindings')
+
+export const resetGoogleBinding = apiDelete<MessageResponse, [userId: number]>(
+    (userId) => `/admin/mcp/google-bindings/${userId}`,
+)
+
+export const resetAllGoogleBindings = apiDelete<ResetAllBindingsResponse>(
+    '/admin/mcp/google-bindings',
+)

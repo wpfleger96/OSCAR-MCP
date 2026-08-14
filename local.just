@@ -21,6 +21,11 @@ _dev-auth-seed:
     SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
     uv run snore user invite dev@localhost --role admin
 
+# Seed fake Google bindings into the dev DB so the /admin/mcp reset flows are
+# testable under `just dev-auth` (no real Google OAuth needed). Idempotent.
+dev-seed-bindings:
+    uv run python scripts/seed_dev_google_bindings.py
+
 # Fully reset local dev state: stop stray dev servers (orphaned uvicorn
 # reload workers are the usual "database is locked" culprit), drop the DB,
 # and clear staged data. `snore db drop` skips sidecar cleanup when the main

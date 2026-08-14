@@ -36,7 +36,7 @@
                 >
                     <Loader2 v-if="deleting" class="mr-2 h-4 w-4 animate-spin" />
                     <Trash2 v-else class="mr-2 h-4 w-4" />
-                    Delete
+                    {{ confirmLabel }}
                 </Button>
             </AlertDialogFooter>
         </AlertDialogContent>
@@ -57,15 +57,20 @@ import {
 import { Button } from '@/components/ui/button'
 import { Loader2, Trash2 } from '@lucide/vue'
 
-const props = defineProps<{
-    visible: boolean
-    title: string
-    message: string
-    loading: boolean
-    deleting: boolean
-    /** When set, the user must type this exact phrase before confirming. */
-    confirmPhrase?: string
-}>()
+const props = withDefaults(
+    defineProps<{
+        visible: boolean
+        title: string
+        message: string
+        loading: boolean
+        deleting: boolean
+        /** When set, the user must type this exact phrase before confirming. */
+        confirmPhrase?: string
+        /** Label for the confirm button. Defaults to "Delete". */
+        confirmLabel?: string
+    }>(),
+    { confirmLabel: 'Delete' },
+)
 
 const emit = defineEmits<{
     'update:visible': [value: boolean]
