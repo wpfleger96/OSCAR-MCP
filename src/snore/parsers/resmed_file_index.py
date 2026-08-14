@@ -78,6 +78,31 @@ def scan_edf_files(datalog_dir: Path) -> list[Path]:
     return edf_files
 
 
+def index_segment_files(datalog_dir: Path) -> dict[str, dict[str, Path]]:
+    """Scan DATALOG and return a flat session_id -> {file_type: Path} mapping.
+
+    This is the single scan point used by both ``group_session_files`` and
+    ``chain_session_segments``.
+
+    Args:
+        datalog_dir: Directory to scan (typically source_root / "DATALOG").
+
+    Returns:
+        Dict mapping session_id (YYYYMMDD_HHMMSS) to its file-type map.
+    """
+    segments: dict[str, dict[str, Path]] = {}
+    for edf_file in scan_edf_files(datalog_dir):
+        match = _EDF_SESSION_PATTERN.match(edf_file.name)
+        if not match:
+            continue
+        session_id = match.group(1)
+        file_type = match.group(2)
+        if session_id not in segments:
+            segments[session_id] = {}
+        segments[session_id][file_type] = edf_file
+    return segments
+
+
 def group_session_files(
     datalog_dir: Path,
 ) -> dict[str, dict[str, dict[str, Path]]]:
@@ -107,23 +132,12 @@ def group_session_files(
     """
     groups: dict[str, dict[str, dict[str, Path]]] = {}
 
-    for edf_file in scan_edf_files(datalog_dir):
-        match = _EDF_SESSION_PATTERN.match(edf_file.name)
-        if not match:
-            continue
-
-        session_id = match.group(1)
-        file_type = match.group(2)
-
+    for session_id, file_map in index_segment_files(datalog_dir).items():
         timestamp = datetime.strptime(session_id, "%Y%m%d_%H%M%S")
         night = get_night_date(timestamp)
-
         if night not in groups:
             groups[night] = {}
-        if session_id not in groups[night]:
-            groups[night][session_id] = {}
-
-        groups[night][session_id][file_type] = edf_file
+        groups[night][session_id] = file_map
 
     return groups
 
@@ -143,3 +157,147 @@ def flatten_night_files(
             files.extend(file_map.values())
         result[night_date] = files
     return result
+
+
+# OSCAR's "Combine Close Sessions" default is 240 minutes (14400 seconds).
+# This threshold correctly:
+# - Chains noon-rollover pairs (observed gap: 36-47 s) into one session.
+# - Splits isolated diagnostic blips 5.76 h before sleep into separate sessions.
+OSCAR_COMBINE_CLOSE_SECONDS: int = 4 * 60 * 60
+
+
+def get_segment_duration_seconds(
+    session_id: str, files: dict[str, Path]
+) -> float | None:
+    """Return the total recording duration of a segment in seconds.
+
+    Reads the EDF header (first 256 bytes) for the first available file type
+    among BRP, PLD, SA2 — without opening the file via pyedflib. This reuses
+    the same byte-offset layout as ``formats.edf.get_edf_record_count`` but
+    also extracts record_duration (bytes 244:252) to compute total length.
+
+    Args:
+        session_id: Segment identifier (used only for contextual logging).
+        files: Mapping of file type to path for a single EDF segment.
+
+    Returns:
+        Duration in seconds (num_records × record_duration) when a readable
+        file with positive values is found; None otherwise.
+        ``num_records == -1`` (EDF+C unknown) is treated as unusable.
+        Values exceeding 172800 s (48 h) are treated as corrupt header data.
+    """
+    for file_type in ("BRP", "PLD", "SA2"):
+        path = files.get(file_type)
+        if path is None or not path.exists():
+            continue
+        try:
+            with open(path, "rb") as f:
+                header = f.read(256)
+            if len(header) < 256:
+                continue
+            num_records_str = header[236:244].decode("ascii", errors="ignore").strip()
+            record_duration_str = (
+                header[244:252].decode("ascii", errors="ignore").strip()
+            )
+            num_records = int(num_records_str)
+            record_duration = float(record_duration_str)
+            # -1 means "number of records unknown" in EDF+C — treat as unusable.
+            if num_records == -1:
+                continue
+            if num_records > 0 and record_duration > 0:
+                duration = num_records * record_duration
+                # No physical segment can exceed ~24 h (noon rollover); cap at
+                # 48 h to reject corrupt headers that would poison chain end times.
+                if duration > 172800:
+                    continue
+                return duration
+        except (ValueError, OSError):
+            logger.debug(
+                f"Could not read EDF header for {file_type} in segment {session_id}"
+            )
+            continue
+    return None
+
+
+def chain_session_segments(
+    datalog_dir: Path,
+    max_gap_seconds: int = OSCAR_COMBINE_CLOSE_SECONDS,
+) -> list[tuple[str, str, dict[str, dict[str, Path]]]]:
+    """Group EDF segments into chains based on chronological proximity.
+
+    Replaces noon-bucket merging with proximity-based chaining: segments are
+    linked into a chain while the gap between the previous chain's end and the
+    next segment's start is within ``max_gap_seconds``. Each chain becomes one
+    session; its night date is derived from the chain's first segment using the
+    same noon-cutoff rule as ``get_night_date``.
+
+    This correctly handles:
+    - Noon rollover: therapy running at 12:00 produces two EDF segment groups
+      ~36-47 s apart that chain into one session.
+    - Diagnostic blips: a brief self-test segment 5+ h before real sleep does
+      NOT chain with the sleep session.
+    - CSL/EVE annotation stubs: real ResMed devices write a CSL+EVE-only group
+      ~9-14 s before each BRP/PLD/SA2 waveform group. These stubs have no
+      duration-bearing file types, so their duration is unknown. The walker
+      uses the segment's own start time as a lower-bound end (equivalent to
+      zero duration), so `last_end` is always a real datetime and gaps are
+      measured from the latest known activity in the chain.
+
+    Args:
+        datalog_dir: DATALOG directory to scan.
+        max_gap_seconds: Maximum gap in seconds to chain segments together.
+            Defaults to OSCAR_COMBINE_CLOSE_SECONDS (4 h).
+
+    Returns:
+        Chronologically ordered list of ``(night_date, chain_id, segments)``
+        tuples where:
+        - ``night_date`` is YYYYMMDD (noon-cutoff applied to chain start).
+        - ``chain_id`` is the first segment's session_id.
+        - ``segments`` maps ``session_id -> {file_type: Path}``.
+    """
+    all_sessions = index_segment_files(datalog_dir)
+
+    if not all_sessions:
+        return []
+
+    # Lexicographic sort == chronological for YYYYMMDD_HHMMSS format.
+    sorted_ids = sorted(all_sessions)
+
+    chains: list[tuple[str, str, dict[str, dict[str, Path]]]] = []
+
+    first_id = sorted_ids[0]
+    first_files = all_sessions[first_id]
+    chain_first_id = first_id
+    chain_segments: dict[str, dict[str, Path]] = {first_id: first_files}
+    first_start = datetime.strptime(first_id, "%Y%m%d_%H%M%S")
+    first_duration = get_segment_duration_seconds(first_id, first_files)
+    # Use seg_start as a lower-bound end when duration is unknown. This keeps
+    # last_end a real datetime so gaps are always measurable, and naturally
+    # chains CSL/EVE-only stub groups that precede BRP/PLD/SA2 groups by ~9-14 s.
+    last_end: datetime = first_start + timedelta(seconds=first_duration or 0)
+
+    for session_id in sorted_ids[1:]:
+        files = all_sessions[session_id]
+        seg_start = datetime.strptime(session_id, "%Y%m%d_%H%M%S")
+
+        gap_seconds = (seg_start - last_end).total_seconds()
+
+        if gap_seconds <= max_gap_seconds:
+            chain_segments[session_id] = files
+            duration = get_segment_duration_seconds(session_id, files)
+            seg_end_lower = seg_start + timedelta(seconds=duration or 0)
+            last_end = max(last_end, seg_end_lower)
+        else:
+            night_date = get_night_date(
+                datetime.strptime(chain_first_id, "%Y%m%d_%H%M%S")
+            )
+            chains.append((night_date, chain_first_id, chain_segments))
+            chain_first_id = session_id
+            chain_segments = {session_id: files}
+            duration = get_segment_duration_seconds(session_id, files)
+            last_end = seg_start + timedelta(seconds=duration or 0)
+
+    night_date = get_night_date(datetime.strptime(chain_first_id, "%Y%m%d_%H%M%S"))
+    chains.append((night_date, chain_first_id, chain_segments))
+
+    return chains

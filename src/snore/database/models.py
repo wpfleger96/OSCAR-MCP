@@ -613,7 +613,7 @@ class Session(Base):
     data_quality_notes: Mapped[dict[str, Any]] = mapped_column(
         ValidatedJSONWithDefault, default=dict
     )
-    # Ascending [start_offset_s, end_offset_s] mask-on intervals in session
+    # Ascending, disjoint [start_offset_s, end_offset_s] mask-on intervals in session
     # offset seconds (list of 2-element lists). NULL = unknown (OSCAR imports,
     # pre-change data); a single-segment session stores [[0.0, duration]].
     mask_on_segments: Mapped[list[Any] | None] = mapped_column(
@@ -688,6 +688,10 @@ class Session(Base):
             ondelete="CASCADE",
             use_alter=True,
         ),
+        # Supports the _find_overlapping range predicate: device_id equality filter +
+        # start_time range scan.  Run per imported session; index prevents full table
+        # scan growth as diagnostic-blip sessions accumulate.
+        Index("ix_sessions_device_id_start_time", "device_id", "start_time"),
     )
 
     def __repr__(self) -> str:

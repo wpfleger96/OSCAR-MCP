@@ -429,7 +429,7 @@ class UnifiedSession(BaseModel):
     mask_on_segments: list[tuple[float, float]] | None = Field(
         default=None,
         description=(
-            "Ascending [start_offset_s, end_offset_s] mask-on intervals in "
+            "Ascending, disjoint [start_offset_s, end_offset_s] mask-on intervals in "
             "merged-session offset seconds. A single-segment session stores "
             "[(0.0, duration)] so 'known, no gaps' is distinguishable from "
             "None = unknown (e.g. OSCAR imports)."
@@ -537,14 +537,22 @@ class UnifiedSession(BaseModel):
         self.statistics.hypopneas = event_counts["H"]
         self.statistics.reras = event_counts["RE"]
 
-        if self.duration_seconds and self.duration_seconds > 0:
-            hours = self.duration_seconds / 3600
+        if self.mask_on_segments is not None:
+            therapy_seconds = sum(end - start for start, end in self.mask_on_segments)
+        else:
+            therapy_seconds = self.duration_seconds
+
+        if therapy_seconds and therapy_seconds > 0:
+            hours = therapy_seconds / 3600
             total_events = event_counts["OA"] + event_counts["CA"] + event_counts["H"]
-            self.statistics.ahi = total_events / hours if hours > 0 else None
-            self.statistics.oai = event_counts["OA"] / hours if hours > 0 else None
-            self.statistics.cai = event_counts["CA"] / hours if hours > 0 else None
-            self.statistics.hi = event_counts["H"] / hours if hours > 0 else None
+            self.statistics.ahi = total_events / hours
+            self.statistics.oai = event_counts["OA"] / hours
+            self.statistics.cai = event_counts["CA"] / hours
+            self.statistics.hi = event_counts["H"] / hours
             self.statistics.usage_hours = hours
+        elif self.mask_on_segments is not None:
+            # Explicitly empty segments: known-zero mask-on time; rates undefined.
+            self.statistics.usage_hours = 0.0
 
         therapy_wf = self.waveforms.get(WaveformType.THERAPY_PRESSURE)
         if therapy_wf is None:

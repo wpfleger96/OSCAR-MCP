@@ -444,14 +444,14 @@ class TestTCVParsing:
 
 
 class TestParserVersion:
-    def test_parser_version_is_1_1_0(self):
+    def test_parser_version_is_1_2_0(self):
         parser = ResmedEDFParser()
-        assert parser.get_metadata().parser_version == "1.1.0"
+        assert parser.get_metadata().parser_version == "1.2.0"
 
-    def test_session_carries_version_1_1_0(self):
+    def test_session_carries_version_1_2_0(self):
         parser = ResmedEDFParser()
         session = list(parser.parse_sessions(FIXTURE_ROOT))[0]
-        assert session.parser_version == "1.1.0"
+        assert session.parser_version == "1.2.0"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -549,7 +549,7 @@ class TestMultiSegmentMergeStats:
         parser = ResmedEDFParser()
         with patch.object(parser, "_parse_session_group", side_effect=[seg1, seg2]):
             merged = parser._parse_night_session(
-                "20260809", dummy_segments, _DEVICE, Path("/fake")
+                "20260809", min(dummy_segments), dummy_segments, _DEVICE, Path("/fake")
             )
 
         assert merged is not None

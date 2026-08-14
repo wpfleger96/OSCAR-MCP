@@ -24,9 +24,11 @@ change tracking.
 import itertools
 import json
 import logging
+import re
 
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 import numpy as np
 
@@ -39,6 +41,30 @@ from snore.database.session import session_scope
 from snore.parsers.unified import UnifiedSession, WaveformData
 
 logger = logging.getLogger(__name__)
+
+
+class SessionImportResult(NamedTuple):
+    """Result of a single-session import attempt.
+
+    Invariant: ``extra_day_ids`` and ``deleted_session_ids`` can be non-empty
+    even when ``imported`` is ``False``.  The legacy-format purge step runs
+    unconditionally and is durable on the skip path by design — callers MUST
+    drain both fields regardless of the value of ``imported``.  Treating
+    ``imported=False`` as "nothing happened" will silently orphan day rows
+    that need re-aggregation and leave stale PKs in accumulated ID lists.
+    """
+
+    imported: bool
+    day_id: int | None
+    session_id: int | None
+    extra_day_ids: set[int]
+    deleted_session_ids: set[int]
+
+
+# Matches only the legacy noon-bucket ID format (e.g. "20260130_merged").
+# New proximity-chained IDs (e.g. "20260130_225000_merged") must NOT match so
+# they continue to flow through the normal all_covered replace/skip logic.
+_OLD_MERGED_PATTERN = re.compile(r"^\d{8}_merged$")
 
 
 async def _find_overlapping(
@@ -164,28 +190,21 @@ class SessionImporter:
         db: AsyncSession,
         session_data: UnifiedSession,
         force: bool = False,
-    ) -> tuple[bool, int | None, int | None, set[int], set[int]]:
-        """
-        Import a single session. Returns (imported, day_id, session_id, extra_day_ids, deleted_session_ids).
+    ) -> SessionImportResult:
+        """Import a single session and return a :class:`SessionImportResult`.
 
-        This method NEVER aggregates - aggregation is handled by the caller.
+        This method NEVER aggregates — aggregation is handled by the caller.
         It does NOT open its own savepoint; callers that want per-session
         isolation must wrap each call in ``db.begin_nested()``.
+
+        See :class:`SessionImportResult` for the caller contract, in particular
+        the invariant that ``extra_day_ids`` and ``deleted_session_ids`` must be
+        drained regardless of ``imported``.
 
         Args:
             db: SQLAlchemy async database session
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
-
-        Returns:
-            Tuple of (was_imported, day_id, session_id, extra_day_ids, deleted_session_ids).
-            session_id is the PK of the newly inserted (or replaced-on-force)
-            Session row; None when was_imported is False.
-            extra_day_ids is the set of day IDs from overlap-replaced rows that
-            differ from the new session's day and need re-aggregation.
-            deleted_session_ids is the set of Session PKs deleted during the
-            overlap-replace step — callers prune these from accumulated ID lists
-            to avoid referencing rows that no longer exist.
         """
         profile_id = self.profile_id
         stmt = select(models.Device).where(
@@ -224,7 +243,7 @@ class SessionImporter:
             logger.debug(
                 f"Session {session_data.device_session_id} already exists, skipping"
             )
-            return False, None, None, set(), set()
+            return SessionImportResult(False, None, None, set(), set())
 
         # Strip tz info once here: Session.start_time / end_time are device
         # wall-clock columns stored without timezone info.
@@ -246,35 +265,74 @@ class SessionImporter:
         replaced_day_ids: set[int] = set()
         deleted_session_ids: set[int] = set()
         if overlapping:
-            all_covered = all(
-                naive_start <= row.start_time and naive_end >= row.end_time
+            # Partition: stale legacy noon-bucket rows (e.g. "20260130_merged") are
+            # purged unconditionally so a plain re-import can replace them with the
+            # new proximity-chained format.  The remaining rows are evaluated with
+            # the existing all_covered replace/skip logic.
+            old_format_rows = [
+                row
                 for row in overlapping
-            )
-            if all_covered:
-                # Incoming session fully covers every overlapping row: replace them.
-                replaced_ids = [row.device_session_id for row in overlapping]
-                replaced_day_ids = {
-                    row.day_id for row in overlapping if row.day_id is not None
-                }
-                deleted_session_ids = {row.id for row in overlapping}
-                for row in overlapping:
+                if _OLD_MERGED_PATTERN.match(row.device_session_id)
+            ]
+            remaining_overlapping = [
+                row
+                for row in overlapping
+                if not _OLD_MERGED_PATTERN.match(row.device_session_id)
+            ]
+            if old_format_rows:
+                old_ids = [row.device_session_id for row in old_format_rows]
+                replaced_day_ids.update(
+                    row.day_id for row in old_format_rows if row.day_id is not None
+                )
+                deleted_session_ids.update(row.id for row in old_format_rows)
+                for row in old_format_rows:
                     await db.delete(row)
                 await db.flush()
                 logger.info(
-                    f"Overlap guard: replaced {replaced_ids} with incoming "
-                    f"{session_data.device_session_id} "
-                    f"({naive_start} – {naive_end})"
+                    f"Overlap guard: purged stale old-format row(s) {old_ids} to "
+                    f"allow re-import as {session_data.device_session_id}"
                 )
-            else:
-                # Incoming session only partially overlaps with a session it does
-                # NOT fully cover: skip incoming without touching anything.
-                overlap_ids = [row.device_session_id for row in overlapping]
-                logger.warning(
-                    f"Overlap guard: skipping {session_data.device_session_id} "
-                    f"({naive_start} – {naive_end}) — "
-                    f"partial overlap with existing {overlap_ids}"
+            if remaining_overlapping:
+                all_covered = all(
+                    naive_start <= row.start_time and naive_end >= row.end_time
+                    for row in remaining_overlapping
                 )
-                return False, None, None, set(), set()
+                if all_covered:
+                    # Incoming session fully covers every overlapping row: replace them.
+                    replaced_ids = [
+                        row.device_session_id for row in remaining_overlapping
+                    ]
+                    replaced_day_ids.update(
+                        row.day_id
+                        for row in remaining_overlapping
+                        if row.day_id is not None
+                    )
+                    deleted_session_ids.update(row.id for row in remaining_overlapping)
+                    for row in remaining_overlapping:
+                        await db.delete(row)
+                    await db.flush()
+                    logger.info(
+                        f"Overlap guard: replaced {replaced_ids} with incoming "
+                        f"{session_data.device_session_id} "
+                        f"({naive_start} – {naive_end})"
+                    )
+                else:
+                    # Incoming session only partially overlaps with a session it does
+                    # NOT fully cover: skip incoming without touching anything.
+                    # Any old-format rows already deleted above are included in the
+                    # return values so the batch can re-aggregate their days and prune
+                    # their IDs.
+                    overlap_ids = [
+                        row.device_session_id for row in remaining_overlapping
+                    ]
+                    logger.warning(
+                        f"Overlap guard: skipping {session_data.device_session_id} "
+                        f"({naive_start} – {naive_end}) — "
+                        f"partial overlap with existing {overlap_ids}"
+                    )
+                    return SessionImportResult(
+                        False, None, None, replaced_day_ids, deleted_session_ids
+                    )
 
         # Now that the import decision is final ("proceed"), delete the existing
         # same-ID row for force re-imports.  Doing this after the overlap check
@@ -341,7 +399,9 @@ class SessionImporter:
         # differ from the new session's day (a segment that crossed noon can produce a
         # replaced day_id distinct from day_id).
         extra_day_ids = replaced_day_ids - {day_id}
-        return True, day_id, new_session.id, extra_day_ids, deleted_session_ids
+        return SessionImportResult(
+            True, day_id, new_session.id, extra_day_ids, deleted_session_ids
+        )
 
     async def import_session(
         self,
@@ -494,29 +554,35 @@ class SessionImporter:
         for session_data in batch:
             try:
                 async with db.begin_nested():
-                    (
-                        was_imported,
-                        day_id,
-                        new_session_id,
-                        extra_day_ids,
-                        deleted_session_ids,
-                    ) = await self._import_single_session(db, session_data, force)
-                if was_imported:
+                    result = await self._import_single_session(db, session_data, force)
+                if result.imported:
                     imported += 1
-                    if day_id:
-                        batch_day_ids.add(day_id)
-                    batch_day_ids.update(extra_day_ids)
+                    if result.day_id:
+                        batch_day_ids.add(result.day_id)
+                    batch_day_ids.update(result.extra_day_ids)
                     # Prune any earlier-imported IDs that were deleted by the
                     # overlap-replace step so downstream consumers don't receive
                     # references to rows that no longer exist.
-                    if deleted_session_ids:
+                    if result.deleted_session_ids:
                         batch_session_ids[:] = [
-                            i for i in batch_session_ids if i not in deleted_session_ids
+                            i
+                            for i in batch_session_ids
+                            if i not in result.deleted_session_ids
                         ]
-                    if new_session_id is not None:
-                        batch_session_ids.append(new_session_id)
+                    if result.session_id is not None:
+                        batch_session_ids.append(result.session_id)
                 else:
                     skipped += 1
+                    # Drain both sets unconditionally — old-format purges are durable
+                    # on the skip path (see SessionImportResult invariant).
+                    if result.extra_day_ids:
+                        batch_day_ids.update(result.extra_day_ids)
+                    if result.deleted_session_ids:
+                        batch_session_ids[:] = [
+                            i
+                            for i in batch_session_ids
+                            if i not in result.deleted_session_ids
+                        ]
             except Exception as e:
                 from snore.database.txn import _is_sqlite_contention  # noqa: PLC0415
 

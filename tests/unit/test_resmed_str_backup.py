@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 import pytest
 
-from snore.parsers.resmed_edf import ResmedEDFParser, _slice_str_cache
+from snore.parsers.resmed_edf import (
+    ResmedEDFParser,
+    _chain_therapy_days,
+    _slice_str_cache,
+)
 
 StrCache = dict[date, dict[str, float]]
 
@@ -436,22 +440,31 @@ class TestCorruptWinnerFallback:
 
 
 class TestSliceStrCache:
-    """Tests for the _slice_str_cache helper used to limit pickle payload per future."""
+    """Tests for the STR-cache slicing helpers used to limit pickle payload per future.
 
-    def test_returns_single_entry_for_matching_date(self):
+    Segments map to therapy days via: therapy_day = (seg_start - 12h).date().
+    A segment id "YYYYMMDD_220000" maps to the same calendar date (22:00 - 12h = 10:00).
+    """
+
+    def test_returns_entry_for_matching_segment_therapy_day(self):
         d = date(2025, 1, 1)
         other = date(2025, 1, 2)
         cache = {d: {"pressure_min": 4.0}, other: {"pressure_min": 6.0}}
-        result = _slice_str_cache(cache, d)
+        # "20250101_220000" - 12h → 2025-01-01 10:00 → therapy_day = d
+        segments = {"20250101_220000": {"BRP": Path("/fake.edf")}}
+        result = _slice_str_cache(cache, _chain_therapy_days(segments))
         assert result == {d: {"pressure_min": 4.0}}
 
     def test_returns_none_when_entry_absent(self):
         cache = {date(2025, 1, 2): {"pressure_min": 6.0}}
-        result = _slice_str_cache(cache, date(2025, 1, 1))
+        # therapy_day for "20250101_220000" = date(2025, 1, 1) — not in cache
+        segments = {"20250101_220000": {"BRP": Path("/fake.edf")}}
+        result = _slice_str_cache(cache, _chain_therapy_days(segments))
         assert result is None
 
     def test_returns_none_for_none_cache(self):
-        assert _slice_str_cache(None, date(2025, 1, 1)) is None
+        segments = {"20250101_220000": {}}
+        assert _slice_str_cache(None, _chain_therapy_days(segments)) is None
 
     def test_result_does_not_include_other_dates(self):
         d = date(2025, 6, 15)
@@ -460,6 +473,22 @@ class TestSliceStrCache:
             d: {"pressure_min": 8.0},
             date(2025, 6, 16): {"pressure_min": 5.0},
         }
-        result = _slice_str_cache(cache, d)
+        # "20250615_220000" - 12h → 2025-06-15 10:00 → therapy_day = d
+        segments = {"20250615_220000": {"BRP": Path("/fake.edf")}}
+        result = _slice_str_cache(cache, _chain_therapy_days(segments))
         assert result is not None
         assert list(result.keys()) == [d]
+
+    def test_cross_noon_chain_returns_two_entries(self):
+        """A chain spanning noon (noon-rollover) covers two therapy days."""
+        d1 = date(2026, 3, 20)
+        d2 = date(2026, 3, 21)
+        cache = {d1: {"ahi": 1.0}, d2: {"ahi": 2.0}}
+        # Pre-noon segment: "20260321_020000" - 12h → 2026-03-20 14:00 → d1
+        # Post-noon segment: "20260321_140000" - 12h → 2026-03-21 02:00 → d2
+        segments = {
+            "20260321_020000": {"BRP": Path("/a.edf")},
+            "20260321_140000": {"BRP": Path("/b.edf")},
+        }
+        result = _slice_str_cache(cache, _chain_therapy_days(segments))
+        assert result == {d1: {"ahi": 1.0}, d2: {"ahi": 2.0}}

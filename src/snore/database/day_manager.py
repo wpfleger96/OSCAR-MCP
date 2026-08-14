@@ -4,7 +4,6 @@ Day aggregation and management logic (OSCAR-compatible).
 Handles day splitting logic and aggregation of session statistics into daily records.
 """
 
-from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import select
@@ -98,24 +97,42 @@ class DayManager:
         await cls._aggregate_day_statistics(day, db_session)
         return day
 
+    @staticmethod
+    def _effective_session_hours(
+        stats: Statistics | None, session: SessionModel
+    ) -> float:
+        """Effective therapy hours for a session.
+
+        Prefers statistics.usage_hours (actual mask-on time) over session span.
+        usage_hours == 0.0 is treated as known-zero; no span fallback applies.
+        """
+        if stats is not None and stats.usage_hours is not None:
+            return stats.usage_hours
+        return (session.duration_seconds or 0) / 3600
+
     @classmethod
     def _weighted_average(
         cls,
-        stats_records: list[Statistics],
-        sessions: Sequence[SessionModel],
+        stat_pairs: list[tuple[Statistics, SessionModel]],
         attr: str,
     ) -> float | None:
-        """Calculate time-weighted average for a statistic across sessions."""
+        """Calculate usage-weighted average for a statistic across sessions.
+
+        stat_pairs must be pre-aligned: each tuple is the Statistics row and its
+        owning SessionModel. Weights prefer usage_hours over session span; entries
+        with zero effective hours are excluded so they cannot distort the average.
+        """
         values = [
-            (getattr(s, attr), sess.duration_seconds / 3600)
-            for s, sess in zip(stats_records, sessions, strict=False)
-            if getattr(s, attr) is not None and sess.duration_seconds
+            (getattr(s, attr), cls._effective_session_hours(s, sess))
+            for s, sess in stat_pairs
+            if getattr(s, attr) is not None
         ]
+        # Zero-weight entries (known-zero usage) cannot contribute to a rate average.
+        values = [(v, w) for v, w in values if w > 0]
         if not values:
             return None
-        total_weighted = sum(v * w for v, w in values)
         total_weight = sum(w for _, w in values)
-        return float(total_weighted / total_weight)
+        return float(sum(v * w for v, w in values) / total_weight)
 
     @classmethod
     async def _aggregate_day_statistics(
@@ -168,12 +185,19 @@ class DayManager:
 
         day.session_count = len(sessions)
 
-        total_seconds = sum(s.duration_seconds for s in sessions if s.duration_seconds)
-        day.total_therapy_hours = total_seconds / 3600.0 if total_seconds else 0.0
+        day.total_therapy_hours = sum(
+            cls._effective_session_hours(s.statistics, s) for s in sessions
+        )
 
-        stats_records = [s.statistics for s in sessions if s.statistics]
+        # Pre-aligned pairs: each Statistics row with its owning session.
+        # Building this once avoids the zip-misalignment bug that occurs when
+        # not every session has a Statistics row.
+        stat_pairs: list[tuple[Statistics, SessionModel]] = [
+            (s.statistics, s) for s in sessions if s.statistics
+        ]
+        stats_records = [s for s, _ in stat_pairs]
 
-        if stats_records:
+        if stat_pairs:
             day.obstructive_apneas = sum(
                 s.obstructive_apneas for s in stats_records if s.obstructive_apneas
             )
@@ -185,10 +209,10 @@ class DayManager:
 
             total_hours = day.total_therapy_hours
             if total_hours > 0:
-                day.ahi = cls._weighted_average(stats_records, sessions, "ahi")
-                day.oai = cls._weighted_average(stats_records, sessions, "oai")
-                day.cai = cls._weighted_average(stats_records, sessions, "cai")
-                day.hi = cls._weighted_average(stats_records, sessions, "hi")
+                day.ahi = cls._weighted_average(stat_pairs, "ahi")
+                day.oai = cls._weighted_average(stat_pairs, "oai")
+                day.cai = cls._weighted_average(stat_pairs, "cai")
+                day.hi = cls._weighted_average(stat_pairs, "hi")
 
             pressure_mins = [s.pressure_min for s in stats_records if s.pressure_min]
             pressure_maxs = [s.pressure_max for s in stats_records if s.pressure_max]
@@ -197,14 +221,10 @@ class DayManager:
 
             if total_hours > 0:
                 day.pressure_median = cls._weighted_average(
-                    stats_records, sessions, "pressure_median"
+                    stat_pairs, "pressure_median"
                 )
-                day.pressure_mean = cls._weighted_average(
-                    stats_records, sessions, "pressure_mean"
-                )
-                day.pressure_95th = cls._weighted_average(
-                    stats_records, sessions, "pressure_95th"
-                )
+                day.pressure_mean = cls._weighted_average(stat_pairs, "pressure_mean")
+                day.pressure_95th = cls._weighted_average(stat_pairs, "pressure_95th")
 
             epap_mins = [s.epap_min for s in stats_records if s.epap_min]
             epap_maxs = [s.epap_max for s in stats_records if s.epap_max]
@@ -212,15 +232,9 @@ class DayManager:
             day.epap_max = max(epap_maxs) if epap_maxs else None
 
             if total_hours > 0:
-                day.epap_median = cls._weighted_average(
-                    stats_records, sessions, "epap_median"
-                )
-                day.epap_mean = cls._weighted_average(
-                    stats_records, sessions, "epap_mean"
-                )
-                day.epap_95th = cls._weighted_average(
-                    stats_records, sessions, "epap_95th"
-                )
+                day.epap_median = cls._weighted_average(stat_pairs, "epap_median")
+                day.epap_mean = cls._weighted_average(stat_pairs, "epap_mean")
+                day.epap_95th = cls._weighted_average(stat_pairs, "epap_95th")
 
             leak_mins = [s.leak_min for s in stats_records if s.leak_min]
             leak_maxs = [s.leak_max for s in stats_records if s.leak_max]
@@ -228,15 +242,9 @@ class DayManager:
             day.leak_max = max(leak_maxs) if leak_maxs else None
 
             if total_hours > 0:
-                day.leak_median = cls._weighted_average(
-                    stats_records, sessions, "leak_median"
-                )
-                day.leak_mean = cls._weighted_average(
-                    stats_records, sessions, "leak_mean"
-                )
-                day.leak_95th = cls._weighted_average(
-                    stats_records, sessions, "leak_95th"
-                )
+                day.leak_median = cls._weighted_average(stat_pairs, "leak_median")
+                day.leak_mean = cls._weighted_average(stat_pairs, "leak_mean")
+                day.leak_95th = cls._weighted_average(stat_pairs, "leak_95th")
 
             spo2_mins = [s.spo2_min for s in stats_records if s.spo2_min]
             spo2_maxs = [s.spo2_max for s in stats_records if s.spo2_max]
@@ -244,9 +252,7 @@ class DayManager:
             day.spo2_max = max(spo2_maxs) if spo2_maxs else None
 
             if total_hours > 0:
-                day.spo2_mean = cls._weighted_average(
-                    stats_records, sessions, "spo2_mean"
-                )
+                day.spo2_mean = cls._weighted_average(stat_pairs, "spo2_mean")
 
     @classmethod
     async def link_session_to_day(

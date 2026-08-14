@@ -71,6 +71,7 @@ def _parse_night(
     }
     night = parser._parse_night_session(
         night_date="20250910",
+        chain_id=min(segments),
         segments=segments,
         device_info=_device_info(),
         base_path=Path("/nonexistent"),
@@ -130,6 +131,102 @@ class TestParserMaskOnSegments:
         """Sessions built without segment info (e.g. OSCAR) default to None."""
         session = _segment_session(datetime(2025, 9, 10, 22, 0, 0), 3600.0)
         assert session.mask_on_segments is None
+
+
+# ---------------------------------------------------------------------------
+# Overlapping segment coalescing (ResMed straddle fix)
+# ---------------------------------------------------------------------------
+
+
+class TestOverlappingSegmentCoalescing:
+    """ResMed sometimes writes one mask-on period's EDF files across two adjacent-second
+    timestamps (e.g. PLD at :59, BRP/SA2 at :00). The parser sees two full-length
+    segments 1 s apart; strictly-overlapping intervals must be coalesced so the stored
+    list is disjoint. Touching intervals (next start == prev end) stay separate.
+    """
+
+    def test_straddled_file_type_groups_coalesce_to_one_interval(self, monkeypatch):
+        """PLD at :59 + BRP at :00 — two 36420 s segments 1 s apart merge to one.
+
+        Mirrors the real 2025-08-11 night: union span is 36421 s, stored as a
+        single interval starting at offset 0.
+        """
+        base = datetime(2025, 8, 11, 23, 52, 59)
+        night = _parse_night(
+            [
+                _segment_session(base, 36420.0),  # PLD group at :59
+                _segment_session(base + timedelta(seconds=1), 36420.0),  # BRP at :00
+            ],
+            monkeypatch,
+        )
+
+        assert night.mask_on_segments == [(0.0, 36421.0)]
+        assert any("Coalesced" in note for note in night.data_quality_notes)
+
+    def test_straddle_pair_plus_later_real_segment_keeps_real_gap(self, monkeypatch):
+        """Straddle pair coalesces; a later real segment (big gap) stays separate.
+
+        Mirrors the real 2025-05-06 night: two overlapping segments followed by
+        a second genuine mask-on period after a 21 000 s gap.
+        """
+        base = datetime(2025, 5, 6, 22, 0, 0)
+        night = _parse_night(
+            [
+                _segment_session(base, 21240.0),
+                _segment_session(base + timedelta(seconds=1), 21240.0),
+                _segment_session(base + timedelta(seconds=21876), 11700.0),
+            ],
+            monkeypatch,
+        )
+
+        assert night.mask_on_segments == [(0.0, 21241.0), (21876.0, 33576.0)]
+
+    def test_fully_contained_segment_is_absorbed(self, monkeypatch):
+        """A short segment that starts and ends inside a longer one is absorbed.
+
+        Merged end is the max of both ends, not the last segment's end.
+        """
+        base = datetime(2025, 9, 10, 22, 0, 0)
+        night = _parse_night(
+            [
+                _segment_session(base, 7200.0),  # 22:00–00:00
+                _segment_session(
+                    base + timedelta(seconds=3600), 1800.0
+                ),  # 23:00–23:30 (contained)
+            ],
+            monkeypatch,
+        )
+
+        assert night.mask_on_segments == [(0.0, 7200.0)]
+
+    def test_touching_intervals_stay_separate(self, monkeypatch):
+        """next start == prev end is touching, not overlapping — must NOT coalesce."""
+        base = datetime(2025, 9, 10, 22, 0, 0)
+        night = _parse_night(
+            [
+                _segment_session(base, 3600.0),
+                _segment_session(base + timedelta(seconds=3600), 3600.0),
+            ],
+            monkeypatch,
+        )
+
+        assert night.mask_on_segments == [(0.0, 3600.0), (3600.0, 7200.0)]
+        assert not any("Coalesced" in note for note in night.data_quality_notes)
+
+    def test_straddled_night_usage_hours_equals_union(self, monkeypatch):
+        """After finalize_statistics(), usage_hours reflects the coalesced union span."""
+        base = datetime(2025, 8, 11, 23, 52, 59)
+        night = _parse_night(
+            [
+                _segment_session(base, 36420.0),
+                _segment_session(base + timedelta(seconds=1), 36420.0),
+            ],
+            monkeypatch,
+        )
+
+        night.finalize_statistics()
+
+        assert night.statistics.usage_hours == pytest.approx(36421.0 / 3600)
 
 
 # ---------------------------------------------------------------------------
