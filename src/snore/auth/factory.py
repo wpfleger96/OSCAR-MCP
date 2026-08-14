@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.auth.actor import ActorContext, AuthMode, Role
@@ -139,7 +140,7 @@ class ActorContextFactory:
         This is the only entry point that does not require an existing user_id —
         it is safe only in LOCAL mode where there is exactly one operator.
         """
-        # Try to find the first existing admin user.
+        # Try to find the first live (non-disabled) admin user.
         stmt = (
             select(models.User)
             .where(
@@ -156,7 +157,14 @@ class ActorContextFactory:
             # or when the DB has only non-admin users.
             user = models.User(canonical_email="local@localhost", role="admin")
             self._db.add(user)
-            await self._db.flush()
+            try:
+                await self._db.flush()
+            except IntegrityError:
+                logger.error(
+                    "Local mode: cannot auto-provision admin — a local@localhost "
+                    "user already exists with a non-admin or disabled state"
+                )
+                raise
             profile = models.Profile(user_id=user.id, name="Default")
             self._db.add(profile)
             await self._db.flush()
@@ -194,14 +202,18 @@ class ActorContextFactory:
         Click-friendly errors should use resolve_cli_profile_id() instead.
         """
         if user_ref is None:
-            # Fail fast when multiple non-disabled users exist: guessing the
-            # "first" one silently breaks multi-user setups.  Single-user and
-            # zero-user (auto-provision) paths continue to make_local().
+            # Fail fast when multiple non-demo, non-disabled users exist: demo
+            # users are never eligible CLI/local identities so they must not
+            # count toward ambiguity.  Single-user and zero-user (auto-provision)
+            # paths continue to make_local().
             user_count = (
                 await self._db.execute(
                     select(func.count())
                     .select_from(models.User)
-                    .where(models.User.disabled_at.is_(None))
+                    .where(
+                        models.User.disabled_at.is_(None),
+                        models.User.role != "demo",
+                    )
                 )
             ).scalar_one()
             if user_count > 1:

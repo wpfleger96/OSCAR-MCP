@@ -136,6 +136,40 @@ class TestMakeFromCliAmbiguityGuard:
                 user_ref=None, profile_ref=None, mode=AuthMode.LOCAL
             )
 
+    async def test_demo_user_not_counted_toward_cli_ambiguity(self, async_db_session):
+        """Demo + admin + member = 3 non-disabled users, but only 2 non-demo → still ambiguous."""
+        demo = await _make_user(async_db_session, "demo@snore.local", role="demo")
+        await _make_profile(async_db_session, demo.id)
+        admin, _ = await _seed_user(async_db_session, "admin@example.com")
+        admin.role = "admin"
+        await async_db_session.flush()
+        member, _ = await _seed_user(async_db_session, "member@example.com")
+        member.role = "member"
+        await async_db_session.flush()
+
+        factory = ActorContextFactory(async_db_session)
+        with pytest.raises(ValueError, match="Multiple users found"):
+            await factory.make_from_cli(
+                user_ref=None, profile_ref=None, mode=AuthMode.LOCAL
+            )
+
+    async def test_demo_plus_single_admin_resolves_admin(self, async_db_session):
+        """Demo user + one admin: demo is excluded from the count, admin is resolved."""
+        demo = await _make_user(async_db_session, "demo@snore.local", role="demo")
+        await _make_profile(async_db_session, demo.id)
+        admin, profile = await _seed_user(async_db_session, "admin@example.com")
+        admin.role = "admin"
+        await async_db_session.flush()
+
+        factory = ActorContextFactory(async_db_session)
+        actor = await factory.make_from_cli(
+            user_ref=None, profile_ref=None, mode=AuthMode.LOCAL
+        )
+
+        assert actor.user_id == admin.id
+        assert actor.role is Role.ADMIN
+        assert actor.profile_id == profile.id
+
 
 class TestResolveLocalProfileIdGuard:
     """resolve_local_profile_id propagates the multi-user guard."""
@@ -197,4 +231,23 @@ class TestMakeLocalAdminResolution:
         actor = await factory.make_local(mode=AuthMode.LOCAL)
 
         assert actor.user_id != member.id
+        assert actor.role is Role.ADMIN
+
+    async def test_disabled_admin_skipped_live_admin_resolved(self, async_db_session):
+        """Disabled admin is skipped; the second live admin is resolved."""
+        disabled_admin = await _make_user(
+            async_db_session, "disabled@example.com", role="admin"
+        )
+        disabled_admin.disabled_at = datetime.now(UTC)
+        await async_db_session.flush()
+
+        live_admin = await _make_user(
+            async_db_session, "live@example.com", role="admin"
+        )
+        await _make_profile(async_db_session, live_admin.id)
+
+        factory = ActorContextFactory(async_db_session)
+        actor = await factory.make_local(mode=AuthMode.LOCAL)
+
+        assert actor.user_id == live_admin.id
         assert actor.role is Role.ADMIN

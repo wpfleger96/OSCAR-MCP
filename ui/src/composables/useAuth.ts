@@ -23,7 +23,7 @@ export function useAuth() {
     const role = computed(() => status.value?.user?.role ?? null)
     // canWrite: trust the server-reported role — an authenticated non-demo actor
     // can write in any auth mode.
-    const canWrite = computed(() => status.value?.user?.role !== 'demo' && isAuthenticated.value)
+    const canWrite = computed(() => role.value !== 'demo' && isAuthenticated.value)
     const demoAvailable = computed(() => status.value?.demo_available ?? false)
     // Distinct from !isAuthenticated: true while auth state is unknown (fetch pending or failed).
     const statusUnknown = computed(() => status.value === null)
