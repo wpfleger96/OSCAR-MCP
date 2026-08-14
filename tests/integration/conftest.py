@@ -8,7 +8,6 @@ are plain functions — not fixtures — so test modules can import and call the
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 from datetime import date, datetime, timedelta
@@ -23,11 +22,15 @@ from snore.database.session import cleanup_database
 
 
 @pytest.fixture(autouse=True)
-def reset_database_state():
-    """Reset global database state before and after each test."""
-    asyncio.run(cleanup_database())
+async def reset_database_state():
+    """Reset global database state before and after each test.
+
+    Runs cleanup in the same event loop as the test so engine disposal is
+    loop-correct; pytest-asyncio's auto mode serves sync tests transparently.
+    """
+    await cleanup_database()
     yield
-    asyncio.run(cleanup_database())
+    await cleanup_database()
 
 
 # ---------------------------------------------------------------------------

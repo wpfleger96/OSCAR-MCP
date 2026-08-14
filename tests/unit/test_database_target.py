@@ -11,6 +11,8 @@ the ``serve --db`` env-collision scenario.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from snore.database.target import DatabaseTarget
@@ -385,6 +387,11 @@ class TestServeCommandEnvExport:
             result = runner.invoke(
                 serve,
                 ["--db", explicit_db, "--port", "19999"],
+                # Passing env={"SNORE_DATABASE_URL": None} tells Click to save and
+                # restore this key.  serve() writes it to os.environ directly; without
+                # this entry CliRunner's finally block would not clean it up and the
+                # canonical URL would leak into the next test.
+                env={"SNORE_DATABASE_URL": None},
                 catch_exceptions=False,
             )
 
@@ -403,8 +410,11 @@ class TestServeCommandEnvExport:
         from snore.database.session import cleanup_database  # noqa: PLC0415
 
         app = create_app()
+        # Click's finally block deleted SNORE_DATABASE_URL (it was saved as
+        # "not set" via env={"SNORE_DATABASE_URL": None} above).  Set it back
+        # for the lifespan call; monkeypatch records NOTSET and cleans it up
+        # on teardown, so this does not leak.
         monkeypatch.setenv("SNORE_DATABASE_URL", exported_url)
-        monkeypatch.delenv("SNORE_DB_PATH", raising=False)
 
         async def run_lifespan() -> None:
             import threading as _threading  # noqa: PLC0415
@@ -429,4 +439,37 @@ class TestServeCommandEnvExport:
         assert (tmp_path / "lifespan_test.db").exists(), (
             "The flagged SQLite DB file must be created by the lifespan. "
             "If absent, the lifespan opened a different database."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Suite-wide DB guard observability
+# ---------------------------------------------------------------------------
+
+
+class TestSuiteDbGuard:
+    """Observes that the suite-wide _block_real_db guard in tests/conftest.py is active.
+
+    This test performs NO env manipulation of its own — it relies entirely on
+    the conftest guard being in place.  If both the module-level baseline and
+    the ``_block_real_db`` fixture body are removed from conftest.py, this test
+    fails first, surfacing the regression before any test can accidentally write
+    to the real user database.
+    """
+
+    def test_env_chain_resolves_to_guard_db_not_real_db(self):
+        """Without any env manipulation, DB resolution lands in the guard tmp path.
+
+        This test observes the suite-wide ``_block_real_db`` guard from
+        tests/conftest.py; if the guard is removed, this test fails first.
+        """
+        from snore.constants import DEFAULT_DATABASE_PATH
+
+        target = DatabaseTarget.from_env_and_flags(warn_ignored=False)
+
+        assert target.is_sqlite
+        assert Path(target.sqlite_path).name == "guard.db"
+        assert (
+            Path(target.sqlite_path).resolve()
+            != Path(DEFAULT_DATABASE_PATH).expanduser().resolve()
         )
