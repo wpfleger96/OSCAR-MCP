@@ -1,9 +1,12 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/api/auth')
 
 import { useAuth } from '@/composables/useAuth'
 import * as authApi from '@/api/auth'
+
+const mockLoginResponse = { message: 'Logged in', totp_required: false, pending_token: null }
 
 const mockStatus = {
     authenticated: true,
@@ -12,6 +15,7 @@ const mockStatus = {
     profiles: [{ id: 10, name: 'Primary' }],
     active_profile_id: 10,
     demo_available: false,
+    totp_enrollment_required: false,
 }
 
 describe('useAuth', () => {
@@ -102,17 +106,77 @@ describe('useAuth', () => {
 
     it('login_success_fetchesUpdatedStatus', async () => {
         const loggedInStatus = { ...mockStatus, authenticated: true }
-        vi.mocked(authApi.loginUser).mockResolvedValueOnce({ message: 'ok' })
+        vi.mocked(authApi.loginUser).mockResolvedValueOnce(mockLoginResponse)
         vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce(loggedInStatus)
 
         const { login, isAuthenticated } = useAuth()
-        await login('alice@example.com', 'hunter2')
+        const result = await login('alice@example.com', 'hunter2')
 
         expect(authApi.loginUser).toHaveBeenCalledWith({
             email: 'alice@example.com',
             password: 'hunter2',
         })
+        expect(result).toEqual({ totpRequired: false })
         expect(isAuthenticated.value).toBe(true)
+    })
+
+    it('login_totpRequired_storesPendingTokenAndSkipsStatusRefresh', async () => {
+        const totpLoginResponse = {
+            message: null,
+            totp_required: true,
+            pending_token: 'tok-abc',
+        }
+        vi.mocked(authApi.loginUser).mockResolvedValueOnce(totpLoginResponse)
+
+        const { login, isAuthenticated } = useAuth()
+        const result = await login('alice@example.com', 'hunter2')
+
+        expect(result).toEqual({ totpRequired: true })
+        // Must not have tried to refresh status
+        expect(authApi.getAuthStatus).not.toHaveBeenCalled()
+        expect(isAuthenticated.value).toBe(false)
+    })
+
+    it('submitTotp_success_completesAuthAndRefreshesStatus', async () => {
+        const loggedInStatus = { ...mockStatus, authenticated: true }
+        // Set up a pending token via login
+        vi.mocked(authApi.loginUser).mockResolvedValueOnce({
+            message: null,
+            totp_required: true,
+            pending_token: 'tok-abc',
+        })
+        vi.mocked(authApi.submitTotpChallenge).mockResolvedValueOnce({ message: 'Logged in' })
+        vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce(loggedInStatus)
+
+        const { login, submitTotp, isAuthenticated } = useAuth()
+        await login('alice@example.com', 'hunter2')
+        await submitTotp('123456')
+
+        expect(authApi.submitTotpChallenge).toHaveBeenCalledWith({
+            pending_token: 'tok-abc',
+            code: '123456',
+        })
+        expect(isAuthenticated.value).toBe(true)
+    })
+
+    it('submitTotp_withNoPendingToken_throws', async () => {
+        const { submitTotp } = useAuth()
+        await expect(submitTotp('123456')).rejects.toThrow('No pending TOTP challenge')
+        expect(authApi.submitTotpChallenge).not.toHaveBeenCalled()
+    })
+
+    it('clearTotpChallenge_clearsPendingToken_subsequentSubmitTotpThrows', async () => {
+        vi.mocked(authApi.loginUser).mockResolvedValueOnce({
+            message: null,
+            totp_required: true,
+            pending_token: 'tok-abc',
+        })
+
+        const { login, submitTotp, clearTotpChallenge } = useAuth()
+        await login('alice@example.com', 'hunter2')
+        clearTotpChallenge()
+
+        await expect(submitTotp('123456')).rejects.toThrow('No pending TOTP challenge')
     })
 
     it('logout_clearsAuthState', async () => {
@@ -426,7 +490,7 @@ describe('useAuth', () => {
         vi.mocked(authApi.getAuthStatus)
             .mockReturnValueOnce(anonymousPromise)
             .mockResolvedValueOnce(authedStatus)
-        vi.mocked(authApi.loginUser).mockResolvedValueOnce({ message: 'ok' })
+        vi.mocked(authApi.loginUser).mockResolvedValueOnce(mockLoginResponse)
 
         const { fetchStatus, login, isAuthenticated } = useAuth()
 

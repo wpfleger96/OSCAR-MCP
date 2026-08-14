@@ -16,11 +16,21 @@ vi.mock('@/components/DeleteConfirmDialog.vue', () => ({
     }),
 }))
 
+// Stub TotpEnrollmentWizard to avoid complex wizard interactions in unrelated tests.
+vi.mock('@/components/TotpEnrollmentWizard.vue', () => ({
+    default: defineComponent({
+        name: 'TotpEnrollmentWizard',
+        emits: ['done'],
+        template: `<div class="stub-totp-wizard"><button class="wizard-done-btn" @click="$emit('done')">Done</button></div>`,
+    }),
+}))
+
 import {
     makeAuthMock as baseMakeAuthMock,
     makeDateFormatMock as baseDateFormatMock,
 } from './helpers/mockUseAuth'
 vi.mock('@/api/me')
+vi.mock('@/api/totp')
 
 import AccountView from '@/views/AccountView.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
@@ -28,6 +38,7 @@ import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
 import { useRoute, useRouter } from 'vue-router'
 import { getMe, changePassword, getPreferences, unlinkGoogle, deleteMyData } from '@/api/me'
+import { getTotpStatus, disableTotp, regenerateRecoveryCodes } from '@/api/totp'
 
 const ME_WITH_PASSWORD = {
     id: 1,
@@ -36,6 +47,9 @@ const ME_WITH_PASSWORD = {
     has_password: true,
     google_linked: false,
     role: 'member',
+    totp_enabled: false,
+    totp_enrollment_required: false,
+    recovery_codes_remaining: null,
 }
 
 const ME_WITHOUT_PASSWORD = {
@@ -45,6 +59,21 @@ const ME_WITHOUT_PASSWORD = {
     has_password: false,
     google_linked: true,
     role: 'member',
+    totp_enabled: false,
+    totp_enrollment_required: false,
+    recovery_codes_remaining: null,
+}
+
+const TOTP_STATUS_DISABLED = { enabled: false, enabled_at: null, recovery_codes_remaining: null }
+const TOTP_STATUS_ENABLED = {
+    enabled: true,
+    enabled_at: '2026-01-01T00:00:00Z',
+    recovery_codes_remaining: 10,
+}
+const TOTP_STATUS_LOW_CODES = {
+    enabled: true,
+    enabled_at: '2026-01-01T00:00:00Z',
+    recovery_codes_remaining: 2,
 }
 
 const PREFS = { landing_page: 'dashboard' as const, date_format: 'iso' as const }
@@ -70,6 +99,7 @@ describe('AccountView — password form', () => {
         vi.mocked(useRoute).mockReturnValue({ query: {} } as never)
         vi.mocked(getMe).mockResolvedValue(ME_WITH_PASSWORD)
         vi.mocked(getPreferences).mockResolvedValue(PREFS as never)
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_DISABLED)
     })
 
     async function mountAndLoad() {
@@ -199,6 +229,9 @@ describe('AccountView — sign-in methods / Google unlink', () => {
         has_password: true,
         google_linked: true,
         role: 'member',
+        totp_enabled: false,
+        totp_enrollment_required: false,
+        recovery_codes_remaining: null,
     }
     const ME_LINKED_NO_PW = {
         id: 1,
@@ -207,6 +240,9 @@ describe('AccountView — sign-in methods / Google unlink', () => {
         has_password: false,
         google_linked: true,
         role: 'member',
+        totp_enabled: false,
+        totp_enrollment_required: false,
+        recovery_codes_remaining: null,
     }
     const ME_NOT_LINKED = {
         id: 1,
@@ -215,6 +251,9 @@ describe('AccountView — sign-in methods / Google unlink', () => {
         has_password: true,
         google_linked: false,
         role: 'member',
+        totp_enabled: false,
+        totp_enrollment_required: false,
+        recovery_codes_remaining: null,
     }
 
     let mockPush: ReturnType<typeof vi.fn>
@@ -241,6 +280,7 @@ describe('AccountView — sign-in methods / Google unlink', () => {
             landing_page: 'dashboard' as const,
             date_format: 'iso' as const,
         } as never)
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_DISABLED)
     })
 
     async function mountAndLoad() {
@@ -390,6 +430,7 @@ describe('AccountView — danger zone (delete-data)', () => {
         vi.mocked(useRoute).mockReturnValue({ query: {} } as never)
         vi.mocked(getMe).mockResolvedValue(ME_WITH_PASSWORD)
         vi.mocked(getPreferences).mockResolvedValue(PREFS as never)
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_DISABLED)
     })
 
     async function mountAndLoad() {
@@ -453,5 +494,183 @@ describe('AccountView — danger zone (delete-data)', () => {
 
         expect(wrapper.find('[role="alert"]').text()).toContain('Server error')
         expect(wrapper.find('.form-success').exists()).toBe(false)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// TOTP card
+// ---------------------------------------------------------------------------
+
+describe('AccountView — two-factor authentication card', () => {
+    let mockPush: ReturnType<typeof vi.fn>
+    let mockClearAuth: ReturnType<typeof vi.fn>
+
+    beforeEach(() => {
+        vi.resetAllMocks()
+        mockPush = vi.fn()
+        mockClearAuth = vi.fn()
+        vi.mocked(useRouter).mockReturnValue({ push: mockPush, replace: vi.fn() } as never)
+        vi.mocked(useRoute).mockReturnValue({ query: {} } as never)
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                role: ref('member') as never,
+                isAuthenticated: ref(true) as never,
+                clearAuth: mockClearAuth as never,
+            }) as never,
+        )
+        vi.mocked(useDateFormat).mockReturnValue(baseDateFormatMock() as never)
+        vi.mocked(getMe).mockResolvedValue(ME_WITH_PASSWORD)
+        vi.mocked(getPreferences).mockResolvedValue(PREFS as never)
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_DISABLED)
+    })
+
+    async function mountAndLoad() {
+        const wrapper = mount(AccountView)
+        await flushPromises()
+        return wrapper
+    }
+
+    it('test_2fa_card_visible_for_password_account', async () => {
+        const wrapper = await mountAndLoad()
+        expect(wrapper.text()).toContain('Two-factor authentication')
+        expect(wrapper.text()).toContain('Set up two-factor auth')
+    })
+
+    it('test_2fa_card_hidden_for_google_only_account', async () => {
+        vi.mocked(getMe).mockResolvedValue({
+            ...ME_WITH_PASSWORD,
+            has_password: false,
+            google_linked: true,
+            totp_enabled: false,
+            totp_enrollment_required: false,
+            recovery_codes_remaining: null,
+        })
+        const wrapper = await mountAndLoad()
+        expect(wrapper.text()).not.toContain('Two-factor authentication')
+    })
+
+    it('test_2fa_card_hidden_for_demo_account', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                role: ref('demo') as never,
+                isAuthenticated: ref(true) as never,
+            }) as never,
+        )
+        const wrapper = await mountAndLoad()
+        expect(wrapper.text()).not.toContain('Two-factor authentication')
+    })
+
+    it('test_setup_button_shows_enrollment_wizard', async () => {
+        const wrapper = await mountAndLoad()
+        const setupBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Set up two-factor'))
+        expect(setupBtn).toBeTruthy()
+        await setupBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+        expect(wrapper.find('.stub-totp-wizard').exists()).toBe(true)
+    })
+
+    it('test_enrolled_state_shows_enabled_badge_and_code_count', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        const wrapper = await mountAndLoad()
+        expect(wrapper.text()).toContain('Enabled')
+        expect(wrapper.text()).toContain('10 remaining')
+    })
+
+    it('test_low_codes_warning_shown_when_3_or_fewer_remain', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_LOW_CODES)
+        const wrapper = await mountAndLoad()
+        expect(wrapper.text()).toContain('2 remaining')
+        expect(wrapper.text()).toContain('Few recovery codes left')
+    })
+
+    it('test_disable_success_calls_clearAuth_and_navigates_to_login', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        vi.mocked(disableTotp).mockResolvedValueOnce({ message: 'TOTP disabled' })
+
+        const wrapper = await mountAndLoad()
+
+        // Open the disable form
+        const disableBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Disable two-factor'))
+        expect(disableBtn).toBeTruthy()
+        await disableBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Fill in password and code
+        await wrapper.find('#disable-password').setValue('mypassword')
+        await wrapper.find('#disable-code').setValue('123456')
+
+        // Trigger submit on the stacked-form that wraps the disable fields
+        const forms = wrapper.findAll('.stacked-form')
+        const disableStacked = forms.find((f) => f.find('#disable-code').exists())
+        expect(disableStacked).toBeTruthy()
+        await disableStacked!.trigger('submit')
+        await flushPromises()
+
+        expect(disableTotp).toHaveBeenCalledWith({ password: 'mypassword', code: '123456' })
+        expect(mockClearAuth).toHaveBeenCalledOnce()
+        expect(mockPush).toHaveBeenCalledWith('/')
+    })
+
+    it('test_disable_failure_shows_inline_error_no_navigation', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        vi.mocked(disableTotp).mockRejectedValueOnce(new Error('Wrong code'))
+
+        const wrapper = await mountAndLoad()
+
+        const disableBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Disable two-factor'))
+        await disableBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        await wrapper.find('#disable-password').setValue('pw')
+        await wrapper.find('#disable-code').setValue('000000')
+        const forms = wrapper.findAll('.stacked-form')
+        const disableStacked = forms.find((f) => f.find('#disable-code').exists())
+        await disableStacked!.trigger('submit')
+        await flushPromises()
+
+        const alerts = wrapper.findAll('[role="alert"]')
+        const errorAlert = alerts.find((a) => a.text().includes('Wrong code'))
+        expect(errorAlert).toBeTruthy()
+        expect(mockClearAuth).not.toHaveBeenCalled()
+        expect(mockPush).not.toHaveBeenCalled()
+    })
+
+    it('test_regen_success_shows_new_codes', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        vi.mocked(regenerateRecoveryCodes).mockResolvedValueOnce({
+            recovery_codes: ['code-a', 'code-b', 'code-c'],
+        })
+
+        const wrapper = await mountAndLoad()
+
+        // Open regen form
+        const regenBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Regenerate recovery'))
+        expect(regenBtn).toBeTruthy()
+        await regenBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Find the regen stacked-form (the one without #disable-password)
+        const forms = wrapper.findAll('.stacked-form')
+        const regenStacked = forms.find(
+            (f) =>
+                !f.find('#disable-password').exists() &&
+                f.find('input[inputmode="numeric"]').exists(),
+        )
+        expect(regenStacked).toBeTruthy()
+        await regenStacked!.find('input[inputmode="numeric"]').setValue('654321')
+        await regenStacked!.trigger('submit')
+        await flushPromises()
+
+        expect(regenerateRecoveryCodes).toHaveBeenCalledWith({ code: '654321' })
+        expect(wrapper.text()).toContain('code-a')
+        expect(wrapper.text()).toContain('code-b')
     })
 })

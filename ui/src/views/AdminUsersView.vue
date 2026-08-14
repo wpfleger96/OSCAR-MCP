@@ -20,7 +20,7 @@
                             <TableHead style="width: 160px">Auth</TableHead>
                             <TableHead style="width: 120px">Last login</TableHead>
                             <TableHead style="width: 90px">Status</TableHead>
-                            <TableHead style="width: 100px">Actions</TableHead>
+                            <TableHead style="width: 180px">Actions</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -98,6 +98,12 @@
                                         title="No login method — user cannot sign in"
                                         >None</span
                                     >
+                                    <span
+                                        v-if="u.totp_enabled"
+                                        class="status-badge status-badge--totp"
+                                        title="Two-factor authentication enabled"
+                                        >2FA</span
+                                    >
                                 </TableCell>
                                 <TableCell>
                                     <span v-if="u.last_login_at">{{
@@ -132,6 +138,33 @@
                                     >
                                         Enable
                                     </button>
+                                    <template v-if="u.totp_enabled">
+                                        <template v-if="totpResetConfirmId === u.id">
+                                            <span class="revoke-confirm-label">Reset 2FA?</span>
+                                            <button
+                                                class="action-btn action-btn--destructive"
+                                                :disabled="busyUserIds.has(u.id)"
+                                                @click="executeTotpReset(u.id)"
+                                            >
+                                                Yes
+                                            </button>
+                                            <button
+                                                class="action-btn action-btn--ghost"
+                                                :disabled="busyUserIds.has(u.id)"
+                                                @click="totpResetConfirmId = null"
+                                            >
+                                                No
+                                            </button>
+                                        </template>
+                                        <button
+                                            v-else
+                                            class="action-btn action-btn--ghost"
+                                            :disabled="busyUserIds.has(u.id)"
+                                            @click="totpResetConfirmId = u.id"
+                                        >
+                                            Reset 2FA
+                                        </button>
+                                    </template>
                                 </TableCell>
                             </TableRow>
                             <TableRow v-if="userRowErrors[u.id]">
@@ -296,6 +329,7 @@ import {
     createInvite,
     revokeInvite,
 } from '@/api/admin'
+import { adminResetTotp } from '@/api/totp'
 import type { components } from '@/types/generated'
 
 type UserItem = components['schemas']['UserItem']
@@ -399,6 +433,25 @@ async function handleEnable(userId: number): Promise<void> {
         await reloadUsers()
     } catch (e: unknown) {
         userRowErrors[userId] = e instanceof Error ? e.message : 'Failed to enable user'
+    } finally {
+        busyUserIds.delete(userId)
+    }
+}
+
+// --- TOTP reset ---
+
+const totpResetConfirmId = ref<number | null>(null)
+
+async function executeTotpReset(userId: number): Promise<void> {
+    delete userRowErrors[userId]
+    busyUserIds.add(userId)
+    try {
+        await adminResetTotp(userId)
+        totpResetConfirmId.value = null
+        await reloadUsers()
+    } catch (e: unknown) {
+        totpResetConfirmId.value = null
+        userRowErrors[userId] = e instanceof Error ? e.message : 'Failed to reset 2FA'
     } finally {
         busyUserIds.delete(userId)
     }
@@ -519,6 +572,12 @@ async function executeRevoke(inviteId: number): Promise<void> {
 
 .status-badge--neutral:last-child {
     margin-right: 0;
+}
+
+.status-badge--totp {
+    color: var(--color-primary);
+    background: hsl(from var(--color-primary) h s l / 0.12);
+    margin-left: 0.25rem;
 }
 
 .muted-text {

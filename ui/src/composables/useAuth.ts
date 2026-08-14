@@ -1,9 +1,18 @@
 import { computed, ref } from 'vue'
 import type { AuthStatusResponse } from '@/types'
-import { demoLoginUser, getAuthStatus, loginUser, logoutUser, switchProfile } from '@/api/auth'
+import {
+    demoLoginUser,
+    getAuthStatus,
+    loginUser,
+    logoutUser,
+    submitTotpChallenge,
+    switchProfile,
+} from '@/api/auth'
 
 // Module-level singleton — shared across all callers (same pattern as useDarkMode).
 const status = ref<AuthStatusResponse | null>(null)
+// In-memory only; a page refresh abandons any pending challenge (user logs in again).
+const totpPendingToken = ref<string | null>(null)
 const profileKey = ref(0)
 let _fetchPromise: Promise<void> | null = null
 let _lastFetched = 0
@@ -25,6 +34,7 @@ export function useAuth() {
     // can write in any auth mode.
     const canWrite = computed(() => role.value !== 'demo' && isAuthenticated.value)
     const demoAvailable = computed(() => status.value?.demo_available ?? false)
+    const totpEnrollmentRequired = computed(() => status.value?.totp_enrollment_required ?? false)
     // Distinct from !isAuthenticated: true while auth state is unknown (fetch pending or failed).
     const statusUnknown = computed(() => status.value === null)
 
@@ -97,9 +107,27 @@ export function useAuth() {
         await fetchStatus()
     }
 
-    async function login(email: string, password: string): Promise<void> {
-        await loginUser({ email, password })
+    async function login(email: string, password: string): Promise<{ totpRequired: boolean }> {
+        const result = await loginUser({ email, password })
+        if (result.totp_required && result.pending_token) {
+            totpPendingToken.value = result.pending_token
+            return { totpRequired: true }
+        }
+        totpPendingToken.value = null
         await refreshStatus()
+        return { totpRequired: false }
+    }
+
+    async function submitTotp(code: string): Promise<void> {
+        const token = totpPendingToken.value
+        if (!token) throw new Error('No pending TOTP challenge')
+        await submitTotpChallenge({ pending_token: token, code })
+        totpPendingToken.value = null
+        await refreshStatus()
+    }
+
+    function clearTotpChallenge(): void {
+        totpPendingToken.value = null
     }
 
     async function demoLogin(): Promise<void> {
@@ -145,11 +173,14 @@ export function useAuth() {
         role,
         canWrite,
         demoAvailable,
+        totpEnrollmentRequired,
         statusUnknown,
         profileKey,
         fetchStatus,
         refreshStatus,
         login,
+        submitTotp,
+        clearTotpChallenge,
         demoLogin,
         logout,
         clearAuth,

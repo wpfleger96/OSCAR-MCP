@@ -119,6 +119,15 @@ class User(Base):
     google_link_disabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0"
     )
+    # TOTP 2FA columns.
+    # Non-null + totp_enabled_at is None  = pending unconfirmed setup.
+    # Non-null + totp_enabled_at is set   = active 2FA enrollment.
+    # Stored as plaintext Base32 by design: the symmetric secret must be
+    # recoverable for verification; defense is DB file access control.
+    totp_secret: Mapped[str | None] = mapped_column(String(64))
+    totp_enabled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Last successfully verified time-step — used for replay prevention.
+    totp_last_used_step: Mapped[int | None] = mapped_column(Integer)
 
     profiles = relationship(
         "Profile",
@@ -205,6 +214,28 @@ class Invite(Base):
 
     def __repr__(self) -> str:
         return f"<Invite(id={self.id}, email={self.email})>"
+
+
+class TotpRecoveryCode(Base):
+    """One-time recovery code for a TOTP-enrolled user.
+
+    Each row represents a single code.  ``used_at`` non-null means the code
+    has been redeemed and cannot be used again.  Rows are cascade-deleted with
+    their owning user.
+    """
+
+    __tablename__ = "totp_recovery_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    code_hash: Mapped[str] = mapped_column(String(64))  # SHA-256 hex of raw code
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+    __table_args__ = (Index("ix_totp_recovery_codes_user_id", "user_id"),)
+
+    def __repr__(self) -> str:
+        return f"<TotpRecoveryCode(id={self.id}, user_id={self.user_id})>"
 
 
 class OauthAttempt(Base):

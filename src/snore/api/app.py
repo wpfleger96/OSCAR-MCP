@@ -29,7 +29,12 @@ from snore.api.import_jobs import get_live_spool_dirs
 from snore.api.import_jobs import shutdown as _shutdown_import_jobs
 from snore.api.import_jobs import start_import_worker as _start_import_worker
 from snore.api.import_jobs import start_reaper as _start_import_reaper
-from snore.api.middleware import AuthMiddleware, AuthPathMiddleware, RateLimitMiddleware
+from snore.api.middleware import (
+    AuthMiddleware,
+    AuthPathMiddleware,
+    RateLimitMiddleware,
+    TotpEnforcementMiddleware,
+)
 from snore.api.routers import (
     about,
     admin,
@@ -771,7 +776,8 @@ def create_app() -> FastAPI:
     # fires before the body pre-read, rejecting rate-limited requests cheaply.
     app.add_middleware(AuthPathMiddleware)  # innermost of auth pair
     app.add_middleware(RateLimitMiddleware)  # outermost of auth pair
-    app.add_middleware(AuthMiddleware)
+    app.add_middleware(TotpEnforcementMiddleware)  # runs after actor is resolved
+    app.add_middleware(AuthMiddleware)  # resolves request.state.actor
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cfg.cors_origins,

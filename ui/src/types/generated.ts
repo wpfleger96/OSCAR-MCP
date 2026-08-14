@@ -4,36 +4,469 @@
  */
 
 export interface paths {
-    '/api/v1/admin/invites': {
+    '/api/v1/auth/login': {
         parameters: {
             query?: never
             header?: never
             path?: never
             cookie?: never
         }
-        /**
-         * List Invites
-         * @description Return pending invites (not redeemed, not revoked, not expired).
-         */
-        get: operations['list_invites_api_v1_admin_invites_get']
+        get?: never
         put?: never
         /**
-         * Create Invite
-         * @description Create an invite link for a new user.
-         *
-         *     Returns 201 with Cache-Control: no-store because the raw token appears in
-         *     the response body and must not be cached by proxies or browsers.  The token
-         *     is embedded in the URL fragment (never the path) so it never enters server
-         *     access logs.  It is shown once — it is not stored.
+         * Login
+         * @description Authenticate with email + password; set session cookie on success.
          */
-        post: operations['create_invite_api_v1_admin_invites_post']
+        post: operations['login_api_v1_auth_login_post']
         delete?: never
         options?: never
         head?: never
         patch?: never
         trace?: never
     }
-    '/api/v1/admin/invites/{invite_id}': {
+    '/api/v1/auth/login/totp': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Login Totp
+         * @description Complete a TOTP second-factor challenge issued by POST /login.
+         *
+         *     The ``pending_token`` must be the value returned by a successful password
+         *     verification within the last 5 minutes.  Accepts a 6-digit TOTP code or a
+         *     10-char lowercase hex recovery code.  All failures return the same generic
+         *     401 to prevent oracle attacks.
+         */
+        post: operations['login_totp_api_v1_auth_login_totp_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/logout': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Logout
+         * @description Clear the session cookie.
+         */
+        post: operations['logout_api_v1_auth_logout_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/demo-login': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Demo Login
+         * @description Sign in as the demo account (read-only, no password required).
+         *
+         *     Looks up the single active demo user and issues a session cookie.
+         *     Returns 404 (generic) when no demo account is configured so callers
+         *     cannot distinguish "demo user disabled" from "demo user absent".
+         *
+         *     Only meaningful in multiuser mode — returns 404 in local mode (which has
+         *     no session cookie and no per-role access control).
+         */
+        post: operations['demo_login_api_v1_auth_demo_login_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/status': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Auth Status
+         * @description Return authentication state and profile list for the current session.
+         */
+        get: operations['auth_status_api_v1_auth_status_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/active-profile': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Set Active Profile
+         * @description Switch the active profile; re-validates ownership.
+         */
+        post: operations['set_active_profile_api_v1_auth_active_profile_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/invites/lookup': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Lookup Invite
+         * @description Return invite metadata (email, valid) for a token submitted in the request body.
+         *
+         *     The token is never echoed in the response and never appears in the URL path
+         *     so it does not enter access logs.  The invite URL printed by
+         *     ``snore user invite`` carries the token in a URL fragment
+         *     (``/invite#<token>``) so the UI extracts it client-side and POST it here.
+         *
+         *     Rate-limited by per-IP lockout to slow down token probing.
+         */
+        post: operations['lookup_invite_api_v1_auth_invites_lookup_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/invites/redeem': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Redeem Invite Route
+         * @description Redeem an invite with a password — create user + profile atomically.
+         *
+         *     Both token and password are in the request body so neither appears in the
+         *     URL path or access logs (secret hygiene).
+         *
+         *     State machine:
+         *     1. Validate the password byte length (shared byte-based validator).
+         *     2. Validate the invite (token hash lookup, not expired/revoked/redeemed).
+         *     3. In one transaction via ``run_txn``:
+         *        - Consume the invite (conditional UPDATE — race-safe).
+         *        - Create the User row with Argon2id password hash.
+         *        - Create the initial default Profile.
+         *        - Link ``user.default_profile_id``.
+         *     4. Set a session cookie for immediate login.
+         *
+         *     Fails generically on any invite problem (no oracle attack on state).
+         */
+        post: operations['redeem_invite_route_api_v1_auth_invites_redeem_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/google/login': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Google Login
+         * @description Initiate a Google OAuth login flow (login-only; never provisions accounts).
+         *
+         *     Issues a ``snore_pre_auth`` browser-binding cookie when absent and inserts
+         *     an ``oauth_attempts`` row, then redirects the browser to Google.
+         */
+        get: operations['google_login_api_v1_auth_google_login_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/google/connect': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Google Connect
+         * @description Link a Google identity to the authenticated user's account.
+         *
+         *     Initiates an OAuth flow that, on callback, links the Google account to
+         *     the session user.  The Google account's email must match the user's
+         *     ``canonical_email`` (verified at callback time).
+         *
+         *     Demo role is blocked at the ``RequireWritable`` guard (403).  Admin
+         *     accounts are allowed — this is the intended path for admins, who are
+         *     deliberately excluded from the email auto-link path in ``resolve_login``.
+         *
+         *     Why GET is CSRF-safe: a forged GET can only *start* a flow bound to the
+         *     victim's ``user_id``; completing it requires Google claims whose verified
+         *     email equals the victim's ``canonical_email``, which an attacker's Google
+         *     account cannot produce.  The ``snore_pre_auth`` cookie additionally binds
+         *     the flow to the initiating browser, matching the existing pattern used by
+         *     ``GET /google/login``.
+         */
+        get: operations['google_connect_api_v1_auth_google_connect_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/google/callback': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Google Callback
+         * @description Handle the Google OAuth callback for both login and signup flows.
+         *
+         *     Looks up the attempt by ``state`` alone (the column is UNIQUE) and
+         *     dispatches account resolution on the attempt's ``kind``.
+         *
+         *     Uses two transaction windows so no DB connection is held during Google I/O:
+         *     Window 1 reads and validates the attempt (and, for signups, the invite);
+         *     Window 2 consumes the attempt and resolves the account.
+         */
+        get: operations['google_callback_api_v1_auth_google_callback_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/invites/google': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Google Invite Initiate
+         * @description Initiate a Google OAuth signup flow for an invite token.
+         *
+         *     Token is in the request body — never in the URL — so it never appears
+         *     in Uvicorn access logs.  Returns JSON with an ``authorization_url`` that
+         *     the client should redirect to.
+         *
+         *     Rate-limited per (token_hash, client IP) to slow down token probing.
+         */
+        post: operations['google_invite_initiate_api_v1_auth_invites_google_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/totp': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Totp Status
+         * @description Return the caller's TOTP enrollment status and remaining recovery code count.
+         */
+        get: operations['totp_status_api_v1_auth_me_totp_get']
+        put?: never
+        post?: never
+        /**
+         * Totp Disable
+         * @description Disable TOTP after verifying both the current password and a TOTP/recovery code.
+         *
+         *     Clears all TOTP state and recovery codes, bumps ``session_version``, and
+         *     clears the session cookie — the user must log in again.
+         */
+        delete: operations['totp_disable_api_v1_auth_me_totp_delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/totp/setup': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Totp Setup
+         * @description Begin TOTP enrollment: generate a new secret and return setup material.
+         *
+         *     Returns 409 if TOTP is already enabled.  Calling this again while a
+         *     pending (unconfirmed) setup exists replaces the prior pending secret.
+         */
+        post: operations['totp_setup_api_v1_auth_me_totp_setup_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/totp/confirm': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Totp Confirm
+         * @description Confirm TOTP enrollment with the first successful code.
+         *
+         *     Activates TOTP for the account, generates recovery codes, bumps
+         *     ``session_version``, and re-issues the caller's session cookie.  Recovery
+         *     codes are returned exactly once — they cannot be retrieved again.
+         */
+        post: operations['totp_confirm_api_v1_auth_me_totp_confirm_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/totp/recovery-codes/regenerate': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Totp Regenerate Recovery Codes
+         * @description Regenerate recovery codes after verifying a TOTP code (not a recovery code).
+         *
+         *     Returns 409 if TOTP is not enabled.  Only a live 6-digit TOTP code is
+         *     accepted — recovery codes cannot mint new recovery codes.
+         */
+        post: operations['totp_regenerate_recovery_codes_api_v1_auth_me_totp_recovery_codes_regenerate_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Me
+         * @description Return the authenticated user's account information.
+         */
+        get: operations['get_me_api_v1_auth_me_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/display-name': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        /**
+         * Update Display Name
+         * @description Update the authenticated user's display name.
+         */
+        patch: operations['update_display_name_api_v1_auth_me_display_name_patch']
+        trace?: never
+    }
+    '/api/v1/auth/me/password': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Change Password
+         * @description Change the authenticated user's password; bumps session_version and re-issues cookie.
+         */
+        post: operations['change_password_api_v1_auth_me_password_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/auth/me/identities/google': {
         parameters: {
             query?: never
             header?: never
@@ -44,18 +477,21 @@ export interface paths {
         put?: never
         post?: never
         /**
-         * Revoke Invite
-         * @description Revoke a pending invite.
+         * Unlink Google
+         * @description Delete the user's Google identity and invalidate all sessions.
          *
-         *     Returns 409 when the invite is already redeemed, revoked, or expired.
+         *     Blocked with 409 when the account has no password — removing Google would
+         *     eliminate the user's only sign-in method.  On success, bumps
+         *     ``session_version`` (invalidates all cookies) and clears the caller's
+         *     session cookie so they must re-authenticate with their password.
          */
-        delete: operations['revoke_invite_api_v1_admin_invites__invite_id__delete']
+        delete: operations['unlink_google_api_v1_auth_me_identities_google_delete']
         options?: never
         head?: never
         patch?: never
         trace?: never
     }
-    '/api/v1/admin/mcp/google-bindings': {
+    '/api/v1/auth/me/preferences': {
         parameters: {
             query?: never
             header?: never
@@ -63,32 +499,23 @@ export interface paths {
             cookie?: never
         }
         /**
-         * List Google Bindings
-         * @description Return all Google-linked auth_identities with the owning user's details.
-         *
-         *     One item per auth_identities row — a user with two Google identities appears
-         *     twice.  Ordered by user email then linked_at for stable display.
+         * Get Preferences
+         * @description Return the authenticated user's preferences, filling gaps with defaults.
          */
-        get: operations['list_google_bindings_api_v1_admin_mcp_google_bindings_get']
+        get: operations['get_preferences_api_v1_auth_me_preferences_get']
         put?: never
         post?: never
-        /**
-         * Reset All Google Bindings
-         * @description Delete Google bindings for all users who have a password.
-         *
-         *     Password-less users' bindings survive — removing their only sign-in method
-         *     would lock them out.  The auth_identities row deletion immediately revokes MCP
-         *     access (the MCP server resolves every request by row lookup); bumping
-         *     session_version invalidates web session cookies.  google_link_disabled is
-         *     intentionally left untouched; members re-link automatically at next sign-in.
-         */
-        delete: operations['reset_all_google_bindings_api_v1_admin_mcp_google_bindings_delete']
+        delete?: never
         options?: never
         head?: never
-        patch?: never
+        /**
+         * Update Preferences
+         * @description Merge supplied preferences into stored preferences; return the merged result.
+         */
+        patch: operations['update_preferences_api_v1_auth_me_preferences_patch']
         trace?: never
     }
-    '/api/v1/admin/mcp/google-bindings/{user_id}': {
+    '/api/v1/auth/me/delete-data': {
         parameters: {
             query?: never
             header?: never
@@ -97,43 +524,46 @@ export interface paths {
         }
         get?: never
         put?: never
-        post?: never
         /**
-         * Reset Google Binding
-         * @description Delete all Google bindings for a single user and invalidate their sessions.
+         * Delete My Data
+         * @description Delete all sleep data owned by the authenticated user.
          *
-         *     404 when the user does not exist or has no Google binding.
-         *     409 when the user has no password — resetting would leave them with no
-         *     sign-in method.  The auth_identities row deletion immediately revokes MCP
-         *     access (the MCP server resolves every request by row lookup); bumping
-         *     session_version invalidates web session cookies.  google_link_disabled is
-         *     intentionally left untouched so a fresh binding can form at next Google
-         *     sign-in (or via the account-page Connect flow for admins).
-         */
-        delete: operations['reset_google_binding_api_v1_admin_mcp_google_bindings__user_id__delete']
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/admin/mcp/status': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Get Mcp Status
-         * @description Return the current MCP server status.
+         *     Removes all Device rows for every live profile owned by the caller.  The
+         *     DB-level cascade (Device → Session/Day/Waveform/Event/Statistics/Setting/
+         *     AnalysisResult/Breath/DetectedPattern) wipes all dependent sleep data.
+         *     Import job records for this user are also deleted.  Raw backup directories
+         *     under ``raw/<profile_id>/`` are purged via the quarantine-rename pattern.
          *
-         *     Reports whether the embedded MCP streamable-HTTP server is active and, when
-         *     disabled, the reason.  Also returns the count of Google-linked identities so
-         *     admins can understand how many users can authenticate via MCP OAuth.
+         *     Profile rows, the user account, preferences, auth identities, and invites
+         *     are NOT affected.  The caller can re-import data after this operation.
+         *
+         *     VACUUM runs as a post-response background task so that reclaiming large
+         *     waveform blobs never blocks the event loop or exceeds proxy timeouts.
+         *     ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
+         *     A persistent marker file is written before the commit so that a container
+         *     restart between commit and VACUUM causes startup to reschedule the VACUUM.
+         *
+         *     Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
+         *     renamed into ``.quarantine/`` BEFORE the commit so that a container restart
+         *     between quarantine and commit leaves dirs visible to
+         *     ``DeletionSaga.recover()`` case 2 on next boot.  DB rows survive so the
+         *     state is consistent.  New imports proceed normally — re-upload and
+         *     deduplication make the loss harmless.
+         *
+         *     NOTE: Concurrent in-flight imports for this user's devices will fail if
+         *     their device rows are deleted mid-import; this is accepted behavior.
+         *
+         *     Demo accounts are blocked by ``RequireWritable`` (403) before reaching
+         *     this handler — fixture data is never at risk.
+         *
+         *     Write-lock design: two layers protect against concurrent writers.  The
+         *     app-level reset lock (``_lock: ResetLockDep``) serializes concurrent
+         *     /db/reset and /auth/me/delete-data requests, returning 409 immediately when
+         *     held.  ``ImmediateDbDep`` (BEGIN IMMEDIATE) guards against non-serialized
+         *     writers such as imports or analysis jobs; on write-lock contention the
+         *     endpoint returns 409 "Database is busy…" rather than a generic 500.
          */
-        get: operations['get_mcp_status_api_v1_admin_mcp_status_get']
-        put?: never
-        post?: never
+        post: operations['delete_my_data_api_v1_auth_me_delete_data_post']
         delete?: never
         options?: never
         head?: never
@@ -229,6 +659,476 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/admin/users/{user_id}/totp/reset': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Reset User Totp
+         * @description Reset TOTP enrollment for a user, forcing re-enrollment on next login.
+         *
+         *     Clears totp_secret, totp_enabled_at, and totp_last_used_step; deletes all
+         *     recovery codes; bumps session_version to invalidate existing sessions.
+         *
+         *     Self-reset is allowed — it forces re-enrollment rather than lockout.
+         */
+        post: operations['reset_user_totp_api_v1_admin_users__user_id__totp_reset_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/invites': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Invites
+         * @description Return pending invites (not redeemed, not revoked, not expired).
+         */
+        get: operations['list_invites_api_v1_admin_invites_get']
+        put?: never
+        /**
+         * Create Invite
+         * @description Create an invite link for a new user.
+         *
+         *     Returns 201 with Cache-Control: no-store because the raw token appears in
+         *     the response body and must not be cached by proxies or browsers.  The token
+         *     is embedded in the URL fragment (never the path) so it never enters server
+         *     access logs.  It is shown once — it is not stored.
+         */
+        post: operations['create_invite_api_v1_admin_invites_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/invites/{invite_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /**
+         * Revoke Invite
+         * @description Revoke a pending invite.
+         *
+         *     Returns 409 when the invite is already redeemed, revoked, or expired.
+         */
+        delete: operations['revoke_invite_api_v1_admin_invites__invite_id__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/mcp/status': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Mcp Status
+         * @description Return the current MCP server status.
+         *
+         *     Reports whether the embedded MCP streamable-HTTP server is active and, when
+         *     disabled, the reason.  Also returns the count of Google-linked identities so
+         *     admins can understand how many users can authenticate via MCP OAuth.
+         */
+        get: operations['get_mcp_status_api_v1_admin_mcp_status_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/mcp/google-bindings': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Google Bindings
+         * @description Return all Google-linked auth_identities with the owning user's details.
+         *
+         *     One item per auth_identities row — a user with two Google identities appears
+         *     twice.  Ordered by user email then linked_at for stable display.
+         */
+        get: operations['list_google_bindings_api_v1_admin_mcp_google_bindings_get']
+        put?: never
+        post?: never
+        /**
+         * Reset All Google Bindings
+         * @description Delete Google bindings for all users who have a password.
+         *
+         *     Password-less users' bindings survive — removing their only sign-in method
+         *     would lock them out.  The auth_identities row deletion immediately revokes MCP
+         *     access (the MCP server resolves every request by row lookup); bumping
+         *     session_version invalidates web session cookies.  google_link_disabled is
+         *     intentionally left untouched; members re-link automatically at next sign-in.
+         */
+        delete: operations['reset_all_google_bindings_api_v1_admin_mcp_google_bindings_delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/admin/mcp/google-bindings/{user_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /**
+         * Reset Google Binding
+         * @description Delete all Google bindings for a single user and invalidate their sessions.
+         *
+         *     404 when the user does not exist or has no Google binding.
+         *     409 when the user has no password — resetting would leave them with no
+         *     sign-in method.  The auth_identities row deletion immediately revokes MCP
+         *     access (the MCP server resolves every request by row lookup); bumping
+         *     session_version invalidates web session cookies.  google_link_disabled is
+         *     intentionally left untouched so a fresh binding can form at next Google
+         *     sign-in (or via the account-page Connect flow for admins).
+         */
+        delete: operations['reset_google_binding_api_v1_admin_mcp_google_bindings__user_id__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/devices/': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Devices */
+        get: operations['list_devices_api_v1_devices__get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/devices/{device_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Device Detail */
+        get: operations['get_device_detail_api_v1_devices__device_id__get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Sessions */
+        get: operations['list_sessions_api_v1_sessions__get']
+        put?: never
+        post?: never
+        /** Delete Sessions */
+        delete: operations['delete_sessions_api_v1_sessions__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/delete-preview': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Bulk Delete Preview */
+        post: operations['bulk_delete_preview_api_v1_sessions_delete_preview_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}/delete-preview': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Delete Preview */
+        get: operations['get_delete_preview_api_v1_sessions__session_id__delete_preview_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Session */
+        get: operations['get_session_api_v1_sessions__session_id__get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        /** Update Session */
+        patch: operations['update_session_api_v1_sessions__session_id__patch']
+        trace?: never
+    }
+    '/api/v1/stats/summary': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Summary */
+        get: operations['get_summary_api_v1_stats_summary_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/stats/periods': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Periods */
+        get: operations['get_periods_api_v1_stats_periods_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/stats/trends': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Trends */
+        get: operations['get_trends_api_v1_stats_trends_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/stats/data-range': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Data Range */
+        get: operations['get_data_range_api_v1_stats_data_range_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/stats/records': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Records */
+        get: operations['get_records_api_v1_stats_records_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}/waveforms': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Waveforms */
+        get: operations['list_waveforms_api_v1_sessions__session_id__waveforms_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}/waveforms/compare': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Compare Waveform Events */
+        get: operations['compare_waveform_events_api_v1_sessions__session_id__waveforms_compare_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}/waveforms/{waveform_type}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Waveform */
+        get: operations['get_waveform_api_v1_sessions__session_id__waveforms__waveform_type__get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}/events': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Events */
+        get: operations['list_events_api_v1_sessions__session_id__events_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}/events/match': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Match Events */
+        get: operations['match_events_api_v1_sessions__session_id__events_match_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/analysis/sessions': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Analysis Sessions */
+        get: operations['list_analysis_sessions_api_v1_analysis_sessions_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/sessions/{session_id}/analysis': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Analysis */
+        get: operations['get_analysis_api_v1_sessions__session_id__analysis_get']
+        put?: never
+        /** Run Analysis */
+        post: operations['run_analysis_api_v1_sessions__session_id__analysis_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/analysis': {
         parameters: {
             query?: never
@@ -246,23 +1146,6 @@ export interface paths {
         patch?: never
         trace?: never
     }
-    '/api/v1/analysis/batch': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /** Run Batch Analysis */
-        post: operations['run_batch_analysis_api_v1_analysis_batch_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
     '/api/v1/analysis/delete-preview': {
         parameters: {
             query?: never
@@ -274,6 +1157,23 @@ export interface paths {
         get: operations['get_analysis_delete_preview_api_v1_analysis_delete_preview_get']
         put?: never
         post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/analysis/batch': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Run Batch Analysis */
+        post: operations['run_batch_analysis_api_v1_analysis_batch_post']
         delete?: never
         options?: never
         head?: never
@@ -309,467 +1209,6 @@ export interface paths {
         post?: never
         /** Cancel Analysis Job */
         delete: operations['cancel_analysis_job_api_v1_analysis_jobs__job_id__delete']
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/analysis/sessions': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** List Analysis Sessions */
-        get: operations['list_analysis_sessions_api_v1_analysis_sessions_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/active-profile': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Set Active Profile
-         * @description Switch the active profile; re-validates ownership.
-         */
-        post: operations['set_active_profile_api_v1_auth_active_profile_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/demo-login': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Demo Login
-         * @description Sign in as the demo account (read-only, no password required).
-         *
-         *     Looks up the single active demo user and issues a session cookie.
-         *     Returns 404 (generic) when no demo account is configured so callers
-         *     cannot distinguish "demo user disabled" from "demo user absent".
-         *
-         *     Only meaningful in multiuser mode — returns 404 in local mode (which has
-         *     no session cookie and no per-role access control).
-         */
-        post: operations['demo_login_api_v1_auth_demo_login_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/google/callback': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Google Callback
-         * @description Handle the Google OAuth callback for both login and signup flows.
-         *
-         *     Looks up the attempt by ``state`` alone (the column is UNIQUE) and
-         *     dispatches account resolution on the attempt's ``kind``.
-         *
-         *     Uses two transaction windows so no DB connection is held during Google I/O:
-         *     Window 1 reads and validates the attempt (and, for signups, the invite);
-         *     Window 2 consumes the attempt and resolves the account.
-         */
-        get: operations['google_callback_api_v1_auth_google_callback_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/google/connect': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Google Connect
-         * @description Link a Google identity to the authenticated user's account.
-         *
-         *     Initiates an OAuth flow that, on callback, links the Google account to
-         *     the session user.  The Google account's email must match the user's
-         *     ``canonical_email`` (verified at callback time).
-         *
-         *     Demo role is blocked at the ``RequireWritable`` guard (403).  Admin
-         *     accounts are allowed — this is the intended path for admins, who are
-         *     deliberately excluded from the email auto-link path in ``resolve_login``.
-         *
-         *     Why GET is CSRF-safe: a forged GET can only *start* a flow bound to the
-         *     victim's ``user_id``; completing it requires Google claims whose verified
-         *     email equals the victim's ``canonical_email``, which an attacker's Google
-         *     account cannot produce.  The ``snore_pre_auth`` cookie additionally binds
-         *     the flow to the initiating browser, matching the existing pattern used by
-         *     ``GET /google/login``.
-         */
-        get: operations['google_connect_api_v1_auth_google_connect_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/google/login': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Google Login
-         * @description Initiate a Google OAuth login flow (login-only; never provisions accounts).
-         *
-         *     Issues a ``snore_pre_auth`` browser-binding cookie when absent and inserts
-         *     an ``oauth_attempts`` row, then redirects the browser to Google.
-         */
-        get: operations['google_login_api_v1_auth_google_login_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/invites/google': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Google Invite Initiate
-         * @description Initiate a Google OAuth signup flow for an invite token.
-         *
-         *     Token is in the request body — never in the URL — so it never appears
-         *     in Uvicorn access logs.  Returns JSON with an ``authorization_url`` that
-         *     the client should redirect to.
-         *
-         *     Rate-limited per (token_hash, client IP) to slow down token probing.
-         */
-        post: operations['google_invite_initiate_api_v1_auth_invites_google_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/invites/lookup': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Lookup Invite
-         * @description Return invite metadata (email, valid) for a token submitted in the request body.
-         *
-         *     The token is never echoed in the response and never appears in the URL path
-         *     so it does not enter access logs.  The invite URL printed by
-         *     ``snore user invite`` carries the token in a URL fragment
-         *     (``/invite#<token>``) so the UI extracts it client-side and POST it here.
-         *
-         *     Rate-limited by per-IP lockout to slow down token probing.
-         */
-        post: operations['lookup_invite_api_v1_auth_invites_lookup_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/invites/redeem': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Redeem Invite Route
-         * @description Redeem an invite with a password — create user + profile atomically.
-         *
-         *     Both token and password are in the request body so neither appears in the
-         *     URL path or access logs (secret hygiene).
-         *
-         *     State machine:
-         *     1. Validate the password byte length (shared byte-based validator).
-         *     2. Validate the invite (token hash lookup, not expired/revoked/redeemed).
-         *     3. In one transaction via ``run_txn``:
-         *        - Consume the invite (conditional UPDATE — race-safe).
-         *        - Create the User row with Argon2id password hash.
-         *        - Create the initial default Profile.
-         *        - Link ``user.default_profile_id``.
-         *     4. Set a session cookie for immediate login.
-         *
-         *     Fails generically on any invite problem (no oracle attack on state).
-         */
-        post: operations['redeem_invite_route_api_v1_auth_invites_redeem_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/login': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Login
-         * @description Authenticate with email + password; set session cookie on success.
-         */
-        post: operations['login_api_v1_auth_login_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/logout': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Logout
-         * @description Clear the session cookie.
-         */
-        post: operations['logout_api_v1_auth_logout_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/me': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Get Me
-         * @description Return the authenticated user's account information.
-         */
-        get: operations['get_me_api_v1_auth_me_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/me/delete-data': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Delete My Data
-         * @description Delete all sleep data owned by the authenticated user.
-         *
-         *     Removes all Device rows for every live profile owned by the caller.  The
-         *     DB-level cascade (Device → Session/Day/Waveform/Event/Statistics/Setting/
-         *     AnalysisResult/Breath/DetectedPattern) wipes all dependent sleep data.
-         *     Import job records for this user are also deleted.  Raw backup directories
-         *     under ``raw/<profile_id>/`` are purged via the quarantine-rename pattern.
-         *
-         *     Profile rows, the user account, preferences, auth identities, and invites
-         *     are NOT affected.  The caller can re-import data after this operation.
-         *
-         *     VACUUM runs as a post-response background task so that reclaiming large
-         *     waveform blobs never blocks the event loop or exceeds proxy timeouts.
-         *     ``size_after_mb`` is null and ``vacuum_scheduled`` is true in the response.
-         *     A persistent marker file is written before the commit so that a container
-         *     restart between commit and VACUUM causes startup to reschedule the VACUUM.
-         *
-         *     Crash-safe cleanup (quarantine-before-commit pattern): raw backup dirs are
-         *     renamed into ``.quarantine/`` BEFORE the commit so that a container restart
-         *     between quarantine and commit leaves dirs visible to
-         *     ``DeletionSaga.recover()`` case 2 on next boot.  DB rows survive so the
-         *     state is consistent.  New imports proceed normally — re-upload and
-         *     deduplication make the loss harmless.
-         *
-         *     NOTE: Concurrent in-flight imports for this user's devices will fail if
-         *     their device rows are deleted mid-import; this is accepted behavior.
-         *
-         *     Demo accounts are blocked by ``RequireWritable`` (403) before reaching
-         *     this handler — fixture data is never at risk.
-         *
-         *     Write-lock design: two layers protect against concurrent writers.  The
-         *     app-level reset lock (``_lock: ResetLockDep``) serializes concurrent
-         *     /db/reset and /auth/me/delete-data requests, returning 409 immediately when
-         *     held.  ``ImmediateDbDep`` (BEGIN IMMEDIATE) guards against non-serialized
-         *     writers such as imports or analysis jobs; on write-lock contention the
-         *     endpoint returns 409 "Database is busy…" rather than a generic 500.
-         */
-        post: operations['delete_my_data_api_v1_auth_me_delete_data_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/me/display-name': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        /**
-         * Update Display Name
-         * @description Update the authenticated user's display name.
-         */
-        patch: operations['update_display_name_api_v1_auth_me_display_name_patch']
-        trace?: never
-    }
-    '/api/v1/auth/me/identities/google': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        post?: never
-        /**
-         * Unlink Google
-         * @description Delete the user's Google identity and invalidate all sessions.
-         *
-         *     Blocked with 409 when the account has no password — removing Google would
-         *     eliminate the user's only sign-in method.  On success, bumps
-         *     ``session_version`` (invalidates all cookies) and clears the caller's
-         *     session cookie so they must re-authenticate with their password.
-         */
-        delete: operations['unlink_google_api_v1_auth_me_identities_google_delete']
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/me/password': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Change Password
-         * @description Change the authenticated user's password; bumps session_version and re-issues cookie.
-         */
-        post: operations['change_password_api_v1_auth_me_password_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/auth/me/preferences': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Get Preferences
-         * @description Return the authenticated user's preferences, filling gaps with defaults.
-         */
-        get: operations['get_preferences_api_v1_auth_me_preferences_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        /**
-         * Update Preferences
-         * @description Merge supplied preferences into stored preferences; return the merged result.
-         */
-        patch: operations['update_preferences_api_v1_auth_me_preferences_patch']
-        trace?: never
-    }
-    '/api/v1/auth/status': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Auth Status
-         * @description Return authentication state and profile list for the current session.
-         */
-        get: operations['auth_status_api_v1_auth_status_get']
-        put?: never
-        post?: never
-        delete?: never
         options?: never
         head?: never
         patch?: never
@@ -820,6 +1259,498 @@ export interface paths {
         get: operations['get_day_api_v1_days__day_date__get']
         put?: never
         post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/health/nights/dates': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Night Dates
+         * @description Return all night dates that have Apple Health sleep data for this profile.
+         */
+        get: operations['list_night_dates_api_v1_health_nights_dates_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/health/nights': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Nights
+         * @description Return paginated nightly sleep summaries, most-recent first.
+         */
+        get: operations['list_nights_api_v1_health_nights_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/health/nights/{night_date}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Night Detail
+         * @description Return nightly sleep detail with aggregated SpO2 and respiratory rate metrics.
+         */
+        get: operations['get_night_detail_api_v1_health_nights__night_date__get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/health/nights/{night_date}/samples': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Get Night Samples
+         * @description Return sleep-stage samples for the night ordered by start time.
+         *
+         *     When source_name is omitted, samples are filtered to the night's preferred
+         *     source (no filter if preferred_source is also unset).
+         */
+        get: operations['get_night_samples_api_v1_health_nights__night_date__samples_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/rx/history': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Rx History */
+        get: operations['get_rx_history_api_v1_rx_history_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/rx/current': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Rx Current */
+        get: operations['get_rx_current_api_v1_rx_current_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/rx/compare': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Compare Rx */
+        get: operations['compare_rx_api_v1_rx_compare_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/rx/all': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Rx All */
+        get: operations['get_rx_all_api_v1_rx_all_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/rx/changes': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Rx Changes */
+        get: operations['get_rx_changes_api_v1_rx_changes_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/equipment/masks/epochs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Mask Epochs */
+        get: operations['list_mask_epochs_api_v1_equipment_masks_epochs_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/equipment/masks': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Mask Log Entries */
+        get: operations['list_mask_log_entries_api_v1_equipment_masks_get']
+        put?: never
+        /** Create Mask Log Entry */
+        post: operations['create_mask_log_entry_api_v1_equipment_masks_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/equipment/masks/{entry_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /** Delete Mask Log Entry */
+        delete: operations['delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete']
+        options?: never
+        head?: never
+        /** Update Mask Log Entry */
+        patch: operations['update_mask_log_entry_api_v1_equipment_masks__entry_id__patch']
+        trace?: never
+    }
+    '/api/v1/import/': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Import Files */
+        post: operations['import_files_api_v1_import__post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/import/precheck': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Precheck Upload
+         * @description Return which client files are already present in the server backup.
+         *
+         *     Fail-open: a missing or empty backup returns nothing skippable so the client
+         *     uploads everything. Anchor files (STR.edf, Identification.json,
+         *     Identification.tgt) are never skippable — STR.edf changes daily and drives
+         *     parser detection and CPAP settings history; the server check is authoritative.
+         *     The filesystem walk runs off the event loop via asyncio.to_thread; concurrent
+         *     walks are bounded by _PRECHECK_WALK_SEM (fail-open on timeout).
+         */
+        post: operations['precheck_upload_api_v1_import_precheck_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/import/rescan': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Rescan Archive
+         * @description Re-import CPAP sessions from the server-side raw archive.
+         *
+         *     Creates an import job that reads directly from the profile's backup archive
+         *     (~/.snore/raw/<profile_id>/<serial>/DATALOG/) without requiring a new file
+         *     upload.  Useful when DB sessions were deleted but the archive is intact —
+         *     the UNIQUE(device_id, device_session_id) upsert-skip makes this idempotent.
+         *
+         *     Returns 422 when no archive exists or the archive contains no device data.
+         *     Returns 429 when admission caps are exceeded.
+         */
+        post: operations['rescan_archive_api_v1_import_rescan_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/import/jobs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * List Pipeline Jobs
+         * @description List all pipeline (import) jobs visible to the authenticated actor.
+         *
+         *     Merges in-memory active/recent jobs with persisted historical records from
+         *     the database.  In-memory jobs take precedence when both exist for the same
+         *     job_id (deduplication).
+         *
+         *     Ownership: jobs with owner_user_id=None are visible to any authenticated
+         *     user (local-mode parity); jobs with a set owner are visible only to that owner.
+         */
+        get: operations['list_pipeline_jobs_api_v1_import_jobs_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/import/{job_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        post?: never
+        /**
+         * Cancel Import
+         * @description Cancel an import job.
+         *
+         *     Requires write access and ownership of the job. Returns 404 for foreign jobs
+         *     (no information leak about other users' job IDs).
+         *
+         *     Jobs without an owner (owner_user_id=None) are accessible in local mode.
+         */
+        delete: operations['cancel_import_api_v1_import__job_id__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/import/{job_id}/progress': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /**
+         * Import Progress
+         * @description Attach an SSE observer to an existing job. Never starts/restarts the worker.
+         *
+         *     Returns 404 for foreign jobs (no information leak about other users' job IDs).
+         *     Jobs without an owner (owner_user_id=None) are accessible in local mode.
+         */
+        get: operations['import_progress_api_v1_import__job_id__progress_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/reports/summary': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Summary Report */
+        get: operations['get_summary_report_api_v1_reports_summary_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/reports/comparison': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Comparison Report */
+        get: operations['get_comparison_report_api_v1_reports_comparison_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/export/csv': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Export Csv */
+        get: operations['export_csv_api_v1_export_csv_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/export/json': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Export Json */
+        get: operations['export_json_api_v1_export_json_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/export/raw': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Export Raw */
+        get: operations['export_raw_api_v1_export_raw_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/db/stats': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Stats */
+        get: operations['get_stats_api_v1_db_stats_get']
+        put?: never
+        post?: never
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/db/vacuum': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Vacuum Db
+         * @description Vacuum the SQLite database to reclaim space after deletions.
+         *
+         *     Requires a SQLite file target; raises 422 for non-SQLite databases.
+         */
+        post: operations['vacuum_db_api_v1_db_vacuum_post']
         delete?: never
         options?: never
         head?: never
@@ -882,24 +1813,7 @@ export interface paths {
         patch?: never
         trace?: never
     }
-    '/api/v1/db/stats': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Stats */
-        get: operations['get_stats_api_v1_db_stats_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/db/vacuum': {
+    '/api/v1/validate/': {
         parameters: {
             query?: never
             header?: never
@@ -908,89 +1822,15 @@ export interface paths {
         }
         get?: never
         put?: never
-        /**
-         * Vacuum Db
-         * @description Vacuum the SQLite database to reclaim space after deletions.
-         *
-         *     Requires a SQLite file target; raises 422 for non-SQLite databases.
-         */
-        post: operations['vacuum_db_api_v1_db_vacuum_post']
+        /** Run Validation */
+        post: operations['run_validation_api_v1_validate__post']
         delete?: never
         options?: never
         head?: never
         patch?: never
         trace?: never
     }
-    '/api/v1/devices/': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** List Devices */
-        get: operations['list_devices_api_v1_devices__get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/devices/{device_id}': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Device Detail */
-        get: operations['get_device_detail_api_v1_devices__device_id__get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/equipment/masks': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** List Mask Log Entries */
-        get: operations['list_mask_log_entries_api_v1_equipment_masks_get']
-        put?: never
-        /** Create Mask Log Entry */
-        post: operations['create_mask_log_entry_api_v1_equipment_masks_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/equipment/masks/epochs': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** List Mask Epochs */
-        get: operations['list_mask_epochs_api_v1_equipment_masks_epochs_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/equipment/masks/{entry_id}': {
+    '/api/v1/validate/fl': {
         parameters: {
             query?: never
             header?: never
@@ -999,150 +1839,15 @@ export interface paths {
         }
         get?: never
         put?: never
-        post?: never
-        /** Delete Mask Log Entry */
-        delete: operations['delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete']
-        options?: never
-        head?: never
-        /** Update Mask Log Entry */
-        patch: operations['update_mask_log_entry_api_v1_equipment_masks__entry_id__patch']
-        trace?: never
-    }
-    '/api/v1/export/csv': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Export Csv */
-        get: operations['export_csv_api_v1_export_csv_get']
-        put?: never
-        post?: never
+        /** Run Fl Validation */
+        post: operations['run_fl_validation_api_v1_validate_fl_post']
         delete?: never
         options?: never
         head?: never
         patch?: never
         trace?: never
     }
-    '/api/v1/export/json': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Export Json */
-        get: operations['export_json_api_v1_export_json_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/export/raw': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Export Raw */
-        get: operations['export_raw_api_v1_export_raw_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/health/nights': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * List Nights
-         * @description Return paginated nightly sleep summaries, most-recent first.
-         */
-        get: operations['list_nights_api_v1_health_nights_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/health/nights/dates': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * List Night Dates
-         * @description Return all night dates that have Apple Health sleep data for this profile.
-         */
-        get: operations['list_night_dates_api_v1_health_nights_dates_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/health/nights/{night_date}': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Get Night Detail
-         * @description Return nightly sleep detail with aggregated SpO2 and respiratory rate metrics.
-         */
-        get: operations['get_night_detail_api_v1_health_nights__night_date__get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/health/nights/{night_date}/samples': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Get Night Samples
-         * @description Return sleep-stage samples for the night ordered by start time.
-         *
-         *     When source_name is omitted, samples are filtered to the night's preferred
-         *     source (no filter if preferred_source is also unset).
-         */
-        get: operations['get_night_samples_api_v1_health_nights__night_date__samples_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/import/': {
+    '/api/v1/validate/breaths': {
         parameters: {
             query?: never
             header?: never
@@ -1151,138 +1856,8 @@ export interface paths {
         }
         get?: never
         put?: never
-        /** Import Files */
-        post: operations['import_files_api_v1_import__post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/import/jobs': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * List Pipeline Jobs
-         * @description List all pipeline (import) jobs visible to the authenticated actor.
-         *
-         *     Merges in-memory active/recent jobs with persisted historical records from
-         *     the database.  In-memory jobs take precedence when both exist for the same
-         *     job_id (deduplication).
-         *
-         *     Ownership: jobs with owner_user_id=None are visible to any authenticated
-         *     user (local-mode parity); jobs with a set owner are visible only to that owner.
-         */
-        get: operations['list_pipeline_jobs_api_v1_import_jobs_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/import/precheck': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Precheck Upload
-         * @description Return which client files are already present in the server backup.
-         *
-         *     Fail-open: a missing or empty backup returns nothing skippable so the client
-         *     uploads everything. Anchor files (STR.edf, Identification.json,
-         *     Identification.tgt) are never skippable — STR.edf changes daily and drives
-         *     parser detection and CPAP settings history; the server check is authoritative.
-         *     The filesystem walk runs off the event loop via asyncio.to_thread; concurrent
-         *     walks are bounded by _PRECHECK_WALK_SEM (fail-open on timeout).
-         */
-        post: operations['precheck_upload_api_v1_import_precheck_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/import/rescan': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /**
-         * Rescan Archive
-         * @description Re-import CPAP sessions from the server-side raw archive.
-         *
-         *     Creates an import job that reads directly from the profile's backup archive
-         *     (~/.snore/raw/<profile_id>/<serial>/DATALOG/) without requiring a new file
-         *     upload.  Useful when DB sessions were deleted but the archive is intact —
-         *     the UNIQUE(device_id, device_session_id) upsert-skip makes this idempotent.
-         *
-         *     Returns 422 when no archive exists or the archive contains no device data.
-         *     Returns 429 when admission caps are exceeded.
-         */
-        post: operations['rescan_archive_api_v1_import_rescan_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/import/{job_id}': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        post?: never
-        /**
-         * Cancel Import
-         * @description Cancel an import job.
-         *
-         *     Requires write access and ownership of the job. Returns 404 for foreign jobs
-         *     (no information leak about other users' job IDs).
-         *
-         *     Jobs without an owner (owner_user_id=None) are accessible in local mode.
-         */
-        delete: operations['cancel_import_api_v1_import__job_id__delete']
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/import/{job_id}/progress': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /**
-         * Import Progress
-         * @description Attach an SSE observer to an existing job. Never starts/restarts the worker.
-         *
-         *     Returns 404 for foreign jobs (no information leak about other users' job IDs).
-         *     Jobs without an owner (owner_user_id=None) are accessible in local mode.
-         */
-        get: operations['import_progress_api_v1_import__job_id__progress_get']
-        put?: never
-        post?: never
+        /** Run Breath Trends Validation */
+        post: operations['run_breath_trends_validation_api_v1_validate_breaths_post']
         delete?: never
         options?: never
         head?: never
@@ -1327,434 +1902,6 @@ export interface paths {
         patch: operations['update_profile_api_v1_profiles__profile_id__patch']
         trace?: never
     }
-    '/api/v1/reports/comparison': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Comparison Report */
-        get: operations['get_comparison_report_api_v1_reports_comparison_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/reports/summary': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Summary Report */
-        get: operations['get_summary_report_api_v1_reports_summary_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/rx/all': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Rx All */
-        get: operations['get_rx_all_api_v1_rx_all_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/rx/changes': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Rx Changes */
-        get: operations['get_rx_changes_api_v1_rx_changes_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/rx/compare': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Compare Rx */
-        get: operations['compare_rx_api_v1_rx_compare_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/rx/current': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Rx Current */
-        get: operations['get_rx_current_api_v1_rx_current_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/rx/history': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Rx History */
-        get: operations['get_rx_history_api_v1_rx_history_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** List Sessions */
-        get: operations['list_sessions_api_v1_sessions__get']
-        put?: never
-        post?: never
-        /** Delete Sessions */
-        delete: operations['delete_sessions_api_v1_sessions__delete']
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/delete-preview': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /** Bulk Delete Preview */
-        post: operations['bulk_delete_preview_api_v1_sessions_delete_preview_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Session */
-        get: operations['get_session_api_v1_sessions__session_id__get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        /** Update Session */
-        patch: operations['update_session_api_v1_sessions__session_id__patch']
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}/analysis': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Analysis */
-        get: operations['get_analysis_api_v1_sessions__session_id__analysis_get']
-        put?: never
-        /** Run Analysis */
-        post: operations['run_analysis_api_v1_sessions__session_id__analysis_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}/delete-preview': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Delete Preview */
-        get: operations['get_delete_preview_api_v1_sessions__session_id__delete_preview_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}/events': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** List Events */
-        get: operations['list_events_api_v1_sessions__session_id__events_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}/events/match': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Match Events */
-        get: operations['match_events_api_v1_sessions__session_id__events_match_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}/waveforms': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** List Waveforms */
-        get: operations['list_waveforms_api_v1_sessions__session_id__waveforms_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}/waveforms/compare': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Compare Waveform Events */
-        get: operations['compare_waveform_events_api_v1_sessions__session_id__waveforms_compare_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/sessions/{session_id}/waveforms/{waveform_type}': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Waveform */
-        get: operations['get_waveform_api_v1_sessions__session_id__waveforms__waveform_type__get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/stats/data-range': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Data Range */
-        get: operations['get_data_range_api_v1_stats_data_range_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/stats/periods': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Periods */
-        get: operations['get_periods_api_v1_stats_periods_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/stats/records': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Records */
-        get: operations['get_records_api_v1_stats_records_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/stats/summary': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Summary */
-        get: operations['get_summary_api_v1_stats_summary_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/stats/trends': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        /** Get Trends */
-        get: operations['get_trends_api_v1_stats_trends_get']
-        put?: never
-        post?: never
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/validate/': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /** Run Validation */
-        post: operations['run_validation_api_v1_validate__post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/validate/breaths': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /** Run Breath Trends Validation */
-        post: operations['run_breath_trends_validation_api_v1_validate_breaths_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
-    '/api/v1/validate/fl': {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        get?: never
-        put?: never
-        /** Run Fl Validation */
-        post: operations['run_fl_validation_api_v1_validate_fl_post']
-        delete?: never
-        options?: never
-        head?: never
-        patch?: never
-        trace?: never
-    }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -1770,40 +1917,10 @@ export interface components {
          */
         AggregateMetrics: {
             /**
-             * Avg Apnea F1
-             * @description Average apnea F1
+             * Total Sessions
+             * @description Total sessions analyzed
              */
-            avg_apnea_f1: number
-            /**
-             * Avg Apnea Precision
-             * @description Average apnea precision
-             */
-            avg_apnea_precision: number
-            /**
-             * Avg Apnea Sensitivity
-             * @description Average apnea sensitivity
-             */
-            avg_apnea_sensitivity: number
-            /**
-             * Avg Hypopnea F1
-             * @description Average hypopnea F1
-             */
-            avg_hypopnea_f1: number
-            /**
-             * Avg Hypopnea Precision
-             * @description Average hypopnea precision
-             */
-            avg_hypopnea_precision: number
-            /**
-             * Avg Hypopnea Sensitivity
-             * @description Average hypopnea sensitivity
-             */
-            avg_hypopnea_sensitivity: number
-            /**
-             * Low Sensitivity Sessions
-             * @description Session IDs with <60% sensitivity
-             */
-            low_sensitivity_sessions: number[]
+            total_sessions: number
             /**
              * Total Machine Events
              * @description Total machine events
@@ -1815,36 +1932,66 @@ export interface components {
              */
             total_programmatic_events: number
             /**
-             * Total Sessions
-             * @description Total sessions analyzed
+             * Avg Apnea Sensitivity
+             * @description Average apnea sensitivity
              */
-            total_sessions: number
+            avg_apnea_sensitivity: number
+            /**
+             * Avg Apnea Precision
+             * @description Average apnea precision
+             */
+            avg_apnea_precision: number
+            /**
+             * Avg Apnea F1
+             * @description Average apnea F1
+             */
+            avg_apnea_f1: number
+            /**
+             * Avg Hypopnea Sensitivity
+             * @description Average hypopnea sensitivity
+             */
+            avg_hypopnea_sensitivity: number
+            /**
+             * Avg Hypopnea Precision
+             * @description Average hypopnea precision
+             */
+            avg_hypopnea_precision: number
+            /**
+             * Avg Hypopnea F1
+             * @description Average hypopnea F1
+             */
+            avg_hypopnea_f1: number
+            /**
+             * Low Sensitivity Sessions
+             * @description Session IDs with <60% sensitivity
+             */
+            low_sensitivity_sessions: number[]
         }
         /**
          * AnalysisDeletePreview
          * @description Preview of analysis data to be deleted.
          */
         AnalysisDeletePreview: {
-            /** Patterns Count */
-            patterns_count: number
-            /** Records To Delete */
-            records_to_delete: number
-            /** Session Details */
-            session_details?: components['schemas']['AnalysisSessionDetail'][]
             /** Sessions With Analysis */
             sessions_with_analysis: number
             /** Total Analysis Records */
             total_analysis_records: number
+            /** Records To Delete */
+            records_to_delete: number
+            /** Patterns Count */
+            patterns_count: number
+            /** Session Details */
+            session_details?: components['schemas']['AnalysisSessionDetail'][]
         }
         /** AnalysisDeleteRequest */
         AnalysisDeleteRequest: {
+            /** Session Ids */
+            session_ids?: number[]
             /**
              * All Versions
              * @default false
              */
             all_versions: boolean
-            /** Session Ids */
-            session_ids?: number[]
         }
         /**
          * AnalysisEvent
@@ -1856,25 +2003,30 @@ export interface components {
          */
         AnalysisEvent: {
             /**
-             * Baseline Flow
-             * @description Baseline flow (L/min)
+             * Event Type
+             * @description Event type
              */
-            baseline_flow?: number | null
+            event_type: string
             /**
-             * Confidence
-             * @description Detection confidence
+             * Start Time
+             * @description Session offset (seconds from session start)
              */
-            confidence?: number | null
+            start_time: number
             /**
              * Duration
              * @description Event duration (seconds)
              */
             duration: number
             /**
-             * Event Type
-             * @description Event type
+             * Source
+             * @description Event source (machine/programmatic)
              */
-            event_type: string
+            source: string
+            /**
+             * Confidence
+             * @description Detection confidence
+             */
+            confidence?: number | null
             /**
              * Flow Reduction
              * @description Flow reduction (0-1)
@@ -1886,15 +2038,10 @@ export interface components {
              */
             has_desaturation?: boolean | null
             /**
-             * Source
-             * @description Event source (machine/programmatic)
+             * Baseline Flow
+             * @description Baseline flow (L/min)
              */
-            source: string
-            /**
-             * Start Time
-             * @description Session offset (seconds from session start)
-             */
-            start_time: number
+            baseline_flow?: number | null
         }
         /** AnalysisJobEnqueued */
         AnalysisJobEnqueued: {
@@ -1905,28 +2052,28 @@ export interface components {
         }
         /** AnalysisJobStatus */
         AnalysisJobStatus: {
-            /** Created At */
-            created_at: number
-            /** Error Message */
-            error_message: string | null
-            /** Finished At */
-            finished_at: number | null
             /** Job Id */
             job_id: string
-            /** Owner User Id */
-            owner_user_id: number | null
+            /** State */
+            state: string
+            /** Source */
+            source: string
+            /** Session Count */
+            session_count: number
             /** Progress Completed */
             progress_completed: number
             /** Progress Total */
             progress_total: number
-            /** Session Count */
-            session_count: number
-            /** Source */
-            source: string
+            /** Error Message */
+            error_message: string | null
+            /** Created At */
+            created_at: number
             /** Started At */
             started_at: number | null
-            /** State */
-            state: string
+            /** Finished At */
+            finished_at: number | null
+            /** Owner User Id */
+            owner_user_id: number | null
         }
         /** AnalysisJobsListResponse */
         AnalysisJobsListResponse: {
@@ -1938,19 +2085,19 @@ export interface components {
          * @description Session with analysis status for listing.
          */
         AnalysisListItem: {
-            /** Analysis Id */
-            analysis_id?: number | null
-            /** Duration Hours */
-            duration_hours?: number | null
-            /** Has Analysis */
-            has_analysis: boolean
+            /** Session Id */
+            session_id: number
             /**
              * Session Date
              * Format: date
              */
             session_date: string
-            /** Session Id */
-            session_id: number
+            /** Duration Hours */
+            duration_hours?: number | null
+            /** Has Analysis */
+            has_analysis: boolean
+            /** Analysis Id */
+            analysis_id?: number | null
         }
         /**
          * AnalysisResult
@@ -1958,28 +2105,20 @@ export interface components {
          */
         AnalysisResult: {
             /**
-             * Csr Detection
-             * @description Cheyne-Stokes Respiration detection (summary)
+             * Session Id
+             * @description Database session ID
              */
-            csr_detection?: {
-                [key: string]: unknown
-            } | null
+            session_id: number
             /**
-             * Csr Episodes
-             * @description Time-localized CSR episodes
+             * Session Duration Hours
+             * @description Session duration (hours)
              */
-            csr_episodes?:
-                | {
-                      [key: string]: unknown
-                  }[]
-                | null
+            session_duration_hours: number
             /**
-             * Flow Analysis
-             * @description Flow limitation analysis
+             * Total Breaths
+             * @description Total breaths segmented
              */
-            flow_analysis?: {
-                [key: string]: unknown
-            } | null
+            total_breaths: number
             /**
              * Machine Events
              * @description Machine-flagged events
@@ -1993,12 +2132,35 @@ export interface components {
                 [key: string]: components['schemas']['ModeResult']
             }
             /**
+             * Flow Analysis
+             * @description Flow limitation analysis
+             */
+            flow_analysis?: {
+                [key: string]: unknown
+            } | null
+            /**
+             * Csr Detection
+             * @description Cheyne-Stokes Respiration detection (summary)
+             */
+            csr_detection?: {
+                [key: string]: unknown
+            } | null
+            /**
              * Periodic Breathing
              * @description Periodic breathing detection (summary)
              */
             periodic_breathing?: {
                 [key: string]: unknown
             } | null
+            /**
+             * Csr Episodes
+             * @description Time-localized CSR episodes
+             */
+            csr_episodes?:
+                | {
+                      [key: string]: unknown
+                  }[]
+                | null
             /**
              * Periodic Breathing Episodes
              * @description Time-localized periodic breathing episodes
@@ -2019,32 +2181,17 @@ export interface components {
              */
             pulse_change_index?: number | null
             /**
-             * Session Duration Hours
-             * @description Session duration (hours)
-             */
-            session_duration_hours: number
-            /**
-             * Session Id
-             * @description Database session ID
-             */
-            session_id: number
-            /**
-             * Timestamp End
-             * @description Session end timestamp
-             * @default 0
-             */
-            timestamp_end: number
-            /**
              * Timestamp Start
              * @description Session start timestamp
              * @default 0
              */
             timestamp_start: number
             /**
-             * Total Breaths
-             * @description Total breaths segmented
+             * Timestamp End
+             * @description Session end timestamp
+             * @default 0
              */
-            total_breaths: number
+            timestamp_end: number
         }
         /** AnalysisRunRequest */
         AnalysisRunRequest: {
@@ -2068,15 +2215,15 @@ export interface components {
         AnalysisSessionDetail: {
             /** Id */
             id: number
-            /** Manufacturer */
-            manufacturer?: string | null
-            /** Model */
-            model?: string | null
             /**
              * Start Time
              * Format: date-time
              */
             start_time: string
+            /** Manufacturer */
+            manufacturer?: string | null
+            /** Model */
+            model?: string | null
             /** Version Count */
             version_count: number
         }
@@ -2097,37 +2244,20 @@ export interface components {
          */
         ApneaEvent: {
             /**
-             * Baseline Flow
-             * @description Baseline flow before event (L/min)
+             * Start Time
+             * @description Event start timestamp (seconds)
              */
-            baseline_flow: number
-            /**
-             * Classification Confidence
-             * @description Confidence in OA/CA/MA classification (0-1)
-             * @default 0.5
-             */
-            classification_confidence: number
-            /**
-             * Confidence
-             * @description Detection confidence (0-1)
-             */
-            confidence: number
-            /**
-             * Detection Method
-             * @description Detection method (amplitude, gap, near_zero_flow)
-             * @default amplitude
-             */
-            detection_method: string
-            /**
-             * Duration
-             * @description Event duration (seconds)
-             */
-            duration: number
+            start_time: number
             /**
              * End Time
              * @description Event end timestamp (seconds)
              */
             end_time: number
+            /**
+             * Duration
+             * @description Event duration (seconds)
+             */
+            duration: number
             /** @description Apnea type */
             event_type: components['schemas']['ApneaEventType']
             /**
@@ -2136,37 +2266,61 @@ export interface components {
              */
             flow_reduction: number
             /**
-             * Start Time
-             * @description Event start timestamp (seconds)
+             * Confidence
+             * @description Detection confidence (0-1)
              */
-            start_time: number
+            confidence: number
+            /**
+             * Classification Confidence
+             * @description Confidence in OA/CA/MA classification (0-1)
+             * @default 0.5
+             */
+            classification_confidence: number
+            /**
+             * Baseline Flow
+             * @description Baseline flow before event (L/min)
+             */
+            baseline_flow: number
+            /**
+             * Detection Method
+             * @description Detection method (amplitude, gap, near_zero_flow)
+             * @default amplitude
+             */
+            detection_method: string
         }
         /** @enum {string} */
         ApneaEventType: 'OA' | 'CA' | 'MA' | 'UA'
         /** AuthStatusResponse */
         AuthStatusResponse: {
-            /** Active Profile Id */
-            active_profile_id?: number | null
-            /** Auth Mode */
-            auth_mode: string
             /** Authenticated */
             authenticated: boolean
+            /** Auth Mode */
+            auth_mode: string
+            user?: components['schemas']['UserInfo'] | null
+            /**
+             * Profiles
+             * @default []
+             */
+            profiles: components['schemas']['ProfileInfo'][]
+            /** Active Profile Id */
+            active_profile_id?: number | null
             /**
              * Demo Available
              * @default false
              */
             demo_available: boolean
             /**
-             * Profiles
-             * @default []
+             * Totp Enrollment Required
+             * @default false
              */
-            profiles: components['schemas']['ProfileInfo'][]
-            user?: components['schemas']['UserInfo'] | null
+            totp_enrollment_required: boolean
         }
         /** BatchAnalysisRequest */
         BatchAnalysisRequest: {
             /** From Date */
             from_date?: string | null
+            /** To Date */
+            to_date?: string | null
             /**
              * Missing Only
              * @description When true, restrict the batch to sessions that have a flow waveform but no analysis result yet. Composable with from_date/to_date. When true, from_date and to_date are not required.
@@ -2185,18 +2339,17 @@ export interface components {
              * @default true
              */
             store_results: boolean
-            /** To Date */
-            to_date?: string | null
         }
         /**
          * BreathTrendsAggregateMetrics
          * @description Aggregate breath-trends validation metrics across multiple sessions.
          */
         BreathTrendsAggregateMetrics: {
-            /** @description Aggregate for the I:E ratio channel */
-            ie_ratio: components['schemas']['ChannelAggregateMetrics']
-            /** @description Aggregate for the RR channel */
-            rr: components['schemas']['ChannelAggregateMetrics']
+            /**
+             * Total Sessions
+             * @description Sessions in the requested date range
+             */
+            total_sessions: number
             /**
              * Sessions Compared
              * @description Sessions with analysis and valid breaths (skipped_reason is None)
@@ -2212,15 +2365,14 @@ export interface components {
              * @description Sessions skipped: no leak-valid breaths with timing columns
              */
             sessions_skipped_no_valid_breaths: number
-            /** @description Aggregate for the Ti channel */
-            ti: components['schemas']['ChannelAggregateMetrics']
-            /**
-             * Total Sessions
-             * @description Sessions in the requested date range
-             */
-            total_sessions: number
+            /** @description Aggregate for the RR channel */
+            rr: components['schemas']['ChannelAggregateMetrics']
             /** @description Aggregate for the TV channel */
             tv: components['schemas']['ChannelAggregateMetrics']
+            /** @description Aggregate for the Ti channel */
+            ti: components['schemas']['ChannelAggregateMetrics']
+            /** @description Aggregate for the I:E ratio channel */
+            ie_ratio: components['schemas']['ChannelAggregateMetrics']
         }
         /**
          * BreathTrendsSessionValidation
@@ -2228,12 +2380,10 @@ export interface components {
          */
         BreathTrendsSessionValidation: {
             /**
-             * Channels
-             * @description Per-channel comparison results keyed by channel name ('rr', 'tv', 'ti', 'ie_ratio').  Empty when skipped_reason is set.
+             * Session Id
+             * @description Database session ID
              */
-            channels?: {
-                [key: string]: components['schemas']['ChannelComparison']
-            }
+            session_id: number
             /**
              * Date
              * @description Session date (YYYY-MM-DD)
@@ -2245,49 +2395,51 @@ export interface components {
              */
             duration_hours: number
             /**
+             * Parser Version
+             * @description Waveform parser/import version tag
+             */
+            parser_version: string
+            /**
+             * Skipped Reason
+             * @description Why the whole session was excluded: 'no_analysis' | 'no_valid_breaths' | 'error' | None.  'no_analysis' — no completed analysis result for this session.  'no_valid_breaths' — analysis exists but no leak-valid breaths with timing columns.  'error' — unhandled exception during session validation; details in logs.
+             */
+            skipped_reason?: string | null
+            /**
              * N Breaths
              * @description Count of leak-valid breaths with timing columns fetched for this session.  This is the count BEFORE per-channel alignment filtering, so it is an upper bound across all channels; the authoritative per-channel count is each channel's `n_pairs`.  Intentionally differs from FL's `n_breaths_compared`, which counts breaths used in the FL comparison.
              * @default 0
              */
             n_breaths: number
             /**
-             * Parser Version
-             * @description Waveform parser/import version tag
+             * Channels
+             * @description Per-channel comparison results keyed by channel name ('rr', 'tv', 'ti', 'ie_ratio').  Empty when skipped_reason is set.
              */
-            parser_version: string
-            /**
-             * Session Id
-             * @description Database session ID
-             */
-            session_id: number
-            /**
-             * Skipped Reason
-             * @description Why the whole session was excluded: 'no_analysis' | 'no_valid_breaths' | 'error' | None.  'no_analysis' — no completed analysis result for this session.  'no_valid_breaths' — analysis exists but no leak-valid breaths with timing columns.  'error' — unhandled exception during session validation; details in logs.
-             */
-            skipped_reason?: string | null
+            channels?: {
+                [key: string]: components['schemas']['ChannelComparison']
+            }
         }
         /**
          * BreathTrendsValidationReport
          * @description Complete breath-trends validation report.
          */
         BreathTrendsValidationReport: {
-            /** @description Aggregate metrics */
-            aggregate: components['schemas']['BreathTrendsAggregateMetrics']
             /**
-             * Date Range End
-             * @description End date of the requested range
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
              */
-            date_range_end: string
+            report_date: string
             /**
              * Date Range Start
              * @description Start date of the requested range
              */
             date_range_start: string
             /**
-             * Report Date
-             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             * Date Range End
+             * @description End date of the requested range
              */
-            report_date: string
+            date_range_end: string
+            /** @description Aggregate metrics */
+            aggregate: components['schemas']['BreathTrendsAggregateMetrics']
             /**
              * Sessions
              * @description Per-session results
@@ -2309,19 +2461,19 @@ export interface components {
         }
         /** BulkDeletePreviewRequest */
         BulkDeletePreviewRequest: {
+            /** Session Ids */
+            session_ids?: number[] | null
+            /** Device */
+            device?: string | null
+            /** From Date */
+            from_date?: string | null
+            /** To Date */
+            to_date?: string | null
             /**
              * Delete All
              * @default false
              */
             delete_all: boolean
-            /** Device */
-            device?: string | null
-            /** From Date */
-            from_date?: string | null
-            /** Session Ids */
-            session_ids?: number[] | null
-            /** To Date */
-            to_date?: string | null
         }
         /**
          * ChannelAggregateMetrics
@@ -2329,25 +2481,25 @@ export interface components {
          */
         ChannelAggregateMetrics: {
             /**
-             * Mean Bias
-             * @description Mean of per-session mean_bias over sessions with data
+             * Sessions With Data
+             * @description Sessions where this channel has at least one aligned pair
              */
-            mean_bias?: number | null
-            /**
-             * Mean Median Abs Error
-             * @description Mean of per-session median_abs_error over sessions with data
-             */
-            mean_median_abs_error?: number | null
+            sessions_with_data: number
             /**
              * Mean Spearman R
              * @description Mean Spearman r over sessions with a non-None spearman_r
              */
             mean_spearman_r?: number | null
             /**
-             * Sessions With Data
-             * @description Sessions where this channel has at least one aligned pair
+             * Mean Median Abs Error
+             * @description Mean of per-session median_abs_error over sessions with data
              */
-            sessions_with_data: number
+            mean_median_abs_error?: number | null
+            /**
+             * Mean Bias
+             * @description Mean of per-session mean_bias over sessions with data
+             */
+            mean_bias?: number | null
         }
         /**
          * ChannelComparison
@@ -2355,36 +2507,36 @@ export interface components {
          */
         ChannelComparison: {
             /**
-             * Mean Bias
-             * @description Mean (SNORE − device) in native units; None if n_pairs == 0
-             */
-            mean_bias?: number | null
-            /**
-             * Median Abs Error
-             * @description Median |SNORE − device| in native units (bpm / mL / s / pp); None if n_pairs == 0
-             */
-            median_abs_error?: number | null
-            /**
              * N Pairs
              * @description Number of (SNORE, device) pairs after dropping NaN and zero-device windows
              * @default 0
              */
             n_pairs: number
             /**
-             * Skipped Reason
-             * @description Why this channel was excluded: 'channel_not_recorded' | None. 'channel_not_recorded' means no device waveform row exists for this channel in this session (normal for ti/ie_ratio on APAP sessions).
+             * Spearman R
+             * @description Spearman r between SNORE per-breath value and device breath-window average; None if n < 3 or either side is constant
              */
-            skipped_reason?: string | null
+            spearman_r?: number | null
             /**
              * Spearman P
              * @description p-value for spearman_r
              */
             spearman_p?: number | null
             /**
-             * Spearman R
-             * @description Spearman r between SNORE per-breath value and device breath-window average; None if n < 3 or either side is constant
+             * Median Abs Error
+             * @description Median |SNORE − device| in native units (bpm / mL / s / pp); None if n_pairs == 0
              */
-            spearman_r?: number | null
+            median_abs_error?: number | null
+            /**
+             * Mean Bias
+             * @description Mean (SNORE − device) in native units; None if n_pairs == 0
+             */
+            mean_bias?: number | null
+            /**
+             * Skipped Reason
+             * @description Why this channel was excluded: 'channel_not_recorded' | None. 'channel_not_recorded' means no device waveform row exists for this channel in this session (normal for ti/ie_ratio on APAP sessions).
+             */
+            skipped_reason?: string | null
         }
         /** CreateInviteRequest */
         CreateInviteRequest: {
@@ -2420,40 +2572,85 @@ export interface components {
         /** DatabaseStatsPublic */
         DatabaseStatsPublic: {
             /**
-             * Analysis Count
-             * @description Number of analysis results
+             * Size Mb
+             * @description Database file size in megabytes
              */
-            analysis_count: number
+            size_mb: number
             /**
-             * Analysis Coverage Pct
-             * @description Percentage of analyzable sessions (those with a flow waveform) that have been analyzed: sessions_with_analysis / analyzable_session_count * 100
+             * Profile Count
+             * @description Number of profiles
              */
-            analysis_coverage_pct: number
-            /**
-             * Analyzable Session Count
-             * @description Sessions having a flow waveform (prerequisite for analysis)
-             */
-            analyzable_session_count: number
-            /**
-             * Day Count
-             * @description Number of days
-             */
-            day_count: number
+            profile_count: number
             /**
              * Device Count
              * @description Number of devices
              */
             device_count: number
             /**
+             * Session Count
+             * @description Number of sessions
+             */
+            session_count: number
+            /**
+             * Day Count
+             * @description Number of days
+             */
+            day_count: number
+            /**
              * Event Count
              * @description Number of events
              */
             event_count: number
             /**
+             * Waveform Count
+             * @description Number of waveform records
+             */
+            waveform_count: number
+            /**
+             * Analysis Count
+             * @description Number of analysis results
+             */
+            analysis_count: number
+            /**
+             * Pattern Count
+             * @description Number of detected patterns
+             */
+            pattern_count: number
+            /**
+             * Sessions With Waveforms
+             * @description Sessions that have waveform data
+             */
+            sessions_with_waveforms: number
+            /**
+             * Sessions With Events
+             * @description Sessions that have event data
+             */
+            sessions_with_events: number
+            /**
+             * Sessions With Analysis
+             * @description Distinct sessions having at least one analysis result
+             */
+            sessions_with_analysis: number
+            /**
+             * Analyzable Session Count
+             * @description Sessions having a flow waveform (prerequisite for analysis)
+             */
+            analyzable_session_count: number
+            /**
+             * Waveform Coverage Pct
+             * @description Percentage of sessions with waveforms
+             */
+            waveform_coverage_pct: number
+            /**
              * Event Coverage Pct
              * @description Percentage of sessions with events
              */
             event_coverage_pct: number
+            /**
+             * Analysis Coverage Pct
+             * @description Percentage of analyzable sessions (those with a flow waveform) that have been analyzed: sessions_with_analysis / analyzable_session_count * 100
+             */
+            analysis_coverage_pct: number
             /**
              * First Session
              * @description Earliest session date
@@ -2464,51 +2661,6 @@ export interface components {
              * @description Latest session date
              */
             last_session?: string | null
-            /**
-             * Pattern Count
-             * @description Number of detected patterns
-             */
-            pattern_count: number
-            /**
-             * Profile Count
-             * @description Number of profiles
-             */
-            profile_count: number
-            /**
-             * Session Count
-             * @description Number of sessions
-             */
-            session_count: number
-            /**
-             * Sessions With Analysis
-             * @description Distinct sessions having at least one analysis result
-             */
-            sessions_with_analysis: number
-            /**
-             * Sessions With Events
-             * @description Sessions that have event data
-             */
-            sessions_with_events: number
-            /**
-             * Sessions With Waveforms
-             * @description Sessions that have waveform data
-             */
-            sessions_with_waveforms: number
-            /**
-             * Size Mb
-             * @description Database file size in megabytes
-             */
-            size_mb: number
-            /**
-             * Waveform Count
-             * @description Number of waveform records
-             */
-            waveform_count: number
-            /**
-             * Waveform Coverage Pct
-             * @description Percentage of sessions with waveforms
-             */
-            waveform_coverage_pct: number
         }
         /** DateListResponse */
         DateListResponse: {
@@ -2520,92 +2672,90 @@ export interface components {
          * @description Full detail of a therapy day including per-metric stats.
          */
         DayDetail: {
+            /**
+             * Date
+             * Format: date
+             */
+            date: string
+            /** Device Id */
+            device_id: number
+            /** Session Count */
+            session_count: number
+            /** Total Therapy Hours */
+            total_therapy_hours?: number | null
             /** Ahi */
             ahi?: number | null
-            /** Avg Leak */
-            avg_leak?: number | null
-            /** Avg Pressure */
-            avg_pressure?: number | null
-            /** Avg Spo2 */
-            avg_spo2?: number | null
+            /** Oai */
+            oai?: number | null
             /** Cai */
             cai?: number | null
+            /** Hi */
+            hi?: number | null
+            /** Avg Pressure */
+            avg_pressure?: number | null
+            /** Avg Leak */
+            avg_leak?: number | null
+            /** Avg Spo2 */
+            avg_spo2?: number | null
+            /** Pressure Min */
+            pressure_min?: number | null
+            /** Pressure Max */
+            pressure_max?: number | null
+            /** Pressure Median */
+            pressure_median?: number | null
+            /** Pressure 95Th */
+            pressure_95th?: number | null
+            /** Epap Min */
+            epap_min?: number | null
+            /** Epap Max */
+            epap_max?: number | null
+            /** Epap Median */
+            epap_median?: number | null
+            /** Epap Mean */
+            epap_mean?: number | null
+            /** Epap 95Th */
+            epap_95th?: number | null
+            /** Leak Min */
+            leak_min?: number | null
+            /** Leak Max */
+            leak_max?: number | null
+            /** Leak Mean */
+            leak_mean?: number | null
+            /** Leak 95Th */
+            leak_95th?: number | null
+            /** Spo2 Min */
+            spo2_min?: number | null
+            /** Spo2 Max */
+            spo2_max?: number | null
+            /**
+             * Obstructive Apneas
+             * @default 0
+             */
+            obstructive_apneas: number
             /**
              * Central Apneas
              * @default 0
              */
             central_apneas: number
             /**
-             * Date
-             * Format: date
-             */
-            date: string
-            /** Device Id */
-            device_id: number
-            /** Epap 95Th */
-            epap_95th?: number | null
-            /** Epap Max */
-            epap_max?: number | null
-            /** Epap Mean */
-            epap_mean?: number | null
-            /** Epap Median */
-            epap_median?: number | null
-            /** Epap Min */
-            epap_min?: number | null
-            health_sleep?: components['schemas']['HealthNightSummaryRead'] | null
-            /** Hi */
-            hi?: number | null
-            /**
              * Hypopneas
              * @default 0
              */
             hypopneas: number
-            /** Leak 95Th */
-            leak_95th?: number | null
-            /** Leak Max */
-            leak_max?: number | null
-            /** Leak Mean */
-            leak_mean?: number | null
-            /** Leak Min */
-            leak_min?: number | null
-            /** Oai */
-            oai?: number | null
-            /**
-             * Obstructive Apneas
-             * @default 0
-             */
-            obstructive_apneas: number
-            /** Pressure 95Th */
-            pressure_95th?: number | null
-            /** Pressure Max */
-            pressure_max?: number | null
-            /** Pressure Median */
-            pressure_median?: number | null
-            /** Pressure Min */
-            pressure_min?: number | null
             /**
              * Reras
              * @default 0
              */
             reras: number
-            /** Session Count */
-            session_count: number
             /** Session Ids */
             session_ids?: number[]
-            /** Spo2 Max */
-            spo2_max?: number | null
-            /** Spo2 Min */
-            spo2_min?: number | null
-            /** Total Therapy Hours */
-            total_therapy_hours?: number | null
+            health_sleep?: components['schemas']['HealthNightSummaryRead'] | null
         }
         /**
          * DayListItem
          * @description Summary of a single therapy day.
          */
         DayListItem: {
-            /** Ahi */
-            ahi?: number | null
             /**
              * Date
              * Format: date
@@ -2617,12 +2767,19 @@ export interface components {
             session_count: number
             /** Total Therapy Hours */
             total_therapy_hours?: number | null
+            /** Ahi */
+            ahi?: number | null
         }
         /**
          * DeleteDataResult
          * @description Result of a per-user delete-all-data operation.
          */
         DeleteDataResult: {
+            /**
+             * Status
+             * @description Operation status ('success')
+             */
+            status: string
             /**
              * Devices Deleted
              * @description Device rows deleted (cascades removed all sleep data)
@@ -2639,20 +2796,15 @@ export interface components {
              */
             profiles_processed: number
             /**
-             * Size After Mb
-             * @description Database size after vacuum in MB. Null when vacuum_scheduled=true — the vacuum is still running as a post-response background task.
-             */
-            size_after_mb?: number | null
-            /**
              * Size Before Mb
              * @description Database size before deletion in MB
              */
             size_before_mb: number
             /**
-             * Status
-             * @description Operation status ('success')
+             * Size After Mb
+             * @description Database size after vacuum in MB. Null when vacuum_scheduled=true — the vacuum is still running as a post-response background task.
              */
-            status: string
+            size_after_mb?: number | null
             /**
              * Vacuum Scheduled
              * @description True when VACUUM has been queued as a post-response background task. size_after_mb will be null in this case.
@@ -2666,102 +2818,102 @@ export interface components {
          */
         DeletePreview: {
             /**
-             * Event Count
-             * @description Total events to be deleted
-             */
-            event_count: number
-            /**
              * Sessions
              * @description Sessions to be deleted
              */
             sessions: components['schemas']['SessionListItem'][]
             /**
-             * Stats Count
-             * @description Total statistics records to be deleted
+             * Event Count
+             * @description Total events to be deleted
              */
-            stats_count: number
+            event_count: number
             /**
              * Waveform Count
              * @description Total waveform records to be deleted
              */
             waveform_count: number
+            /**
+             * Stats Count
+             * @description Total statistics records to be deleted
+             */
+            stats_count: number
         }
         /**
          * DeviceDetail
          * @description Full device detail including usage summary, current settings, and settings history.
          */
         DeviceDetail: {
-            /** Current Settings */
-            current_settings: {
-                [key: string]: string
-            } | null
+            /** Id */
+            id: number
+            /** Manufacturer */
+            manufacturer: string
+            /** Model */
+            model: string
+            /** Serial Number */
+            serial_number: string
             /** Firmware Version */
             firmware_version?: string | null
+            /** Hardware Version */
+            hardware_version?: string | null
+            /** Product Code */
+            product_code?: string | null
             /**
              * First Seen
              * Format: date-time
              */
             first_seen: string
-            /** Hardware Version */
-            hardware_version?: string | null
-            /** Id */
-            id: number
             /** Last Import */
             last_import?: string | null
-            /** Manufacturer */
-            manufacturer: string
-            /** Model */
-            model: string
-            /** Product Code */
-            product_code?: string | null
-            /** Serial Number */
-            serial_number: string
+            usage: components['schemas']['DeviceUsageSummary']
+            /** Current Settings */
+            current_settings: {
+                [key: string]: string
+            } | null
             /** Settings History */
             settings_history: components['schemas']['SettingsChange'][]
-            usage: components['schemas']['DeviceUsageSummary']
         }
         /**
          * DeviceInfo
          * @description Device information for listing.
          */
         DeviceInfo: {
+            /** Id */
+            id: number
+            /** Manufacturer */
+            manufacturer: string
+            /** Model */
+            model: string
+            /** Serial Number */
+            serial_number: string
             /** Firmware Version */
             firmware_version?: string | null
+            /** Hardware Version */
+            hardware_version?: string | null
+            /** Product Code */
+            product_code?: string | null
             /**
              * First Seen
              * Format: date-time
              */
             first_seen: string
-            /** Hardware Version */
-            hardware_version?: string | null
-            /** Id */
-            id: number
             /** Last Import */
             last_import?: string | null
-            /** Manufacturer */
-            manufacturer: string
-            /** Model */
-            model: string
-            /** Product Code */
-            product_code?: string | null
-            /** Serial Number */
-            serial_number: string
         }
         /**
          * DeviceUsageSummary
          * @description Aggregated usage statistics for a device.
          */
         DeviceUsageSummary: {
+            /** Session Count */
+            session_count: number
             /** First Session Date */
             first_session_date: string | null
             /** Last Session Date */
             last_session_date: string | null
-            /** Session Count */
-            session_count: number
-            /** Therapy Modes */
-            therapy_modes: string[]
             /** Total Therapy Hours */
             total_therapy_hours: number
+            /** Therapy Modes */
+            therapy_modes: string[]
         }
         /** DisplayNameRequest */
         DisplayNameRequest: {
@@ -2774,36 +2926,56 @@ export interface components {
          */
         EventComparisonDetail: {
             /**
-             * Confidence
-             * @description Detection confidence (programmatic events only)
+             * Event Type
+             * @description Event type (OA, CA, MA, H, etc.)
              */
-            confidence?: number | null
+            event_type: string
+            /**
+             * Start Time
+             * @description Event start time in seconds from session start
+             */
+            start_time: number
             /**
              * Duration
              * @description Event duration in seconds
              */
             duration: number
             /**
-             * Event Type
-             * @description Event type (OA, CA, MA, H, etc.)
+             * Confidence
+             * @description Detection confidence (programmatic events only)
              */
-            event_type: string
+            confidence?: number | null
             /**
              * Flow Reduction
              * @description Flow reduction fraction (programmatic events only)
              */
             flow_reduction?: number | null
-            /**
-             * Start Time
-             * @description Event start time in seconds from session start
-             */
-            start_time: number
         }
         /**
          * EventComparisonResult
          * @description Result of comparing machine vs programmatic events for a session.
          */
         EventComparisonResult: {
+            /**
+             * Session Id
+             * @description Session database ID
+             */
+            session_id: number
+            /**
+             * Mode
+             * @description Detection mode used (e.g., 'aasm')
+             */
+            mode: string
+            /**
+             * Machine Event Count
+             * @description Total machine-detected events
+             */
+            machine_event_count: number
+            /**
+             * Programmatic Event Count
+             * @description Total programmatically-detected events
+             */
+            programmatic_event_count: number
             /**
              * False Negatives
              * @description Machine events missed by programmatic detection
@@ -2819,69 +2991,49 @@ export interface components {
              * @description Programmatic hypopneas not in machine events
              */
             false_positives_hypopnea?: components['schemas']['EventComparisonDetail'][]
-            /**
-             * Machine Event Count
-             * @description Total machine-detected events
-             */
-            machine_event_count: number
-            /**
-             * Mode
-             * @description Detection mode used (e.g., 'aasm')
-             */
-            mode: string
-            /**
-             * Programmatic Event Count
-             * @description Total programmatically-detected events
-             */
-            programmatic_event_count: number
-            /**
-             * Session Id
-             * @description Session database ID
-             */
-            session_id: number
         }
         /** EventItem */
         EventItem: {
-            /** Duration Seconds */
-            duration_seconds: number
-            /** Event Type */
-            event_type: string
             /** Id */
             id: number
-            /** Offset Seconds */
-            offset_seconds: number
-            /** Peak Flow Limitation */
-            peak_flow_limitation?: number | null
-            /** Spo2 Drop */
-            spo2_drop?: number | null
+            /** Event Type */
+            event_type: string
             /** Start Time */
             start_time: number
+            /** Duration Seconds */
+            duration_seconds: number
+            /** Offset Seconds */
+            offset_seconds: number
+            /** Spo2 Drop */
+            spo2_drop?: number | null
+            /** Peak Flow Limitation */
+            peak_flow_limitation?: number | null
         }
         /**
          * EventMatchResult
          * @description Result of matching machine vs programmatic events.
          */
         EventMatchResult: {
-            /** False Negatives */
-            false_negatives: number
-            /** False Positives */
-            false_positives: number
             /** Machine Count */
             machine_count: number
-            /** Matched */
-            matched: number
             /** Programmatic Count */
             programmatic_count: number
+            /** Matched */
+            matched: number
+            /** False Positives */
+            false_positives: number
+            /** False Negatives */
+            false_negatives: number
         }
         /**
          * EventTypeCount
          * @description Event type with count and percentage.
          */
         EventTypeCount: {
-            /** Count */
-            count: number
             /** Event Type */
             event_type: string
+            /** Count */
+            count: number
             /** Percentage */
             percentage: number
         }
@@ -2891,15 +3043,40 @@ export interface components {
          */
         FlAggregateMetrics: {
             /**
-             * Cross Night Spearman P
-             * @description p-value for cross_night_spearman_r
+             * Total Sessions
+             * @description Sessions in the requested date range
              */
-            cross_night_spearman_p?: number | null
+            total_sessions: number
             /**
-             * Cross Night Spearman R
-             * @description Cross-night Spearman r of (snore_fl_95th, device_flg_95th) pairs; None if fewer than 3 paired nights
+             * Sessions Compared
+             * @description Sessions with metrics computed
              */
-            cross_night_spearman_r?: number | null
+            sessions_compared: number
+            /**
+             * Sessions Skipped No Flg
+             * @description Sessions skipped: no FLG waveform row
+             */
+            sessions_skipped_no_flg: number
+            /**
+             * Sessions Skipped No Analysis
+             * @description Sessions skipped: no completed analysis result
+             */
+            sessions_skipped_no_analysis: number
+            /**
+             * Sessions Skipped No Valid Breaths
+             * @description Sessions skipped: no leak-valid breaths with required fields
+             */
+            sessions_skipped_no_valid_breaths: number
+            /**
+             * Mean Spearman Flattening R
+             * @description Mean Spearman r (flattening_severity) over compared sessions
+             */
+            mean_spearman_flattening_r?: number | null
+            /**
+             * Mean Spearman Flatness R
+             * @description Mean Spearman r (flatness_index) over compared sessions
+             */
+            mean_spearman_flatness_r?: number | null
             /**
              * Mean Auc T25
              * @description Mean AUC at FLG threshold 0.25
@@ -2911,46 +3088,83 @@ export interface components {
              */
             mean_auc_t50?: number | null
             /**
-             * Mean Spearman Flatness R
-             * @description Mean Spearman r (flatness_index) over compared sessions
+             * Cross Night Spearman R
+             * @description Cross-night Spearman r of (snore_fl_95th, device_flg_95th) pairs; None if fewer than 3 paired nights
              */
-            mean_spearman_flatness_r?: number | null
+            cross_night_spearman_r?: number | null
             /**
-             * Mean Spearman Flattening R
-             * @description Mean Spearman r (flattening_severity) over compared sessions
+             * Cross Night Spearman P
+             * @description p-value for cross_night_spearman_r
              */
-            mean_spearman_flattening_r?: number | null
-            /**
-             * Sessions Compared
-             * @description Sessions with metrics computed
-             */
-            sessions_compared: number
-            /**
-             * Sessions Skipped No Analysis
-             * @description Sessions skipped: no completed analysis result
-             */
-            sessions_skipped_no_analysis: number
-            /**
-             * Sessions Skipped No Flg
-             * @description Sessions skipped: no FLG waveform row
-             */
-            sessions_skipped_no_flg: number
-            /**
-             * Sessions Skipped No Valid Breaths
-             * @description Sessions skipped: no leak-valid breaths with required fields
-             */
-            sessions_skipped_no_valid_breaths: number
-            /**
-             * Total Sessions
-             * @description Sessions in the requested date range
-             */
-            total_sessions: number
+            cross_night_spearman_p?: number | null
         }
         /**
          * FlSessionValidation
          * @description Validation results for a single session's FL signal comparison.
          */
         FlSessionValidation: {
+            /**
+             * Session Id
+             * @description Database session ID
+             */
+            session_id: number
+            /**
+             * Date
+             * @description Session date (YYYY-MM-DD)
+             */
+            date: string
+            /**
+             * Duration Hours
+             * @description Session duration in hours
+             */
+            duration_hours: number
+            /**
+             * Parser Version
+             * @description Waveform parser/import version tag
+             */
+            parser_version: string
+            /**
+             * Has Flg Waveform
+             * @description Whether a device FLG waveform row exists for this session
+             */
+            has_flg_waveform: boolean
+            /**
+             * Skipped Reason
+             * @description Why this session was excluded from comparison. Possible values: 'no_flg_waveform' — no device FLG waveform row; 'no_analysis' — no completed analysis result; 'no_valid_breaths' — no leak-valid breaths with required fields; 'no_flg_samples' — waveform row exists but data_blob is None or sample_count is 0; 'no_aligned_pairs' — all breath windows had zero FLG samples after alignment; 'error' — unhandled exception during session validation; None — session was fully compared.
+             */
+            skipped_reason?: string | null
+            /**
+             * N Breaths Compared
+             * @description Number of (breath, FLG) pairs actually compared after dropping NaN (zero-sample) alignment windows
+             * @default 0
+             */
+            n_breaths_compared: number
+            /**
+             * Low Sample Warning
+             * @description True when n_breaths_compared < 20
+             * @default false
+             */
+            low_sample_warning: boolean
+            /**
+             * Spearman Flattening R
+             * @description Spearman r between flattening_severity (1 − mid_insp_flattening) and breath-averaged device FLG; None if n < 3 or either side constant
+             */
+            spearman_flattening_r?: number | null
+            /**
+             * Spearman Flattening P
+             * @description p-value for spearman_flattening_r
+             */
+            spearman_flattening_p?: number | null
+            /**
+             * Spearman Flatness R
+             * @description Spearman r between flatness_index (direct severity) and breath-averaged device FLG; None if n < 3 or either side constant
+             */
+            spearman_flatness_r?: number | null
+            /**
+             * Spearman Flatness P
+             * @description p-value for spearman_flatness_r
+             */
+            spearman_flatness_p?: number | null
             /**
              * Auc T25
              * @description AUC (Mann-Whitney U / n_pos*n_neg) discriminating device FLG >= 0.25 using flattening_severity as score; None if either class empty
@@ -2962,100 +3176,38 @@ export interface components {
              */
             auc_t50?: number | null
             /**
-             * Date
-             * @description Session date (YYYY-MM-DD)
-             */
-            date: string
-            /**
-             * Device Flg 95Th
-             * @description 95th percentile of masked FLG samples (values in [0, 1]) over the full session
-             */
-            device_flg_95th?: number | null
-            /**
-             * Duration Hours
-             * @description Session duration in hours
-             */
-            duration_hours: number
-            /**
-             * Has Flg Waveform
-             * @description Whether a device FLG waveform row exists for this session
-             */
-            has_flg_waveform: boolean
-            /**
-             * Low Sample Warning
-             * @description True when n_breaths_compared < 20
-             * @default false
-             */
-            low_sample_warning: boolean
-            /**
-             * N Breaths Compared
-             * @description Number of (breath, FLG) pairs actually compared after dropping NaN (zero-sample) alignment windows
-             * @default 0
-             */
-            n_breaths_compared: number
-            /**
-             * Parser Version
-             * @description Waveform parser/import version tag
-             */
-            parser_version: string
-            /**
-             * Session Id
-             * @description Database session ID
-             */
-            session_id: number
-            /**
-             * Skipped Reason
-             * @description Why this session was excluded from comparison. Possible values: 'no_flg_waveform' — no device FLG waveform row; 'no_analysis' — no completed analysis result; 'no_valid_breaths' — no leak-valid breaths with required fields; 'no_flg_samples' — waveform row exists but data_blob is None or sample_count is 0; 'no_aligned_pairs' — all breath windows had zero FLG samples after alignment; 'error' — unhandled exception during session validation; None — session was fully compared.
-             */
-            skipped_reason?: string | null
-            /**
              * Snore Fl 95Th
              * @description 95th percentile of flattening_severity (1 − mid_insp_flattening) over leak-valid breaths; direct severity orientation
              */
             snore_fl_95th?: number | null
             /**
-             * Spearman Flatness P
-             * @description p-value for spearman_flatness_r
+             * Device Flg 95Th
+             * @description 95th percentile of masked FLG samples (values in [0, 1]) over the full session
              */
-            spearman_flatness_p?: number | null
-            /**
-             * Spearman Flatness R
-             * @description Spearman r between flatness_index (direct severity) and breath-averaged device FLG; None if n < 3 or either side constant
-             */
-            spearman_flatness_r?: number | null
-            /**
-             * Spearman Flattening P
-             * @description p-value for spearman_flattening_r
-             */
-            spearman_flattening_p?: number | null
-            /**
-             * Spearman Flattening R
-             * @description Spearman r between flattening_severity (1 − mid_insp_flattening) and breath-averaged device FLG; None if n < 3 or either side constant
-             */
-            spearman_flattening_r?: number | null
+            device_flg_95th?: number | null
         }
         /**
          * FlValidationReport
          * @description Complete FL signal validation report.
          */
         FlValidationReport: {
-            /** @description Aggregate metrics */
-            aggregate: components['schemas']['FlAggregateMetrics']
             /**
-             * Date Range End
-             * @description End date of the requested range
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
              */
-            date_range_end: string
+            report_date: string
             /**
              * Date Range Start
              * @description Start date of the requested range
              */
             date_range_start: string
             /**
-             * Report Date
-             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             * Date Range End
+             * @description End date of the requested range
              */
-            report_date: string
+            date_range_end: string
+            /** @description Aggregate metrics */
+            aggregate: components['schemas']['FlAggregateMetrics']
             /**
              * Sessions
              * @description Per-session results
@@ -3077,21 +3229,21 @@ export interface components {
         }
         /** GoogleBindingItem */
         GoogleBindingItem: {
+            /** User Id */
+            user_id: number
+            /** User Email */
+            user_email: string
             /** Display Name */
             display_name: string | null
             /** Google Email */
             google_email: string | null
-            /** Has Password */
-            has_password: boolean
             /**
              * Linked At
              * Format: date-time
              */
             linked_at: string
-            /** User Email */
-            user_email: string
-            /** User Id */
-            user_id: number
+            /** Has Password */
+            has_password: boolean
         }
         /** GoogleInviteInitRequest */
         GoogleInviteInitRequest: {
@@ -3110,33 +3262,16 @@ export interface components {
         HealthImportResultSummary: {
             /** Inserted */
             inserted: number
-            /** Nights Recomputed */
-            nights_recomputed: number
             /** Skipped */
             skipped: number
+            /** Nights Recomputed */
+            nights_recomputed: number
         }
         /**
          * HealthNightDetailRead
          * @description Nightly sleep summary with aggregated oximetry and respiratory rate metrics.
          */
         HealthNightDetailRead: {
-            /** Avg Rr */
-            avg_rr?: number | null
-            /** Avg Spo2 Pct */
-            avg_spo2_pct?: number | null
-            /** Awake Seconds */
-            awake_seconds?: number | null
-            /**
-             * Computed At
-             * Format: date-time
-             */
-            computed_at: string
-            /** Core Seconds */
-            core_seconds?: number | null
-            /** Deep Seconds */
-            deep_seconds?: number | null
-            /** Min Spo2 Pct */
-            min_spo2_pct?: number | null
             /**
              * Night Date
              * Format: date
@@ -3144,35 +3279,41 @@ export interface components {
             night_date: string
             /** Preferred Source */
             preferred_source?: string | null
-            /** Rem Seconds */
-            rem_seconds?: number | null
-            /** Sleep Efficiency Pct */
-            sleep_efficiency_pct?: number | null
-            /** Stage Coverage Pct */
-            stage_coverage_pct?: number | null
             /** Time In Bed Seconds */
             time_in_bed_seconds?: number | null
             /** Total Sleep Seconds */
             total_sleep_seconds?: number | null
+            /** Core Seconds */
+            core_seconds?: number | null
+            /** Deep Seconds */
+            deep_seconds?: number | null
+            /** Rem Seconds */
+            rem_seconds?: number | null
+            /** Awake Seconds */
+            awake_seconds?: number | null
             /** Unspecified Seconds */
             unspecified_seconds?: number | null
+            /** Sleep Efficiency Pct */
+            sleep_efficiency_pct?: number | null
+            /** Stage Coverage Pct */
+            stage_coverage_pct?: number | null
+            /**
+             * Computed At
+             * Format: date-time
+             */
+            computed_at: string
+            /** Avg Spo2 Pct */
+            avg_spo2_pct?: number | null
+            /** Min Spo2 Pct */
+            min_spo2_pct?: number | null
+            /** Avg Rr */
+            avg_rr?: number | null
         }
         /**
          * HealthNightSummaryRead
          * @description Derived nightly sleep summary from Apple Health data.
          */
         HealthNightSummaryRead: {
-            /** Awake Seconds */
-            awake_seconds?: number | null
-            /**
-             * Computed At
-             * Format: date-time
-             */
-            computed_at: string
-            /** Core Seconds */
-            core_seconds?: number | null
-            /** Deep Seconds */
-            deep_seconds?: number | null
             /**
              * Night Date
              * Format: date
@@ -3180,36 +3321,37 @@ export interface components {
             night_date: string
             /** Preferred Source */
             preferred_source?: string | null
-            /** Rem Seconds */
-            rem_seconds?: number | null
-            /** Sleep Efficiency Pct */
-            sleep_efficiency_pct?: number | null
-            /** Stage Coverage Pct */
-            stage_coverage_pct?: number | null
             /** Time In Bed Seconds */
             time_in_bed_seconds?: number | null
             /** Total Sleep Seconds */
             total_sleep_seconds?: number | null
+            /** Core Seconds */
+            core_seconds?: number | null
+            /** Deep Seconds */
+            deep_seconds?: number | null
+            /** Rem Seconds */
+            rem_seconds?: number | null
+            /** Awake Seconds */
+            awake_seconds?: number | null
             /** Unspecified Seconds */
             unspecified_seconds?: number | null
+            /** Sleep Efficiency Pct */
+            sleep_efficiency_pct?: number | null
+            /** Stage Coverage Pct */
+            stage_coverage_pct?: number | null
+            /**
+             * Computed At
+             * Format: date-time
+             */
+            computed_at: string
         }
         /**
          * HealthSampleRead
          * @description Single Apple Health sample (sleep stage or quantity record).
          */
         HealthSampleRead: {
-            /**
-             * End Time
-             * Format: date-time
-             */
-            end_time: string
             /** Id */
             id: number
-            /**
-             * Night Date
-             * Format: date
-             */
-            night_date: string
             /** Record Type */
             record_type: string
             /** Source Name */
@@ -3219,12 +3361,22 @@ export interface components {
              * Format: date-time
              */
             start_time: string
-            /** Unit */
-            unit?: string | null
-            /** Value Num */
-            value_num?: number | null
+            /**
+             * End Time
+             * Format: date-time
+             */
+            end_time: string
             /** Value Text */
             value_text?: string | null
+            /** Value Num */
+            value_num?: number | null
+            /** Unit */
+            unit?: string | null
+            /**
+             * Night Date
+             * Format: date
+             */
+            night_date: string
         }
         /**
          * HypopneaEvent
@@ -3242,30 +3394,35 @@ export interface components {
          */
         HypopneaEvent: {
             /**
-             * Baseline Flow
-             * @description Baseline flow before event (L/min)
+             * Start Time
+             * @description Event start timestamp (seconds)
              */
-            baseline_flow: number
-            /**
-             * Confidence
-             * @description Detection confidence (0-1)
-             */
-            confidence: number
-            /**
-             * Duration
-             * @description Event duration (seconds)
-             */
-            duration: number
+            start_time: number
             /**
              * End Time
              * @description Event end timestamp (seconds)
              */
             end_time: number
             /**
+             * Duration
+             * @description Event duration (seconds)
+             */
+            duration: number
+            /**
              * Flow Reduction
              * @description Flow reduction (0-1)
              */
             flow_reduction: number
+            /**
+             * Confidence
+             * @description Detection confidence (0-1)
+             */
+            confidence: number
+            /**
+             * Baseline Flow
+             * @description Baseline flow before event (L/min)
+             */
+            baseline_flow: number
             /**
              * Has Arousal
              * @description Arousal detected
@@ -3276,27 +3433,22 @@ export interface components {
              * @description SpO2 desaturation ≥3%
              */
             has_desaturation?: boolean | null
-            /**
-             * Start Time
-             * @description Event start timestamp (seconds)
-             */
-            start_time: number
         }
         /**
          * ImportResultSummary
          * @description Trimmed ImportResult excluding imported_session_ids (poll-bandwidth).
          */
         ImportResultSummary: {
-            /** Sources */
-            sources: components['schemas']['ImportSourceResultSummary'][]
-            /** Total Failed */
-            total_failed: number
             /** Total Imported */
             total_imported: number
             /** Total Skipped */
             total_skipped: number
+            /** Total Failed */
+            total_failed: number
             /** Warnings */
             warnings: string[]
+            /** Sources */
+            sources: components['schemas']['ImportSourceResultSummary'][]
         }
         /**
          * ImportSource
@@ -3304,63 +3456,63 @@ export interface components {
          */
         ImportSource: {
             /**
-             * Data Root
-             * @description Data root within source
+             * Parser Name
+             * @description Parser identifier (e.g., 'resmed')
              */
-            data_root?: string | null
+            parser_name: string
             /**
              * Device Serial
              * @description Device serial number
              */
             device_serial?: string | null
             /**
-             * Parser Name
-             * @description Parser identifier (e.g., 'resmed')
-             */
-            parser_name: string
-            /**
              * Profile Name
              * @description Data profile name
              */
             profile_name?: string | null
+            /**
+             * Structure Type
+             * @description Directory structure type
+             */
+            structure_type?: string | null
             /**
              * Root Path
              * @description Root path of data source
              */
             root_path: string
             /**
-             * Structure Type
-             * @description Directory structure type
+             * Data Root
+             * @description Data root within source
              */
-            structure_type?: string | null
+            data_root?: string | null
         }
         /** ImportSourceResultSummary */
         ImportSourceResultSummary: {
-            /** Failed */
-            failed: number
+            source: components['schemas']['ImportSource']
             /** Imported */
             imported: number
             /** Skipped */
             skipped: number
-            source: components['schemas']['ImportSource']
+            /** Failed */
+            failed: number
             /** Warnings */
             warnings: string[]
         }
         /** InviteCreatedResponse */
         InviteCreatedResponse: {
+            /** Id */
+            id: number
             /** Email */
             email: string
+            /** Role */
+            role: string
+            /** Invite Url */
+            invite_url: string
             /**
              * Expires At
              * Format: date-time
              */
             expires_at: string
-            /** Id */
-            id: number
-            /** Invite Url */
-            invite_url: string
-            /** Role */
-            role: string
         }
         /** InviteInfoResponse */
         InviteInfoResponse: {
@@ -3371,24 +3523,24 @@ export interface components {
         }
         /** InviteItem */
         InviteItem: {
+            /** Id */
+            id: number
+            /** Email */
+            email: string
+            /** Role */
+            role: string
             /**
              * Created At
              * Format: date-time
              */
             created_at: string
-            /** Created By Id */
-            created_by_id: number | null
-            /** Email */
-            email: string
             /**
              * Expires At
              * Format: date-time
              */
             expires_at: string
-            /** Id */
-            id: number
-            /** Role */
-            role: string
+            /** Created By Id */
+            created_by_id: number | null
         }
         /**
          * InviteLookupRequest
@@ -3403,10 +3555,10 @@ export interface components {
          * @description Invite redemption — both token and password in request body.
          */
         InviteRedeemRequest: {
-            /** Password */
-            password: string
             /** Token */
             token: string
+            /** Password */
+            password: string
         }
         /** JobResponse */
         JobResponse: {
@@ -3415,16 +3567,16 @@ export interface components {
         }
         /** LinkedAnalysisSummary */
         LinkedAnalysisSummary: {
-            /** Error Message */
-            error_message: string | null
             /** Job Id */
             job_id: string
+            /** State */
+            state: string
             /** Progress Completed */
             progress_completed: number
             /** Progress Total */
             progress_total: number
-            /** State */
-            state: string
+            /** Error Message */
+            error_message: string | null
         }
         /** LoginRequest */
         LoginRequest: {
@@ -3432,6 +3584,18 @@ export interface components {
             email: string
             /** Password */
             password: string
+        }
+        /** LoginResponse */
+        LoginResponse: {
+            /** Message */
+            message?: string | null
+            /**
+             * Totp Required
+             * @default false
+             */
+            totp_required: boolean
+            /** Pending Token */
+            pending_token?: string | null
         }
         /**
          * MaskEpochResponse
@@ -3442,26 +3606,26 @@ export interface components {
          *     installs.
          */
         MaskEpochResponse: {
+            /** Mask Type */
+            mask_type: string
+            /** Style */
+            style: string | null
+            /**
+             * Start Date
+             * Format: date
+             */
+            start_date: string
+            /**
+             * End Date
+             * Format: date
+             */
+            end_date: string
             /** Days Count */
             days_count: number
             /** Device Id */
             device_id: number | null
             /** Device Name */
             device_name: string | null
-            /**
-             * End Date
-             * Format: date
-             */
-            end_date: string
-            /** Mask Type */
-            mask_type: string
-            /**
-             * Start Date
-             * Format: date
-             */
-            start_date: string
-            /** Style */
-            style: string | null
         }
         /**
          * MaskLogCreateRequest
@@ -3472,34 +3636,34 @@ export interface components {
             brand?: string | null
             /** Model */
             model?: string | null
-            /** Notes */
-            notes?: string | null
-            /** Size */
-            size?: string | null
-            /** Start Date */
-            start_date?: string | null
             /** Style */
             style?: ('pillows' | 'nasal' | 'full_face') | null
+            /** Start Date */
+            start_date?: string | null
+            /** Size */
+            size?: string | null
+            /** Notes */
+            notes?: string | null
         }
         /**
          * MaskLogEntryResponse
          * @description A single user-entered mask equipment log entry.
          */
         MaskLogEntryResponse: {
-            /** Brand */
-            brand?: string | null
             /** Id */
             id: number
+            /** Brand */
+            brand?: string | null
             /** Model */
             model?: string | null
-            /** Notes */
-            notes?: string | null
             /** Size */
             size?: string | null
-            /** Start Date */
-            start_date?: string | null
             /** Style */
             style?: string | null
+            /** Start Date */
+            start_date?: string | null
+            /** Notes */
+            notes?: string | null
         }
         /**
          * MaskLogUpdateRequest
@@ -3510,44 +3674,50 @@ export interface components {
             brand?: string | null
             /** Model */
             model?: string | null
-            /** Notes */
-            notes?: string | null
-            /** Size */
-            size?: string | null
-            /** Start Date */
-            start_date?: string | null
             /** Style */
             style?: ('pillows' | 'nasal' | 'full_face') | null
+            /** Start Date */
+            start_date?: string | null
+            /** Size */
+            size?: string | null
+            /** Notes */
+            notes?: string | null
         }
         /** McpStatus */
         McpStatus: {
-            /** Auth Provider */
-            auth_provider: string | null
-            /** Disabled Reason */
-            disabled_reason: string | null
             /** Enabled */
             enabled: boolean
             /** Endpoint Url */
             endpoint_url: string | null
-            /** Linked Google Identities */
-            linked_google_identities: number
             /** Transport */
             transport: string | null
+            /** Auth Provider */
+            auth_provider: string | null
+            /** Disabled Reason */
+            disabled_reason: string | null
+            /** Linked Google Identities */
+            linked_google_identities: number
         }
         /** MeResponse */
         MeResponse: {
-            /** Display Name */
-            display_name: string | null
-            /** Email */
-            email: string
-            /** Google Linked */
-            google_linked: boolean
-            /** Has Password */
-            has_password: boolean
             /** Id */
             id: number
+            /** Email */
+            email: string
+            /** Display Name */
+            display_name: string | null
             /** Role */
             role: string
+            /** Has Password */
+            has_password: boolean
+            /** Google Linked */
+            google_linked: boolean
+            /** Totp Enabled */
+            totp_enabled: boolean
+            /** Totp Enrollment Required */
+            totp_enrollment_required: boolean
+            /** Recovery Codes Remaining */
+            recovery_codes_remaining: number | null
         }
         /** MessageResponse */
         MessageResponse: {
@@ -3560,10 +3730,10 @@ export interface components {
          */
         ModeResult: {
             /**
-             * Ahi
-             * @description Apnea-Hypopnea Index
+             * Mode Name
+             * @description Mode name
              */
-            ahi: number
+            mode_name: string
             /**
              * Apneas
              * @description Detected apnea events
@@ -3575,71 +3745,71 @@ export interface components {
              */
             hypopneas: components['schemas']['HypopneaEvent'][]
             /**
-             * Metadata
-             * @description Mode-specific debug info
+             * Reras
+             * @description Detected RERA events
              */
-            metadata?: {
-                [key: string]: unknown
-            }
+            reras?: components['schemas']['RERAEvent'][]
             /**
-             * Mode Name
-             * @description Mode name
+             * Ahi
+             * @description Apnea-Hypopnea Index
              */
-            mode_name: string
+            ahi: number
             /**
              * Rdi
              * @description Respiratory Disturbance Index (AHI + RERAs/hour)
              */
             rdi: number
             /**
-             * Reras
-             * @description Detected RERA events
+             * Metadata
+             * @description Mode-specific debug info
              */
-            reras?: components['schemas']['RERAEvent'][]
+            metadata?: {
+                [key: string]: unknown
+            }
         }
         /** PaginatedResponse[AnalysisListItem] */
         PaginatedResponse_AnalysisListItem_: {
             /** Items */
             items: components['schemas']['AnalysisListItem'][]
+            /** Total */
+            total: number
             /** Limit */
             limit: number
             /** Offset */
             offset: number
-            /** Total */
-            total: number
         }
         /** PaginatedResponse[DayListItem] */
         PaginatedResponse_DayListItem_: {
             /** Items */
             items: components['schemas']['DayListItem'][]
+            /** Total */
+            total: number
             /** Limit */
             limit: number
             /** Offset */
             offset: number
-            /** Total */
-            total: number
         }
         /** PaginatedResponse[HealthNightSummaryRead] */
         PaginatedResponse_HealthNightSummaryRead_: {
             /** Items */
             items: components['schemas']['HealthNightSummaryRead'][]
+            /** Total */
+            total: number
             /** Limit */
             limit: number
             /** Offset */
             offset: number
-            /** Total */
-            total: number
         }
         /** PaginatedResponse[SessionListItem] */
         PaginatedResponse_SessionListItem_: {
             /** Items */
             items: components['schemas']['SessionListItem'][]
+            /** Total */
+            total: number
             /** Limit */
             limit: number
             /** Offset */
             offset: number
-            /** Total */
-            total: number
         }
         /** PasswordChangeRequest */
         PasswordChangeRequest: {
@@ -3682,10 +3852,82 @@ export interface components {
          */
         PeriodStatistics: {
             /**
+             * Period Type
+             * @description Type: daily, weekly, monthly, yearly
+             */
+            period_type: string
+            /**
+             * Period Start
+             * Format: date
+             */
+            period_start: string
+            /**
+             * Period End
+             * Format: date
+             */
+            period_end: string
+            /**
+             * Days Used
+             * @description Number of days with therapy
+             * @default 0
+             */
+            days_used: number
+            /**
+             * Days In Period
+             * @description Total days in period
+             * @default 0
+             */
+            days_in_period: number
+            /**
+             * Avg Hours Per Day
+             * @description Average hours per day used
+             */
+            avg_hours_per_day?: number | null
+            /**
              * Avg Ahi
              * @description Average AHI
              */
             avg_ahi?: number | null
+            /**
+             * Median Ahi
+             * @description Median AHI
+             */
+            median_ahi?: number | null
+            /**
+             * Avg Pressure
+             * @description Average pressure (cmH₂O)
+             */
+            avg_pressure?: number | null
+            /**
+             * Avg Leak
+             * @description Average leak rate (L/min)
+             */
+            avg_leak?: number | null
+            /**
+             * Avg Spo2
+             * @description Average SpO₂ (%)
+             */
+            avg_spo2?: number | null
+            /**
+             * Min Spo2
+             * @description Minimum SpO₂ (%)
+             */
+            min_spo2?: number | null
+            /**
+             * Avg Total Sleep Hours
+             * @description Average total sleep hours per night (Apple Health)
+             */
+            avg_total_sleep_hours?: number | null
+            /**
+             * Avg Sleep Efficiency Pct
+             * @description Average sleep efficiency % per night (Apple Health)
+             */
+            avg_sleep_efficiency_pct?: number | null
+            /**
+             * Avg Oai
+             * @description Average OAI (events/hour)
+             */
+            avg_oai?: number | null
             /**
              * Avg Cai
              * @description Average CAI (events/hour)
@@ -3697,82 +3939,10 @@ export interface components {
              */
             avg_hi?: number | null
             /**
-             * Avg Hours Per Day
-             * @description Average hours per day used
-             */
-            avg_hours_per_day?: number | null
-            /**
-             * Avg Leak
-             * @description Average leak rate (L/min)
-             */
-            avg_leak?: number | null
-            /**
-             * Avg Oai
-             * @description Average OAI (events/hour)
-             */
-            avg_oai?: number | null
-            /**
-             * Avg Pressure
-             * @description Average pressure (cmH₂O)
-             */
-            avg_pressure?: number | null
-            /**
              * Avg Rera
              * @description Average RERA index (events/hour)
              */
             avg_rera?: number | null
-            /**
-             * Avg Sleep Efficiency Pct
-             * @description Average sleep efficiency % per night (Apple Health)
-             */
-            avg_sleep_efficiency_pct?: number | null
-            /**
-             * Avg Spo2
-             * @description Average SpO₂ (%)
-             */
-            avg_spo2?: number | null
-            /**
-             * Avg Total Sleep Hours
-             * @description Average total sleep hours per night (Apple Health)
-             */
-            avg_total_sleep_hours?: number | null
-            /**
-             * Days In Period
-             * @description Total days in period
-             * @default 0
-             */
-            days_in_period: number
-            /**
-             * Days Used
-             * @description Number of days with therapy
-             * @default 0
-             */
-            days_used: number
-            /**
-             * Median Ahi
-             * @description Median AHI
-             */
-            median_ahi?: number | null
-            /**
-             * Min Spo2
-             * @description Minimum SpO₂ (%)
-             */
-            min_spo2?: number | null
-            /**
-             * Period End
-             * Format: date
-             */
-            period_end: string
-            /**
-             * Period Start
-             * Format: date
-             */
-            period_start: string
-            /**
-             * Period Type
-             * @description Type: daily, weekly, monthly, yearly
-             */
-            period_type: string
         }
         /**
          * PipelineJobStatus
@@ -3781,33 +3951,33 @@ export interface components {
          *     created_at and finished_at are ISO 8601 UTC datetime strings.
          */
         PipelineJobStatus: {
-            /** Analysis Job Id */
-            analysis_job_id: string | null
-            /** Analysis Queued */
-            analysis_queued: boolean | null
-            /** Created At */
-            created_at: string
-            /** Error Message */
-            error_message: string | null
-            /** File Count */
-            file_count: number
-            /** Finished At */
-            finished_at: string | null
-            health_import_result?: components['schemas']['HealthImportResultSummary'] | null
-            import_result: components['schemas']['ImportResultSummary'] | null
             /** Job Id */
             job_id: string
             /** Job Type */
             job_type: string
-            linked_analysis: components['schemas']['LinkedAnalysisSummary'] | null
+            /** State */
+            state: string
+            /** Stage */
+            stage: string
+            /** File Count */
+            file_count: number
+            /** Created At */
+            created_at: string
+            /** Finished At */
+            finished_at: string | null
             /** Progress Message */
             progress_message: string | null
             /** Sessions Imported */
             sessions_imported: number | null
-            /** Stage */
-            stage: string
-            /** State */
-            state: string
+            import_result: components['schemas']['ImportResultSummary'] | null
+            health_import_result?: components['schemas']['HealthImportResultSummary'] | null
+            /** Error Message */
+            error_message: string | null
+            /** Analysis Job Id */
+            analysis_job_id: string | null
+            /** Analysis Queued */
+            analysis_queued: boolean | null
+            linked_analysis: components['schemas']['LinkedAnalysisSummary'] | null
         }
         /** PipelineJobsListResponse */
         PipelineJobsListResponse: {
@@ -3842,21 +4012,21 @@ export interface components {
         }
         /** ProfileResponse */
         ProfileResponse: {
+            /** Id */
+            id: number
+            /** Name */
+            name: string
+            /** User Id */
+            user_id: number
             /**
              * Created At
              * Format: date-time
              */
             created_at: string
-            /** Id */
-            id: number
             /** Is Default */
             is_default: boolean
-            /** Name */
-            name: string
             /** Timezone */
             timezone?: string | null
-            /** User Id */
-            user_id: number
         }
         /**
          * RERAEvent
@@ -3876,25 +4046,20 @@ export interface components {
          */
         RERAEvent: {
             /**
-             * Baseline Flow
-             * @description Baseline flow before event (L/min)
+             * Start Time
+             * @description Event start timestamp (seconds)
              */
-            baseline_flow: number
-            /**
-             * Confidence
-             * @description Detection confidence (0-1, lower without EEG)
-             */
-            confidence: number
-            /**
-             * Duration
-             * @description Event duration (seconds)
-             */
-            duration: number
+            start_time: number
             /**
              * End Time
              * @description Event end timestamp (seconds)
              */
             end_time: number
+            /**
+             * Duration
+             * @description Event duration (seconds)
+             */
+            duration: number
             /**
              * Obstructed Breath Count
              * @description Breaths showing flow limitation
@@ -3906,17 +4071,22 @@ export interface components {
              */
             recovery_amplitude_increase_pct: number
             /**
-             * Start Time
-             * @description Event start timestamp (seconds)
+             * Confidence
+             * @description Detection confidence (0-1, lower without EEG)
              */
-            start_time: number
+            confidence: number
+            /**
+             * Baseline Flow
+             * @description Baseline flow before event (L/min)
+             */
+            baseline_flow: number
         }
         /** RenameProfileRequest */
         RenameProfileRequest: {
-            /** Default */
-            default?: boolean | null
             /** Name */
             name?: string | null
+            /** Default */
+            default?: boolean | null
             /** Timezone */
             timezone?: string | null
         }
@@ -3946,21 +4116,6 @@ export interface components {
          */
         ResetResult: {
             /**
-             * Bootstrap Invite Url
-             * @description Admin invite redemption URL (only present after include_accounts=true reset). The caller's account was deleted; redeem this URL to create a new admin account.
-             */
-            bootstrap_invite_url?: string | null
-            /**
-             * Size After Mb
-             * @description Database size after vacuum in MB. Null when vacuum_scheduled=true — the vacuum is still running as a post-response background task.
-             */
-            size_after_mb?: number | null
-            /**
-             * Size Before Mb
-             * @description Database size before reset in MB
-             */
-            size_before_mb: number
-            /**
              * Status
              * @description Operation status ('success')
              */
@@ -3978,25 +4133,40 @@ export interface components {
              */
             total_rows_deleted: number
             /**
+             * Size Before Mb
+             * @description Database size before reset in MB
+             */
+            size_before_mb: number
+            /**
+             * Size After Mb
+             * @description Database size after vacuum in MB. Null when vacuum_scheduled=true — the vacuum is still running as a post-response background task.
+             */
+            size_after_mb?: number | null
+            /**
              * Vacuum Scheduled
              * @description True when VACUUM has been queued as a post-response background task. size_after_mb will be null in this case.
              * @default false
              */
             vacuum_scheduled: boolean
+            /**
+             * Bootstrap Invite Url
+             * @description Admin invite redemption URL (only present after include_accounts=true reset). The caller's account was deleted; redeem this URL to create a new admin account.
+             */
+            bootstrap_invite_url?: string | null
         }
         /**
          * RxAllResponse
          * @description Combined RX data derived from a single database query.
          */
         RxAllResponse: {
-            /** Best Index */
-            best_index?: number | null
-            changes: components['schemas']['RxChangesResponse']
-            current?: components['schemas']['RxPeriodResponse'] | null
             /** History */
             history: components['schemas']['RxPeriodResponse'][]
+            current?: components['schemas']['RxPeriodResponse'] | null
+            /** Best Index */
+            best_index?: number | null
             /** Worst Index */
             worst_index?: number | null
+            changes: components['schemas']['RxChangesResponse']
         }
         /**
          * RxChangesResponse
@@ -4011,10 +4181,10 @@ export interface components {
          * @description RX period comparison result with best/worst indices.
          */
         RxComparisonResponse: {
-            /** Best Index */
-            best_index?: number | null
             /** Periods */
             periods: components['schemas']['RxPeriodResponse'][]
+            /** Best Index */
+            best_index?: number | null
             /** Worst Index */
             worst_index?: number | null
         }
@@ -4023,25 +4193,6 @@ export interface components {
          * @description Single therapy prescription period with aggregated stats.
          */
         RxPeriodResponse: {
-            /** Avg Ahi */
-            avg_ahi?: number | null
-            /** Avg Hours */
-            avg_hours?: number | null
-            /** Avg Leak */
-            avg_leak?: number | null
-            /** Days Count */
-            days_count: number
-            /** Device Id */
-            device_id?: number | null
-            /** Device Name */
-            device_name?: string | null
-            /**
-             * End Date
-             * Format: date
-             */
-            end_date: string
-            /** Median Ahi */
-            median_ahi?: number | null
             /** Settings */
             settings: {
                 [key: string]: string
@@ -4052,10 +4203,29 @@ export interface components {
              */
             start_date: string
             /**
+             * End Date
+             * Format: date
+             */
+            end_date: string
+            /** Days Count */
+            days_count: number
+            /** Avg Ahi */
+            avg_ahi?: number | null
+            /** Median Ahi */
+            median_ahi?: number | null
+            /** Avg Hours */
+            avg_hours?: number | null
+            /**
              * Total Hours
              * @default 0
              */
             total_hours: number
+            /** Avg Leak */
+            avg_leak?: number | null
+            /** Device Id */
+            device_id?: number | null
+            /** Device Name */
+            device_name?: string | null
         }
         /**
          * RxSettingChange
@@ -4073,10 +4243,10 @@ export interface components {
             device_name: string
             /** Key */
             key: string
-            /** New Value */
-            new_value?: string | null
             /** Old Value */
             old_value?: string | null
+            /** New Value */
+            new_value?: string | null
         }
         /** SessionDeleteRequest */
         SessionDeleteRequest: {
@@ -4088,60 +4258,60 @@ export interface components {
          * @description Detailed view of a single session with all metadata.
          */
         SessionDetail: {
-            active_mask?: components['schemas']['MaskLogEntryResponse'] | null
-            /** Data Quality Notes */
-            data_quality_notes?: string[]
+            /** Id */
+            id: number
+            /** Device Session Id */
+            device_session_id: string
             /** Device Manufacturer */
             device_manufacturer: string | null
             /** Device Model */
             device_model: string | null
             /** Device Serial */
             device_serial: string | null
-            /** Device Session Id */
-            device_session_id: string
-            /** Duration Hours */
-            duration_hours: number
-            /** Duration Seconds */
-            duration_seconds: number
-            /** Enabled */
-            enabled: boolean
-            /**
-             * End Time
-             * Format: date-time
-             */
-            end_time: string
-            /** Event Count */
-            event_count: number
-            /** Has Event Data */
-            has_event_data: boolean
-            /** Has Statistics */
-            has_statistics: boolean
-            /** Id */
-            id: number
-            /** Import Source */
-            import_source?: string | null
-            /** Parser Version */
-            parser_version?: string | null
-            /** Settings */
-            settings?: components['schemas']['SessionSetting'][] | null
-            /**
-             * Start Time
-             * Format: date-time
-             */
-            start_time: string
-            statistics?: components['schemas']['SessionStatistics'] | null
             /**
              * Therapy Day
              * Format: date
              * @description Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day
              */
             therapy_day: string
+            /**
+             * Start Time
+             * Format: date-time
+             */
+            start_time: string
+            /**
+             * End Time
+             * Format: date-time
+             */
+            end_time: string
+            /** Duration Hours */
+            duration_hours: number
+            /** Duration Seconds */
+            duration_seconds: number
             /** Therapy Mode */
             therapy_mode: string | null
+            /** Enabled */
+            enabled: boolean
+            /** Event Count */
+            event_count: number
             /** Waveform Count */
             waveform_count: number
             /** Waveform Types */
             waveform_types: string[]
+            /** Has Statistics */
+            has_statistics: boolean
+            /** Has Event Data */
+            has_event_data: boolean
+            /** Import Source */
+            import_source?: string | null
+            /** Parser Version */
+            parser_version?: string | null
+            /** Data Quality Notes */
+            data_quality_notes?: string[]
+            statistics?: components['schemas']['SessionStatistics'] | null
+            /** Settings */
+            settings?: components['schemas']['SessionSetting'][] | null
+            active_mask?: components['schemas']['MaskLogEntryResponse'] | null
         }
         /** SessionEnabledRequest */
         SessionEnabledRequest: {
@@ -4154,10 +4324,22 @@ export interface components {
          */
         SessionListItem: {
             /**
-             * Ahi
-             * @description Apnea-Hypopnea Index
+             * Id
+             * @description Session database ID
              */
-            ahi?: number | null
+            id: number
+            /**
+             * Therapy Day
+             * Format: date
+             * @description Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day
+             */
+            therapy_day: string
+            /**
+             * Start Time
+             * Format: date-time
+             * @description Session start timestamp
+             */
+            start_time: string
             /**
              * Duration Hours
              * @description Session duration in hours
@@ -4168,11 +4350,6 @@ export interface components {
              * @description Whether session is enabled for stats
              */
             enabled: boolean
-            /**
-             * Id
-             * @description Session database ID
-             */
-            id: number
             /**
              * Manufacturer
              * @description Device manufacturer
@@ -4189,17 +4366,10 @@ export interface components {
              */
             serial_number: string
             /**
-             * Start Time
-             * Format: date-time
-             * @description Session start timestamp
+             * Ahi
+             * @description Apnea-Hypopnea Index
              */
-            start_time: string
-            /**
-             * Therapy Day
-             * Format: date
-             * @description Therapy day (noon-cutoff date): sessions before 12:00 belong to the previous calendar day
-             */
-            therapy_day: string
+            ahi?: number | null
         }
         /**
          * SessionSetting
@@ -4222,154 +4392,154 @@ export interface components {
          * @description Statistics for a single session (from Statistics table).
          */
         SessionStatistics: {
+            /** Usage Hours */
+            usage_hours?: number | null
             /** Ahi */
             ahi?: number | null
-            /** Ai */
-            ai?: number | null
-            /** Amb Humidity Median */
-            amb_humidity_median?: number | null
-            /** Blow Flow Median */
-            blow_flow_median?: number | null
-            /** Blow Press 5Th */
-            blow_press_5th?: number | null
-            /** Blow Press 95Th */
-            blow_press_95th?: number | null
+            /** Rei */
+            rei?: number | null
+            /** Oai */
+            oai?: number | null
             /** Cai */
             cai?: number | null
-            /** Central Apneas */
-            central_apneas?: number | null
-            /** Csr Pct */
-            csr_pct?: number | null
-            /** Epap 95Th */
-            epap_95th?: number | null
-            /** Epap Max */
-            epap_max?: number | null
-            /** Epap Mean */
-            epap_mean?: number | null
-            /** Epap Median */
-            epap_median?: number | null
-            /** Epap Min */
-            epap_min?: number | null
-            /** Flow 5Th */
-            flow_5th?: number | null
-            /** Flow 95Th */
-            flow_95th?: number | null
-            /** Flow Limitations */
-            flow_limitations?: number | null
             /** Hi */
             hi?: number | null
-            /** Htube Pow Median */
-            htube_pow_median?: number | null
-            /** Htube Temp Median */
-            htube_temp_median?: number | null
-            /** Hum Pow Median */
-            hum_pow_median?: number | null
-            /** Hum Temp Median */
-            hum_temp_median?: number | null
+            /** Obstructive Apneas */
+            obstructive_apneas?: number | null
+            /** Central Apneas */
+            central_apneas?: number | null
+            /** Mixed Apneas */
+            mixed_apneas?: number | null
             /** Hypopneas */
             hypopneas?: number | null
-            /** Ie Ratio 95Th */
-            ie_ratio_95th?: number | null
-            /** Ie Ratio Max */
-            ie_ratio_max?: number | null
-            /** Ie Ratio Median */
-            ie_ratio_median?: number | null
+            /** Reras */
+            reras?: number | null
+            /** Flow Limitations */
+            flow_limitations?: number | null
+            /** Pressure Mean */
+            pressure_mean?: number | null
+            /** Pressure Min */
+            pressure_min?: number | null
+            /** Pressure Max */
+            pressure_max?: number | null
+            /** Pressure Median */
+            pressure_median?: number | null
+            /** Pressure 95Th */
+            pressure_95th?: number | null
+            /** Epap Mean */
+            epap_mean?: number | null
+            /** Epap Min */
+            epap_min?: number | null
+            /** Epap Max */
+            epap_max?: number | null
+            /** Epap Median */
+            epap_median?: number | null
+            /** Epap 95Th */
+            epap_95th?: number | null
+            /** Ipap Median */
+            ipap_median?: number | null
             /** Ipap 95Th */
             ipap_95th?: number | null
             /** Ipap Max */
             ipap_max?: number | null
-            /** Ipap Median */
-            ipap_median?: number | null
-            /** Leak 95Th */
-            leak_95th?: number | null
-            /** Leak Max */
-            leak_max?: number | null
             /** Leak Mean */
             leak_mean?: number | null
-            /** Leak Median */
-            leak_median?: number | null
             /** Leak Min */
             leak_min?: number | null
+            /** Leak Max */
+            leak_max?: number | null
+            /** Leak Median */
+            leak_median?: number | null
             /** Leak Percentile 70 */
             leak_percentile_70?: number | null
-            /** Mask Events */
-            mask_events?: number | null
-            /** Minute Ventilation 95Th */
-            minute_ventilation_95th?: number | null
-            /** Minute Ventilation Max */
-            minute_ventilation_max?: number | null
-            /** Minute Ventilation Mean */
-            minute_ventilation_mean?: number | null
-            /** Minute Ventilation Min */
-            minute_ventilation_min?: number | null
-            /** Mixed Apneas */
-            mixed_apneas?: number | null
-            /** Oai */
-            oai?: number | null
-            /** Obstructive Apneas */
-            obstructive_apneas?: number | null
-            /** Pressure 95Th */
-            pressure_95th?: number | null
-            /** Pressure Max */
-            pressure_max?: number | null
-            /** Pressure Mean */
-            pressure_mean?: number | null
-            /** Pressure Median */
-            pressure_median?: number | null
-            /** Pressure Min */
-            pressure_min?: number | null
-            /** Pulse Max */
-            pulse_max?: number | null
+            /** Leak 95Th */
+            leak_95th?: number | null
+            /** Spo2 Mean */
+            spo2_mean?: number | null
+            /** Spo2 Min */
+            spo2_min?: number | null
+            /** Spo2 Max */
+            spo2_max?: number | null
+            /** Spo2 Median */
+            spo2_median?: number | null
+            /** Spo2 95Th */
+            spo2_95th?: number | null
+            /** Spo2 Time Below 90 */
+            spo2_time_below_90?: number | null
             /** Pulse Mean */
             pulse_mean?: number | null
             /** Pulse Min */
             pulse_min?: number | null
-            /** Rei */
-            rei?: number | null
-            /** Reras */
-            reras?: number | null
-            /** Respiratory Rate 95Th */
-            respiratory_rate_95th?: number | null
-            /** Respiratory Rate Max */
-            respiratory_rate_max?: number | null
+            /** Pulse Max */
+            pulse_max?: number | null
             /** Respiratory Rate Mean */
             respiratory_rate_mean?: number | null
             /** Respiratory Rate Min */
             respiratory_rate_min?: number | null
-            /** Rin */
-            rin?: number | null
-            /** Spo2 95Th */
-            spo2_95th?: number | null
-            /** Spo2 Max */
-            spo2_max?: number | null
-            /** Spo2 Mean */
-            spo2_mean?: number | null
-            /** Spo2 Median */
-            spo2_median?: number | null
-            /** Spo2 Min */
-            spo2_min?: number | null
-            /** Spo2 Time Below 90 */
-            spo2_time_below_90?: number | null
-            /** Spont Cyc Pct */
-            spont_cyc_pct?: number | null
-            /** Ti 95Th */
-            ti_95th?: number | null
-            /** Ti Max */
-            ti_max?: number | null
-            /** Ti Median */
-            ti_median?: number | null
-            /** Tidal Volume 95Th */
-            tidal_volume_95th?: number | null
-            /** Tidal Volume Max */
-            tidal_volume_max?: number | null
+            /** Respiratory Rate Max */
+            respiratory_rate_max?: number | null
+            /** Respiratory Rate 95Th */
+            respiratory_rate_95th?: number | null
             /** Tidal Volume Mean */
             tidal_volume_mean?: number | null
             /** Tidal Volume Min */
             tidal_volume_min?: number | null
+            /** Tidal Volume Max */
+            tidal_volume_max?: number | null
+            /** Tidal Volume 95Th */
+            tidal_volume_95th?: number | null
+            /** Minute Ventilation Mean */
+            minute_ventilation_mean?: number | null
+            /** Minute Ventilation Min */
+            minute_ventilation_min?: number | null
+            /** Minute Ventilation Max */
+            minute_ventilation_max?: number | null
+            /** Minute Ventilation 95Th */
+            minute_ventilation_95th?: number | null
             /** Uai */
             uai?: number | null
-            /** Usage Hours */
-            usage_hours?: number | null
+            /** Ai */
+            ai?: number | null
+            /** Rin */
+            rin?: number | null
+            /** Csr Pct */
+            csr_pct?: number | null
+            /** Spont Cyc Pct */
+            spont_cyc_pct?: number | null
+            /** Ie Ratio Median */
+            ie_ratio_median?: number | null
+            /** Ie Ratio 95Th */
+            ie_ratio_95th?: number | null
+            /** Ie Ratio Max */
+            ie_ratio_max?: number | null
+            /** Ti Median */
+            ti_median?: number | null
+            /** Ti 95Th */
+            ti_95th?: number | null
+            /** Ti Max */
+            ti_max?: number | null
+            /** Flow 5Th */
+            flow_5th?: number | null
+            /** Flow 95Th */
+            flow_95th?: number | null
+            /** Blow Press 5Th */
+            blow_press_5th?: number | null
+            /** Blow Press 95Th */
+            blow_press_95th?: number | null
+            /** Blow Flow Median */
+            blow_flow_median?: number | null
+            /** Amb Humidity Median */
+            amb_humidity_median?: number | null
+            /** Hum Temp Median */
+            hum_temp_median?: number | null
+            /** Htube Temp Median */
+            htube_temp_median?: number | null
+            /** Htube Pow Median */
+            htube_pow_median?: number | null
+            /** Hum Pow Median */
+            hum_pow_median?: number | null
+            /** Mask Events */
+            mask_events?: number | null
         }
         /**
          * SessionValidation
@@ -4377,30 +4547,75 @@ export interface components {
          */
         SessionValidation: {
             /**
-             * Apnea F1
-             * @description Apnea F1 score (0-1)
+             * Session Id
+             * @description Database session ID
              */
-            apnea_f1: number
-            /**
-             * Apnea Precision
-             * @description Apnea precision (0-1)
-             */
-            apnea_precision: number
-            /**
-             * Apnea Sensitivity
-             * @description Apnea sensitivity (0-1)
-             */
-            apnea_sensitivity: number
+            session_id: number
             /**
              * Date
              * @description Session date (YYYY-MM-DD)
              */
             date: string
             /**
+             * Duration Hours
+             * @description Session duration in hours
+             */
+            duration_hours: number
+            /**
+             * Machine Event Count
+             * @description Total machine events
+             */
+            machine_event_count: number
+            /**
+             * Programmatic Event Count
+             * @description Total programmatic events
+             */
+            programmatic_event_count: number
+            /**
+             * Apnea Sensitivity
+             * @description Apnea sensitivity (0-1)
+             */
+            apnea_sensitivity: number
+            /**
+             * Apnea Precision
+             * @description Apnea precision (0-1)
+             */
+            apnea_precision: number
+            /**
+             * Apnea F1
+             * @description Apnea F1 score (0-1)
+             */
+            apnea_f1: number
+            /**
+             * Hypopnea Sensitivity
+             * @description Hypopnea sensitivity (0-1)
+             */
+            hypopnea_sensitivity: number
+            /**
+             * Hypopnea Precision
+             * @description Hypopnea precision (0-1)
+             */
+            hypopnea_precision: number
+            /**
+             * Hypopnea F1
+             * @description Hypopnea F1 score (0-1)
+             */
+            hypopnea_f1: number
+            /**
+             * Notes
+             * @description Additional notes
+             */
+            notes?: string | null
+            /**
              * Device Ahi
              * @description Device AHI (events/hr)
              */
             device_ahi?: number | null
+            /**
+             * Device Oai
+             * @description Device OAI (obstructive apnea index, events/hr)
+             */
+            device_oai?: number | null
             /**
              * Device Cai
              * @description Device CAI (central apnea index, events/hr)
@@ -4412,55 +4627,10 @@ export interface components {
              */
             device_hi?: number | null
             /**
-             * Device Oai
-             * @description Device OAI (obstructive apnea index, events/hr)
-             */
-            device_oai?: number | null
-            /**
              * Device Uai
              * @description Device UAI (upper-airway/unclassified apnea index, events/hr; vAuto/bilevel only)
              */
             device_uai?: number | null
-            /**
-             * Duration Hours
-             * @description Session duration in hours
-             */
-            duration_hours: number
-            /**
-             * Hypopnea F1
-             * @description Hypopnea F1 score (0-1)
-             */
-            hypopnea_f1: number
-            /**
-             * Hypopnea Precision
-             * @description Hypopnea precision (0-1)
-             */
-            hypopnea_precision: number
-            /**
-             * Hypopnea Sensitivity
-             * @description Hypopnea sensitivity (0-1)
-             */
-            hypopnea_sensitivity: number
-            /**
-             * Machine Event Count
-             * @description Total machine events
-             */
-            machine_event_count: number
-            /**
-             * Notes
-             * @description Additional notes
-             */
-            notes?: string | null
-            /**
-             * Programmatic Event Count
-             * @description Total programmatic events
-             */
-            programmatic_event_count: number
-            /**
-             * Session Id
-             * @description Database session ID
-             */
-            session_id: number
         }
         /**
          * SettingChangeEntry
@@ -4469,66 +4639,31 @@ export interface components {
         SettingChangeEntry: {
             /** Key */
             key: string
-            /** New Value */
-            new_value: string | null
             /** Old Value */
             old_value: string | null
+            /** New Value */
+            new_value: string | null
         }
         /**
          * SettingsChange
          * @description Settings that changed for a particular session relative to the prior one.
          */
         SettingsChange: {
-            /** Changes */
-            changes: components['schemas']['SettingChangeEntry'][]
+            /** Session Id */
+            session_id: number
             /**
              * Date
              * Format: date
              */
             date: string
-            /** Session Id */
-            session_id: number
+            /** Changes */
+            changes: components['schemas']['SettingChangeEntry'][]
         }
         /**
          * TherapySummary
          * @description Aggregated therapy statistics summary.
          */
         TherapySummary: {
-            /** Ahi Trend Direction */
-            ahi_trend_direction?: string | null
-            /** Avg Ahi */
-            avg_ahi?: number | null
-            /** Avg Epap */
-            avg_epap?: number | null
-            /** Avg Hours */
-            avg_hours: number
-            /** Avg Leak */
-            avg_leak?: number | null
-            /** Avg Minute Ventilation */
-            avg_minute_ventilation?: number | null
-            /** Avg Pressure */
-            avg_pressure?: number | null
-            /** Avg Pulse */
-            avg_pulse?: number | null
-            /** Avg Rei */
-            avg_rei?: number | null
-            /** Avg Respiratory Rate */
-            avg_respiratory_rate?: number | null
-            /** Avg Spo2 */
-            avg_spo2?: number | null
-            /** Avg Tidal Volume */
-            avg_tidal_volume?: number | null
-            /** Days Since Last */
-            days_since_last: number
-            /** Days With Data */
-            days_with_data: number
-            /**
-             * Effectiveness
-             * @default unknown
-             */
-            effectiveness: string
-            /** Event Counts */
-            event_counts?: components['schemas']['EventTypeCount'][]
             /**
              * First Date
              * Format: date
@@ -4539,76 +4674,165 @@ export interface components {
              * Format: date
              */
             last_date: string
-            /** Max Pressure */
-            max_pressure?: number | null
-            /** Min Pressure */
-            min_pressure?: number | null
-            /** Min Spo2 */
-            min_spo2?: number | null
+            /** Days Since Last */
+            days_since_last: number
             /** Total Hours */
             total_hours: number
+            /** Avg Hours */
+            avg_hours: number
+            /** Days With Data */
+            days_with_data: number
+            /** Avg Ahi */
+            avg_ahi?: number | null
+            /**
+             * Effectiveness
+             * @default unknown
+             */
+            effectiveness: string
+            /** Avg Rei */
+            avg_rei?: number | null
+            /** Avg Pressure */
+            avg_pressure?: number | null
+            /** Min Pressure */
+            min_pressure?: number | null
+            /** Max Pressure */
+            max_pressure?: number | null
+            /** Avg Epap */
+            avg_epap?: number | null
+            /** Avg Leak */
+            avg_leak?: number | null
+            /** Avg Spo2 */
+            avg_spo2?: number | null
+            /** Min Spo2 */
+            min_spo2?: number | null
             /**
              * Total Spo2 Time Below 90
              * @default 0
              */
             total_spo2_time_below_90: number
+            /** Avg Pulse */
+            avg_pulse?: number | null
+            /** Avg Respiratory Rate */
+            avg_respiratory_rate?: number | null
+            /** Avg Tidal Volume */
+            avg_tidal_volume?: number | null
+            /** Avg Minute Ventilation */
+            avg_minute_ventilation?: number | null
+            /** Ahi Trend Direction */
+            ahi_trend_direction?: string | null
+            /** Event Counts */
+            event_counts?: components['schemas']['EventTypeCount'][]
+        }
+        /** TotpChallengeRequest */
+        TotpChallengeRequest: {
+            /** Pending Token */
+            pending_token: string
+            /** Code */
+            code: string
+        }
+        /** TotpConfirmRequest */
+        TotpConfirmRequest: {
+            /** Code */
+            code: string
+        }
+        /** TotpConfirmResponse */
+        TotpConfirmResponse: {
+            /** Recovery Codes */
+            recovery_codes: string[]
+        }
+        /** TotpDisableRequest */
+        TotpDisableRequest: {
+            /** Password */
+            password: string
+            /** Code */
+            code: string
+        }
+        /** TotpRegenerateRequest */
+        TotpRegenerateRequest: {
+            /** Code */
+            code: string
+        }
+        /** TotpRegenerateResponse */
+        TotpRegenerateResponse: {
+            /** Recovery Codes */
+            recovery_codes: string[]
+        }
+        /** TotpSetupResponse */
+        TotpSetupResponse: {
+            /** Secret */
+            secret: string
+            /** Otpauth Uri */
+            otpauth_uri: string
+            /** Qr Data Uri */
+            qr_data_uri: string
+        }
+        /** TotpStatusResponse */
+        TotpStatusResponse: {
+            /** Enabled */
+            enabled: boolean
+            /** Enabled At */
+            enabled_at?: string | null
+            /** Recovery Codes Remaining */
+            recovery_codes_remaining?: number | null
         }
         /** UserInfo */
         UserInfo: {
-            /** Display Name */
-            display_name: string | null
-            /** Email */
-            email: string
             /** Id */
             id: number
+            /** Email */
+            email: string
+            /** Display Name */
+            display_name: string | null
             /** Role */
             role: string
         }
         /** UserItem */
         UserItem: {
-            /** Auth Providers */
-            auth_providers: string[]
+            /** Id */
+            id: number
+            /** Email */
+            email: string
+            /** Display Name */
+            display_name: string | null
+            /** Role */
+            role: string
+            /** Disabled */
+            disabled: boolean
             /**
              * Created At
              * Format: date-time
              */
             created_at: string
-            /** Disabled */
-            disabled: boolean
-            /** Display Name */
-            display_name: string | null
-            /** Email */
-            email: string
             /** Has Password */
             has_password: boolean
-            /** Id */
-            id: number
+            /** Auth Providers */
+            auth_providers: string[]
             /** Last Login At */
             last_login_at: string | null
-            /** Role */
-            role: string
+            /** Totp Enabled */
+            totp_enabled: boolean
         }
         /** UserPreferences */
         UserPreferences: {
-            /**
-             * Date Format
-             * @default iso
-             * @enum {string}
-             */
-            date_format: 'iso' | 'locale' | 'short'
             /**
              * Landing Page
              * @default dashboard
              * @enum {string}
              */
             landing_page: 'dashboard' | 'sessions' | 'stats'
+            /**
+             * Date Format
+             * @default iso
+             * @enum {string}
+             */
+            date_format: 'iso' | 'locale' | 'short'
         }
         /** UserPreferencesUpdate */
         UserPreferencesUpdate: {
-            /** Date Format */
-            date_format?: ('iso' | 'locale' | 'short') | null
             /** Landing Page */
             landing_page?: ('dashboard' | 'sessions' | 'stats') | null
+            /** Date Format */
+            date_format?: ('iso' | 'locale' | 'short') | null
         }
         /**
          * VacuumResult
@@ -4616,56 +4840,56 @@ export interface components {
          */
         VacuumResult: {
             /**
-             * Size After Mb
-             * @description Database size after vacuum in MB
+             * Status
+             * @description Operation status ('success')
              */
-            size_after_mb: number
+            status: string
             /**
              * Size Before Mb
              * @description Database size before vacuum in MB
              */
             size_before_mb: number
             /**
-             * Status
-             * @description Operation status ('success')
+             * Size After Mb
+             * @description Database size after vacuum in MB
              */
-            status: string
+            size_after_mb: number
         }
         /** ValidationError */
         ValidationError: {
-            /** Context */
-            ctx?: Record<string, never>
-            /** Input */
-            input?: unknown
             /** Location */
             loc: (string | number)[]
             /** Message */
             msg: string
             /** Error Type */
             type: string
+            /** Input */
+            input?: unknown
+            /** Context */
+            ctx?: Record<string, never>
         }
         /**
          * ValidationReport
          * @description Complete validation report.
          */
         ValidationReport: {
-            /** @description Aggregate metrics */
-            aggregate: components['schemas']['AggregateMetrics']
             /**
-             * Date Range End
-             * @description End date of analyzed sessions
+             * Report Date
+             * @description Report generation date
              */
-            date_range_end: string
+            report_date: string
             /**
              * Date Range Start
              * @description Start date of analyzed sessions
              */
             date_range_start: string
             /**
-             * Report Date
-             * @description Report generation date
+             * Date Range End
+             * @description End date of analyzed sessions
              */
-            report_date: string
+            date_range_end: string
+            /** @description Aggregate metrics */
+            aggregate: components['schemas']['AggregateMetrics']
             /**
              * Sessions
              * @description Per-session results
@@ -4680,49 +4904,49 @@ export interface components {
              */
             from_date: string
             /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
+            /**
              * Mode
              * @default aasm
              * @enum {string}
              */
             mode: 'aasm' | 'aasm_relaxed' | 'resmed'
-            /**
-             * To Date
-             * Format: date
-             */
-            to_date: string
         }
         /** WaveformDataResponse */
         WaveformDataResponse: {
+            /** Timestamps */
+            timestamps: number[]
+            /** Values */
+            values: number[]
+            /** Sample Rate */
+            sample_rate: number
+            /** Unit */
+            unit: string
+            /** Total Samples */
+            total_samples: number
             /** Downsampled */
             downsampled: boolean
             /** Returned Samples */
             returned_samples: number
-            /** Sample Rate */
-            sample_rate: number
-            /** Timestamps */
-            timestamps: number[]
-            /** Total Samples */
-            total_samples: number
-            /** Unit */
-            unit: string
-            /** Values */
-            values: number[]
         }
         /**
          * WaveformInfo
          * @description Waveform metadata for listing.
          */
         WaveformInfo: {
-            /** Duration Hours */
-            duration_hours: number
-            /** Sample Count */
-            sample_count: number
-            /** Sample Rate */
-            sample_rate: number
-            /** Unit */
-            unit?: string | null
             /** Waveform Type */
             waveform_type: string
+            /** Sample Rate */
+            sample_rate: number
+            /** Sample Count */
+            sample_count: number
+            /** Unit */
+            unit?: string | null
+            /** Duration Hours */
+            duration_hours: number
         }
     }
     responses: never
@@ -4733,27 +4957,7 @@ export interface components {
 }
 export type $defs = Record<string, never>
 export interface operations {
-    list_invites_api_v1_admin_invites_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['InviteItem'][]
-                }
-            }
-        }
-    }
-    create_invite_api_v1_admin_invites_post: {
+    login_api_v1_auth_login_post: {
         parameters: {
             query?: never
             header?: never
@@ -4762,17 +4966,17 @@ export interface operations {
         }
         requestBody: {
             content: {
-                'application/json': components['schemas']['CreateInviteRequest']
+                'application/json': components['schemas']['LoginRequest']
             }
         }
         responses: {
             /** @description Successful Response */
-            201: {
+            200: {
                 headers: {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['InviteCreatedResponse']
+                    'application/json': components['schemas']['LoginResponse']
                 }
             }
             /** @description Validation Error */
@@ -4786,16 +4990,18 @@ export interface operations {
             }
         }
     }
-    revoke_invite_api_v1_admin_invites__invite_id__delete: {
+    login_totp_api_v1_auth_login_totp_post: {
         parameters: {
             query?: never
             header?: never
-            path: {
-                invite_id: number
-            }
+            path?: never
             cookie?: never
         }
-        requestBody?: never
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['TotpChallengeRequest']
+            }
+        }
         responses: {
             /** @description Successful Response */
             200: {
@@ -4817,7 +5023,7 @@ export interface operations {
             }
         }
     }
-    list_google_bindings_api_v1_admin_mcp_google_bindings_get: {
+    logout_api_v1_auth_logout_post: {
         parameters: {
             query?: never
             header?: never
@@ -4832,12 +5038,12 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['GoogleBindingItem'][]
+                    'application/json': components['schemas']['MessageResponse']
                 }
             }
         }
     }
-    reset_all_google_bindings_api_v1_admin_mcp_google_bindings_delete: {
+    demo_login_api_v1_auth_demo_login_post: {
         parameters: {
             query?: never
             header?: never
@@ -4852,21 +5058,43 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['ResetAllBindingsResponse']
+                    'application/json': components['schemas']['MessageResponse']
                 }
             }
         }
     }
-    reset_google_binding_api_v1_admin_mcp_google_bindings__user_id__delete: {
+    auth_status_api_v1_auth_status_get: {
         parameters: {
             query?: never
             header?: never
-            path: {
-                user_id: number
-            }
+            path?: never
             cookie?: never
         }
         requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AuthStatusResponse']
+                }
+            }
+        }
+    }
+    set_active_profile_api_v1_auth_active_profile_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['ActiveProfileRequest']
+            }
+        }
         responses: {
             /** @description Successful Response */
             200: {
@@ -4888,7 +5116,73 @@ export interface operations {
             }
         }
     }
-    get_mcp_status_api_v1_admin_mcp_status_get: {
+    lookup_invite_api_v1_auth_invites_lookup_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['InviteLookupRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['InviteInfoResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    redeem_invite_route_api_v1_auth_invites_redeem_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['InviteRedeemRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    google_login_api_v1_auth_google_login_get: {
         parameters: {
             query?: never
             header?: never
@@ -4903,7 +5197,411 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['McpStatus']
+                    'application/json': unknown
+                }
+            }
+        }
+    }
+    google_connect_api_v1_auth_google_connect_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+        }
+    }
+    google_callback_api_v1_auth_google_callback_get: {
+        parameters: {
+            query?: {
+                state?: string | null
+                code?: string | null
+                error?: string | null
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    google_invite_initiate_api_v1_auth_invites_google_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['GoogleInviteInitRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    totp_status_api_v1_auth_me_totp_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['TotpStatusResponse']
+                }
+            }
+        }
+    }
+    totp_disable_api_v1_auth_me_totp_delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['TotpDisableRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    totp_setup_api_v1_auth_me_totp_setup_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['TotpSetupResponse']
+                }
+            }
+        }
+    }
+    totp_confirm_api_v1_auth_me_totp_confirm_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['TotpConfirmRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['TotpConfirmResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    totp_regenerate_recovery_codes_api_v1_auth_me_totp_recovery_codes_regenerate_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['TotpRegenerateRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['TotpRegenerateResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_me_api_v1_auth_me_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MeResponse']
+                }
+            }
+        }
+    }
+    update_display_name_api_v1_auth_me_display_name_patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['DisplayNameRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    change_password_api_v1_auth_me_password_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['PasswordChangeRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    unlink_google_api_v1_auth_me_identities_google_delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
+                }
+            }
+        }
+    }
+    get_preferences_api_v1_auth_me_preferences_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['UserPreferences']
+                }
+            }
+        }
+    }
+    update_preferences_api_v1_auth_me_preferences_patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['UserPreferencesUpdate']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['UserPreferences']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    delete_my_data_api_v1_auth_me_delete_data_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DeleteDataResult']
                 }
             }
         }
@@ -5025,203 +5723,16 @@ export interface operations {
             }
         }
     }
-    delete_analysis_api_v1_analysis_delete: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['AnalysisDeleteRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': {
-                        [key: string]: number
-                    }
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    run_batch_analysis_api_v1_analysis_batch_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['BatchAnalysisRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['AnalysisJobEnqueued']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_analysis_delete_preview_api_v1_analysis_delete_preview_get: {
-        parameters: {
-            query?: {
-                session_ids?: number[]
-                all_versions?: boolean
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['AnalysisDeletePreview']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_analysis_jobs_api_v1_analysis_jobs_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['AnalysisJobsListResponse']
-                }
-            }
-        }
-    }
-    cancel_analysis_job_api_v1_analysis_jobs__job_id__delete: {
+    reset_user_totp_api_v1_admin_users__user_id__totp_reset_post: {
         parameters: {
             query?: never
             header?: never
             path: {
-                job_id: string
+                user_id: number
             }
             cookie?: never
         }
         requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content?: never
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_analysis_sessions_api_v1_analysis_sessions_get: {
-        parameters: {
-            query?: {
-                analyzed_only?: boolean
-                sort_by?: string
-                limit?: number
-                offset?: number
-                from_date?: string | null
-                to_date?: string | null
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['PaginatedResponse_AnalysisListItem_']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    set_active_profile_api_v1_auth_active_profile_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['ActiveProfileRequest']
-            }
-        }
         responses: {
             /** @description Successful Response */
             200: {
@@ -5243,7 +5754,7 @@ export interface operations {
             }
         }
     }
-    demo_login_api_v1_auth_demo_login_post: {
+    list_invites_api_v1_admin_invites_get: {
         parameters: {
             query?: never
             header?: never
@@ -5258,85 +5769,12 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['MessageResponse']
+                    'application/json': components['schemas']['InviteItem'][]
                 }
             }
         }
     }
-    google_callback_api_v1_auth_google_callback_get: {
-        parameters: {
-            query?: {
-                state?: string | null
-                code?: string | null
-                error?: string | null
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    google_connect_api_v1_auth_google_connect_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-        }
-    }
-    google_login_api_v1_auth_google_login_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-        }
-    }
-    google_invite_initiate_api_v1_auth_invites_google_post: {
+    create_invite_api_v1_admin_invites_post: {
         parameters: {
             query?: never
             header?: never
@@ -5345,17 +5783,17 @@ export interface operations {
         }
         requestBody: {
             content: {
-                'application/json': components['schemas']['GoogleInviteInitRequest']
+                'application/json': components['schemas']['CreateInviteRequest']
             }
         }
         responses: {
             /** @description Successful Response */
-            200: {
+            201: {
                 headers: {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': unknown
+                    'application/json': components['schemas']['InviteCreatedResponse']
                 }
             }
             /** @description Validation Error */
@@ -5369,387 +5807,12 @@ export interface operations {
             }
         }
     }
-    lookup_invite_api_v1_auth_invites_lookup_post: {
+    revoke_invite_api_v1_admin_invites__invite_id__delete: {
         parameters: {
             query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['InviteLookupRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['InviteInfoResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    redeem_invite_route_api_v1_auth_invites_redeem_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['InviteRedeemRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MessageResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    login_api_v1_auth_login_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['LoginRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MessageResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    logout_api_v1_auth_logout_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MessageResponse']
-                }
-            }
-        }
-    }
-    get_me_api_v1_auth_me_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MeResponse']
-                }
-            }
-        }
-    }
-    delete_my_data_api_v1_auth_me_delete_data_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['DeleteDataResult']
-                }
-            }
-        }
-    }
-    update_display_name_api_v1_auth_me_display_name_patch: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['DisplayNameRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MessageResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    unlink_google_api_v1_auth_me_identities_google_delete: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MessageResponse']
-                }
-            }
-        }
-    }
-    change_password_api_v1_auth_me_password_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['PasswordChangeRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MessageResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_preferences_api_v1_auth_me_preferences_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['UserPreferences']
-                }
-            }
-        }
-    }
-    update_preferences_api_v1_auth_me_preferences_patch: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['UserPreferencesUpdate']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['UserPreferences']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    auth_status_api_v1_auth_status_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['AuthStatusResponse']
-                }
-            }
-        }
-    }
-    list_days_api_v1_days__get: {
-        parameters: {
-            query?: {
-                device_id?: number | null
-                limit?: number
-                offset?: number
-                from_date?: string | null
-                to_date?: string | null
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['PaginatedResponse_DayListItem_']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_dates_api_v1_days_dates_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['DateListResponse']
-                }
-            }
-        }
-    }
-    get_day_api_v1_days__day_date__get: {
-        parameters: {
-            query?: {
-                device_id?: number | null
-            }
             header?: never
             path: {
-                day_date: string
+                invite_id: number
             }
             cookie?: never
         }
@@ -5761,7 +5824,7 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['DayDetail']
+                    'application/json': components['schemas']['MessageResponse']
                 }
             }
             /** @description Validation Error */
@@ -5775,18 +5838,14 @@ export interface operations {
             }
         }
     }
-    reset_db_api_v1_db_reset_post: {
+    get_mcp_status_api_v1_admin_mcp_status_get: {
         parameters: {
             query?: never
             header?: never
             path?: never
             cookie?: never
         }
-        requestBody?: {
-            content: {
-                'application/json': components['schemas']['ResetRequest'] | null
-            }
-        }
+        requestBody?: never
         responses: {
             /** @description Successful Response */
             200: {
@@ -5794,7 +5853,69 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['ResetResult']
+                    'application/json': components['schemas']['McpStatus']
+                }
+            }
+        }
+    }
+    list_google_bindings_api_v1_admin_mcp_google_bindings_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['GoogleBindingItem'][]
+                }
+            }
+        }
+    }
+    reset_all_google_bindings_api_v1_admin_mcp_google_bindings_delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ResetAllBindingsResponse']
+                }
+            }
+        }
+    }
+    reset_google_binding_api_v1_admin_mcp_google_bindings__user_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                user_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MessageResponse']
                 }
             }
             /** @description Validation Error */
@@ -5804,46 +5925,6 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_stats_api_v1_db_stats_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['DatabaseStatsPublic']
-                }
-            }
-        }
-    }
-    vacuum_db_api_v1_db_vacuum_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['VacuumResult']
                 }
             }
         }
@@ -5895,825 +5976,6 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_mask_log_entries_api_v1_equipment_masks_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MaskLogEntryResponse'][]
-                }
-            }
-        }
-    }
-    create_mask_log_entry_api_v1_equipment_masks_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['MaskLogCreateRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MaskLogEntryResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_mask_epochs_api_v1_equipment_masks_epochs_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MaskEpochResponse'][]
-                }
-            }
-        }
-    }
-    delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                entry_id: number
-            }
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content?: never
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    update_mask_log_entry_api_v1_equipment_masks__entry_id__patch: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                entry_id: number
-            }
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['MaskLogUpdateRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['MaskLogEntryResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    export_csv_api_v1_export_csv_get: {
-        parameters: {
-            query?: {
-                from_date?: string | null
-                to_date?: string | null
-                device?: string | null
-                include_waveforms?: boolean
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    export_json_api_v1_export_json_get: {
-        parameters: {
-            query?: {
-                from_date?: string | null
-                to_date?: string | null
-                device?: string | null
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    export_raw_api_v1_export_raw_get: {
-        parameters: {
-            query?: {
-                from_date?: string | null
-                to_date?: string | null
-                device?: string | null
-                trim_str?: boolean
-                as_zip?: boolean
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_nights_api_v1_health_nights_get: {
-        parameters: {
-            query?: {
-                limit?: number
-                offset?: number
-                from_date?: string | null
-                to_date?: string | null
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['PaginatedResponse_HealthNightSummaryRead_']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_night_dates_api_v1_health_nights_dates_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['DateListResponse']
-                }
-            }
-        }
-    }
-    get_night_detail_api_v1_health_nights__night_date__get: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                night_date: string
-            }
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HealthNightDetailRead']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_night_samples_api_v1_health_nights__night_date__samples_get: {
-        parameters: {
-            query?: {
-                source_name?: string | null
-            }
-            header?: never
-            path: {
-                night_date: string
-            }
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HealthSampleRead'][]
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    import_files_api_v1_import__post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'multipart/form-data': {
-                    files: string[]
-                    /**
-                     * @description Type of import: 'cpap' for CPAP device uploads (default), 'health' for Apple Health export.zip
-                     * @enum {string}
-                     */
-                    import_type?: 'cpap' | 'health'
-                    /** @description Target profile ID (defaults to actor's active profile) */
-                    profile_id?: number
-                }
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['JobResponse']
-                }
-            }
-        }
-    }
-    list_pipeline_jobs_api_v1_import_jobs_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['PipelineJobsListResponse']
-                }
-            }
-        }
-    }
-    precheck_upload_api_v1_import_precheck_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['PrecheckRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['PrecheckResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    rescan_archive_api_v1_import_rescan_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['RescanRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['JobResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    cancel_import_api_v1_import__job_id__delete: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                job_id: string
-            }
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content?: never
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    import_progress_api_v1_import__job_id__progress_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                job_id: string
-            }
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_profiles_api_v1_profiles__get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['ProfileResponse'][]
-                }
-            }
-        }
-    }
-    create_profile_api_v1_profiles__post: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['CreateProfileRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['ProfileResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    update_profile_api_v1_profiles__profile_id__patch: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                profile_id: number
-            }
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['RenameProfileRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['ProfileResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_comparison_report_api_v1_reports_comparison_get: {
-        parameters: {
-            query: {
-                from_a: string
-                to_a: string
-                from_b: string
-                to_b: string
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_summary_report_api_v1_reports_summary_get: {
-        parameters: {
-            query: {
-                from_date: string
-                to_date: string
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': unknown
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_rx_all_api_v1_rx_all_get: {
-        parameters: {
-            query?: {
-                min_days?: number
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['RxAllResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_rx_changes_api_v1_rx_changes_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['RxChangesResponse']
-                }
-            }
-        }
-    }
-    compare_rx_api_v1_rx_compare_get: {
-        parameters: {
-            query?: {
-                min_days?: number
-            }
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['RxComparisonResponse']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_rx_current_api_v1_rx_current_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['RxPeriodResponse']
-                }
-            }
-            /** @description No RX data available */
-            204: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content?: never
-            }
-        }
-    }
-    get_rx_history_api_v1_rx_history_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['RxPeriodResponse'][]
                 }
             }
         }
@@ -6823,6 +6085,37 @@ export interface operations {
             }
         }
     }
+    get_delete_preview_api_v1_sessions__session_id__delete_preview_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                session_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DeletePreview']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
     get_session_api_v1_sessions__session_id__get: {
         parameters: {
             query?: {
@@ -6891,112 +6184,13 @@ export interface operations {
             }
         }
     }
-    get_analysis_api_v1_sessions__session_id__analysis_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                session_id: number
-            }
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['AnalysisResult']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    run_analysis_api_v1_sessions__session_id__analysis_post: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                session_id: number
-            }
-            cookie?: never
-        }
-        requestBody: {
-            content: {
-                'application/json': components['schemas']['AnalysisRunRequest']
-            }
-        }
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['AnalysisResult']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    get_delete_preview_api_v1_sessions__session_id__delete_preview_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path: {
-                session_id: number
-            }
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['DeletePreview']
-                }
-            }
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['HTTPValidationError']
-                }
-            }
-        }
-    }
-    list_events_api_v1_sessions__session_id__events_get: {
+    get_summary_api_v1_stats_summary_get: {
         parameters: {
             query?: {
-                event_type?: string | null
+                days_limit?: number | null
             }
             header?: never
-            path: {
-                session_id: number
-            }
+            path?: never
             cookie?: never
         }
         requestBody?: never
@@ -7007,7 +6201,46 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['EventItem'][]
+                    'application/json': components['schemas']['TherapySummary']
+                }
+            }
+            /** @description No therapy data available */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_periods_api_v1_stats_periods_get: {
+        parameters: {
+            query?: {
+                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
+                days_limit?: number | null
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['PeriodStatistics'][]
                 }
             }
             /** @description Validation Error */
@@ -7021,15 +6254,15 @@ export interface operations {
             }
         }
     }
-    match_events_api_v1_sessions__session_id__events_match_get: {
+    get_trends_api_v1_stats_trends_get: {
         parameters: {
             query?: {
-                mode?: string
+                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
+                /** @description Limit to last N days. For period_type=day, defaults to 180 when omitted to keep the response size reasonable. */
+                days_limit?: number | null
             }
             header?: never
-            path: {
-                session_id: number
-            }
+            path?: never
             cookie?: never
         }
         requestBody?: never
@@ -7040,7 +6273,65 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['EventMatchResult']
+                    'application/json': {
+                        [key: string]: unknown[][]
+                    }
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_data_range_api_v1_stats_data_range_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DataRange']
+                }
+            }
+        }
+    }
+    get_records_api_v1_stats_records_get: {
+        parameters: {
+            query?: {
+                days_limit?: number | null
+                top_n?: number
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': {
+                        [key: string]: {
+                            [key: string]: unknown[][]
+                        }
+                    }
                 }
             }
             /** @description Validation Error */
@@ -7170,34 +6461,15 @@ export interface operations {
             }
         }
     }
-    get_data_range_api_v1_stats_data_range_get: {
-        parameters: {
-            query?: never
-            header?: never
-            path?: never
-            cookie?: never
-        }
-        requestBody?: never
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown
-                }
-                content: {
-                    'application/json': components['schemas']['DataRange']
-                }
-            }
-        }
-    }
-    get_periods_api_v1_stats_periods_get: {
+    list_events_api_v1_sessions__session_id__events_get: {
         parameters: {
             query?: {
-                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
-                days_limit?: number | null
+                event_type?: string | null
             }
             header?: never
-            path?: never
+            path: {
+                session_id: number
+            }
             cookie?: never
         }
         requestBody?: never
@@ -7208,7 +6480,7 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['PeriodStatistics'][]
+                    'application/json': components['schemas']['EventItem'][]
                 }
             }
             /** @description Validation Error */
@@ -7222,11 +6494,48 @@ export interface operations {
             }
         }
     }
-    get_records_api_v1_stats_records_get: {
+    match_events_api_v1_sessions__session_id__events_match_get: {
         parameters: {
             query?: {
-                days_limit?: number | null
-                top_n?: number
+                mode?: string
+            }
+            header?: never
+            path: {
+                session_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['EventMatchResult']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_analysis_sessions_api_v1_analysis_sessions_get: {
+        parameters: {
+            query?: {
+                analyzed_only?: boolean
+                sort_by?: string
+                limit?: number
+                offset?: number
+                from_date?: string | null
+                to_date?: string | null
             }
             header?: never
             path?: never
@@ -7240,10 +6549,107 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
+                    'application/json': components['schemas']['PaginatedResponse_AnalysisListItem_']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_analysis_api_v1_sessions__session_id__analysis_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                session_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AnalysisResult']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    run_analysis_api_v1_sessions__session_id__analysis_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                session_id: number
+            }
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['AnalysisRunRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AnalysisResult']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    delete_analysis_api_v1_analysis_delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['AnalysisDeleteRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
                     'application/json': {
-                        [key: string]: {
-                            [key: string]: unknown[][]
-                        }
+                        [key: string]: number
                     }
                 }
             }
@@ -7258,10 +6664,11 @@ export interface operations {
             }
         }
     }
-    get_summary_api_v1_stats_summary_get: {
+    get_analysis_delete_preview_api_v1_analysis_delete_preview_get: {
         parameters: {
             query?: {
-                days_limit?: number | null
+                session_ids?: number[]
+                all_versions?: boolean
             }
             header?: never
             path?: never
@@ -7275,10 +6682,85 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['TherapySummary']
+                    'application/json': components['schemas']['AnalysisDeletePreview']
                 }
             }
-            /** @description No therapy data available */
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    run_batch_analysis_api_v1_analysis_batch_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['BatchAnalysisRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AnalysisJobEnqueued']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_analysis_jobs_api_v1_analysis_jobs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AnalysisJobsListResponse']
+                }
+            }
+        }
+    }
+    cancel_analysis_job_api_v1_analysis_jobs__job_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                job_id: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
             204: {
                 headers: {
                     [name: string]: unknown
@@ -7296,12 +6778,14 @@ export interface operations {
             }
         }
     }
-    get_trends_api_v1_stats_trends_get: {
+    list_days_api_v1_days__get: {
         parameters: {
             query?: {
-                period_type?: 'day' | 'week' | 'month' | '6month' | 'year'
-                /** @description Limit to last N days. For period_type=day, defaults to 180 when omitted to keep the response size reasonable. */
-                days_limit?: number | null
+                device_id?: number | null
+                limit?: number
+                offset?: number
+                from_date?: string | null
+                to_date?: string | null
             }
             header?: never
             path?: never
@@ -7315,9 +6799,864 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': {
-                        [key: string]: unknown[][]
-                    }
+                    'application/json': components['schemas']['PaginatedResponse_DayListItem_']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_dates_api_v1_days_dates_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DateListResponse']
+                }
+            }
+        }
+    }
+    get_day_api_v1_days__day_date__get: {
+        parameters: {
+            query?: {
+                device_id?: number | null
+            }
+            header?: never
+            path: {
+                day_date: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DayDetail']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_night_dates_api_v1_health_nights_dates_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DateListResponse']
+                }
+            }
+        }
+    }
+    list_nights_api_v1_health_nights_get: {
+        parameters: {
+            query?: {
+                limit?: number
+                offset?: number
+                from_date?: string | null
+                to_date?: string | null
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['PaginatedResponse_HealthNightSummaryRead_']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_night_detail_api_v1_health_nights__night_date__get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                night_date: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HealthNightDetailRead']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_night_samples_api_v1_health_nights__night_date__samples_get: {
+        parameters: {
+            query?: {
+                source_name?: string | null
+            }
+            header?: never
+            path: {
+                night_date: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HealthSampleRead'][]
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_rx_history_api_v1_rx_history_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['RxPeriodResponse'][]
+                }
+            }
+        }
+    }
+    get_rx_current_api_v1_rx_current_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['RxPeriodResponse']
+                }
+            }
+            /** @description No RX data available */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
+            }
+        }
+    }
+    compare_rx_api_v1_rx_compare_get: {
+        parameters: {
+            query?: {
+                min_days?: number
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['RxComparisonResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_rx_all_api_v1_rx_all_get: {
+        parameters: {
+            query?: {
+                min_days?: number
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['RxAllResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_rx_changes_api_v1_rx_changes_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['RxChangesResponse']
+                }
+            }
+        }
+    }
+    list_mask_epochs_api_v1_equipment_masks_epochs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskEpochResponse'][]
+                }
+            }
+        }
+    }
+    list_mask_log_entries_api_v1_equipment_masks_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse'][]
+                }
+            }
+        }
+    }
+    create_mask_log_entry_api_v1_equipment_masks_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['MaskLogCreateRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    delete_mask_log_entry_api_v1_equipment_masks__entry_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                entry_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    update_mask_log_entry_api_v1_equipment_masks__entry_id__patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                entry_id: number
+            }
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['MaskLogUpdateRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['MaskLogEntryResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    import_files_api_v1_import__post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'multipart/form-data': {
+                    files: string[]
+                    /** @description Target profile ID (defaults to actor's active profile) */
+                    profile_id?: number
+                    /**
+                     * @description Type of import: 'cpap' for CPAP device uploads (default), 'health' for Apple Health export.zip
+                     * @enum {string}
+                     */
+                    import_type?: 'cpap' | 'health'
+                }
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['JobResponse']
+                }
+            }
+        }
+    }
+    precheck_upload_api_v1_import_precheck_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['PrecheckRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['PrecheckResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    rescan_archive_api_v1_import_rescan_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['RescanRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['JobResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_pipeline_jobs_api_v1_import_jobs_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['PipelineJobsListResponse']
+                }
+            }
+        }
+    }
+    cancel_import_api_v1_import__job_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                job_id: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    import_progress_api_v1_import__job_id__progress_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                job_id: string
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_summary_report_api_v1_reports_summary_get: {
+        parameters: {
+            query: {
+                from_date: string
+                to_date: string
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_comparison_report_api_v1_reports_comparison_get: {
+        parameters: {
+            query: {
+                from_a: string
+                to_a: string
+                from_b: string
+                to_b: string
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    export_csv_api_v1_export_csv_get: {
+        parameters: {
+            query?: {
+                from_date?: string | null
+                to_date?: string | null
+                device?: string | null
+                include_waveforms?: boolean
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    export_json_api_v1_export_json_get: {
+        parameters: {
+            query?: {
+                from_date?: string | null
+                to_date?: string | null
+                device?: string | null
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    export_raw_api_v1_export_raw_get: {
+        parameters: {
+            query?: {
+                from_date?: string | null
+                to_date?: string | null
+                device?: string | null
+                trim_str?: boolean
+                as_zip?: boolean
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': unknown
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_stats_api_v1_db_stats_get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['DatabaseStatsPublic']
+                }
+            }
+        }
+    }
+    vacuum_db_api_v1_db_vacuum_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['VacuumResult']
+                }
+            }
+        }
+    }
+    reset_db_api_v1_db_reset_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: {
+            content: {
+                'application/json': components['schemas']['ResetRequest'] | null
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ResetResult']
                 }
             }
             /** @description Validation Error */
@@ -7364,6 +7703,39 @@ export interface operations {
             }
         }
     }
+    run_fl_validation_api_v1_validate_fl_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['FlValidationRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['FlValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
     run_breath_trends_validation_api_v1_validate_breaths_post: {
         parameters: {
             query?: never
@@ -7397,7 +7769,27 @@ export interface operations {
             }
         }
     }
-    run_fl_validation_api_v1_validate_fl_post: {
+    list_profiles_api_v1_profiles__get: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ProfileResponse'][]
+                }
+            }
+        }
+    }
+    create_profile_api_v1_profiles__post: {
         parameters: {
             query?: never
             header?: never
@@ -7406,7 +7798,42 @@ export interface operations {
         }
         requestBody: {
             content: {
-                'application/json': components['schemas']['FlValidationRequest']
+                'application/json': components['schemas']['CreateProfileRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ProfileResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    update_profile_api_v1_profiles__profile_id__patch: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                profile_id: number
+            }
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['RenameProfileRequest']
             }
         }
         responses: {
@@ -7416,7 +7843,7 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['FlValidationReport']
+                    'application/json': components['schemas']['ProfileResponse']
                 }
             }
             /** @description Validation Error */

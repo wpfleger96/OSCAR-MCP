@@ -3,7 +3,9 @@ import type { AuthStatusResponse } from '@/types'
 import type { components } from '@/types/generated'
 
 type LoginRequest = components['schemas']['LoginRequest']
+type LoginResponse = components['schemas']['LoginResponse']
 type MessageResponse = components['schemas']['MessageResponse']
+type TotpChallengeRequest = components['schemas']['TotpChallengeRequest']
 type ActiveProfileRequest = components['schemas']['ActiveProfileRequest']
 type InviteLookupRequest = components['schemas']['InviteLookupRequest']
 type InviteInfoResponse = components['schemas']['InviteInfoResponse']
@@ -23,9 +25,14 @@ export const getAuthStatus = apiGet<AuthStatusResponse, [signal?: AbortSignal]>(
     (signal) => ({ signal }),
 )
 
-export const loginUser = apiPost<MessageResponse, [body: LoginRequest]>('/auth/login', (body) => ({
+export const loginUser = apiPost<LoginResponse, [body: LoginRequest]>('/auth/login', (body) => ({
     data: body,
 }))
+
+export const submitTotpChallenge = apiPost<MessageResponse, [body: TotpChallengeRequest]>(
+    '/auth/login/totp',
+    (body) => ({ data: body }),
+)
 
 export const demoLoginUser = apiPost<MessageResponse>('/auth/demo-login')
 

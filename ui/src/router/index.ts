@@ -165,6 +165,12 @@ const router = createRouter({
             meta: { requiresMultiuser: true },
         },
         {
+            path: '/totp-enroll',
+            name: 'totp-enroll',
+            component: () => import('@/views/TotpEnrollView.vue'),
+            meta: { requiresMultiuser: true },
+        },
+        {
             path: '/admin/users',
             name: 'admin-users',
             component: () => import('@/views/AdminUsersView.vue'),
@@ -181,7 +187,7 @@ const router = createRouter({
 
 // Exported for unit testing — the production router uses this directly.
 export async function authGuard(to: RouteLocationNormalized): Promise<string | boolean | void> {
-    const { fetchStatus, isAuthenticated, isLocal, role } = useAuth()
+    const { fetchStatus, isAuthenticated, isLocal, role, totpEnrollmentRequired } = useAuth()
 
     try {
         await fetchStatus()
@@ -195,6 +201,12 @@ export async function authGuard(to: RouteLocationNormalized): Promise<string | b
     // Unauthenticated user on a guarded route → login.
     if (!authed && !to.meta.authFree) {
         return '/'
+    }
+
+    // Forced TOTP enrollment: the server rejects everything except the enrollment
+    // endpoints, so short-circuit all destinations before landing-path resolution.
+    if (authed && !isLocal.value && totpEnrollmentRequired.value) {
+        return to.path === '/totp-enroll' ? undefined : '/totp-enroll'
     }
 
     // Authenticated user landing on login page → preference-based landing or dashboard.
@@ -214,6 +226,12 @@ export async function authGuard(to: RouteLocationNormalized): Promise<string | b
     // Admin-only routes require the admin role.
     if (to.meta.requiresAdmin && role.value !== 'admin') {
         return '/dashboard'
+    }
+
+    // Prevent stale visits to /totp-enroll when enrollment is no longer required
+    // (the enrollment-required case already short-circuited above).
+    if (authed && !isLocal.value && to.path === '/totp-enroll') {
+        return resolveLandingPath()
     }
 }
 

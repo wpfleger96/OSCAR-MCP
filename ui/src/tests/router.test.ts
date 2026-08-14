@@ -119,6 +119,57 @@ describe('authGuard (production)', () => {
             authGuard(makeRoute('/invite', { authFree: true }) as never),
         ).resolves.toBeUndefined()
     })
+
+    it('test_enrollment_required_redirects_to_totp_enroll', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                totpEnrollmentRequired: ref(true) as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/sessions') as never)
+        expect(result).toBe('/totp-enroll')
+    })
+
+    it('test_enrollment_required_does_not_redirect_to_totp_enroll_when_already_there', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                totpEnrollmentRequired: ref(true) as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/totp-enroll') as never)
+        expect(result).toBeUndefined()
+    })
+
+    it('test_totp_enroll_redirects_away_when_enrollment_not_required', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                totpEnrollmentRequired: ref(false) as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/totp-enroll') as never)
+        // Should redirect to the landing path (dashboard by default when getPreferences is not mocked)
+        expect(result).toBeTruthy()
+        expect(result).not.toBe('/totp-enroll')
+    })
+
+    it('test_enrollment_required_does_not_apply_in_local_mode', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(false) as never,
+                isLocal: ref(true) as never,
+                totpEnrollmentRequired: ref(true) as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/sessions') as never)
+        // Local mode users bypass TOTP enforcement — no redirect to /totp-enroll
+        expect(result).toBeUndefined()
+    })
 })
 
 // ---------------------------------------------------------------------------

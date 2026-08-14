@@ -72,6 +72,7 @@ class UserItem(BaseModel):
     has_password: bool
     auth_providers: list[str]
     last_login_at: datetime | None
+    totp_enabled: bool
 
 
 class PatchUserRequest(BaseModel):
@@ -171,6 +172,7 @@ async def list_users(
             has_password=u.password_hash is not None,
             auth_providers=providers_by_user.get(u.id, []),
             last_login_at=u.last_login_at,
+            totp_enabled=u.totp_enabled_at is not None,
         )
         for u in rows
     ]
@@ -292,6 +294,42 @@ async def enable_user(
 
     user.disabled_at = None
     return MessageResponse(message="User enabled")
+
+
+@router.post("/users/{user_id}/totp/reset", response_model=MessageResponse)
+async def reset_user_totp(
+    user_id: int,
+    actor: RequireAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JSONResponse:
+    """Reset TOTP enrollment for a user, forcing re-enrollment on next login.
+
+    Clears totp_secret, totp_enabled_at, and totp_last_used_step; deletes all
+    recovery codes; bumps session_version to invalidate existing sessions.
+
+    Self-reset is allowed — it forces re-enrollment rather than lockout.
+    """
+    user = await db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.totp_secret = None
+    user.totp_enabled_at = None
+    user.totp_last_used_step = None
+    user.session_version += 1
+
+    await db.execute(
+        delete(models.TotpRecoveryCode).where(
+            models.TotpRecoveryCode.user_id == user_id
+        )
+    )
+
+    logger.info("Admin id=%s reset TOTP for user id=%s", actor.user_id, user_id)
+
+    return JSONResponse(
+        content={"message": "TOTP reset"},
+        headers=NO_STORE,
+    )
 
 
 # ---------------------------------------------------------------------------
