@@ -928,8 +928,7 @@ class TestP2UploadLifecycle:
         from collections.abc import AsyncGenerator  # noqa: PLC0415
 
         async def override_db() -> AsyncGenerator[AsyncSession]:
-            async with async_db_session.begin():
-                yield async_db_session
+            yield async_db_session
 
         async def override_actor(
             db: Annotated[AsyncSession, Depends(get_db)],
