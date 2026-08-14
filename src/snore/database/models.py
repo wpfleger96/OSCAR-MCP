@@ -225,6 +225,11 @@ class OauthAttempt(Base):
     browser_session_hash: Mapped[str | None] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
     consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Non-NULL marks a connect-kind flow: link Google to this already-authenticated
+    # user.  kind stays "login" so the CHECK constraint holds on pre-existing DBs.
+    connect_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 
     __table_args__ = (

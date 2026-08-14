@@ -113,6 +113,9 @@
                     }}</span>
                 </div>
 
+                <p v-if="connectSuccess" class="form-success">{{ connectSuccess }}</p>
+                <p v-if="connectError" role="alert" class="form-error">{{ connectError }}</p>
+
                 <template v-if="me.google_linked">
                     <p v-if="!me.has_password" class="form-error" role="alert">
                         Set a password first — Google is currently your only way to sign in.
@@ -127,6 +130,14 @@
                         Unlink Google
                     </Button>
                     <p v-if="unlinkError" role="alert" class="form-error">{{ unlinkError }}</p>
+                </template>
+                <template v-else>
+                    <GoogleSignInButton
+                        class="connect-google-btn"
+                        :href="isDemo ? undefined : '/api/v1/auth/google/connect'"
+                        :disabled="isDemo"
+                        label="Connect Google"
+                    />
                 </template>
 
                 <DeleteConfirmDialog
@@ -283,10 +294,11 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
+import GoogleSignInButton from '@/components/GoogleSignInButton.vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
@@ -306,6 +318,7 @@ import type { AxiosError } from 'axios'
 type UserPreferences = components['schemas']['UserPreferences']
 
 const router = useRouter()
+const route = useRoute()
 const { role, refreshStatus, clearAuth, activeProfileId, profiles } = useAuth()
 const isDemo = computed(() => role.value === 'demo')
 const { setDateFormat } = useDateFormat()
@@ -391,6 +404,8 @@ async function savePassword() {
 const unlinkDialogOpen = ref(false)
 const unlinking = ref(false)
 const unlinkError = ref<string | null>(null)
+const connectError = ref<string | null>(null)
+const connectSuccess = ref<string | null>(null)
 
 async function confirmUnlinkGoogle() {
     if (isDemo.value) return
@@ -545,6 +560,14 @@ function applyDetectedTimezone() {
 
 onMounted(() => {
     loadProfileTimezone()
+    if ('google_connected' in route.query) {
+        connectSuccess.value = 'Google account linked'
+        void router.replace({ path: '/account' })
+    } else if ('google_connect_error' in route.query) {
+        connectError.value =
+            "Couldn't link Google. Make sure the Google account's email matches your SNORE account email."
+        void router.replace({ path: '/account' })
+    }
 })
 
 // ── Delete all my data ────────────────────────────────────────────────────────
@@ -714,5 +737,10 @@ async function handleDeleteData(): Promise<void> {
 
 .action-btn--ghost:hover {
     background: hsl(from var(--color-primary) h s l / 0.08);
+}
+
+.connect-google-btn {
+    width: auto;
+    align-self: flex-start;
 }
 </style>

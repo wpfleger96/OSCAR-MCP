@@ -1,10 +1,11 @@
-"""Google OAuth routes: login and invite-signup initiation, single callback.
+"""Google OAuth routes: login, connect, and invite-signup initiation, single callback.
 
 Routes
 ------
 GET  /api/v1/auth/google/login
+GET  /api/v1/auth/google/connect   (authenticated; links Google to the session user)
 POST /api/v1/auth/invites/google   (invite token in request body)
-GET  /api/v1/auth/google/callback  (single callback for both flow kinds)
+GET  /api/v1/auth/google/callback  (single callback for all flow kinds)
 
 Both flows authorize with the same redirect URI; the ``oauth_attempts`` row
 created at initiation carries ``kind`` ("login" | "signup"), and the callback
@@ -47,6 +48,7 @@ from snore.api.client_ip import get_client_ip
 from snore.api.config import AppConfig, get_config
 from snore.api.constants import NO_STORE
 from snore.api.deps import get_db, get_raw_session
+from snore.api.guards import RequireWritable
 from snore.api.routers.auth._common import (
     TOKEN_MAX_LEN,
     issue_session_redirect,
@@ -54,6 +56,7 @@ from snore.api.routers.auth._common import (
 )
 from snore.api.routers.auth._google_resolution import (
     TxFailure,
+    resolve_connect,
     resolve_login,
     resolve_signup,
 )
@@ -101,6 +104,11 @@ def _oauth_failure_response() -> JSONResponse:
     )
 
 
+def _connect_failure_redirect() -> RedirectResponse:
+    """Connect flows fail back to /account so the SPA can show the error inline."""
+    return RedirectResponse(url="/account?google_connect_error=1", status_code=302)
+
+
 def _google_gate(cfg: AppConfig) -> JSONResponse | None:
     """503 unless Google flows are available: multiuser mode + credentials.
 
@@ -138,6 +146,7 @@ async def _begin_google_flow(
     invite_id: int | None = None,
     expected_canonical_email: str | None = None,
     login_hint: str | None = None,
+    connect_user_id: int | None = None,
 ) -> _GoogleFlowStart:
     """Create an ``oauth_attempts`` row and build the Google authorization URL.
 
@@ -179,6 +188,7 @@ async def _begin_google_flow(
             pkce_verifier=verifier,
             browser_session_hash=hashlib.sha256(pre_auth_value.encode()).hexdigest(),
             expires_at=now + timedelta(seconds=cfg.oauth_attempt_ttl_seconds),
+            connect_user_id=connect_user_id,
         )
     )
     await db.flush()
@@ -233,6 +243,46 @@ async def google_login(
     return response
 
 
+@router.get("/google/connect")
+async def google_connect(
+    request: Request,
+    actor: RequireWritable,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Link a Google identity to the authenticated user's account.
+
+    Initiates an OAuth flow that, on callback, links the Google account to
+    the session user.  The Google account's email must match the user's
+    ``canonical_email`` (verified at callback time).
+
+    Demo role is blocked at the ``RequireWritable`` guard (403).  Admin
+    accounts are allowed — this is the intended path for admins, who are
+    deliberately excluded from the email auto-link path in ``resolve_login``.
+
+    Why GET is CSRF-safe: a forged GET can only *start* a flow bound to the
+    victim's ``user_id``; completing it requires Google claims whose verified
+    email equals the victim's ``canonical_email``, which an attacker's Google
+    account cannot produce.  The ``snore_pre_auth`` cookie additionally binds
+    the flow to the initiating browser, matching the existing pattern used by
+    ``GET /google/login``.
+    """
+    cfg = get_config()
+    if (gate := _google_gate(cfg)) is not None:
+        return gate
+    user = await db.get(models.User, actor.user_id)
+    flow = await _begin_google_flow(
+        db,
+        cfg,
+        request,
+        kind="login",
+        connect_user_id=actor.user_id,
+        login_hint=user.canonical_email if user else None,
+    )
+    response: RedirectResponse = RedirectResponse(url=flow.auth_url, status_code=302)
+    _set_pre_auth_cookie(response, cfg, flow)
+    return response
+
+
 @router.get("/google/callback")
 async def google_callback(
     request: Request,
@@ -255,13 +305,37 @@ async def google_callback(
         return gate
 
     if error or not state or not code:
+        # When the user cancels on Google's consent screen, Google redirects
+        # back with ``error=access_denied`` and the original ``state`` but no
+        # ``code``.  ``state`` is a 64-hex secret known only to the browser
+        # that initiated the flow, so looking it up here leaks nothing the
+        # caller doesn't already possess.  A connect flow deserves a redirect
+        # rather than a raw JSON 400 so the SPA can show an inline message.
+        if state:
+            async with db.begin():
+                cancelled = (
+                    (
+                        await db.execute(
+                            select(models.OauthAttempt).where(
+                                models.OauthAttempt.state == state,
+                                models.OauthAttempt.consumed_at.is_(None),
+                                models.OauthAttempt.expires_at > datetime.now(UTC),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if cancelled is not None and cancelled.connect_user_id is not None:
+                    return _connect_failure_redirect()
         return _oauth_failure_response()
 
     # Window 1: short read — identify and validate attempt.
     async with db.begin():
         # Deliberately no ``kind`` filter: ``state`` is UNIQUE, and ``kind``
         # is server-written at initiation (CHECK-constrained to
-        # login|signup) — it drives dispatch below, never selection.
+        # login|signup).  Dispatch is driven by ``connect_user_id`` first,
+        # then ``kind`` — neither is used for selection.
         attempt = (
             (
                 await db.execute(
@@ -286,6 +360,7 @@ async def google_callback(
         attempt_nonce = attempt.nonce or ""
         attempt_browser_hash = attempt.browser_session_hash or ""
         attempt_expected_email = attempt.expected_canonical_email or ""
+        attempt_connect_user_id: int | None = attempt.connect_user_id
 
         # For signups: the attempt must reference a still-valid invite; read
         # it here to capture (invite_id, role) for window-2 resolution.
@@ -317,6 +392,8 @@ async def google_callback(
     cookie_hash = hashlib.sha256(pre_auth_value.encode()).hexdigest()
     if not hmac.compare_digest(cookie_hash, attempt_browser_hash):
         logger.warning("Google callback: browser binding cookie mismatch")
+        if attempt_connect_user_id is not None:
+            return _connect_failure_redirect()
         return _oauth_failure_response()
 
     # Network I/O (no transaction held): exchange authorization code.
@@ -331,6 +408,8 @@ async def google_callback(
         )
     except OAuthError as e:
         logger.warning("OAuth error in google_callback: %s", e)
+        if attempt_connect_user_id is not None:
+            return _connect_failure_redirect()
         return _oauth_failure_response()
 
     # Local: a signup must be completed by the invited Google account.
@@ -362,7 +441,12 @@ async def google_callback(
                 )
                 raise TxFailure()
 
-            if kind == "signup":
+            if attempt_connect_user_id is not None:
+                await resolve_connect(db, cfg, claims, user_id=attempt_connect_user_id)
+                return RedirectResponse(
+                    url="/account?google_connected=1", status_code=302
+                )
+            elif kind == "signup":
                 if signup_ctx is None:  # window-1 invariant; guard, don't assert
                     logger.warning("Google callback: signup_ctx invariant violated")
                     raise TxFailure()
@@ -379,12 +463,16 @@ async def google_callback(
                 ticket = await resolve_login(db, cfg, claims)
             return issue_session_redirect(cfg, ticket)
     except TxFailure:
+        if attempt_connect_user_id is not None:
+            return _connect_failure_redirect()
         return _oauth_failure_response()
     except IntegrityError:
         # Two concurrent flows racing to link the same (provider, subject)
         # identity: the loser's commit violates the unique constraint.  Keep
         # the uniform generic failure instead of surfacing a 500.
         logger.warning("Google callback lost an identity-link race; returning 400")
+        if attempt_connect_user_id is not None:
+            return _connect_failure_redirect()
         return _oauth_failure_response()
 
 
