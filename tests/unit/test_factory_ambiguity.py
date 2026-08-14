@@ -17,7 +17,7 @@ import pytest
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.auth.actor import AuthMode
+from snore.auth.actor import AuthMode, Role
 from snore.auth.factory import ActorContextFactory, resolve_local_profile_id
 from snore.database import models
 
@@ -26,11 +26,13 @@ from snore.database import models
 # ---------------------------------------------------------------------------
 
 
-async def _make_user(session: AsyncSession, email: str | None = None) -> models.User:
+async def _make_user(
+    session: AsyncSession, email: str | None = None, role: str = "admin"
+) -> models.User:
     """Create a minimal non-disabled User and flush."""
     user = models.User(
         canonical_email=email or f"user_{uuid.uuid4().hex[:8]}@example.com",
-        role="admin",
+        role=role,
     )
     session.add(user)
     await session.flush()
@@ -150,3 +152,49 @@ class TestResolveLocalProfileIdGuard:
         await _seed_user(async_db_session, "bob@example.com")
         with pytest.raises(ValueError, match="Multiple users found"):
             await resolve_local_profile_id(async_db_session)
+
+
+class TestMakeLocalAdminResolution:
+    """make_local() must resolve the first live admin, never a demo/member user."""
+
+    async def test_demo_at_lowest_id_skipped_admin_resolved(self, async_db_session):
+        """Demo user seeded first (lowest id) is skipped; admin is returned."""
+        # Seed demo user first so it gets the lower id (reproduces the observed bug
+        # where multiuser mode seeds a demo user at id=1 before local mode runs).
+        demo = await _make_user(async_db_session, "demo@snore.local", role="demo")
+        await _make_profile(async_db_session, demo.id)
+
+        admin = await _make_user(async_db_session, "admin@example.com", role="admin")
+        await _make_profile(async_db_session, admin.id)
+
+        assert demo.id < admin.id
+
+        factory = ActorContextFactory(async_db_session)
+        actor = await factory.make_local(mode=AuthMode.LOCAL)
+
+        assert actor.user_id == admin.id
+        assert actor.role is Role.ADMIN
+        assert actor.can_write is True
+
+    async def test_only_demo_users_provisions_admin(self, async_db_session):
+        """Only demo users in DB → make_local auto-provisions a fresh admin."""
+        demo = await _make_user(async_db_session, "demo@snore.local", role="demo")
+        await _make_profile(async_db_session, demo.id)
+
+        factory = ActorContextFactory(async_db_session)
+        actor = await factory.make_local(mode=AuthMode.LOCAL)
+
+        assert actor.user_id != demo.id
+        assert actor.role is Role.ADMIN
+        assert actor.can_write is True
+
+    async def test_member_only_db_provisions_admin(self, async_db_session):
+        """Only member-role users in DB → make_local auto-provisions a fresh admin."""
+        member = await _make_user(async_db_session, "member@example.com", role="member")
+        await _make_profile(async_db_session, member.id)
+
+        factory = ActorContextFactory(async_db_session)
+        actor = await factory.make_local(mode=AuthMode.LOCAL)
+
+        assert actor.user_id != member.id
+        assert actor.role is Role.ADMIN

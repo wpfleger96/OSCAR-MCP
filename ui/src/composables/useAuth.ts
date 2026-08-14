@@ -21,10 +21,9 @@ export function useAuth() {
     const activeProfileId = computed(() => status.value?.active_profile_id ?? null)
     const authMode = computed(() => status.value?.auth_mode ?? null)
     const role = computed(() => status.value?.user?.role ?? null)
-    // canWrite: local mode always allows writes; multiuser blocks the demo role.
-    const canWrite = computed(
-        () => isLocal.value || (status.value?.user?.role !== 'demo' && isAuthenticated.value),
-    )
+    // canWrite: trust the server-reported role — an authenticated non-demo actor
+    // can write in any auth mode.
+    const canWrite = computed(() => status.value?.user?.role !== 'demo' && isAuthenticated.value)
     const demoAvailable = computed(() => status.value?.demo_available ?? false)
     // Distinct from !isAuthenticated: true while auth state is unknown (fetch pending or failed).
     const statusUnknown = computed(() => status.value === null)
