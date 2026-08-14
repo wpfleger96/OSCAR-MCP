@@ -306,6 +306,34 @@ class TestResetGoogleBinding:
         updated = db_session.get(models.User, target.id)
         assert updated.google_link_disabled is True
 
+    def test_admin_self_reset_invalidates_own_session(
+        self, async_db_session: AsyncSession, db_session: Session
+    ) -> None:
+        # Admin resets their OWN Google binding — allowed by design.
+        # Stale-session 401 is not assertable here: the test client injects an
+        # ActorContext directly and bypasses real JWT/session auth entirely.
+        # We assert the two observable effects: identity rows gone and
+        # session_version bumped by exactly 1.
+        admin = _seed_user(db_session, role="admin", password_hash=_PW_HASH)
+        _seed_google_identity(db_session, admin.id)
+        original_version = admin.session_version
+
+        client = _make_client(async_db_session, actor=_admin_actor(admin.id))
+        resp = client.delete(f"/api/v1/admin/mcp/google-bindings/{admin.id}")
+
+        assert resp.status_code == 200
+
+        db_session.expunge_all()
+        updated = db_session.get(models.User, admin.id)
+        assert updated.session_version == original_version + 1
+
+        remaining = (
+            db_session.query(models.AuthIdentity)
+            .filter_by(user_id=admin.id, provider="google")
+            .all()
+        )
+        assert remaining == []
+
     def test_passwordless_user_returns_409_binding_survives(
         self, async_db_session: AsyncSession, db_session: Session
     ) -> None:

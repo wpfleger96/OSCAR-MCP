@@ -154,6 +154,7 @@
         :message="resetRowMessage"
         :loading="false"
         :deleting="resetting"
+        confirm-label="Reset"
         @update:visible="confirmResetUserId = null"
         @confirm="handleResetBinding"
     />
@@ -165,6 +166,7 @@
         message="Every user with a linked Google account and a password will be signed out everywhere — including you, if your account has one. Users without a password are skipped."
         :loading="false"
         :deleting="resettingAll"
+        confirm-label="Reset all"
         @update:visible="confirmResetAll = $event"
         @confirm="handleResetAll"
     />

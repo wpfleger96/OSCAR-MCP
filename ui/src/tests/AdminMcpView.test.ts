@@ -13,7 +13,7 @@ vi.mock('@/api/admin')
 vi.mock('@/components/DeleteConfirmDialog.vue', () => ({
     default: defineComponent({
         name: 'DeleteConfirmDialog',
-        props: ['visible', 'title', 'message', 'loading', 'deleting'],
+        props: ['visible', 'title', 'message', 'loading', 'deleting', 'confirmLabel'],
         emits: ['update:visible', 'confirm'],
         template: `<button v-if="visible" class="stub-confirm" :data-title="title" @click="$emit('confirm')">Confirm</button>`,
     }),
