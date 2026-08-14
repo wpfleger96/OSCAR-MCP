@@ -447,16 +447,21 @@ class TestNonEmptyChainPaths:
         db_path = str(tmp_path / "at_head.db")
         sync_url = f"sqlite:///{db_path}"
 
-        # Pre-create DB with alembic_version at the fake head and an empty
-        # snore_migration_checksums table. The mocked ScriptDirectory yields no
-        # revisions, so computed checksums are {} and the empty stored table {}
-        # matches — the fast path fires and no Alembic command is invoked.
+        # Pre-create DB with alembic_version at the fake head and a NON-EMPTY
+        # snore_migration_checksums table (an empty table now means "backfill
+        # needed" and falls through to the slow path). The mocked
+        # ScriptDirectory yields no revisions, so no stored entry can mismatch
+        # — the fast path fires and no Alembic command is invoked.
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
         conn.execute("INSERT INTO alembic_version VALUES ('fakehead0001')")
         conn.execute(
             "CREATE TABLE snore_migration_checksums"
             " (revision TEXT PRIMARY KEY, checksum TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO snore_migration_checksums VALUES ('fakehead0001', ?)",
+            ("0" * 64,),
         )
         conn.commit()
         conn.close()
