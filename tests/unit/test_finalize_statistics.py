@@ -213,14 +213,44 @@ class TestSpanFallbackWhenMaskOnSegmentsNone:
 
 
 class TestZeroDivisionGuard:
-    def test_empty_segments_list_is_falsy_falls_back_to_span(self):
-        """An empty list for mask_on_segments is falsy; fall back to duration_seconds."""
-        # Pydantic will validate the list, but test the guard path with None
+    def test_none_segments_falls_back_to_span(self):
+        """mask_on_segments=None means unknown — fall back to duration_seconds."""
         session = _session(
             duration_s=3600,
             mask_on_segments=None,
         )
         session.finalize_statistics()
 
-        # Usage hours should equal span hours (1.0), not crash
         assert session.statistics.usage_hours == pytest.approx(1.0, abs=1e-6)
+
+
+class TestEmptyMaskOnSegments:
+    def test_empty_segments_yields_zero_usage_hours_no_rates(self):
+        """mask_on_segments=[] means known-zero mask-on time, not span fallback.
+
+        Events are recorded but no denominator exists, so rates must be None.
+        """
+        session = _session(
+            duration_s=3600,
+            mask_on_segments=[],
+            oa=5,
+            ca=2,
+            h=3,
+        )
+        session.finalize_statistics()
+
+        assert session.statistics.usage_hours == 0.0
+        assert session.statistics.ahi is None
+        assert session.statistics.oai is None
+        assert session.statistics.cai is None
+        assert session.statistics.hi is None
+
+    def test_empty_segments_does_not_use_span(self):
+        """Span must not bleed into usage_hours when segments is an explicit empty list."""
+        session = _session(
+            duration_s=7200,  # 2h span that must not appear in usage_hours
+            mask_on_segments=[],
+        )
+        session.finalize_statistics()
+
+        assert session.statistics.usage_hours == 0.0

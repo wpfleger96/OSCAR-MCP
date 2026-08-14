@@ -76,30 +76,38 @@ logger = logging.getLogger(__name__)
 _STR_NEGATIVE_OK_STATS: frozenset[str] = frozenset({"flow_5th"})
 
 
-def _slice_str_cache_for_chain(
+def _chain_therapy_days(segments: "dict[str, dict[str, Path]]") -> "set[date]":
+    """Return the set of STR therapy days covered by a session chain.
+
+    Each segment id maps to a therapy day via the noon-minus-12h boundary:
+    a segment starting at 23:00 belongs to the same STR row as one starting
+    at 01:00 the next day, because STR rows are keyed on the date at noon−12h.
+
+    Seg ids arrive regex-validated from the EDF filename scan
+    (``_EDF_SESSION_PATTERN``), so strptime never needs a try/except here.
+    """
+    return {
+        (datetime.strptime(seg_id, "%Y%m%d_%H%M%S") - timedelta(hours=12)).date()
+        for seg_id in segments
+    }
+
+
+def _slice_str_cache(
     cache: "dict[date, dict[str, float]] | None",
-    segments: "dict[str, dict[str, Path]]",
+    therapy_days: "set[date]",
 ) -> "dict[date, dict[str, float]] | None":
-    """Return a multi-entry slice of a STR cache covering a session chain.
+    """Return a slice of ``cache`` restricted to ``therapy_days``.
 
-    Each segment maps to its STR therapy day via the noon-minus-12h boundary.
-    A chain that crosses noon (e.g. a noon-rollover session) spans two STR
-    therapy days, so both must be included.
+    Passing the full multi-night cache to every subprocess future causes
+    O(nights²) pickle overhead; this reduces each future's payload to only
+    the entries its chain needs.
 
-    Passing a full multi-night cache to every future causes O(nights²) pickle
-    overhead; this reduces each future's payload to only the entries its chain
-    needs.
-
-    Returns None (never an empty dict) when no chain segment has an entry,
-    because downstream ``_parse_session_group`` uses truthiness
+    Returns None (never an empty dict) when no entry matches, because
+    downstream ``_parse_session_group`` uses truthiness
     (``if str_settings_cache:``) to detect a cache miss.
     """
     if cache is None:
         return None
-    therapy_days = {
-        (datetime.strptime(seg_id, "%Y%m%d_%H%M%S") - timedelta(hours=12)).date()
-        for seg_id in segments
-    }
     sliced = {d: cache[d] for d in therapy_days if d in cache}
     return sliced if sliced else None
 
@@ -749,22 +757,24 @@ class ResmedEDFParser(DeviceParser):
             futures: dict[Any, Any] = {}
             try:
                 pool = get_pool()
-                futures = {
-                    pool.submit(
-                        _resmed_parse_bundle_worker,
-                        night_date,
-                        chain_id,
-                        segments,
-                        device_info,
-                        path,
-                        _slice_str_cache_for_chain(str_settings_cache, segments),
-                        _slice_str_cache_for_chain(str_summaries_cache, segments),
-                        date_from,
-                        date_to,
-                        self._str_series11,
-                    ): chain_id
-                    for night_date, chain_id, segments in night_items
-                }
+                futures = {}
+                for night_date, chain_id, segments in night_items:
+                    therapy_days = _chain_therapy_days(segments)
+                    futures[
+                        pool.submit(
+                            _resmed_parse_bundle_worker,
+                            night_date,
+                            chain_id,
+                            segments,
+                            device_info,
+                            path,
+                            _slice_str_cache(str_settings_cache, therapy_days),
+                            _slice_str_cache(str_summaries_cache, therapy_days),
+                            date_from,
+                            date_to,
+                            self._str_series11,
+                        )
+                    ] = chain_id
 
                 completed = 0
 
@@ -1338,20 +1348,6 @@ class ResmedEDFParser(DeviceParser):
         from snore.parsers.resmed_file_index import get_night_date
 
         return get_night_date(timestamp)
-
-    def _scan_edf_files(self, datalog_dir: Path) -> list[Path]:
-        """Delegate to resmed_file_index.scan_edf_files()."""
-        from snore.parsers.resmed_file_index import scan_edf_files
-
-        return scan_edf_files(datalog_dir)
-
-    def _group_session_files(
-        self, datalog_dir: Path
-    ) -> dict[str, dict[str, dict[str, Path]]]:
-        """Delegate to resmed_file_index.group_session_files()."""
-        from snore.parsers.resmed_file_index import group_session_files
-
-        return group_session_files(datalog_dir)
 
     def parse_night_session(
         self,

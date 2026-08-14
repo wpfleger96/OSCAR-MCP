@@ -268,6 +268,33 @@ class TestNoonRolloverChaining:
         )
         assert pytest.approx(day.total_therapy_hours, abs=0.01) == expected_usage_hours
 
+        # Session-level: the merged session's statistics.usage_hours must exclude
+        # the inter-segment gap — it must be strictly less than the wall-clock span.
+        session_result = await async_db_session.execute(
+            select(models.Session).where(
+                models.Session.device_id == device.id,
+                models.Session.device_session_id == f"{chain_id}_merged",
+            )
+        )
+        db_session_row = session_result.scalars().first()
+        assert db_session_row is not None
+
+        stats_result = await async_db_session.execute(
+            select(models.Statistics).where(
+                models.Statistics.session_id == db_session_row.id
+            )
+        )
+        stats_row = stats_result.scalars().first()
+        assert stats_row is not None
+        assert stats_row.usage_hours is not None
+
+        span_seconds = (post_noon_end - pre_noon_start).total_seconds()
+        assert stats_row.usage_hours < span_seconds / 3600, (
+            f"statistics.usage_hours ({stats_row.usage_hours:.4f} h) must be strictly "
+            f"less than the wall-clock span ({span_seconds / 3600:.4f} h): "
+            "inter-segment gap must be excluded from session-level usage"
+        )
+
 
 # ===========================================================================
 # Test 2 — Blip + sleep: two chains, same night_date, usage-hours correct

@@ -351,12 +351,17 @@ def test_parallel_submits_per_night_str_cache_slices():
     #             str_settings_cache, str_summaries_cache, ...)
     # args indices:  [0]       [1]       [2]       [3]      [4]    [5]
     #                [6]=settings  [7]=summaries
+    expected_chain_ids = {n[0]: n[1] for n in nights}
     for call_obj in calls:
         a = call_obj.args
         night_key = datetime.strptime(a[1], "%Y%m%d").date()
+        chain_id_arg = a[2]
         settings_arg = a[6]
         summaries_arg = a[7]
 
+        assert chain_id_arg == expected_chain_ids[a[1]], (
+            f"chain_id for night {a[1]} must be {expected_chain_ids[a[1]]}; got {chain_id_arg}"
+        )
         assert settings_arg == {night_key: full_settings[night_key]}, (
             f"Expected single-entry settings slice for {night_key}; got {settings_arg}"
         )

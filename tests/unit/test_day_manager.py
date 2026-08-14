@@ -394,3 +394,72 @@ class TestStatisticalAggregation:
 
         # usage-weighted: (10*2 + 2*8) / (2+8) = 36/10 = 3.6
         assert day.ahi == pytest.approx(3.6, abs=0.01)
+
+    async def test_stat_session_pairing_regression(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """Regression: stats/session pairs must align by ownership, not list position.
+
+        Three sessions: only session 1 and session 3 have Statistics.
+        Session 1: span 1h, usage_hours absent (None), ahi 10.0
+        Session 2: span 5h, no Statistics row
+        Session 3: span 6h, usage_hours absent (None), ahi 4.0
+
+        With the old zip-misaligned code, stats3 was paired with session2 (span 5h),
+        giving weighted avg = (10*1 + 4*5) / (1+5) = 5.0.
+        With aligned pairs, stats3 is paired with session3 (span 6h),
+        giving weighted avg = (10*1 + 4*6) / (1+6) = 34/7 ≈ 4.857.
+        """
+        device = async_test_device
+
+        session1 = await async_test_session_factory(
+            device_id=device.id,
+            start_time=datetime(2024, 11, 5, 12, 0, 0),
+            duration_hours=1.0,
+            ahi=10.0,
+        )
+        session2 = await async_test_session_factory(
+            device_id=device.id,
+            start_time=datetime(2024, 11, 5, 14, 0, 0),
+            duration_hours=5.0,
+        )
+        session3 = await async_test_session_factory(
+            device_id=device.id,
+            start_time=datetime(2024, 11, 5, 20, 0, 0),
+            duration_hours=6.0,
+            ahi=4.0,
+        )
+
+        await DayManager.link_session_to_day(session1, device.id, async_db_session)
+        await DayManager.link_session_to_day(session2, device.id, async_db_session)
+        day = await DayManager.link_session_to_day(
+            session3, device.id, async_db_session
+        )
+
+        # Correctly paired: (10*1 + 4*6) / (1+6) = 34/7 ≈ 4.857
+        expected = (10.0 * 1.0 + 4.0 * 6.0) / (1.0 + 6.0)
+        assert day.ahi == pytest.approx(expected, abs=0.001)
+        # Confirm the old misaligned result is not returned
+        misaligned = (10.0 * 1.0 + 4.0 * 5.0) / (1.0 + 5.0)
+        assert day.ahi != pytest.approx(misaligned, abs=0.001)
+
+    async def test_zero_usage_hours_contributes_nothing_to_total(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """usage_hours == 0.0 must contribute 0 to total_therapy_hours, not span.
+
+        The old truthy check treated 0.0 as falsy and fell back to the session span.
+        """
+        device = async_test_device
+
+        # usage_hours=0.0 means known-zero mask-on time; span (5h) must not bleed in.
+        session = await async_test_session_factory(
+            device_id=device.id,
+            start_time=datetime(2024, 11, 5, 12, 0, 0),
+            duration_hours=5.0,
+            usage_hours=0.0,
+        )
+
+        day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+
+        assert day.total_therapy_hours == pytest.approx(0.0, abs=0.001)

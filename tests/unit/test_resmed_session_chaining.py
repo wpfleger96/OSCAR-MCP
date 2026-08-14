@@ -12,11 +12,12 @@ matching the layout documented in the EDF spec and used by
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from snore.parsers.resmed_edf import _chain_therapy_days
 from snore.parsers.resmed_file_index import (
     OSCAR_COMBINE_CLOSE_SECONDS,
     chain_session_segments,
@@ -474,3 +475,99 @@ class TestNightDateAssignment:
         chain_ids = {c[1] for c in chains}
         assert blip_id in chain_ids
         assert sleep_id in chain_ids
+
+
+# ---------------------------------------------------------------------------
+# get_segment_duration_seconds — corrupt header / sanity cap
+# ---------------------------------------------------------------------------
+
+
+class TestDurationSanityCap:
+    def test_absurd_num_records_returns_none(self, tmp_path):
+        """num_records=99999999 × record_duration=1 → 99999999 s > 172800 → None."""
+        seg_id = "20260101_220000"
+        path = tmp_path / f"{seg_id}_BRP.edf"
+        _write_edf(path, num_records=99999999, record_duration=1.0)
+        assert get_segment_duration_seconds(seg_id, {"BRP": path}) is None
+
+    def test_exactly_48h_is_accepted(self, tmp_path):
+        """Duration of exactly 172800 s (48 h) is at the boundary — accepted (not strictly > cap)."""
+        seg_id = "20260101_220000"
+        path = tmp_path / f"{seg_id}_BRP.edf"
+        _write_edf(path, num_records=172800, record_duration=1.0)
+        assert get_segment_duration_seconds(seg_id, {"BRP": path}) == 172800.0
+
+    def test_one_second_over_48h_is_rejected(self, tmp_path):
+        """172801 s > 172800 → treated as corrupt, returns None."""
+        seg_id = "20260101_220000"
+        path = tmp_path / f"{seg_id}_BRP.edf"
+        _write_edf(path, num_records=172801, record_duration=1.0)
+        assert get_segment_duration_seconds(seg_id, {"BRP": path}) is None
+
+    def test_corrupt_header_falls_back_to_pld(self, tmp_path):
+        """BRP with absurd num_records is skipped; PLD with valid header is used."""
+        seg_id = "20260101_220000"
+        brp = tmp_path / f"{seg_id}_BRP.edf"
+        pld = tmp_path / f"{seg_id}_PLD.edf"
+        _write_edf(brp, num_records=99999999, record_duration=1.0)
+        _write_edf(pld, num_records=3600, record_duration=1.0)
+        assert get_segment_duration_seconds(seg_id, {"BRP": brp, "PLD": pld}) == 3600.0
+
+
+# ---------------------------------------------------------------------------
+# _chain_therapy_days
+# (cache slicing itself is covered by TestSliceStrCache in
+# tests/unit/test_resmed_str_backup.py)
+# ---------------------------------------------------------------------------
+
+
+class TestChainTherapyDays:
+    def test_noon_straddling_segments_map_to_two_therapy_days(self):
+        """Segments at 11:59 and 12:00 on the same date map to two STR rows.
+
+        11:59:00 − 12h = 23:59 previous day → date Jan 29
+        12:00:05 − 12h = 00:00:05 same day  → date Jan 30
+        """
+        segments: dict[str, dict] = {
+            "20260130_115900": {},
+            "20260130_120005": {},
+        }
+        days = _chain_therapy_days(segments)
+        assert days == {date(2026, 1, 29), date(2026, 1, 30)}
+
+    def test_single_pre_noon_segment(self):
+        """03:19 − 12h = 15:19 previous day → date Jan 29."""
+        days = _chain_therapy_days({"20260130_031924": {}})
+        assert days == {date(2026, 1, 29)}
+
+
+# ---------------------------------------------------------------------------
+# chain_session_segments — overlapping segments (negative gap)
+# ---------------------------------------------------------------------------
+
+
+class TestOverlappingSegments:
+    def test_overlapping_segments_all_chain_together(self, tmp_path):
+        """Segment B ends before segment A → negative gap → last_end advances from A.
+
+        A: starts 22:00, duration 7200 s → ends 00:00 (next day)
+        B: starts 23:00, duration 600 s  → ends 23:10 (inside A; negative gap from A end)
+        C: starts 03:50 (next day)       → gap from A end (00:00) = 3 h 50 m ≤ 4 h
+
+        All three should land in a single chain because last_end is always
+        max(last_end, seg_end_lower), so A's end time (00:00) is preserved.
+        """
+        datalog = tmp_path / "DATALOG"
+        t_a = datetime(2026, 3, 1, 22, 0, 0)
+        t_b = datetime(2026, 3, 1, 23, 0, 0)
+        t_c = datetime(2026, 3, 2, 3, 50, 0)
+
+        _make_segment(datalog, t_a, duration_s=7200)  # ends 00:00
+        _make_segment(datalog, t_b, duration_s=600)  # ends 23:10 — inside A
+        _make_segment(datalog, t_c, duration_s=1800)  # gap from 00:00 = 3 h 50 m
+
+        chains = chain_session_segments(datalog)
+        assert len(chains) == 1, (
+            f"Expected 1 chain, got {len(chains)}: {[c[1] for c in chains]}"
+        )
+        assert len(chains[0][2]) == 3

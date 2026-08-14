@@ -78,6 +78,31 @@ def scan_edf_files(datalog_dir: Path) -> list[Path]:
     return edf_files
 
 
+def index_segment_files(datalog_dir: Path) -> dict[str, dict[str, Path]]:
+    """Scan DATALOG and return a flat session_id -> {file_type: Path} mapping.
+
+    This is the single scan point used by both ``group_session_files`` and
+    ``chain_session_segments``.
+
+    Args:
+        datalog_dir: Directory to scan (typically source_root / "DATALOG").
+
+    Returns:
+        Dict mapping session_id (YYYYMMDD_HHMMSS) to its file-type map.
+    """
+    segments: dict[str, dict[str, Path]] = {}
+    for edf_file in scan_edf_files(datalog_dir):
+        match = _EDF_SESSION_PATTERN.match(edf_file.name)
+        if not match:
+            continue
+        session_id = match.group(1)
+        file_type = match.group(2)
+        if session_id not in segments:
+            segments[session_id] = {}
+        segments[session_id][file_type] = edf_file
+    return segments
+
+
 def group_session_files(
     datalog_dir: Path,
 ) -> dict[str, dict[str, dict[str, Path]]]:
@@ -107,23 +132,12 @@ def group_session_files(
     """
     groups: dict[str, dict[str, dict[str, Path]]] = {}
 
-    for edf_file in scan_edf_files(datalog_dir):
-        match = _EDF_SESSION_PATTERN.match(edf_file.name)
-        if not match:
-            continue
-
-        session_id = match.group(1)
-        file_type = match.group(2)
-
+    for session_id, file_map in index_segment_files(datalog_dir).items():
         timestamp = datetime.strptime(session_id, "%Y%m%d_%H%M%S")
         night = get_night_date(timestamp)
-
         if night not in groups:
             groups[night] = {}
-        if session_id not in groups[night]:
-            groups[night][session_id] = {}
-
-        groups[night][session_id][file_type] = edf_file
+        groups[night][session_id] = file_map
 
     return groups
 
@@ -170,6 +184,7 @@ def get_segment_duration_seconds(
         Duration in seconds (num_records × record_duration) when a readable
         file with positive values is found; None otherwise.
         ``num_records == -1`` (EDF+C unknown) is treated as unusable.
+        Values exceeding 172800 s (48 h) are treated as corrupt header data.
     """
     for file_type in ("BRP", "PLD", "SA2"):
         path = files.get(file_type)
@@ -190,7 +205,12 @@ def get_segment_duration_seconds(
             if num_records == -1:
                 continue
             if num_records > 0 and record_duration > 0:
-                return num_records * record_duration
+                duration = num_records * record_duration
+                # No physical segment can exceed ~24 h (noon rollover); cap at
+                # 48 h to reject corrupt headers that would poison chain end times.
+                if duration > 172800:
+                    continue
+                return duration
         except (ValueError, OSError):
             logger.debug(
                 f"Could not read EDF header for {file_type} in segment {session_id}"
@@ -235,16 +255,7 @@ def chain_session_segments(
         - ``chain_id`` is the first segment's session_id.
         - ``segments`` maps ``session_id -> {file_type: Path}``.
     """
-    all_sessions: dict[str, dict[str, Path]] = {}
-    for edf_file in scan_edf_files(datalog_dir):
-        match = _EDF_SESSION_PATTERN.match(edf_file.name)
-        if not match:
-            continue
-        session_id = match.group(1)
-        file_type = match.group(2)
-        if session_id not in all_sessions:
-            all_sessions[session_id] = {}
-        all_sessions[session_id][file_type] = edf_file
+    all_sessions = index_segment_files(datalog_dir)
 
     if not all_sessions:
         return []

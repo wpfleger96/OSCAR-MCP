@@ -688,6 +688,10 @@ class Session(Base):
             ondelete="CASCADE",
             use_alter=True,
         ),
+        # Supports the _find_overlapping range predicate: device_id equality filter +
+        # start_time range scan.  Run per imported session; index prevents full table
+        # scan growth as diagnostic-blip sessions accumulate.
+        Index("ix_sessions_device_id_start_time", "device_id", "start_time"),
     )
 
     def __repr__(self) -> str:

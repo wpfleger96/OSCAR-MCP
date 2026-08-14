@@ -28,6 +28,7 @@ import re
 
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 import numpy as np
 
@@ -40,6 +41,25 @@ from snore.database.session import session_scope
 from snore.parsers.unified import UnifiedSession, WaveformData
 
 logger = logging.getLogger(__name__)
+
+
+class SessionImportResult(NamedTuple):
+    """Result of a single-session import attempt.
+
+    Invariant: ``extra_day_ids`` and ``deleted_session_ids`` can be non-empty
+    even when ``imported`` is ``False``.  The legacy-format purge step runs
+    unconditionally and is durable on the skip path by design — callers MUST
+    drain both fields regardless of the value of ``imported``.  Treating
+    ``imported=False`` as "nothing happened" will silently orphan day rows
+    that need re-aggregation and leave stale PKs in accumulated ID lists.
+    """
+
+    imported: bool
+    day_id: int | None
+    session_id: int | None
+    extra_day_ids: set[int]
+    deleted_session_ids: set[int]
+
 
 # Matches only the legacy noon-bucket ID format (e.g. "20260130_merged").
 # New proximity-chained IDs (e.g. "20260130_225000_merged") must NOT match so
@@ -170,28 +190,21 @@ class SessionImporter:
         db: AsyncSession,
         session_data: UnifiedSession,
         force: bool = False,
-    ) -> tuple[bool, int | None, int | None, set[int], set[int]]:
-        """
-        Import a single session. Returns (imported, day_id, session_id, extra_day_ids, deleted_session_ids).
+    ) -> SessionImportResult:
+        """Import a single session and return a :class:`SessionImportResult`.
 
-        This method NEVER aggregates - aggregation is handled by the caller.
+        This method NEVER aggregates — aggregation is handled by the caller.
         It does NOT open its own savepoint; callers that want per-session
         isolation must wrap each call in ``db.begin_nested()``.
+
+        See :class:`SessionImportResult` for the caller contract, in particular
+        the invariant that ``extra_day_ids`` and ``deleted_session_ids`` must be
+        drained regardless of ``imported``.
 
         Args:
             db: SQLAlchemy async database session
             session_data: UnifiedSession to import
             force: If True, re-import existing sessions
-
-        Returns:
-            Tuple of (was_imported, day_id, session_id, extra_day_ids, deleted_session_ids).
-            session_id is the PK of the newly inserted (or replaced-on-force)
-            Session row; None when was_imported is False.
-            extra_day_ids is the set of day IDs from overlap-replaced rows that
-            differ from the new session's day and need re-aggregation.
-            deleted_session_ids is the set of Session PKs deleted during the
-            overlap-replace step — callers prune these from accumulated ID lists
-            to avoid referencing rows that no longer exist.
         """
         profile_id = self.profile_id
         stmt = select(models.Device).where(
@@ -230,7 +243,7 @@ class SessionImporter:
             logger.debug(
                 f"Session {session_data.device_session_id} already exists, skipping"
             )
-            return False, None, None, set(), set()
+            return SessionImportResult(False, None, None, set(), set())
 
         # Strip tz info once here: Session.start_time / end_time are device
         # wall-clock columns stored without timezone info.
@@ -317,7 +330,9 @@ class SessionImporter:
                         f"({naive_start} – {naive_end}) — "
                         f"partial overlap with existing {overlap_ids}"
                     )
-                    return False, None, None, replaced_day_ids, deleted_session_ids
+                    return SessionImportResult(
+                        False, None, None, replaced_day_ids, deleted_session_ids
+                    )
 
         # Now that the import decision is final ("proceed"), delete the existing
         # same-ID row for force re-imports.  Doing this after the overlap check
@@ -384,7 +399,9 @@ class SessionImporter:
         # differ from the new session's day (a segment that crossed noon can produce a
         # replaced day_id distinct from day_id).
         extra_day_ids = replaced_day_ids - {day_id}
-        return True, day_id, new_session.id, extra_day_ids, deleted_session_ids
+        return SessionImportResult(
+            True, day_id, new_session.id, extra_day_ids, deleted_session_ids
+        )
 
     async def import_session(
         self,
@@ -537,38 +554,34 @@ class SessionImporter:
         for session_data in batch:
             try:
                 async with db.begin_nested():
-                    (
-                        was_imported,
-                        day_id,
-                        new_session_id,
-                        extra_day_ids,
-                        deleted_session_ids,
-                    ) = await self._import_single_session(db, session_data, force)
-                if was_imported:
+                    result = await self._import_single_session(db, session_data, force)
+                if result.imported:
                     imported += 1
-                    if day_id:
-                        batch_day_ids.add(day_id)
-                    batch_day_ids.update(extra_day_ids)
+                    if result.day_id:
+                        batch_day_ids.add(result.day_id)
+                    batch_day_ids.update(result.extra_day_ids)
                     # Prune any earlier-imported IDs that were deleted by the
                     # overlap-replace step so downstream consumers don't receive
                     # references to rows that no longer exist.
-                    if deleted_session_ids:
+                    if result.deleted_session_ids:
                         batch_session_ids[:] = [
-                            i for i in batch_session_ids if i not in deleted_session_ids
+                            i
+                            for i in batch_session_ids
+                            if i not in result.deleted_session_ids
                         ]
-                    if new_session_id is not None:
-                        batch_session_ids.append(new_session_id)
+                    if result.session_id is not None:
+                        batch_session_ids.append(result.session_id)
                 else:
                     skipped += 1
-                    # Old-format rows may have been purged even on a skip (the
-                    # stale-format purge runs before the all_covered check).  Carry
-                    # their day IDs forward for re-aggregation and prune their PKs
-                    # from the batch list so callers never reference deleted rows.
-                    if extra_day_ids:
-                        batch_day_ids.update(extra_day_ids)
-                    if deleted_session_ids:
+                    # Drain both sets unconditionally — old-format purges are durable
+                    # on the skip path (see SessionImportResult invariant).
+                    if result.extra_day_ids:
+                        batch_day_ids.update(result.extra_day_ids)
+                    if result.deleted_session_ids:
                         batch_session_ids[:] = [
-                            i for i in batch_session_ids if i not in deleted_session_ids
+                            i
+                            for i in batch_session_ids
+                            if i not in result.deleted_session_ids
                         ]
             except Exception as e:
                 from snore.database.txn import _is_sqlite_contention  # noqa: PLC0415

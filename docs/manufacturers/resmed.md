@@ -118,6 +118,8 @@ When therapy is physically in progress at 12:00:00 local time, the device closes
 
 Gap measurement: a segment's end time is derived from its EDF header (`num_records × record_duration`, read from the first readable of `BRP`/`PLD`/`SA2`). Each physical segment also writes an annotation-only group (`CSL` + `EVE` files, stamped seconds before its waveform group) that carries no duration; such groups advance the chain's clock to their own start time (a lower bound) instead of breaking the chain, so a session's stub and waveform groups always chain together.
 
+Discovery I/O cost: gap measurement requires opening each segment's EDF header (one 256-byte read per file) during the discovery phase, before any waveform data is parsed. On a local SSD this is negligible — even a multi-year DATALOG tree with thousands of segments completes in under a second. Importing directly from an SD card over USB with a cold filesystem cache can add roughly 30–60 seconds for a multi-year archive, because the thousands of small header opens happen sequentially. This cost is inherent to measuring inter-segment gaps and cannot be avoided without a separate pre-recorded duration index.
+
 This replaces an earlier unconditional noon-bucket merge that had no gap cutoff. The old approach produced phantom 18–24 h sessions in two cases:
 
 - A noon rollover put the post-noon half of a session into the next night's bucket, where it merged with that evening's sleep across an ~18 h gap.
