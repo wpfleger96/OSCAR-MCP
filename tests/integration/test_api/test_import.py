@@ -1,6 +1,7 @@
 import json
 
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -883,3 +884,158 @@ class TestPipelineJobsListAPI:
         assert j["stage"] == "done"
         assert j["file_count"] == 3
         assert j["sessions_imported"] == 2
+
+
+class TestRescanEndpoint:
+    """Integration tests for POST /api/v1/import/rescan."""
+
+    # ── helpers ────────────────────────────────────────────────────────────
+
+    def _make_archive(self, raw_root: Path, serial: str = "SN123456789") -> Path:
+        """Populate a minimal archive tree: <raw_root>/<serial>/DATALOG/."""
+        serial_dir = raw_root / serial
+        (serial_dir / "DATALOG").mkdir(parents=True)
+        (serial_dir / "STR.edf").write_bytes(b"\x00" * 4)  # minimal sentinel
+        return raw_root
+
+    # ── happy path ─────────────────────────────────────────────────────────
+
+    def test_rescan_returns_202_with_job_id(self, api_client, monkeypatch, tmp_path):
+        """Happy path: archive present → 202 with job_id."""
+        import snore.api.routers.import_data as import_mod  # noqa: PLC0415
+
+        raw_root = tmp_path / "raw"
+        profiles = api_client.get("/api/v1/profiles/").json()
+        actor_profile_id = next(p["id"] for p in profiles if p["is_default"])
+        self._make_archive(raw_root / str(actor_profile_id))
+
+        monkeypatch.setattr("snore.constants.DEFAULT_RAW_BACKUP_DIR", raw_root)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
+
+        response = api_client.post("/api/v1/import/rescan", json={})
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert isinstance(data["job_id"], str)
+        assert len(data["job_id"]) > 0
+
+    def test_rescan_job_type_is_rescan(self, api_client, monkeypatch, tmp_path):
+        """Job created by rescan endpoint has job_type='rescan'."""
+        import snore.api.routers.import_data as import_mod  # noqa: PLC0415
+
+        from snore.api.import_jobs import get_job  # noqa: PLC0415
+
+        raw_root = tmp_path / "raw"
+        profiles = api_client.get("/api/v1/profiles/").json()
+        actor_profile_id = next(p["id"] for p in profiles if p["is_default"])
+        self._make_archive(raw_root / str(actor_profile_id))
+
+        monkeypatch.setattr("snore.constants.DEFAULT_RAW_BACKUP_DIR", raw_root)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
+
+        response = api_client.post("/api/v1/import/rescan", json={})
+        assert response.status_code == 202
+        job = get_job(response.json()["job_id"])
+        assert job is not None
+        assert job.job_type.value == "rescan"
+
+    def test_rescan_with_explicit_profile_id(self, api_client, monkeypatch, tmp_path):
+        """Rescan with an explicit owned profile_id uses that profile."""
+        import snore.api.routers.import_data as import_mod  # noqa: PLC0415
+
+        from snore.api.import_jobs import get_job  # noqa: PLC0415
+
+        # Create a second profile.
+        resp = api_client.post("/api/v1/profiles/", json={"name": "Second Profile"})
+        assert resp.status_code == 201
+        second_profile_id = resp.json()["id"]
+
+        raw_root = tmp_path / "raw"
+        self._make_archive(raw_root / str(second_profile_id))
+
+        monkeypatch.setattr("snore.constants.DEFAULT_RAW_BACKUP_DIR", raw_root)
+        monkeypatch.setattr(
+            import_mod, "enqueue_for_execution", lambda job, root=None: None
+        )
+
+        response = api_client.post(
+            "/api/v1/import/rescan", json={"profile_id": second_profile_id}
+        )
+        assert response.status_code == 202
+        job = get_job(response.json()["job_id"])
+        assert job is not None
+        assert job.target_profile_id == second_profile_id
+
+    # ── 422 cases ──────────────────────────────────────────────────────────
+
+    def test_rescan_422_no_archive(self, api_client, monkeypatch, tmp_path):
+        """Archive directory absent → 422 with informative message."""
+        raw_root = tmp_path / "raw"
+        monkeypatch.setattr("snore.constants.DEFAULT_RAW_BACKUP_DIR", raw_root)
+
+        response = api_client.post("/api/v1/import/rescan", json={})
+        assert response.status_code == 422
+        assert "archive" in response.json()["detail"].lower()
+
+    def test_rescan_422_archive_no_device_data(self, api_client, monkeypatch, tmp_path):
+        """Profile dir exists but has no <serial>/DATALOG subtree → 422."""
+        raw_root = tmp_path / "raw"
+        profiles = api_client.get("/api/v1/profiles/").json()
+        actor_profile_id = next(p["id"] for p in profiles if p["is_default"])
+        # Create the profile dir but no serial/DATALOG inside it.
+        (raw_root / str(actor_profile_id)).mkdir(parents=True)
+
+        monkeypatch.setattr("snore.constants.DEFAULT_RAW_BACKUP_DIR", raw_root)
+
+        response = api_client.post("/api/v1/import/rescan", json={})
+        assert response.status_code == 422
+        assert "device data" in response.json()["detail"].lower()
+
+    # ── 429 ────────────────────────────────────────────────────────────────
+
+    def test_rescan_429_caps_exceeded(self, api_client, monkeypatch, tmp_path):
+        """Admission caps exceeded → 429."""
+        raw_root = tmp_path / "raw"
+        profiles = api_client.get("/api/v1/profiles/").json()
+        actor_profile_id = next(p["id"] for p in profiles if p["is_default"])
+        self._make_archive(raw_root / str(actor_profile_id))
+
+        monkeypatch.setattr("snore.constants.DEFAULT_RAW_BACKUP_DIR", raw_root)
+        monkeypatch.setattr(
+            "snore.api.routers.import_data.create_job",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("caps")),
+        )
+
+        response = api_client.post("/api/v1/import/rescan", json={})
+        assert response.status_code == 429
+
+    # ── auth ───────────────────────────────────────────────────────────────
+
+    def test_rescan_401_unauthenticated(self, async_db_session, monkeypatch, tmp_path):
+        """Unauthenticated request → 401."""
+        from tests.helpers.api_client import make_test_client  # noqa: PLC0415
+
+        client = make_test_client(async_db_session, unauthenticated=True)
+        response = client.post("/api/v1/import/rescan", json={})
+        assert response.status_code == 401
+
+    def test_rescan_403_demo_actor(self, async_db_session, monkeypatch, tmp_path):
+        """Demo actor (read-only) → 403."""
+        from snore.auth.actor import ActorContext, AuthMode, Role  # noqa: PLC0415
+        from tests.helpers.api_client import make_test_client  # noqa: PLC0415
+
+        demo_actor = ActorContext(
+            user_id=1, profile_id=1, role=Role.DEMO, mode=AuthMode.LOCAL
+        )
+        client = make_test_client(async_db_session, actor=demo_actor)
+        response = client.post("/api/v1/import/rescan", json={})
+        assert response.status_code == 403
+
+    def test_rescan_403_foreign_profile_id(self, api_client, monkeypatch, tmp_path):
+        """profile_id that belongs to another user → 403."""
+        response = api_client.post("/api/v1/import/rescan", json={"profile_id": 999999})
+        assert response.status_code == 403

@@ -1213,6 +1213,34 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/import/rescan': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /**
+         * Rescan Archive
+         * @description Re-import CPAP sessions from the server-side raw archive.
+         *
+         *     Creates an import job that reads directly from the profile's backup archive
+         *     (~/.snore/raw/<profile_id>/<serial>/DATALOG/) without requiring a new file
+         *     upload.  Useful when DB sessions were deleted but the archive is intact —
+         *     the UNIQUE(device_id, device_session_id) upsert-skip makes this idempotent.
+         *
+         *     Returns 422 when no archive exists or the archive contains no device data.
+         *     Returns 429 when admission caps are exceeded.
+         */
+        post: operations['rescan_archive_api_v1_import_rescan_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/import/{job_id}': {
         parameters: {
             query?: never
@@ -3892,6 +3920,11 @@ export interface components {
             /** Timezone */
             timezone?: string | null
         }
+        /** RescanRequest */
+        RescanRequest: {
+            /** Profile Id */
+            profile_id?: number | null
+        }
         /** ResetAllBindingsResponse */
         ResetAllBindingsResponse: {
             /** Reset */
@@ -6296,6 +6329,39 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['PrecheckResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    rescan_archive_api_v1_import_rescan_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['RescanRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['JobResponse']
                 }
             }
             /** @description Validation Error */

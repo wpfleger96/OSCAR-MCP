@@ -234,6 +234,12 @@ export async function importFiles(
     return lastJobResponse!
 }
 
+export async function triggerRescan(profileId?: number): Promise<{ job_id: string }> {
+    const body = profileId !== undefined ? { profile_id: profileId } : {}
+    const { data } = await api.post<{ job_id: string }>('/import/rescan', body)
+    return data
+}
+
 /**
  * Upload a single Apple Health export file (export.xml or similar).
  * Uses a plain multipart POST — no chunking, no precheck.

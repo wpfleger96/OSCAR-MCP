@@ -336,13 +336,131 @@ def _run_health_import(job: ImportJob, profile_raw_root: Path | None = None) -> 
         job.release_capacity()
 
 
+def _run_rescan(job: ImportJob, profile_raw_root: Path | None = None) -> None:
+    """Worker function for archive rescan jobs. Runs in a background thread.
+
+    Mirrors _run_import's ordering contract:
+        1. Persist RUNNING state.
+        2. Validate target_profile_id and profile_raw_root.
+        3. Detect sources from the profile archive root.
+        4. Import with backup=False — the archive IS the source.
+        5. phase_complete(IMPORT) — non-terminal milestone for observers.
+        6. Check post-import cancellation.
+        7. Enqueue background analysis for newly-imported sessions.
+        8. set_analysis_link + terminal "complete".
+        9. Persist terminal record.
+        10. cleanup_files() — no-op (temp_dir is None).
+        11. release_capacity.
+    """
+    try:
+        try:
+            asyncio.run(_upsert_job_record(job))
+        except Exception:
+            logger.exception("Failed to upsert RUNNING state for job %s", job.job_id)
+
+        target_profile_id = job.target_profile_id
+        if target_profile_id is None:
+            raise ValueError("Rescan job has no target profile — cannot proceed")
+        if profile_raw_root is None:
+            raise ValueError("Rescan job has no archive root — cannot proceed")
+
+        service = ImportService()
+        job.report_progress("Scanning archive for device data...")
+        if job.cancel_requested:
+            job._finish(succeeded=False)
+            return
+
+        sources = service.detect_sources(profile_raw_root)
+        if not sources:
+            raise ValueError("No device data found in archive")
+
+        job.report_progress(
+            f"Detected {len(sources)} source(s) — importing from archive"
+        )
+        if job.cancel_requested:
+            job._finish(succeeded=False)
+            return
+
+        # backup=False: the archive IS the source; no additional backup needed.
+        result = asyncio.run(
+            service.import_sources(
+                sources,
+                backup=False,
+                profile_id=target_profile_id,
+                progress_callback=lambda msg: job.report_progress(msg),
+                cancel_predicate=lambda: job.cancel_requested,
+            )
+        )
+
+        import_result_dict = result.model_dump()
+        job.phase_complete(JobPhase.IMPORT, import_result_dict)
+
+        if job.cancel_requested:
+            job._finish(
+                succeeded=False,
+                terminal_msg=_make_terminal(job, "error", message="Cancelled"),
+            )
+            return
+
+        analysis_job_id = None
+        imported_ids = result.imported_session_ids
+        if imported_ids:
+            from snore.api import analysis_jobs  # noqa: PLC0415
+
+            aj = analysis_jobs.enqueue(
+                profile_id=target_profile_id,
+                session_ids=imported_ids,
+                source=analysis_jobs.AnalysisJobSource.IMPORT,
+                owner_user_id=job.owner_user_id,
+            )
+            if aj is not None:
+                analysis_job_id = aj.job_id
+            else:
+                logger.warning(
+                    "Analysis queue full; skipping auto-analysis for rescan job %s",
+                    job.job_id,
+                )
+
+        job.set_analysis_link(
+            analysis_job_id=analysis_job_id,
+            queue_full=bool(imported_ids) and analysis_job_id is None,
+        )
+
+        terminal_extra: dict[str, Any] = {"result": import_result_dict}
+        if analysis_job_id is not None:
+            terminal_extra["analysis_job_id"] = analysis_job_id
+        elif imported_ids:
+            terminal_extra["analysis_queued"] = False
+        terminal_msg = _make_terminal(job, "complete", extra=terminal_extra)
+        job._finish(succeeded=True, terminal_msg=terminal_msg)
+    except Exception as e:
+        logger.exception("Rescan job %s failed", job.job_id)
+        job._finish(
+            succeeded=False,
+            terminal_msg=_make_terminal(job, "error", message=_client_safe_error(e)),
+        )
+    finally:
+        if job.is_terminal:
+            try:
+                asyncio.run(_upsert_job_record(job))
+            except Exception:
+                logger.exception("Failed to persist job record for %s", job.job_id)
+        from snore.api.import_jobs import is_shutdown_in_progress  # noqa: PLC0415
+
+        if not is_shutdown_in_progress():
+            job.cleanup_files()
+        job.release_capacity()
+
+
 def _run_dispatch(job: ImportJob, profile_raw_root: Path | None = None) -> None:
     """Route import jobs to the appropriate worker function based on job type.
 
-    JobType.HEALTH_UPLOAD → _run_health_import; everything else → _run_import.
-    _run_import itself is unchanged and handles UPLOAD (CPAP) jobs.
+    JobType.HEALTH_UPLOAD → _run_health_import; JobType.RESCAN → _run_rescan;
+    everything else → _run_import (handles UPLOAD/CPAP jobs).
     """
     if job.job_type == JobType.HEALTH_UPLOAD:
         _run_health_import(job, profile_raw_root)
+    elif job.job_type == JobType.RESCAN:
+        _run_rescan(job, profile_raw_root)
     else:
         _run_import(job, profile_raw_root)
