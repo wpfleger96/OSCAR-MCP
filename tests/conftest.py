@@ -2,7 +2,7 @@
 
 import os
 import sqlite3
-import tempfile  # noqa: F401 — kept for backwards compat with any external imports
+import tempfile  # load-bearing: mkdtemp used for the module-level DB guard below
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,6 +17,21 @@ sqlite3.register_converter("DATETIME", lambda s: datetime.fromisoformat(s.decode
 # SNORE_SESSION_SECRET.  Phase 2 auth tests override this per-test via
 # monkeypatch + the reset_auth_config fixture.
 os.environ.setdefault("SNORE_AUTH_MODE", "local")
+
+# --- Suite-wide DB guard (module-level baseline) ---
+# Code that resolves a database outside any function-scoped fixture window —
+# module- or session-scoped fixture setup, conftest import side effects — runs
+# before the per-test _block_real_db fixture below has a chance to act.  This
+# baseline covers those windows unconditionally.  It also neutralises any
+# SNORE_DATABASE_URL inherited from the invoking shell or CI (which would
+# outrank SNORE_DB_PATH and bypass the guard entirely).
+#
+# Per-test monkeypatch.setenv calls by tests or fixtures still win because they
+# happen later; _block_real_db refines this baseline to a per-test tmp_path for
+# stronger isolation.
+_DB_GUARD_DIR = Path(tempfile.mkdtemp(prefix="snore-test-dbguard-"))
+os.environ["SNORE_DB_PATH"] = str(_DB_GUARD_DIR / "guard.db")  # unconditional override
+os.environ.pop("SNORE_DATABASE_URL", None)  # neutralize inherited URL
 
 
 @pytest.fixture(autouse=True)
@@ -65,19 +80,28 @@ def _disable_background_vacuum(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _block_real_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Point default-DB fallbacks at a throwaway file.
+    """Refine the module-level DB guard to a per-test throwaway path.
 
-    Nothing in the suite may ever resolve the real user database
-    (~/.snore/snore.db).  Code paths that fall through to
-    ``DatabaseTarget.from_env_and_flags(db_flag=None)`` or
-    ``init_database(None)`` check ``SNORE_DATABASE_URL`` first, then
-    ``SNORE_DB_PATH``, then ``DEFAULT_DATABASE_PATH``.  Setting
-    ``SNORE_DB_PATH`` here makes every unguarded resolution land in
-    ``tmp_path`` instead of the real database.
+    The module-level baseline (above) sets ``SNORE_DB_PATH`` at import time
+    so code that runs before any function-scoped fixture (module/session-scoped
+    fixture setup, conftest side effects) never resolves the real user database
+    (~/.snore/snore.db).  This fixture tightens that to a fresh ``tmp_path``
+    per test for stronger isolation between tests.
 
-    Tests that need a specific target still win: ``SNORE_DATABASE_URL``
-    takes precedence over ``SNORE_DB_PATH``, and explicit paths or
-    monkeypatched targets bypass env resolution entirely.
+    Protected paths: ``DatabaseTarget.from_env_and_flags(db_flag=None)``
+    (env chain: ``SNORE_DATABASE_URL`` > ``SNORE_DB_PATH`` > default) and the
+    app lifespan's own env read in ``app.py``.
+
+    NOT protected (env is not consulted):
+    - ``init_database(None)`` hardcodes ``DEFAULT_DATABASE_PATH`` directly;
+      no current code or test calls it with ``None``.
+    - ``snore db`` CLI subcommands (``cli/groups/db.py``) resolve
+      ``Path(db) if db else Path(DEFAULT_DATABASE_PATH)``; tests guard these
+      by always passing an explicit ``--db`` flag.
+
+    Tests that set ``SNORE_DATABASE_URL`` via monkeypatch still win — it
+    outranks ``SNORE_DB_PATH`` by precedence — so MCP module fixtures that
+    write ``SNORE_DATABASE_URL`` directly are unaffected.
     """
     monkeypatch.setenv("SNORE_DB_PATH", str(tmp_path / "guard.db"))
 
