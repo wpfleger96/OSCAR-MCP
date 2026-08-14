@@ -708,7 +708,7 @@ def _register_sqlite_pragmas_on_async_engine(async_engine: AsyncEngine) -> None:
         try:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA busy_timeout=15000")
             cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
             cursor.execute("PRAGMA temp_store=MEMORY")
             # Cap WAL file growth so checkpoints shrink an oversized WAL back
