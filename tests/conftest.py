@@ -63,6 +63,25 @@ def _disable_background_vacuum(monkeypatch):
     monkeypatch.setattr(_me_router, "_vacuum_background", noop)
 
 
+@pytest.fixture(autouse=True)
+def _block_real_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point default-DB fallbacks at a throwaway file.
+
+    Nothing in the suite may ever resolve the real user database
+    (~/.snore/snore.db).  Code paths that fall through to
+    ``DatabaseTarget.from_env_and_flags(db_flag=None)`` or
+    ``init_database(None)`` check ``SNORE_DATABASE_URL`` first, then
+    ``SNORE_DB_PATH``, then ``DEFAULT_DATABASE_PATH``.  Setting
+    ``SNORE_DB_PATH`` here makes every unguarded resolution land in
+    ``tmp_path`` instead of the real database.
+
+    Tests that need a specific target still win: ``SNORE_DATABASE_URL``
+    takes precedence over ``SNORE_DB_PATH``, and explicit paths or
+    monkeypatched targets bypass env resolution entirely.
+    """
+    monkeypatch.setenv("SNORE_DB_PATH", str(tmp_path / "guard.db"))
+
+
 def pytest_configure(config):
     """Register custom test markers."""
     config.addinivalue_line(
