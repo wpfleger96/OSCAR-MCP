@@ -4,11 +4,13 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { ref } from 'vue'
 
 vi.mock('@/composables/useAuth')
+vi.mock('@/api/me', () => ({ getPreferences: vi.fn() }))
 
 // Import the production guard — guard logic comes from the real module, not a copy.
 // The default export (router instance) is used in the route resolution tests below.
 import router, { authGuard } from '@/router'
 import { useAuth } from '@/composables/useAuth'
+import { getPreferences } from '@/api/me'
 import { makeAuthMock as baseMakeAuthMock } from './helpers/mockUseAuth'
 
 function makeAuthMock(authed: boolean, local: boolean) {
@@ -31,6 +33,8 @@ function makeRoute(
 describe('authGuard (production)', () => {
     beforeEach(() => {
         vi.resetAllMocks()
+        // resolveLandingPath() calls getPreferences; mock it so redirect destinations are deterministic.
+        vi.mocked(getPreferences).mockResolvedValue({ landing_page: 'dashboard' } as never)
     })
 
     it('test_unauthenticated_access_to_guarded_route_redirects_to_login', async () => {
@@ -152,10 +156,10 @@ describe('authGuard (production)', () => {
                 totpEnrollmentRequired: ref(false) as never,
             }) as never,
         )
+        vi.mocked(getPreferences).mockResolvedValueOnce({ landing_page: 'dashboard' } as never)
         const result = await authGuard(makeRoute('/totp-enroll') as never)
-        // Should redirect to the landing path (dashboard by default when getPreferences is not mocked)
-        expect(result).toBeTruthy()
-        expect(result).not.toBe('/totp-enroll')
+        // Guard calls resolveLandingPath() → getPreferences() → '/dashboard'.
+        expect(result).toBe('/dashboard')
     })
 
     it('test_enrollment_required_does_not_apply_in_local_mode', async () => {

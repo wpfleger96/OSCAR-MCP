@@ -148,6 +148,11 @@ class User(Base):
         foreign_keys="Invite.created_by",
         lazy="raise",
     )
+    totp_recovery_codes = relationship(
+        "TotpRecoveryCode",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
 
     __table_args__ = (
         CheckConstraint("length(canonical_email) > 0", name="chk_user_email"),
@@ -228,7 +233,9 @@ class TotpRecoveryCode(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    code_hash: Mapped[str] = mapped_column(String(64))  # SHA-256 hex of raw code
+    code_hash: Mapped[str] = mapped_column(
+        String(255)
+    )  # argon2 encoded hash of raw code
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 

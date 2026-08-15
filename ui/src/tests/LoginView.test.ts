@@ -253,6 +253,36 @@ describe('LoginView', () => {
         expect(wrapper.find('[role="alert"]').text()).toBe('Invalid code — try again')
     })
 
+    it('test_totp_429_shows_rate_limit_error', async () => {
+        const loginMock = vi.fn().mockResolvedValueOnce({ totpRequired: true })
+        const submitTotpMock = vi.fn().mockRejectedValueOnce({
+            response: { status: 429 },
+            message: 'Too Many Requests',
+        })
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            login: loginMock,
+            submitTotp: submitTotpMock,
+            clearTotpChallenge: vi.fn(),
+        })
+        const wrapper = mount(LoginView, {
+            global: { plugins: [makeRouter()] },
+        })
+
+        // Advance to TOTP step
+        await wrapper.find('input[type="email"]').setValue('alice@example.com')
+        await wrapper.find('input[type="password"]').setValue('hunter2')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        // Submit the code — server responds with 429
+        await wrapper.find('input[autocomplete="one-time-code"]').setValue('123456')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        expect(wrapper.find('[role="alert"]').text()).toContain('Too many attempts')
+    })
+
     it('test_totp_back_button_returns_to_password_step', async () => {
         const loginMock = vi.fn().mockResolvedValueOnce({ totpRequired: true })
         const clearTotpChallengeMock = vi.fn()

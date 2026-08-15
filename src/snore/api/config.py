@@ -111,6 +111,7 @@ Environment variables
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 
 from dataclasses import dataclass, field
@@ -120,6 +121,8 @@ from urllib.parse import urlparse
 from snore.auth.actor import AuthMode
 from snore.auth.emails import normalize_email
 from snore.constants import DEFAULT_UPLOAD_SPOOL_DIR
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(ValueError):
@@ -368,7 +371,16 @@ def load_config(
         )
 
     raw_require_totp = os.environ.get("SNORE_REQUIRE_TOTP", "").strip().lower()
-    require_totp = raw_require_totp in ("1", "true", "yes")
+    _TOTP_TRUTHY = frozenset({"1", "true", "yes"})
+    _TOTP_FALSY = frozenset({"0", "false", "no", ""})
+    require_totp = raw_require_totp in _TOTP_TRUTHY
+    if raw_require_totp not in _TOTP_TRUTHY and raw_require_totp not in _TOTP_FALSY:
+        logger.warning(
+            "SNORE_REQUIRE_TOTP=%r is not a recognized value; "
+            "accepted: 1/true/yes (enable), 0/false/no (disable). "
+            "TOTP enforcement is currently DISABLED.",
+            os.environ.get("SNORE_REQUIRE_TOTP", ""),
+        )
 
     public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:

@@ -255,6 +255,90 @@ class TestTotpEnrollment:
         assert resp.status_code == 409
         assert "pending" in resp.json()["detail"].lower()
 
+    def test_google_only_account_setup_returns_403(self, async_db_session, db_session):
+        """Google-only account (password_hash=None) calling setup → 403.
+
+        Such accounts authenticate via Google OAuth and have no password, so
+        they cannot complete a TOTP challenge at login.
+        """
+        user, profile = _seed_user(db_session, password_hash=None)
+        client = _make_actor_client(async_db_session, user, profile)
+
+        resp = client.post("/api/v1/auth/me/totp/setup", headers=_ORIGIN_HEADER)
+        assert resp.status_code == 403
+        assert "google-only" in resp.json()["detail"].lower()
+
+    def test_setup_twice_second_secret_wins(self, async_db_session, db_session):
+        """Two setup calls: confirm with code for first secret → 401; for second → 200.
+
+        The second setup replaces the pending secret so only the second
+        secret is valid for confirmation.
+        """
+        from snore.auth.lockout import get_lockout_store  # noqa: PLC0415
+
+        user, profile = _seed_user(db_session)
+        client = _make_actor_client(async_db_session, user, profile)
+
+        # First setup — stores a pending secret.
+        setup1 = client.post("/api/v1/auth/me/totp/setup", headers=_ORIGIN_HEADER)
+        assert setup1.status_code == 200
+
+        # Second setup — replaces the pending secret with secret2.
+        setup2 = client.post("/api/v1/auth/me/totp/setup", headers=_ORIGIN_HEADER)
+        assert setup2.status_code == 200
+        secret2 = setup2.json()["secret"]
+
+        # A code guaranteed to fail against secret2 (the active secret after setup2).
+        # _wrong_totp_code avoids the ±1 window for secret2, preventing the rare
+        # coincidence where secret1's code matches secret2's at the same step.
+        bad_code = _wrong_totp_code(secret2)
+        bad_resp = client.post(
+            "/api/v1/auth/me/totp/confirm",
+            json={"code": bad_code},
+            headers=_ORIGIN_HEADER,
+        )
+        assert bad_resp.status_code == 401
+
+        # The failed confirm triggers a 5-second lockout (exponential back-off
+        # starts at 5 s for the first failure).  Clear the lockout so the next
+        # confirm isn't blocked — the test is checking code validity, not lockout.
+        get_lockout_store()._entries.clear()
+
+        # Code for secret2 (current window) passes.  The failed confirm above
+        # did not update totp_last_used_step, so last_used_step=None and the
+        # replay guard allows any first match.
+        good_code = pyotp.TOTP(secret2).now()
+        good_resp = client.post(
+            "/api/v1/auth/me/totp/confirm",
+            json={"code": good_code},
+            headers=_ORIGIN_HEADER,
+        )
+        assert good_resp.status_code == 200
+
+    def test_confirm_malformed_code_returns_401(self, async_db_session, db_session):
+        """confirm with malformed code (5 digits, non-digits) → 401, not 422.
+
+        Pydantic accepts codes up to 16 chars (max_length=16); format
+        validation is done in the handler body so bad formats return the
+        uniform 401 rather than 422.
+        """
+        user, profile = _seed_user(db_session)
+        client = _make_actor_client(async_db_session, user, profile)
+
+        setup = client.post("/api/v1/auth/me/totp/setup", headers=_ORIGIN_HEADER)
+        assert setup.status_code == 200
+
+        for bad_code in ("12345", "abcdef"):
+            resp = client.post(
+                "/api/v1/auth/me/totp/confirm",
+                json={"code": bad_code},
+                headers=_ORIGIN_HEADER,
+            )
+            assert resp.status_code == 401, (
+                f"Expected 401 for code={bad_code!r}, got {resp.status_code}"
+            )
+            assert "Authentication failed" in resp.json()["detail"]
+
 
 # ---------------------------------------------------------------------------
 # TestTotpLoginChallenge (full middleware stack via init_database)
@@ -402,6 +486,8 @@ class TestTotpLoginChallenge:
                 )
                 assert status_resp.status_code == 200
                 assert status_resp.json()["authenticated"] is True
+                # Enrolled user: totp_enabled field on the nested UserInfo object.
+                assert status_resp.json()["user"]["totp_enabled"] is True
         finally:
             await cleanup_database()
 
@@ -697,6 +783,154 @@ class TestTotpLoginChallenge:
         finally:
             await cleanup_database()
 
+    @pytest.mark.asyncio
+    async def test_expired_pending_token_returns_401(self, temp_db, monkeypatch):
+        """Pending token past the 5-minute window → 401.
+
+        The TimestampSigner in decode_totp_pending_token checks the token age
+        against time.time().  Patching time.time to return now+400 makes the
+        5-minute-old token appear expired (400 > 300 max_age).
+        """
+        import time as _time  # noqa: PLC0415
+
+        import httpx  # noqa: PLC0415
+
+        from snore.database.session import (  # noqa: PLC0415
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        _multiuser_cfg(monkeypatch)
+        await init_database(str(temp_db))
+        try:
+            secret = pyotp.random_base32()
+            async with session_scope() as db:
+                from datetime import UTC, datetime  # noqa: PLC0415
+
+                user = models.User(
+                    canonical_email=f"expiry_{uuid.uuid4().hex[:6]}@test",
+                    role="admin",
+                    password_hash=_PW_HASH,
+                    session_version=0,
+                    totp_secret=secret,
+                    totp_enabled_at=datetime.now(UTC),
+                )
+                db.add(user)
+                await db.flush()
+                p = models.Profile(user_id=user.id, name="Default")
+                db.add(p)
+                await db.flush()
+                user.default_profile_id = p.id
+                email = user.canonical_email
+
+            app = create_app()
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1:8000",
+            ) as client:
+                # Mint a valid pending token at the real current time.
+                login_resp = await client.post(
+                    "/api/v1/auth/login",
+                    json={"email": email, "password": _TEST_PASSWORD},
+                    headers={"origin": _ORIGIN},
+                )
+                assert login_resp.status_code == 200, login_resp.text
+                pending_token = login_resp.json()["pending_token"]
+
+                # Advance time past the 300-second max_age so the signer sees
+                # the token as expired.  The patch affects every time.time()
+                # call in the process, including itsdangerous.
+                real_now = _time.time()
+                monkeypatch.setattr("time.time", lambda: real_now + 400.0)
+
+                expired_resp = await client.post(
+                    "/api/v1/auth/login/totp",
+                    json={"pending_token": pending_token, "code": "000000"},
+                    headers={"origin": _ORIGIN},
+                )
+                assert expired_resp.status_code == 401
+                assert "Authentication failed" in expired_resp.json()["detail"]
+        finally:
+            await cleanup_database()
+
+    @pytest.mark.asyncio
+    async def test_pending_token_single_use_replay_returns_401(
+        self, temp_db, monkeypatch
+    ):
+        """After a successful TOTP login, replaying the same pending token → 401.
+
+        consume_pending_token is called on the first success; subsequent uses
+        of that token are rejected by is_token_consumed, regardless of the
+        code validity.
+        """
+        import httpx  # noqa: PLC0415
+
+        from snore.database.session import (  # noqa: PLC0415
+            cleanup_database,
+            init_database,
+            session_scope,
+        )
+
+        _multiuser_cfg(monkeypatch)
+        await init_database(str(temp_db))
+        try:
+            secret = pyotp.random_base32()
+            async with session_scope() as db:
+                from datetime import UTC, datetime  # noqa: PLC0415
+
+                user = models.User(
+                    canonical_email=f"singleuse_{uuid.uuid4().hex[:6]}@test",
+                    role="admin",
+                    password_hash=_PW_HASH,
+                    session_version=0,
+                    totp_secret=secret,
+                    totp_enabled_at=datetime.now(UTC),
+                )
+                db.add(user)
+                await db.flush()
+                p = models.Profile(user_id=user.id, name="Default")
+                db.add(p)
+                await db.flush()
+                user.default_profile_id = p.id
+                email = user.canonical_email
+
+            app = create_app()
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1:8000",
+            ) as client:
+                # Step 1: password login → pending token.
+                login_resp = await client.post(
+                    "/api/v1/auth/login",
+                    json={"email": email, "password": _TEST_PASSWORD},
+                    headers={"origin": _ORIGIN},
+                )
+                assert login_resp.status_code == 200, login_resp.text
+                pending_token = login_resp.json()["pending_token"]
+
+                # Step 2: complete the challenge — token is consumed on success.
+                code = pyotp.TOTP(secret).now()
+                ok_resp = await client.post(
+                    "/api/v1/auth/login/totp",
+                    json={"pending_token": pending_token, "code": code},
+                    headers={"origin": _ORIGIN},
+                )
+                assert ok_resp.status_code == 200, ok_resp.text
+
+                # Step 3: replay the same pending_token with a fresh code from
+                # the next 30-second window.  The token is consumed → 401.
+                fresh_code = pyotp.TOTP(secret).at(int(time.time()) + 30)
+                replay_resp = await client.post(
+                    "/api/v1/auth/login/totp",
+                    json={"pending_token": pending_token, "code": fresh_code},
+                    headers={"origin": _ORIGIN},
+                )
+                assert replay_resp.status_code == 401
+                assert "Authentication failed" in replay_resp.json()["detail"]
+        finally:
+            await cleanup_database()
+
 
 # ---------------------------------------------------------------------------
 # TestTotpEnforcementMiddleware
@@ -764,6 +998,8 @@ class TestTotpEnforcementMiddleware:
                 data = resp.json()
                 assert data["authenticated"] is True
                 assert data["totp_enrollment_required"] is False
+                # Google-only user: never enrolled, so totp_enabled is False.
+                assert data["user"]["totp_enabled"] is False
         finally:
             await cleanup_database()
 
@@ -837,6 +1073,8 @@ class TestTotpEnforcementMiddleware:
                 )
                 assert status_resp.status_code == 200
                 assert status_resp.json()["totp_enrollment_required"] is True
+                # Unenrolled password user: TOTP not yet set up.
+                assert status_resp.json()["user"]["totp_enabled"] is False
 
                 # Exempt: GET /auth/me
                 me_resp = await client.get(
@@ -989,6 +1227,8 @@ class TestTotpEnforcementMiddleware:
                 data = status_resp.json()
                 assert data["authenticated"] is True
                 assert data["totp_enrollment_required"] is False
+                # Demo user: no TOTP (and exempt from enrollment requirement).
+                assert data["user"]["totp_enabled"] is False
         finally:
             await cleanup_database()
 
@@ -1087,14 +1327,37 @@ class TestTotpDisable:
         )
         assert resp.status_code == 200
 
-        # Cookie must be cleared (Set-Cookie with empty value or expires in past).
+        # Cookie must be cleared — empty value AND Max-Age=0 in Set-Cookie.
+        import http.cookies as http_cookies  # noqa: PLC0415
+
         set_cookie = resp.headers.get("set-cookie", "")
-        assert "snore_session" in set_cookie
+        sc = http_cookies.SimpleCookie()
+        sc.load(set_cookie)
+        assert "snore_session" in sc, (
+            "disable must emit a snore_session Set-Cookie header"
+        )
+        assert sc["snore_session"].value == "" or "max-age=0" in set_cookie.lower(), (
+            "disabled cookie must have empty value or Max-Age=0"
+        )
 
         # Status shows disabled.
         status_resp = client.get("/api/v1/auth/me/totp")
         assert status_resp.status_code == 200
         assert status_resp.json()["enabled"] is False
+
+    def test_disable_when_not_enrolled_returns_409(self, async_db_session, db_session):
+        """DELETE /auth/me/totp when TOTP is not enabled → 409."""
+        user, profile = _seed_user(db_session)  # no TOTP enrolled
+        client = _make_actor_client(async_db_session, user, profile)
+
+        resp = client.request(
+            "DELETE",
+            "/api/v1/auth/me/totp",
+            json={"password": _TEST_PASSWORD, "code": "123456"},
+            headers=_ORIGIN_HEADER,
+        )
+        assert resp.status_code == 409
+        assert "not enabled" in resp.json()["detail"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1440,21 @@ class TestTotpRegenerate:
         assert resp.status_code == 401
         assert "Authentication failed" in resp.json()["detail"]
 
+    def test_regenerate_when_not_enrolled_returns_409(
+        self, async_db_session, db_session
+    ):
+        """POST /auth/me/totp/recovery-codes/regenerate when TOTP not enabled → 409."""
+        user, profile = _seed_user(db_session)  # no TOTP enrolled
+        client = _make_actor_client(async_db_session, user, profile)
+
+        resp = client.post(
+            "/api/v1/auth/me/totp/recovery-codes/regenerate",
+            json={"code": "123456"},
+            headers=_ORIGIN_HEADER,
+        )
+        assert resp.status_code == 409
+        assert "not enabled" in resp.json()["detail"].lower()
+
 
 # ---------------------------------------------------------------------------
 # TestTotpAdminReset
@@ -1258,15 +1536,23 @@ class TestTotpAdminReset:
         assert rc_count == 0
 
     def test_admin_self_reset_allowed(self, async_db_session, db_session):
-        """Admin can reset their own TOTP enrollment."""
+        """Admin can reset their own TOTP enrollment.
+
+        The admin has TOTP enabled, so the reset call must include a valid
+        6-digit code generated from the admin's own secret.
+        """
         secret = pyotp.random_base32()
         admin, admin_profile = _seed_user(
             db_session, role="admin", totp_secret=secret, totp_enabled=True
         )
         client = self._admin_client(async_db_session, admin, admin_profile)
 
+        # Admin has TOTP enabled → code is required.  totp_last_used_step is
+        # None (freshly seeded), so the current-step code passes the replay guard.
+        code = pyotp.TOTP(secret).now()
         resp = client.post(
             f"/api/v1/admin/users/{admin.id}/totp/reset",
+            json={"code": code},
             headers=_ORIGIN_HEADER,
         )
         assert resp.status_code == 200
@@ -1301,6 +1587,82 @@ class TestTotpAdminReset:
             headers=_ORIGIN_HEADER,
         )
         assert resp.status_code == 404
+
+    def test_admin_with_totp_wrong_code_returns_403_and_target_unchanged(
+        self, async_db_session, db_session
+    ):
+        """Admin with TOTP enrolled + wrong code → 403; target user's TOTP is unchanged.
+
+        The admin reset route deliberately uses 403 (not the login flows' uniform
+        401): the SPA treats a 401 on non-/auth/ paths as session expiry and
+        redirects to login, which would bounce an admin who mistyped their code.
+
+        Confirms that a failed admin TOTP verification aborts the reset entirely —
+        the target is not modified.
+        """
+        import sqlalchemy as sa  # noqa: PLC0415
+
+        admin_secret = pyotp.random_base32()
+        admin, admin_profile = _seed_user(
+            db_session, role="admin", totp_secret=admin_secret, totp_enabled=True
+        )
+        target_secret = pyotp.random_base32()
+        target, _ = _seed_user(db_session, totp_secret=target_secret, totp_enabled=True)
+        target_id = target.id
+        target_initial_secret = target.totp_secret
+
+        client = self._admin_client(async_db_session, admin, admin_profile)
+
+        wrong = _wrong_totp_code(admin_secret)
+        resp = client.post(
+            f"/api/v1/admin/users/{target_id}/totp/reset",
+            json={"code": wrong},
+            headers=_ORIGIN_HEADER,
+        )
+        # The admin reset route raises 403 (not 401) for TOTP failures.
+        assert resp.status_code == 403
+        assert "Authentication failed" in resp.json()["detail"]
+
+        # Target's TOTP must be unchanged.
+        db_session.expire_all()
+        target_refreshed = db_session.execute(
+            sa.select(models.User).where(models.User.id == target_id)
+        ).scalar_one()
+        assert target_refreshed.totp_secret == target_initial_secret
+        assert target_refreshed.totp_enabled_at is not None
+
+    def test_admin_with_totp_valid_code_resets_target(
+        self, async_db_session, db_session
+    ):
+        """Admin with TOTP enrolled + valid code → 200; target's TOTP is cleared."""
+        import sqlalchemy as sa  # noqa: PLC0415
+
+        admin_secret = pyotp.random_base32()
+        admin, admin_profile = _seed_user(
+            db_session, role="admin", totp_secret=admin_secret, totp_enabled=True
+        )
+        target, _ = _seed_user(
+            db_session, totp_secret=pyotp.random_base32(), totp_enabled=True
+        )
+        target_id = target.id
+
+        client = self._admin_client(async_db_session, admin, admin_profile)
+
+        code = pyotp.TOTP(admin_secret).now()
+        resp = client.post(
+            f"/api/v1/admin/users/{target_id}/totp/reset",
+            json={"code": code},
+            headers=_ORIGIN_HEADER,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["message"] == "TOTP reset"
+
+        db_session.expire_all()
+        target_refreshed = db_session.execute(
+            sa.select(models.User).where(models.User.id == target_id)
+        ).scalar_one()
+        assert target_refreshed.totp_secret is None
+        assert target_refreshed.totp_enabled_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -1383,3 +1745,57 @@ class TestTotpSessionVersion:
         assert "snore_session" in disable_set_cookie, (
             "disable must set a snore_session header to clear the cookie"
         )
+        assert "max-age=0" in disable_set_cookie.lower(), (
+            "disable must clear the cookie (Max-Age=0 expected in Set-Cookie)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestTotpMeFields
+# ---------------------------------------------------------------------------
+
+
+class TestTotpMeFields:
+    """GET /api/v1/auth/me — TOTP-related fields in MeResponse."""
+
+    @pytest.fixture(autouse=True)
+    def _multiuser(self, monkeypatch):
+        _multiuser_cfg(monkeypatch)
+
+    def test_me_enrolled_user_totp_fields(self, async_db_session, db_session):
+        """GET /auth/me: enrolled user → totp_enabled=True, recovery_codes_remaining=10."""
+        from snore.auth.totp import (  # noqa: PLC0415
+            generate_recovery_codes,
+            hash_recovery_code,
+        )
+
+        secret = pyotp.random_base32()
+        user, profile = _seed_user(db_session, totp_secret=secret, totp_enabled=True)
+
+        raw_codes = generate_recovery_codes(10)
+        for raw in raw_codes:
+            db_session.add(
+                models.TotpRecoveryCode(
+                    user_id=user.id,
+                    code_hash=hash_recovery_code(raw),
+                )
+            )
+        db_session.flush()
+
+        client = _make_actor_client(async_db_session, user, profile)
+        resp = client.get("/api/v1/auth/me")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["totp_enabled"] is True
+        assert data["recovery_codes_remaining"] == 10
+
+    def test_me_unenrolled_user_totp_fields(self, async_db_session, db_session):
+        """GET /auth/me: unenrolled user → totp_enabled=False, recovery_codes_remaining=None."""
+        user, profile = _seed_user(db_session)  # no TOTP
+        client = _make_actor_client(async_db_session, user, profile)
+
+        resp = client.get("/api/v1/auth/me")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["totp_enabled"] is False
+        assert data["recovery_codes_remaining"] is None

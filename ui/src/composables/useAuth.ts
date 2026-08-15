@@ -109,7 +109,10 @@ export function useAuth() {
 
     async function login(email: string, password: string): Promise<{ totpRequired: boolean }> {
         const result = await loginUser({ email, password })
-        if (result.totp_required && result.pending_token) {
+        if (result.totp_required) {
+            if (!result.pending_token) {
+                throw new Error('Server error: missing pending token')
+            }
             totpPendingToken.value = result.pending_token
             return { totpRequired: true }
         }
@@ -121,7 +124,7 @@ export function useAuth() {
     async function submitTotp(code: string): Promise<void> {
         const token = totpPendingToken.value
         if (!token) throw new Error('No pending TOTP challenge')
-        await submitTotpChallenge({ pending_token: token, code })
+        await submitTotpChallenge({ pending_token: token, code: code.trim().toLowerCase() })
         totpPendingToken.value = null
         await refreshStatus()
     }
@@ -142,6 +145,7 @@ export function useAuth() {
         }
         _healDelay = 3_000 // reset backoff on explicit clear
         status.value = null
+        totpPendingToken.value = null
         _fetchPromise = null
         _lastFetched = 0
         _generation++

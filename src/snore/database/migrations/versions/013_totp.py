@@ -12,7 +12,8 @@ Three columns are added to ``users``:
 - ``totp_last_used_step`` (Integer) — last verified time-step for replay prevention.
 
 A new ``totp_recovery_codes`` table is created with a ``user_id`` FK and an
-index on that column.
+index on that column.  ``code_hash`` is String(255) to store the full argon2
+encoded hash (salt + parameters + digest), not a fixed-length SHA-256 hex.
 
 Revision ID: 013_totp
 Revises: 012_session_time_index
@@ -65,7 +66,7 @@ def upgrade() -> None:
             _RECOVERY_TABLE,
             sa.Column("id", sa.Integer(), nullable=False, autoincrement=True),
             sa.Column("user_id", sa.Integer(), nullable=False),
-            sa.Column("code_hash", sa.String(64), nullable=False),
+            sa.Column("code_hash", sa.String(255), nullable=False),
             sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.PrimaryKeyConstraint("id", name="pk_totp_recovery_codes"),

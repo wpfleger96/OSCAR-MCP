@@ -6,8 +6,9 @@
                 <Loader2 class="h-5 w-5 animate-spin" />
                 <span>Generating setup…</span>
             </div>
-            <div v-else-if="setupError" class="wizard-error" role="alert">
-                {{ setupError }}
+            <div v-else-if="setupError" class="wizard-error-block" role="alert">
+                <p class="wizard-error">{{ setupError }}</p>
+                <button type="button" class="retry-btn" @click="startSetup">Try again</button>
             </div>
             <template v-else-if="setup">
                 <p class="wizard-hint">
@@ -35,6 +36,9 @@
                         {{ secretCopied ? 'Copied' : 'Copy' }}
                     </button>
                 </div>
+                <p v-if="secretCopyError" class="wizard-error" role="alert">
+                    {{ secretCopyError }}
+                </p>
                 <p class="wizard-hint muted">
                     Manual entry URI:
                     <code class="uri-code">{{ setup.otpauth_uri }}</code>
@@ -63,7 +67,7 @@
                 />
                 <p v-if="verifyError" class="wizard-error" role="alert">{{ verifyError }}</p>
                 <div class="wizard-actions">
-                    <button type="button" class="back-btn" :disabled="verifying" @click="step = 1">
+                    <button type="button" class="back-btn" :disabled="verifying" @click="goBack">
                         Back
                     </button>
                     <Button type="submit" :disabled="verifying || verifyCode.length !== 6">
@@ -80,21 +84,7 @@
                 <strong>Save these recovery codes.</strong> Each code can be used once to sign in if
                 you lose access to your authenticator app. They will not be shown again.
             </p>
-            <ul class="recovery-list">
-                <li v-for="code in recoveryCodes" :key="code" class="recovery-code">
-                    {{ code }}
-                </li>
-            </ul>
-            <div class="recovery-actions">
-                <button type="button" class="copy-btn" @click="copyAllCodes">
-                    {{ codesCopied ? 'Copied!' : 'Copy all' }}
-                </button>
-                <button type="button" class="copy-btn" @click="downloadCodes">Download .txt</button>
-            </div>
-            <label class="ack-label">
-                <input v-model="acknowledged" type="checkbox" class="ack-checkbox" />
-                I've saved these recovery codes
-            </label>
+            <RecoveryCodesDisplay :codes="recoveryCodes" v-model="acknowledged" />
             <Button class="mt-4" :disabled="!acknowledged" @click="emit('done')">Finish</Button>
         </div>
     </div>
@@ -104,6 +94,7 @@
 import { ref, onMounted } from 'vue'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import RecoveryCodesDisplay from '@/components/RecoveryCodesDisplay.vue'
 import { setupTotp, confirmTotp } from '@/api/totp'
 import type { components } from '@/types/generated'
 
@@ -118,6 +109,7 @@ const setup = ref<TotpSetupResponse | null>(null)
 const setupLoading = ref(true)
 const setupError = ref<string | null>(null)
 const secretCopied = ref(false)
+const secretCopyError = ref<string | null>(null)
 
 // Step 2 state
 const verifyCode = ref('')
@@ -126,10 +118,11 @@ const verifyError = ref<string | null>(null)
 
 // Step 3 state
 const recoveryCodes = ref<string[]>([])
-const codesCopied = ref(false)
 const acknowledged = ref(false)
 
-onMounted(async () => {
+async function startSetup() {
+    setupLoading.value = true
+    setupError.value = null
     try {
         setup.value = await setupTotp()
     } catch (e: unknown) {
@@ -137,7 +130,9 @@ onMounted(async () => {
     } finally {
         setupLoading.value = false
     }
-})
+}
+
+onMounted(startSetup)
 
 async function copySecret() {
     if (!setup.value) return
@@ -148,8 +143,17 @@ async function copySecret() {
             secretCopied.value = false
         }, 2000)
     } catch {
-        // clipboard API unavailable — do nothing
+        secretCopyError.value = 'Copy failed — select the text manually'
+        setTimeout(() => {
+            secretCopyError.value = null
+        }, 3000)
     }
+}
+
+function goBack() {
+    verifyCode.value = ''
+    verifyError.value = null
+    step.value = 1
 }
 
 async function submitCode() {
@@ -164,29 +168,6 @@ async function submitCode() {
     } finally {
         verifying.value = false
     }
-}
-
-async function copyAllCodes() {
-    try {
-        await navigator.clipboard.writeText(recoveryCodes.value.join('\n'))
-        codesCopied.value = true
-        setTimeout(() => {
-            codesCopied.value = false
-        }, 2000)
-    } catch {
-        // clipboard API unavailable — do nothing
-    }
-}
-
-function downloadCodes() {
-    const text = recoveryCodes.value.join('\n')
-    const blob = new Blob([text], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'snore-recovery-codes.txt'
-    a.click()
-    URL.revokeObjectURL(url)
 }
 </script>
 
@@ -225,6 +206,27 @@ function downloadCodes() {
     font-size: 0.875rem;
     color: var(--color-destructive);
     margin: 0;
+}
+
+.wizard-error-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.retry-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+    color: var(--color-foreground);
+    align-self: flex-start;
+}
+
+.retry-btn:hover {
+    background: var(--color-accent);
 }
 
 .qr-container {
@@ -326,40 +328,5 @@ function downloadCodes() {
 
 .back-btn:hover {
     background: var(--color-accent);
-}
-
-.recovery-list {
-    list-style: none;
-    padding: 0.75rem;
-    margin: 0;
-    background: var(--color-accent);
-    border-radius: 6px;
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.25rem 1.5rem;
-}
-
-.recovery-code {
-    font-family: monospace;
-    font-size: 0.9rem;
-    letter-spacing: 0.05em;
-    color: var(--color-foreground);
-}
-
-.recovery-actions {
-    display: flex;
-    gap: 0.5rem;
-}
-
-.ack-label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-    cursor: pointer;
-}
-
-.ack-checkbox {
-    cursor: pointer;
 }
 </style>

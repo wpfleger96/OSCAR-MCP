@@ -11,7 +11,13 @@ const mockLoginResponse = { message: 'Logged in', totp_required: false, pending_
 const mockStatus = {
     authenticated: true,
     auth_mode: 'multiuser',
-    user: { id: 1, email: 'alice@example.com', display_name: 'Alice', role: 'member' },
+    user: {
+        id: 1,
+        email: 'alice@example.com',
+        display_name: 'Alice',
+        role: 'member',
+        totp_enabled: false,
+    },
     profiles: [{ id: 10, name: 'Primary' }],
     active_profile_id: 10,
     demo_available: false,
@@ -163,6 +169,40 @@ describe('useAuth', () => {
         const { submitTotp } = useAuth()
         await expect(submitTotp('123456')).rejects.toThrow('No pending TOTP challenge')
         expect(authApi.submitTotpChallenge).not.toHaveBeenCalled()
+    })
+
+    it('submitTotp_failedAttemptPreservesPendingToken_secondAttemptSucceeds', async () => {
+        vi.mocked(authApi.loginUser).mockResolvedValueOnce({
+            message: null,
+            totp_required: true,
+            pending_token: 'tok-abc',
+        })
+        vi.mocked(authApi.submitTotpChallenge)
+            .mockRejectedValueOnce({ response: { status: 401 }, message: 'Unauthorized' })
+            .mockResolvedValueOnce({ message: 'Logged in' })
+        vi.mocked(authApi.getAuthStatus).mockResolvedValueOnce({
+            ...mockStatus,
+            authenticated: true,
+        })
+
+        const { login, submitTotp } = useAuth()
+        await login('alice@example.com', 'hunter2')
+
+        // First attempt fails — pending token must be preserved so the next attempt works.
+        await expect(submitTotp('000000')).rejects.toBeDefined()
+
+        // Second attempt succeeds with the same pending_token.
+        await submitTotp('123456')
+
+        expect(authApi.submitTotpChallenge).toHaveBeenCalledTimes(2)
+        expect(authApi.submitTotpChallenge).toHaveBeenNthCalledWith(1, {
+            pending_token: 'tok-abc',
+            code: '000000',
+        })
+        expect(authApi.submitTotpChallenge).toHaveBeenNthCalledWith(2, {
+            pending_token: 'tok-abc',
+            code: '123456',
+        })
     })
 
     it('clearTotpChallenge_clearsPendingToken_subsequentSubmitTotpThrows', async () => {
@@ -456,7 +496,13 @@ describe('useAuth', () => {
                 ...mockStatus,
                 authenticated: true,
                 auth_mode: 'local',
-                user: { id: 1, email: 'admin@example.com', display_name: 'Admin', role: 'admin' },
+                user: {
+                    id: 1,
+                    email: 'admin@example.com',
+                    display_name: 'Admin',
+                    role: 'admin',
+                    totp_enabled: false,
+                },
             })
             const { fetchStatus, canWrite } = useAuth()
             await fetchStatus()

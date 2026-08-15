@@ -432,7 +432,9 @@ class TotpEnforcementMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # TOTP enrollment routes are always permitted.
-        if path.startswith(_TOTP_ENROLLMENT_PATH_PREFIX):
+        if path == _TOTP_ENROLLMENT_PATH_PREFIX or path.startswith(
+            _TOTP_ENROLLMENT_PATH_PREFIX + "/"
+        ):
             return await call_next(request)
 
         # A small set of auth utility paths must remain reachable during enrollment.
@@ -444,4 +446,5 @@ class TotpEnforcementMiddleware(BaseHTTPMiddleware):
         return JSONResponse(
             {"detail": "TOTP enrollment required", "totp_enrollment_required": True},
             status_code=403,
+            headers={"Cache-Control": "no-store"},
         )

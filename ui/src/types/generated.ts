@@ -351,6 +351,8 @@ export interface paths {
          *
          *     Returns 409 if TOTP is already enabled.  Calling this again while a
          *     pending (unconfirmed) setup exists replaces the prior pending secret.
+         *     Returns 403 for Google-only accounts (no password) — they authenticate
+         *     via Google and cannot complete a TOTP challenge at login.
          */
         post: operations['totp_setup_api_v1_auth_me_totp_setup_post']
         delete?: never
@@ -674,6 +676,11 @@ export interface paths {
          *
          *     Clears totp_secret, totp_enabled_at, and totp_last_used_step; deletes all
          *     recovery codes; bumps session_version to invalidate existing sessions.
+         *
+         *     If the calling admin has TOTP enrolled, a valid 6-digit TOTP code for the
+         *     admin's own second factor is required in ``{"code": "..."}``; the lockout
+         *     pre-check and replay guard both apply.  Admins without TOTP enrolled may
+         *     call the endpoint without a request body.
          *
          *     Self-reset is allowed — it forces re-enrollment rather than lockout.
          */
@@ -4081,6 +4088,11 @@ export interface components {
              */
             baseline_flow: number
         }
+        /** RecoveryCodesResponse */
+        RecoveryCodesResponse: {
+            /** Recovery Codes */
+            recovery_codes: string[]
+        }
         /** RenameProfileRequest */
         RenameProfileRequest: {
             /** Name */
@@ -4735,11 +4747,6 @@ export interface components {
             /** Code */
             code: string
         }
-        /** TotpConfirmResponse */
-        TotpConfirmResponse: {
-            /** Recovery Codes */
-            recovery_codes: string[]
-        }
         /** TotpDisableRequest */
         TotpDisableRequest: {
             /** Password */
@@ -4752,10 +4759,16 @@ export interface components {
             /** Code */
             code: string
         }
-        /** TotpRegenerateResponse */
-        TotpRegenerateResponse: {
-            /** Recovery Codes */
-            recovery_codes: string[]
+        /**
+         * TotpResetRequest
+         * @description Optional request body for POST /users/{user_id}/totp/reset.
+         *
+         *     When the calling admin has TOTP enabled, ``code`` is required and must be
+         *     a valid 6-digit TOTP code for the admin's own second factor.
+         */
+        TotpResetRequest: {
+            /** Code */
+            code?: string | null
         }
         /** TotpSetupResponse */
         TotpSetupResponse: {
@@ -4785,6 +4798,11 @@ export interface components {
             display_name: string | null
             /** Role */
             role: string
+            /**
+             * Totp Enabled
+             * @default false
+             */
+            totp_enabled: boolean
         }
         /** UserItem */
         UserItem: {
@@ -5380,7 +5398,7 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['TotpConfirmResponse']
+                    'application/json': components['schemas']['RecoveryCodesResponse']
                 }
             }
             /** @description Validation Error */
@@ -5413,7 +5431,7 @@ export interface operations {
                     [name: string]: unknown
                 }
                 content: {
-                    'application/json': components['schemas']['TotpRegenerateResponse']
+                    'application/json': components['schemas']['RecoveryCodesResponse']
                 }
             }
             /** @description Validation Error */
@@ -5732,7 +5750,11 @@ export interface operations {
             }
             cookie?: never
         }
-        requestBody?: never
+        requestBody?: {
+            content: {
+                'application/json': components['schemas']['TotpResetRequest'] | null
+            }
+        }
         responses: {
             /** @description Successful Response */
             200: {

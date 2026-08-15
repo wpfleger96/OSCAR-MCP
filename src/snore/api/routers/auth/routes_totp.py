@@ -14,6 +14,8 @@ multiuser mode; every endpoint returns 403 in local mode.
 
 from __future__ import annotations
 
+import logging
+
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -35,7 +37,7 @@ from snore.api.routers.auth._common import (
 )
 from snore.api.schemas import MessageResponse
 from snore.auth.lockout import get_lockout_store
-from snore.auth.passwords import verify_password_async
+from snore.auth.passwords import dummy_verify_async, verify_password_async
 from snore.auth.session_cookie import clear_session_cookie
 from snore.auth.totp import (
     RECOVERY_CODE_COUNT,
@@ -44,14 +46,13 @@ from snore.auth.totp import (
     generate_recovery_codes,
     generate_totp_secret,
     hash_recovery_code,
-    is_recovery_code,
     is_totp_code,
-    redeem_recovery_code,
     verify_totp_code,
+    verify_totp_or_recovery,
 )
 from snore.database import models
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +73,12 @@ class TotpSetupResponse(BaseModel):
 
 
 class TotpConfirmRequest(BaseModel):
-    code: Annotated[
-        str,
-        StringConstraints(min_length=6, max_length=6, pattern=r"^\d{6}$"),
-    ]
+    # Pattern constraint removed: format is validated in the handler body so
+    # a bad code returns the uniform 401 rather than a Pydantic 422.
+    code: Annotated[str, StringConstraints(max_length=16)]
 
 
-class TotpConfirmResponse(BaseModel):
+class RecoveryCodesResponse(BaseModel):
     recovery_codes: list[str]
 
 
@@ -89,10 +89,6 @@ class TotpDisableRequest(BaseModel):
 
 class TotpRegenerateRequest(BaseModel):
     code: Annotated[str, StringConstraints(max_length=32)]
-
-
-class TotpRegenerateResponse(BaseModel):
-    recovery_codes: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +106,33 @@ def _require_multiuser() -> None:
         raise HTTPException(status_code=403, detail="Not available in local mode")
 
 
+# Hoist _require_multiuser as a router-level dependency so every route
+# registered on this router checks it automatically.
+router = APIRouter(dependencies=[Depends(_require_multiuser)])
+
+
+async def _replace_recovery_codes(db: AsyncSession, user_id: int) -> list[str]:
+    """Delete existing recovery codes and generate a fresh set.
+
+    Returns the raw (unhashed) codes exactly once.  The delete+insert is
+    performed within the caller's transaction; no commit is performed here.
+    """
+    await db.execute(
+        delete(models.TotpRecoveryCode).where(
+            models.TotpRecoveryCode.user_id == user_id
+        )
+    )
+    raw_codes = generate_recovery_codes(RECOVERY_CODE_COUNT)
+    for raw in raw_codes:
+        db.add(
+            models.TotpRecoveryCode(
+                user_id=user_id,
+                code_hash=hash_recovery_code(raw),
+            )
+        )
+    return raw_codes
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -121,8 +144,6 @@ async def totp_status(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JSONResponse:
     """Return the caller's TOTP enrollment status and remaining recovery code count."""
-    _require_multiuser()
-
     user = await db.get(models.User, actor.user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -158,9 +179,9 @@ async def totp_setup(
 
     Returns 409 if TOTP is already enabled.  Calling this again while a
     pending (unconfirmed) setup exists replaces the prior pending secret.
+    Returns 403 for Google-only accounts (no password) — they authenticate
+    via Google and cannot complete a TOTP challenge at login.
     """
-    _require_multiuser()
-
     user = await db.get(models.User, actor.user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -168,6 +189,15 @@ async def totp_setup(
     if user.totp_enabled_at is not None:
         raise HTTPException(
             status_code=409, detail="Two-factor authentication is already enabled"
+        )
+
+    # Google-only accounts have no password and cannot be challenged with TOTP
+    # at login.  Enrolling them would leave the TOTP unreachable (disable
+    # requires a password) while the enrollment flag persists.
+    if user.password_hash is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Google-only accounts cannot enroll in TOTP",
         )
 
     secret = generate_totp_secret()
@@ -187,7 +217,7 @@ async def totp_setup(
     )
 
 
-@router.post("/confirm", response_model=TotpConfirmResponse)
+@router.post("/confirm", response_model=RecoveryCodesResponse)
 async def totp_confirm(
     request: Request,
     body: TotpConfirmRequest,
@@ -200,8 +230,6 @@ async def totp_confirm(
     ``session_version``, and re-issues the caller's session cookie.  Recovery
     codes are returned exactly once — they cannot be retrieved again.
     """
-    _require_multiuser()
-
     cfg = get_config()
     lockout = get_lockout_store()
     ip = get_client_ip(request)
@@ -217,7 +245,17 @@ async def totp_confirm(
     if user.totp_secret is None:
         raise HTTPException(status_code=409, detail="No pending setup")
 
-    ok, step = verify_totp_code(user.totp_secret, body.code, None)
+    # Lockout pre-check — mirror the /login pattern.
+    if lockout.is_locked(user.canonical_email, ip):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    # Validate code format in the handler for uniform 401 on bad input.
+    code = body.code.strip()
+    if not is_totp_code(code):
+        lockout.record_failure(user.canonical_email, ip)
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    ok, step = verify_totp_code(user.totp_secret, code, None)
     if not ok:
         lockout.record_failure(user.canonical_email, ip)
         raise HTTPException(status_code=401, detail="Authentication failed")
@@ -228,27 +266,14 @@ async def totp_confirm(
     user.totp_enabled_at = now
     user.totp_last_used_step = step
 
-    # Replace any existing recovery codes (handles re-confirm after a prior
-    # partial setup that somehow reached confirm twice).
-    await db.execute(
-        delete(models.TotpRecoveryCode).where(
-            models.TotpRecoveryCode.user_id == user.id
-        )
-    )
-
-    raw_codes = generate_recovery_codes(RECOVERY_CODE_COUNT)
-    for raw in raw_codes:
-        db.add(
-            models.TotpRecoveryCode(
-                user_id=user.id,
-                code_hash=hash_recovery_code(raw),
-            )
-        )
+    raw_codes = await _replace_recovery_codes(db, user.id)
 
     user.session_version += 1
 
+    logger.info("TOTP enabled for user id=%s", user.id)
+
     response = JSONResponse(
-        content=TotpConfirmResponse(recovery_codes=raw_codes).model_dump(),
+        content=RecoveryCodesResponse(recovery_codes=raw_codes).model_dump(),
         headers=NO_STORE,
     )
     apply_session_cookie(
@@ -271,8 +296,6 @@ async def totp_disable(
     Clears all TOTP state and recovery codes, bumps ``session_version``, and
     clears the session cookie — the user must log in again.
     """
-    _require_multiuser()
-
     cfg = get_config()
     lockout = get_lockout_store()
     ip = get_client_ip(request)
@@ -286,8 +309,13 @@ async def totp_disable(
             status_code=409, detail="Two-factor authentication is not enabled"
         )
 
+    # Lockout pre-check — mirror the /login pattern.
+    if lockout.is_locked(user.canonical_email, ip):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
     # Verify current password.
     if user.password_hash is None:
+        await dummy_verify_async()  # timing equalization — matches /login behaviour
         lockout.record_failure(user.canonical_email, ip)
         raise HTTPException(status_code=401, detail="Authentication failed")
 
@@ -298,19 +326,14 @@ async def totp_disable(
 
     # Verify TOTP or recovery code.
     code = body.code.strip()
-    ok: bool
-    if is_totp_code(code):
-        ok, step = verify_totp_code(user.totp_secret, code, user.totp_last_used_step)  # type: ignore[arg-type]
-        if ok:
-            user.totp_last_used_step = step
-    elif is_recovery_code(code.lower()):
-        ok = await redeem_recovery_code(db, user.id, code.lower())
-    else:
-        ok = False
+    ok, matched_step = await verify_totp_or_recovery(db, user, code)
 
     if not ok:
         lockout.record_failure(user.canonical_email, ip)
         raise HTTPException(status_code=401, detail="Authentication failed")
+
+    if matched_step is not None:
+        user.totp_last_used_step = matched_step
 
     lockout.record_success(user.canonical_email, ip)
 
@@ -327,6 +350,8 @@ async def totp_disable(
 
     user.session_version += 1
 
+    logger.info("TOTP disabled for user id=%s", user.id)
+
     response = JSONResponse(
         content={"message": "Two-factor authentication disabled"},
         headers=NO_STORE,
@@ -335,7 +360,7 @@ async def totp_disable(
     return response
 
 
-@router.post("/recovery-codes/regenerate", response_model=TotpRegenerateResponse)
+@router.post("/recovery-codes/regenerate", response_model=RecoveryCodesResponse)
 async def totp_regenerate_recovery_codes(
     request: Request,
     body: TotpRegenerateRequest,
@@ -347,8 +372,6 @@ async def totp_regenerate_recovery_codes(
     Returns 409 if TOTP is not enabled.  Only a live 6-digit TOTP code is
     accepted — recovery codes cannot mint new recovery codes.
     """
-    _require_multiuser()
-
     lockout = get_lockout_store()
     ip = get_client_ip(request)
 
@@ -360,6 +383,10 @@ async def totp_regenerate_recovery_codes(
         raise HTTPException(
             status_code=409, detail="Two-factor authentication is not enabled"
         )
+
+    # Lockout pre-check — mirror the /login pattern.
+    if lockout.is_locked(user.canonical_email, ip):
+        raise HTTPException(status_code=401, detail="Authentication failed")
 
     code = body.code.strip()
     if not is_totp_code(code):
@@ -374,22 +401,11 @@ async def totp_regenerate_recovery_codes(
     lockout.record_success(user.canonical_email, ip)
     user.totp_last_used_step = step
 
-    await db.execute(
-        delete(models.TotpRecoveryCode).where(
-            models.TotpRecoveryCode.user_id == user.id
-        )
-    )
+    raw_codes = await _replace_recovery_codes(db, user.id)
 
-    raw_codes = generate_recovery_codes(RECOVERY_CODE_COUNT)
-    for raw in raw_codes:
-        db.add(
-            models.TotpRecoveryCode(
-                user_id=user.id,
-                code_hash=hash_recovery_code(raw),
-            )
-        )
+    logger.info("TOTP recovery codes regenerated for user id=%s", user.id)
 
     return JSONResponse(
-        content=TotpRegenerateResponse(recovery_codes=raw_codes).model_dump(),
+        content=RecoveryCodesResponse(recovery_codes=raw_codes).model_dump(),
         headers=NO_STORE,
     )

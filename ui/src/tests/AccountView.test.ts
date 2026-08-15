@@ -571,6 +571,52 @@ describe('AccountView — two-factor authentication card', () => {
         expect(wrapper.find('.stub-totp-wizard').exists()).toBe(true)
     })
 
+    it('test_cancel_enrollment_wizard_returns_to_idle_state', async () => {
+        const wrapper = await mountAndLoad()
+
+        const setupBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Set up two-factor'))
+        await setupBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        expect(wrapper.find('.stub-totp-wizard').exists()).toBe(true)
+
+        // Cancel button should be present when wizard is showing
+        const cancelBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Cancel')
+        expect(cancelBtn).toBeTruthy()
+
+        await cancelBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Wizard gone; idle state restored
+        expect(wrapper.find('.stub-totp-wizard').exists()).toBe(false)
+        expect(wrapper.text()).toContain('Set up two-factor auth')
+    })
+
+    it('test_wizard_done_reloads_totp_status_and_shows_enabled_badge', async () => {
+        vi.mocked(getTotpStatus)
+            .mockResolvedValueOnce(TOTP_STATUS_DISABLED)
+            .mockResolvedValueOnce(TOTP_STATUS_ENABLED)
+
+        const wrapper = await mountAndLoad()
+
+        const setupBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Set up two-factor'))
+        await setupBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Fire done from stub wizard
+        await wrapper.find('.wizard-done-btn').trigger('click')
+        await flushPromises()
+
+        expect(getTotpStatus).toHaveBeenCalledTimes(2)
+        // Wizard hidden; enrolled state rendered
+        expect(wrapper.find('.stub-totp-wizard').exists()).toBe(false)
+        expect(wrapper.text()).toContain('Enabled')
+    })
+
     it('test_enrolled_state_shows_enabled_badge_and_code_count', async () => {
         vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
         const wrapper = await mountAndLoad()
@@ -613,6 +659,31 @@ describe('AccountView — two-factor authentication card', () => {
         expect(disableTotp).toHaveBeenCalledWith({ password: 'mypassword', code: '123456' })
         expect(mockClearAuth).toHaveBeenCalledOnce()
         expect(mockPush).toHaveBeenCalledWith('/')
+    })
+
+    it('test_disable_code_is_normalized_before_submit', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        vi.mocked(disableTotp).mockResolvedValueOnce({ message: 'TOTP disabled' })
+
+        const wrapper = await mountAndLoad()
+
+        const disableBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Disable two-factor'))
+        await disableBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Enter a recovery code with mixed case and whitespace
+        await wrapper.find('#disable-password').setValue('mypassword')
+        await wrapper.find('#disable-code').setValue('  ABCDEF01  ')
+
+        const forms = wrapper.findAll('.stacked-form')
+        const disableStacked = forms.find((f) => f.find('#disable-code').exists())
+        await disableStacked!.trigger('submit')
+        await flushPromises()
+
+        // Code must be trimmed and lowercased
+        expect(disableTotp).toHaveBeenCalledWith({ password: 'mypassword', code: 'abcdef01' })
     })
 
     it('test_disable_failure_shows_inline_error_no_navigation', async () => {
@@ -672,5 +743,126 @@ describe('AccountView — two-factor authentication card', () => {
         expect(regenerateRecoveryCodes).toHaveBeenCalledWith({ code: '654321' })
         expect(wrapper.text()).toContain('code-a')
         expect(wrapper.text()).toContain('code-b')
+    })
+
+    it('test_regen_done_disabled_until_acknowledged_and_cancel_clears_state', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        vi.mocked(regenerateRecoveryCodes).mockResolvedValueOnce({
+            recovery_codes: ['code-x', 'code-y'],
+        })
+
+        const wrapper = await mountAndLoad()
+
+        // Open regen and submit
+        const regenBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Regenerate recovery'))
+        await regenBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        const forms = wrapper.findAll('.stacked-form')
+        const regenStacked = forms.find(
+            (f) =>
+                !f.find('#disable-password').exists() &&
+                f.find('input[inputmode="numeric"]').exists(),
+        )
+        await regenStacked!.find('input[inputmode="numeric"]').setValue('654321')
+        await regenStacked!.trigger('submit')
+        await flushPromises()
+
+        expect(wrapper.text()).toContain('code-x')
+
+        // Done button disabled (no acknowledge yet)
+        const doneBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Done')
+        expect(doneBtn).toBeTruthy()
+        expect((doneBtn!.element as HTMLButtonElement).disabled).toBe(true)
+
+        // Check the acknowledge checkbox (rendered inside RecoveryCodesDisplay)
+        await wrapper.find('input[type="checkbox"]').setValue(true)
+        await wrapper.vm.$nextTick()
+
+        expect((doneBtn!.element as HTMLButtonElement).disabled).toBe(false)
+
+        // Click Cancel
+        const cancelBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Cancel')
+        expect(cancelBtn).toBeTruthy()
+        await cancelBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // State cleared: codes gone, regen form gone
+        expect(wrapper.text()).not.toContain('code-x')
+        expect(wrapper.find('input[inputmode="numeric"]').exists()).toBe(false)
+    })
+
+    it('test_regen_api_rejection_shows_inline_error_and_keeps_form_visible', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        vi.mocked(regenerateRecoveryCodes).mockRejectedValueOnce(new Error('Invalid code'))
+
+        const wrapper = await mountAndLoad()
+
+        const regenBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Regenerate recovery'))
+        await regenBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        const forms = wrapper.findAll('.stacked-form')
+        const regenStacked = forms.find(
+            (f) =>
+                !f.find('#disable-password').exists() &&
+                f.find('input[inputmode="numeric"]').exists(),
+        )
+        await regenStacked!.find('input[inputmode="numeric"]').setValue('654321')
+        await regenStacked!.trigger('submit')
+        await flushPromises()
+
+        // Inline error visible
+        const alerts = wrapper.findAll('[role="alert"]')
+        const errAlert = alerts.find((a) => a.text().includes('Invalid code'))
+        expect(errAlert).toBeTruthy()
+
+        // Regen form still visible
+        expect(wrapper.find('input[inputmode="numeric"]').exists()).toBe(true)
+    })
+
+    it('test_regen_copy_all_failure_shows_fallback_message', async () => {
+        vi.mocked(getTotpStatus).mockResolvedValue(TOTP_STATUS_ENABLED)
+        vi.mocked(regenerateRecoveryCodes).mockResolvedValueOnce({
+            recovery_codes: ['code-a'],
+        })
+
+        const wrapper = await mountAndLoad()
+
+        const regenBtn = wrapper
+            .findAll('button')
+            .find((b) => b.text().includes('Regenerate recovery'))
+        await regenBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        const forms = wrapper.findAll('.stacked-form')
+        const regenStacked = forms.find(
+            (f) =>
+                !f.find('#disable-password').exists() &&
+                f.find('input[inputmode="numeric"]').exists(),
+        )
+        await regenStacked!.find('input[inputmode="numeric"]').setValue('654321')
+        await regenStacked!.trigger('submit')
+        await flushPromises()
+
+        // Mock clipboard to fail
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText: vi.fn().mockRejectedValueOnce(new Error('Not allowed')) },
+            writable: true,
+            configurable: true,
+        })
+
+        const copyBtn = wrapper.findAll('button').find((b) => b.text().includes('Copy all'))
+        expect(copyBtn).toBeTruthy()
+        await copyBtn!.trigger('click')
+        await flushPromises()
+
+        const alerts = wrapper.findAll('[role="alert"]')
+        const fallbackAlert = alerts.find((a) => a.text().includes('Copy failed'))
+        expect(fallbackAlert).toBeTruthy()
     })
 })

@@ -43,7 +43,7 @@ class ActorContext:
     role: Role
     mode: AuthMode
     # True when the user must complete TOTP enrollment before accessing the API.
-    # Set by middleware; downstream agents wire up the enforcement logic.
+    # Set by middleware; downstream middleware enforces access control based on this flag.
     enrollment_required: bool = False
 
     @property

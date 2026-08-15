@@ -179,6 +179,13 @@
                     </template>
                     <template v-else>
                         <TotpEnrollmentWizard @done="onEnrollDone" />
+                        <button
+                            type="button"
+                            class="action-btn action-btn--ghost"
+                            @click="showingEnrollWizard = false"
+                        >
+                            Cancel
+                        </button>
                     </template>
                 </template>
 
@@ -250,31 +257,10 @@
                                 <strong>Save these new recovery codes.</strong> Your old codes are
                                 now invalid.
                             </p>
-                            <ul class="recovery-list">
-                                <li
-                                    v-for="code in newRecoveryCodes"
-                                    :key="code"
-                                    class="recovery-code"
-                                >
-                                    {{ code }}
-                                </li>
-                            </ul>
-                            <div class="recovery-actions">
-                                <button type="button" class="action-btn" @click="copyNewCodes">
-                                    {{ newCodesCopied ? 'Copied!' : 'Copy all' }}
-                                </button>
-                                <button type="button" class="action-btn" @click="downloadNewCodes">
-                                    Download .txt
-                                </button>
-                            </div>
-                            <label class="ack-label">
-                                <input
-                                    v-model="regenAcknowledged"
-                                    type="checkbox"
-                                    class="ack-checkbox"
-                                />
-                                I've saved these recovery codes
-                            </label>
+                            <RecoveryCodesDisplay
+                                :codes="newRecoveryCodes"
+                                v-model="regenAcknowledged"
+                            />
                             <Button
                                 class="self-start"
                                 :disabled="!regenAcknowledged"
@@ -309,7 +295,6 @@
                                     id="disable-code"
                                     v-model="disableCode"
                                     type="text"
-                                    inputmode="numeric"
                                     class="field-input totp-code-input"
                                     placeholder="123456 or recovery code"
                                     autocomplete="one-time-code"
@@ -506,6 +491,7 @@ import { Button } from '@/components/ui/button'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import GoogleSignInButton from '@/components/GoogleSignInButton.vue'
 import TotpEnrollmentWizard from '@/components/TotpEnrollmentWizard.vue'
+import RecoveryCodesDisplay from '@/components/RecoveryCodesDisplay.vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
@@ -648,7 +634,6 @@ const regenCode = ref('')
 const regenBusy = ref(false)
 const regenError = ref<string | null>(null)
 const newRecoveryCodes = ref<string[]>([])
-const newCodesCopied = ref(false)
 const regenAcknowledged = ref(false)
 
 // Disable flow
@@ -695,29 +680,6 @@ async function submitRegenCodes() {
     }
 }
 
-async function copyNewCodes() {
-    try {
-        await navigator.clipboard.writeText(newRecoveryCodes.value.join('\n'))
-        newCodesCopied.value = true
-        setTimeout(() => {
-            newCodesCopied.value = false
-        }, 2000)
-    } catch {
-        // clipboard API unavailable — do nothing
-    }
-}
-
-function downloadNewCodes() {
-    const text = newRecoveryCodes.value.join('\n')
-    const blob = new Blob([text], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'snore-recovery-codes.txt'
-    a.click()
-    URL.revokeObjectURL(url)
-}
-
 function cancelRegen() {
     showingRegenWizard.value = false
     regenCode.value = ''
@@ -735,7 +697,10 @@ async function submitDisable() {
     disableError.value = null
     disableBusy.value = true
     try {
-        await disableTotp({ password: disablePassword.value, code: disableCode.value })
+        await disableTotp({
+            password: disablePassword.value,
+            code: disableCode.value.trim().toLowerCase(),
+        })
         // Backend clears the session cookie — sign the user out locally and redirect.
         clearAuth()
         router.push('/')
@@ -1093,40 +1058,6 @@ async function handleDeleteData(): Promise<void> {
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
-}
-
-.recovery-list {
-    list-style: none;
-    padding: 0.75rem;
-    margin: 0;
-    background: var(--color-accent);
-    border-radius: 6px;
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.25rem 1.5rem;
-}
-
-.recovery-code {
-    font-family: monospace;
-    font-size: 0.875rem;
-    letter-spacing: 0.05em;
-}
-
-.recovery-actions {
-    display: flex;
-    gap: 0.5rem;
-}
-
-.ack-label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-    cursor: pointer;
-}
-
-.ack-checkbox {
-    cursor: pointer;
 }
 
 .field-group {

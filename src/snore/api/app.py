@@ -774,9 +774,19 @@ def create_app() -> FastAPI:
     # Middleware add order is innermost-first; requests are processed outermost-first.
     # AuthPathMiddleware must be innermost of the auth pair so RateLimitMiddleware
     # fires before the body pre-read, rejecting rate-limited requests cheaply.
+    #
+    # Request-processing order (outermost → innermost):
+    #   AuthMiddleware          — resolves request.state.actor from session cookie
+    #   TotpEnforcementMiddleware — gates API access for users pending enrollment;
+    #                              must run after AuthMiddleware (needs actor) and
+    #                              before RateLimitMiddleware (not an auth endpoint)
+    #   RateLimitMiddleware     — per-IP sliding-window limiter on /api/v1/auth/
+    #   AuthPathMiddleware      — CSRF origin check + body ceiling + no-store header
     app.add_middleware(AuthPathMiddleware)  # innermost of auth pair
     app.add_middleware(RateLimitMiddleware)  # outermost of auth pair
-    app.add_middleware(TotpEnforcementMiddleware)  # runs after actor is resolved
+    app.add_middleware(
+        TotpEnforcementMiddleware
+    )  # between AuthMiddleware and RateLimitMiddleware
     app.add_middleware(AuthMiddleware)  # resolves request.state.actor
     app.add_middleware(
         CORSMiddleware,

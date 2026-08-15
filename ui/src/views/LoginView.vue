@@ -52,7 +52,7 @@
                 </template>
             </template>
 
-            <form v-else class="login-form" @submit.prevent="handleTotpSubmit">
+            <form v-else-if="step === 'totp'" class="login-form" @submit.prevent="handleTotpSubmit">
                 <div class="field-group">
                     <label for="totp-code" class="field-label">Authentication code</label>
                     <input
@@ -60,7 +60,6 @@
                         v-model="totpCode"
                         type="text"
                         autocomplete="one-time-code"
-                        inputmode="numeric"
                         autofocus
                         class="field-input"
                         :disabled="loading"
@@ -104,6 +103,8 @@ const loading = ref(false)
 const errorMessage = ref<string | null>(null)
 const demoLoading = ref(false)
 const demoError = ref<string | null>(null)
+// Tracks consecutive TOTP code failures so the UI can surface a retry hint on the 2nd+ attempt.
+const totpFailCount = ref(0)
 
 // When background self-heal authenticates the session while the user sits on the login
 // page, navigate to their landing path. Skip if an explicit login handler is already
@@ -145,11 +146,17 @@ async function handleTotpSubmit() {
     loading.value = true
     try {
         await submitTotp(totpCode.value)
+        totpFailCount.value = 0
         router.push(await resolveLandingPath())
     } catch (e: unknown) {
+        totpFailCount.value++
         const status = (e as { response?: { status?: number } }).response?.status
         if (status === 401) {
-            errorMessage.value = 'Invalid code — try again'
+            const hint =
+                totpFailCount.value >= 2
+                    ? ' If this keeps happening, go back and sign in again.'
+                    : ''
+            errorMessage.value = 'Invalid code — try again' + hint
         } else if (status === 429) {
             errorMessage.value = 'Too many attempts — try again later'
         } else if (!navigator.onLine || (e instanceof Error && e.message === 'Network Error')) {
@@ -167,6 +174,7 @@ function handleTotpBack() {
     step.value = 'password'
     errorMessage.value = null
     totpCode.value = ''
+    totpFailCount.value = 0
 }
 
 async function handleDemoLogin() {

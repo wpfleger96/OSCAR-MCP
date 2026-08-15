@@ -92,7 +92,7 @@ const OTHER_USER = {
 // Mock helpers
 // ---------------------------------------------------------------------------
 
-function makeAuthMock(userId = 1) {
+function makeAuthMock(userId = 1, totpEnabled = false) {
     vi.mocked(useAuth).mockReturnValue(
         baseMakeAuthMock({
             user: ref({
@@ -100,6 +100,7 @@ function makeAuthMock(userId = 1) {
                 email: 'test@example.com',
                 display_name: null,
                 role: 'admin',
+                totp_enabled: totpEnabled,
             }) as never,
             role: ref('admin') as never,
             isAuthenticated: ref(true) as never,
@@ -390,7 +391,7 @@ describe('AdminUsersView — 2FA badge and reset', () => {
         expect(listUsers).toHaveBeenCalledTimes(2)
     })
 
-    it('test_reset_2fa_error_shows_row_error', async () => {
+    it('test_reset_2fa_error_shows_row_error_and_confirm_row_stays_visible', async () => {
         vi.mocked(listUsers).mockResolvedValue([USER_WITH_2FA])
         vi.mocked(adminResetTotp).mockRejectedValueOnce(new Error('Reset failed'))
 
@@ -404,6 +405,103 @@ describe('AdminUsersView — 2FA badge and reset', () => {
         await yesBtn!.trigger('click')
         await flushPromises()
 
+        // Inline error shown
         expect(wrapper.find('.row-error').text()).toContain('Reset failed')
+        // Confirm row still visible — user can retry or click No to cancel
+        expect(wrapper.text()).toContain('Reset 2FA?')
+    })
+
+    it('test_reset_2fa_403_wrong_code_shows_inline_error_and_keeps_confirm_row', async () => {
+        makeAuthMock(1, true) // admin has TOTP enabled
+
+        vi.mocked(listUsers).mockResolvedValue([USER_WITH_2FA])
+
+        // 403-shaped rejection (wrong admin TOTP code)
+        const err = Object.assign(new Error('Invalid TOTP code'), {
+            response: { status: 403 },
+        })
+        vi.mocked(adminResetTotp).mockRejectedValueOnce(err)
+
+        const wrapper = await mountAndLoad()
+
+        const resetBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Reset 2FA')
+        await resetBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        const codeInput = wrapper.find('.totp-reset-code-input')
+        await codeInput.setValue('000000')
+        await wrapper.vm.$nextTick()
+
+        const yesBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Yes')
+        await yesBtn!.trigger('click')
+        await flushPromises()
+
+        // Inline error visible
+        expect(wrapper.find('.row-error').text()).toContain('Invalid TOTP code')
+        // Confirm row stays visible — user can correct code and retry
+        expect(wrapper.text()).toContain('Reset 2FA?')
+        // Code input cleared for re-entry
+        expect((codeInput.element as HTMLInputElement).value).toBe('')
+    })
+
+    it('test_reset_2fa_no_button_dismisses_without_calling_adminResetTotp', async () => {
+        vi.mocked(listUsers).mockResolvedValue([USER_WITH_2FA])
+
+        const wrapper = await mountAndLoad()
+
+        const resetBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Reset 2FA')
+        await resetBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        expect(wrapper.text()).toContain('Reset 2FA?')
+
+        const noBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'No')
+        expect(noBtn).toBeTruthy()
+        await noBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Confirm row dismissed; adminResetTotp never called
+        expect(wrapper.text()).not.toContain('Reset 2FA?')
+        expect(adminResetTotp).not.toHaveBeenCalled()
+    })
+
+    it('test_reset_2fa_with_admin_totp_shows_code_input_required_and_passes_code', async () => {
+        // Admin has TOTP enabled
+        makeAuthMock(1, true)
+
+        vi.mocked(listUsers).mockResolvedValue([USER_WITH_2FA])
+        vi.mocked(adminResetTotp).mockResolvedValueOnce({ message: 'TOTP reset' })
+        vi.mocked(listUsers)
+            .mockResolvedValueOnce([USER_WITH_2FA])
+            .mockResolvedValueOnce([{ ...USER_WITH_2FA, totp_enabled: false }])
+
+        const wrapper = await mountAndLoad()
+
+        const resetBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Reset 2FA')
+        await resetBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Code input visible (autocomplete="one-time-code" on the totp-reset-code-input)
+        const codeInput = wrapper.find('.totp-reset-code-input')
+        expect(codeInput.exists()).toBe(true)
+
+        // Yes button disabled when code is empty
+        const yesBtn = wrapper.findAll('button').find((b) => b.text().trim() === 'Yes')
+        expect(yesBtn).toBeTruthy()
+        expect((yesBtn!.element as HTMLButtonElement).disabled).toBe(true)
+
+        // Enter a code
+        await codeInput.setValue('123456')
+        await wrapper.vm.$nextTick()
+
+        // Yes button now enabled
+        expect((yesBtn!.element as HTMLButtonElement).disabled).toBe(false)
+
+        // Click Yes
+        await yesBtn!.trigger('click')
+        await flushPromises()
+
+        // adminResetTotp called with both userId and the code
+        expect(adminResetTotp).toHaveBeenCalledWith(USER_WITH_2FA.id, '123456')
     })
 })

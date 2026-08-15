@@ -58,6 +58,28 @@ describe('TotpEnrollmentWizard — step 1 (QR + secret)', () => {
         expect(alert.text()).toContain('Already enabled')
     })
 
+    it('test_setup_error_shows_retry_button_and_retries_on_success', async () => {
+        vi.mocked(setupTotp)
+            .mockRejectedValueOnce(new Error('Server error'))
+            .mockResolvedValueOnce(SETUP_RESPONSE)
+
+        const wrapper = mount(TotpEnrollmentWizard)
+        await flushPromises()
+
+        // Error state with retry button
+        expect(wrapper.find('[role="alert"]').text()).toContain('Server error')
+        const retryBtn = wrapper.findAll('button').find((b) => b.text().includes('Try again'))
+        expect(retryBtn).toBeTruthy()
+
+        // Click retry — second call resolves with setup data
+        await retryBtn!.trigger('click')
+        await flushPromises()
+
+        expect(setupTotp).toHaveBeenCalledTimes(2)
+        expect(wrapper.find('img[alt="TOTP QR code"]').exists()).toBe(true)
+        expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    })
+
     it('test_continue_button_advances_to_step_2', async () => {
         const wrapper = mount(TotpEnrollmentWizard)
         await flushPromises()
@@ -69,6 +91,28 @@ describe('TotpEnrollmentWizard — step 1 (QR + secret)', () => {
 
         // Step 2 should have the code input
         expect(wrapper.find('input[inputmode="numeric"]').exists()).toBe(true)
+    })
+
+    it('test_copy_secret_failure_shows_fallback_message', async () => {
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText: vi.fn().mockRejectedValueOnce(new Error('Not allowed')) },
+            writable: true,
+            configurable: true,
+        })
+
+        const wrapper = mount(TotpEnrollmentWizard)
+        await flushPromises()
+
+        const copyBtn = wrapper.findAll('button').find((b) => b.text() === 'Copy')
+        expect(copyBtn).toBeTruthy()
+        await copyBtn!.trigger('click')
+        await flushPromises()
+
+        expect(wrapper.text()).toContain('Copy failed')
+        // The fallback message is in a role="alert" element
+        const alerts = wrapper.findAll('[role="alert"]')
+        const fallbackAlert = alerts.find((a) => a.text().includes('Copy failed'))
+        expect(fallbackAlert).toBeTruthy()
     })
 })
 
@@ -127,6 +171,37 @@ describe('TotpEnrollmentWizard — step 2 (verify code)', () => {
         // Back on step 1 — QR image should be visible
         expect(wrapper.find('img[alt="TOTP QR code"]').exists()).toBe(true)
     })
+
+    it('test_back_button_clears_verify_code_and_error', async () => {
+        vi.mocked(confirmTotp).mockRejectedValueOnce(new Error('Invalid code'))
+
+        const wrapper = await mountAtStep2()
+
+        // Enter code and trigger a verify error
+        await wrapper.find('input[inputmode="numeric"]').setValue('999999')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+        expect(wrapper.find('[role="alert"]').text()).toContain('Invalid code')
+
+        // Click back
+        const backBtn = wrapper.findAll('button').find((b) => b.text().includes('Back'))
+        await backBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Back on step 1
+        expect(wrapper.find('img[alt="TOTP QR code"]').exists()).toBe(true)
+
+        // Advance to step 2 again
+        const continueBtn = wrapper.findAll('button').find((b) => b.text().includes('Continue'))
+        await continueBtn!.trigger('click')
+        await wrapper.vm.$nextTick()
+
+        // Code input is empty and no error shown
+        expect((wrapper.find('input[inputmode="numeric"]').element as HTMLInputElement).value).toBe(
+            '',
+        )
+        expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    })
 })
 
 describe('TotpEnrollmentWizard — step 3 (recovery codes)', () => {
@@ -173,5 +248,24 @@ describe('TotpEnrollmentWizard — step 3 (recovery codes)', () => {
 
         expect(wrapper.emitted('done')).toBeTruthy()
         expect(wrapper.emitted('done')!.length).toBe(1)
+    })
+
+    it('test_copy_all_failure_shows_fallback_message', async () => {
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText: vi.fn().mockRejectedValueOnce(new Error('Not allowed')) },
+            writable: true,
+            configurable: true,
+        })
+
+        const wrapper = await mountAtStep3()
+
+        const copyAllBtn = wrapper.findAll('button').find((b) => b.text().includes('Copy all'))
+        expect(copyAllBtn).toBeTruthy()
+        await copyAllBtn!.trigger('click')
+        await flushPromises()
+
+        const alerts = wrapper.findAll('[role="alert"]')
+        const fallbackAlert = alerts.find((a) => a.text().includes('Copy failed'))
+        expect(fallbackAlert).toBeTruthy()
     })
 })
