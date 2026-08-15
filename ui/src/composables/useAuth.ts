@@ -36,12 +36,12 @@ export function useAuth() {
 
         async function attempt(gen: number): Promise<AuthStatusResponse> {
             try {
-                return await getAuthStatus(AbortSignal.timeout(10_000))
+                return await getAuthStatus(AbortSignal.timeout(3_000))
             } catch {
                 // Retry once after a short backoff.
                 await new Promise<void>((r) => setTimeout(r, 500))
                 if (_generation !== gen) throw new Error('superseded')
-                return getAuthStatus(AbortSignal.timeout(10_000))
+                return getAuthStatus(AbortSignal.timeout(3_000))
             }
         }
 
