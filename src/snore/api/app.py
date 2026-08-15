@@ -6,16 +6,18 @@ import os
 import resource
 import uuid
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from snore.api.analysis_jobs import shutdown as _shutdown_analysis_jobs
 from snore.api.analysis_jobs import start_worker as _start_analysis_worker
@@ -779,7 +781,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
     app.add_exception_handler(NotFoundError, not_found_handler)
     app.add_exception_handler(Exception, server_error_handler)
     # Strip credential inputs from 422 validation errors on auth routes.
@@ -890,6 +891,13 @@ def create_app() -> FastAPI:
 
     _mount_spa(app)
 
+    # Registered after _mount_spa so GZip is the outermost middleware — the SPA
+    # fallback registers its own http middleware, and responses it short-circuits
+    # (index.html) would bypass compression if GZip sat inside it.
+    # (add_middleware is innermost-first, so later calls = outer wrapping.)
+    # minimum_size=1000 avoids overhead on tiny payloads.
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
+
     # Mount the embedded MCP sub-app last — after all API and SPA routes so
     # that FastMCP's catch-all OAuth paths do not shadow /api/* or /assets/*.
     from snore.api.mcp_embed import build_mcp_app  # noqa: PLC0415
@@ -900,6 +908,38 @@ def create_app() -> FastAPI:
         app.mount("/", mcp_app)
 
     return app
+
+
+class _ImmutableStaticFiles(StaticFiles):
+    """StaticFiles subclass that stamps Cache-Control: public, max-age=31536000, immutable.
+
+    Safe only for content-hashed assets (e.g. Vite output under /assets) where
+    every file URL changes when content changes, making indefinite caching correct.
+    """
+
+    async def __call__(
+        self,
+        scope: MutableMapping[str, Any],
+        receive: Callable[[], Awaitable[MutableMapping[str, Any]]],
+        send: Callable[[MutableMapping[str, Any]], Awaitable[None]],
+    ) -> None:
+        async def send_with_cache_header(message: MutableMapping[str, Any]) -> None:
+            if (
+                message["type"] == "http.response.start"
+                and message.get("status", 0) < 400
+            ):
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"cache-control"
+                ]
+                headers.append(
+                    (b"cache-control", b"public, max-age=31536000, immutable")
+                )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await super().__call__(scope, receive, send_with_cache_header)
 
 
 def _resolve_spa_dist() -> Path | None:
@@ -926,7 +966,11 @@ def _mount_spa(app: FastAPI) -> None:
     )
     logger.info("Serving SPA from %s (built %s)", dist, built)
 
-    app.mount("/assets", StaticFiles(directory=dist / "assets"), name="spa-assets")
+    app.mount(
+        "/assets",
+        _ImmutableStaticFiles(directory=dist / "assets"),
+        name="spa-assets",
+    )
 
     from snore.api.mcp_embed import is_mcp_path as _is_mcp_path  # noqa: PLC0415
 
@@ -936,5 +980,10 @@ def _mount_spa(app: FastAPI) -> None:
         if response.status_code == 404 and not (
             request.url.path.startswith("/api/") or _is_mcp_path(request.url.path)
         ):
-            return FileResponse(dist / "index.html")
+            stat_result = os.stat(dist / "index.html")
+            fallback = FileResponse(dist / "index.html", stat_result=stat_result)
+            fallback.headers["cache-control"] = "no-cache, must-revalidate"
+            if "etag" in fallback.headers:
+                fallback.headers["etag"] = "W/" + fallback.headers["etag"]
+            return fallback
         return response
