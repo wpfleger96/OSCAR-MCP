@@ -5,12 +5,15 @@
     <link rel="icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SNORE</title>
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2" />
     <script>
       try {
         if (localStorage.getItem('snore-dark-mode') === '1')
           document.documentElement.classList.add('dark')
       } catch (e) {}
     </script>
+    <!-- Pre-mount shell: oklch color values copied from tailwind.css (:root/.dark tokens --background, --card, --primary, --border)
+         and geometry copied from layout.css (.login-card, .login-title). Update both source files when changing. -->
     <style>
       #app-shell {
         min-height: 100vh;

@@ -12,6 +12,7 @@
     --radius: 0.5rem;
 }
 
+/* NOTE: the index.html pre-mount shell mirrors the raw oklch values of --background, --card, --primary, and --border from :root and .dark — update the shell when these tokens change. */
 :root {
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);

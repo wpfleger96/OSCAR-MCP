@@ -894,6 +894,7 @@ def create_app() -> FastAPI:
     # Registered after _mount_spa so GZip is the outermost middleware — the SPA
     # fallback registers its own http middleware, and responses it short-circuits
     # (index.html) would bypass compression if GZip sat inside it.
+    # (add_middleware is innermost-first, so later calls = outer wrapping.)
     # minimum_size=1000 avoids overhead on tiny payloads.
     app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -923,10 +924,19 @@ class _ImmutableStaticFiles(StaticFiles):
         send: Callable[[MutableMapping[str, Any]], Awaitable[None]],
     ) -> None:
         async def send_with_cache_header(message: MutableMapping[str, Any]) -> None:
-            if message["type"] == "http.response.start":
-                headers: dict[bytes, bytes] = dict(message.get("headers", []))
-                headers[b"cache-control"] = b"public, max-age=31536000, immutable"
-                message = {**message, "headers": list(headers.items())}
+            if (
+                message["type"] == "http.response.start"
+                and message.get("status", 0) < 400
+            ):
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"cache-control"
+                ]
+                headers.append(
+                    (b"cache-control", b"public, max-age=31536000, immutable")
+                )
+                message = {**message, "headers": headers}
             await send(message)
 
         await super().__call__(scope, receive, send_with_cache_header)
@@ -970,7 +980,10 @@ def _mount_spa(app: FastAPI) -> None:
         if response.status_code == 404 and not (
             request.url.path.startswith("/api/") or _is_mcp_path(request.url.path)
         ):
-            fallback = FileResponse(dist / "index.html")
-            fallback.headers["Cache-Control"] = "no-cache, must-revalidate"
+            stat_result = os.stat(dist / "index.html")
+            fallback = FileResponse(dist / "index.html", stat_result=stat_result)
+            fallback.headers["cache-control"] = "no-cache, must-revalidate"
+            if "etag" in fallback.headers:
+                fallback.headers["etag"] = "W/" + fallback.headers["etag"]
             return fallback
         return response

@@ -199,6 +199,7 @@ class TestSPAFallback:
         resp = client.get("/")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
+        assert resp.headers.get("cache-control") == "no-cache, must-revalidate"
 
     def test_api_404_not_overridden_by_spa(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -258,3 +259,33 @@ class TestSPAFallback:
         assert (
             resp.headers.get("cache-control") == "public, max-age=31536000, immutable"
         )
+
+        head_resp = client.head("/assets/main.abc123.js")
+        assert head_resp.status_code == 200
+        assert (
+            head_resp.headers.get("cache-control")
+            == "public, max-age=31536000, immutable"
+        )
+
+    def test_gzip_middleware_compresses_response(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GZip middleware compresses SPA fallback responses that exceed minimum_size."""
+        dist = self._make_dist(tmp_path)
+        # Override index.html with content > 1000 bytes so GZipMiddleware (minimum_size=1000)
+        # compresses it.
+        (dist / "index.html").write_text(
+            "<html><body>" + ("SNORE " * 200) + "</body></html>", encoding="utf-8"
+        )
+
+        import snore.api.app as _app_module
+
+        monkeypatch.setattr(_app_module, "_resolve_spa_dist", lambda: dist)
+
+        from snore.api.app import create_app
+
+        app = create_app()
+        client = TestClient(app, raise_server_exceptions=True)
+        resp = client.get("/", headers={"Accept-Encoding": "gzip"})
+        assert resp.status_code == 200
+        assert resp.headers.get("content-encoding") == "gzip"
