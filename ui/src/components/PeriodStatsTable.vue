@@ -6,7 +6,88 @@
         >
             <Loader2 class="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
-        <Table>
+        <template v-if="isMobile">
+            <div v-if="periods.length" class="card-list">
+                <div v-for="row in periods" :key="row.period_start" class="data-card">
+                    <div class="data-card-header">
+                        <template v-if="row.period_start === row.period_end">
+                            {{ formatDateMonthDay(row.period_start) }}
+                        </template>
+                        <template v-else>
+                            {{ formatDateMonthDay(row.period_start) }} –
+                            {{ formatDateMonthDay(row.period_end) }}
+                        </template>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Days Used</span>
+                        <span class="data-card-value">{{ row.days_used }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label"
+                            >Avg Hours <InfoHint glossary-key="usage"
+                        /></span>
+                        <span class="data-card-value">{{
+                            row.avg_hours_per_day?.toFixed(1) ?? '---'
+                        }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Avg AHI <InfoHint glossary-key="ahi" /></span>
+                        <span class="data-card-value" :class="ahiClass(row.avg_ahi)">
+                            {{ row.avg_ahi?.toFixed(1) ?? '---' }}
+                        </span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Median AHI</span>
+                        <span class="data-card-value">{{
+                            row.median_ahi?.toFixed(1) ?? '---'
+                        }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label"
+                            >Avg Pressure <InfoHint glossary-key="pressure"
+                        /></span>
+                        <span class="data-card-value">{{
+                            row.avg_pressure?.toFixed(1) ?? '---'
+                        }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label"
+                            >Avg Leak <InfoHint glossary-key="leak"
+                        /></span>
+                        <span class="data-card-value">{{ row.avg_leak?.toFixed(1) ?? '---' }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label"
+                            >Avg SpO₂ <InfoHint glossary-key="spo2"
+                        /></span>
+                        <span class="data-card-value">{{ row.avg_spo2?.toFixed(1) ?? '---' }}</span>
+                    </div>
+                    <div v-if="showSleepColumns" class="data-card-row">
+                        <span class="data-card-label"
+                            >Avg Sleep <InfoHint glossary-key="total_sleep"
+                        /></span>
+                        <span class="data-card-value">{{
+                            row.avg_total_sleep_hours?.toFixed(1) ?? '---'
+                        }}</span>
+                    </div>
+                    <div v-if="showSleepColumns" class="data-card-row">
+                        <span class="data-card-label"
+                            >Avg Eff <InfoHint glossary-key="sleep_efficiency"
+                        /></span>
+                        <span class="data-card-value">{{
+                            row.avg_sleep_efficiency_pct?.toFixed(1) ?? '---'
+                        }}</span>
+                    </div>
+                </div>
+            </div>
+            <div
+                v-else
+                class="flex h-24 items-center justify-center text-center text-muted-foreground"
+            >
+                {{ emptyMessage ?? 'No period data available.' }}
+            </div>
+        </template>
+        <Table v-else>
             <TableHeader>
                 <TableRow>
                     <TableHead>Period</TableHead>
@@ -63,10 +144,10 @@
                         <TableCell>{{ row.avg_leak?.toFixed(1) ?? '---' }}</TableCell>
                         <TableCell>{{ row.avg_spo2?.toFixed(1) ?? '---' }}</TableCell>
                         <TableCell v-if="showSleepColumns">{{
-                            row.avg_total_sleep_hours?.toFixed(1) ?? '—'
+                            row.avg_total_sleep_hours?.toFixed(1) ?? '---'
                         }}</TableCell>
                         <TableCell v-if="showSleepColumns">{{
-                            row.avg_sleep_efficiency_pct?.toFixed(1) ?? '—'
+                            row.avg_sleep_efficiency_pct?.toFixed(1) ?? '---'
                         }}</TableCell>
                     </TableRow>
                 </template>
@@ -94,6 +175,7 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import InfoHint from '@/components/InfoHint.vue'
+import { useIsMobile } from '@/composables/useIsMobile'
 import type { PeriodStatistics } from '@/types'
 import { ahiClass, formatDateMonthDay } from '@/utils/formatting'
 
@@ -103,4 +185,6 @@ defineProps<{
     emptyMessage?: string
     showSleepColumns?: boolean
 }>()
+
+const { isMobile } = useIsMobile()
 </script>

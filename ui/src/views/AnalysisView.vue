@@ -62,7 +62,38 @@
         <!-- Mode Comparison Table -->
         <div class="section-card">
             <h2>Mode Comparison</h2>
-            <Table>
+            <div v-if="isMobile" class="card-list">
+                <div v-for="(row, i) in modeRows" :key="i" class="data-card">
+                    <div class="data-card-header">{{ row.mode }}</div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">AHI <InfoHint glossary-key="ahi" /></span>
+                        <span class="data-card-value"
+                            ><strong>{{ row.ahi.toFixed(1) }}</strong></span
+                        >
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">RDI <InfoHint glossary-key="rdi" /></span>
+                        <span class="data-card-value">{{ row.rdi.toFixed(1) }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label"
+                            >Apneas <InfoHint glossary-key="apneas"
+                        /></span>
+                        <span class="data-card-value">{{ row.apneas }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label"
+                            >Hypopneas <InfoHint glossary-key="hypopneas"
+                        /></span>
+                        <span class="data-card-value">{{ row.hypopneas }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">RERAs <InfoHint glossary-key="reras" /></span>
+                        <span class="data-card-value">{{ row.reras }}</span>
+                    </div>
+                </div>
+            </div>
+            <Table v-else>
                 <TableHeader>
                     <TableRow>
                         <TableHead>Mode</TableHead>
@@ -118,7 +149,40 @@
             </ToggleGroup>
 
             <div v-if="selectedModeResult">
-                <Table>
+                <div v-if="isMobile" class="card-list">
+                    <div v-for="(row, i) in paginatedEvents" :key="i" class="data-card">
+                        <div class="data-card-header">
+                            <span
+                                class="event-badge"
+                                :style="{ background: EVENT_COLORS[row.type] ?? '#ddd' }"
+                            >
+                                {{ row.type }}
+                            </span>
+                            <span class="mobile-card-time">{{ formatTimeOffset(row.start) }}</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Duration</span>
+                            <span class="data-card-value">{{ row.duration.toFixed(1) }}s</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label"
+                                >Flow Red. <InfoHint glossary-key="flow_reduction"
+                            /></span>
+                            <span class="data-card-value"
+                                >{{ (row.flowReduction * 100).toFixed(0) }}%</span
+                            >
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label"
+                                >Confidence <InfoHint glossary-key="confidence"
+                            /></span>
+                            <span class="data-card-value"
+                                >{{ (row.confidence * 100).toFixed(0) }}%</span
+                            >
+                        </div>
+                    </div>
+                </div>
+                <Table v-else>
                     <TableHeader>
                         <TableRow>
                             <TableHead style="width: 80px">Type</TableHead>
@@ -220,7 +284,29 @@
                     glossary-key="avg_confidence"
                 />
             </div>
-            <Table>
+            <div v-if="isMobile" class="card-list">
+                <div v-for="cls in flDistributionRows" :key="cls.classNum" class="data-card">
+                    <div class="data-card-header">
+                        <span class="flex items-center gap-2">
+                            <FlowClassPopover :fl-class="cls" />
+                            <span>Class {{ cls.classNum }}: {{ cls.name }}</span>
+                        </span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Severity</span>
+                        <span class="data-card-value">{{ cls.severity }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Count</span>
+                        <span class="data-card-value">{{ cls.count }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">% Breaths</span>
+                        <span class="data-card-value">{{ cls.pct.toFixed(1) }}%</span>
+                    </div>
+                </div>
+            </div>
+            <Table v-else>
                 <TableHeader>
                     <TableRow>
                         <TableHead style="width: 60px">Shape</TableHead>
@@ -238,47 +324,7 @@
                         class="odd:bg-muted/50"
                     >
                         <TableCell>
-                            <Popover>
-                                <PopoverTrigger as-child>
-                                    <button
-                                        type="button"
-                                        :aria-label="`Show details for Class ${cls.classNum}: ${cls.name}`"
-                                        class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                    >
-                                        <FlowClassGlyph :class-num="cls.classNum" size="sm" />
-                                    </button>
-                                </PopoverTrigger>
-                                <PopoverContent class="w-80" side="right">
-                                    <div
-                                        class="flex justify-center mb-3 py-2 bg-muted/30 rounded-md"
-                                    >
-                                        <FlowClassGlyph :class-num="cls.classNum" size="lg" />
-                                    </div>
-                                    <PopoverHeader>
-                                        <PopoverTitle
-                                            >Class {{ cls.classNum }}: {{ cls.name }}</PopoverTitle
-                                        >
-                                    </PopoverHeader>
-                                    <SeverityBadge :severity="cls.severity" />
-                                    <p class="text-sm text-muted-foreground">
-                                        {{ FLOW_LIMITATION_CLASSES[cls.classNum]?.description }}
-                                    </p>
-                                    <p class="text-xs text-muted-foreground">
-                                        <strong class="text-foreground">Visual:</strong>
-                                        {{
-                                            FLOW_LIMITATION_CLASSES[cls.classNum]
-                                                ?.visualCharacteristics
-                                        }}
-                                    </p>
-                                    <p class="text-xs text-muted-foreground">
-                                        <strong class="text-foreground">Clinical:</strong>
-                                        {{
-                                            FLOW_LIMITATION_CLASSES[cls.classNum]
-                                                ?.clinicalSignificance
-                                        }}
-                                    </p>
-                                </PopoverContent>
-                            </Popover>
+                            <FlowClassPopover :fl-class="cls" />
                         </TableCell>
                         <TableCell>{{ cls.classNum }}</TableCell>
                         <TableCell>{{ cls.name }}</TableCell>
@@ -363,7 +409,36 @@
 
             <div v-if="comparison.false_negatives?.length" class="compare-table-section">
                 <h3>False Negatives (machine events missed by programmatic)</h3>
-                <Table>
+                <div v-if="isMobile" class="card-list">
+                    <div
+                        v-for="(e, i) in comparison.false_negatives"
+                        :key="'fn-' + i"
+                        class="data-card"
+                    >
+                        <div class="data-card-header">
+                            <span
+                                class="event-badge"
+                                :style="{ background: EVENT_COLORS[e.event_type] ?? '#ddd' }"
+                                >{{ e.event_type }}</span
+                            >
+                            <RouterLink
+                                :to="{
+                                    name: 'session-detail',
+                                    params: { id: sessionId },
+                                    query: { t: e.start_time },
+                                }"
+                                class="mobile-card-time text-primary hover:underline"
+                            >
+                                {{ formatTimeOffset(e.start_time) }}
+                            </RouterLink>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Duration</span>
+                            <span class="data-card-value">{{ e.duration.toFixed(1) }}s</span>
+                        </div>
+                    </div>
+                </div>
+                <Table v-else>
                     <TableHeader>
                         <TableRow>
                             <TableHead style="width: 80px">Type</TableHead>
@@ -410,7 +485,46 @@
                 class="compare-table-section"
             >
                 <h3>False Positives (programmatic events not in machine)</h3>
-                <Table>
+                <div v-if="isMobile" class="card-list">
+                    <div v-for="(e, i) in allFalsePositives" :key="'fp-' + i" class="data-card">
+                        <div class="data-card-header">
+                            <span
+                                class="event-badge"
+                                :style="{ background: EVENT_COLORS[e.event_type] ?? '#ddd' }"
+                                >{{ e.event_type }}</span
+                            >
+                            <RouterLink
+                                :to="{
+                                    name: 'session-detail',
+                                    params: { id: sessionId },
+                                    query: { t: e.start_time },
+                                }"
+                                class="mobile-card-time text-primary hover:underline"
+                            >
+                                {{ formatTimeOffset(e.start_time) }}
+                            </RouterLink>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Duration</span>
+                            <span class="data-card-value">{{ e.duration.toFixed(1) }}s</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Confidence</span>
+                            <span class="data-card-value">{{
+                                e.confidence != null ? (e.confidence * 100).toFixed(0) + '%' : '---'
+                            }}</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Flow Red.</span>
+                            <span class="data-card-value">{{
+                                e.flow_reduction != null
+                                    ? (e.flow_reduction * 100).toFixed(0) + '%'
+                                    : '---'
+                            }}</span>
+                        </div>
+                    </div>
+                </div>
+                <Table v-else>
                     <TableHeader>
                         <TableRow>
                             <TableHead style="width: 80px">Type</TableHead>
@@ -475,21 +589,16 @@ import {
 import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Loader2, AlertTriangle, ArrowLeft, BarChart3, Play, ChevronDown } from '@lucide/vue'
-import {
-    Popover,
-    PopoverContent,
-    PopoverHeader,
-    PopoverTitle,
-    PopoverTrigger,
-} from '@/components/ui/popover'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import StatCard from '@/components/StatCard.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import FlowClassGlyph from '@/components/FlowClassGlyph.vue'
+import FlowClassPopover from '@/components/FlowClassPopover.vue'
 import SeverityBadge from '@/components/SeverityBadge.vue'
 import { getAnalysis, runAnalysis } from '@/api/analysis'
 import { getWaveformCompare } from '@/api/waveforms'
 import { useAuth } from '@/composables/useAuth'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
 import { FLOW_LIMITATION_CLASSES } from '@/utils/flowLimitation'
@@ -503,6 +612,7 @@ interface FlowAnalysis {
 }
 
 const { canWrite } = useAuth()
+const { isMobile } = useIsMobile()
 
 const props = defineProps<{ sessionId: number }>()
 
@@ -738,5 +848,12 @@ onMounted(async () => {
     font-size: 0.95rem;
     font-weight: 600;
     margin-bottom: 0.5rem;
+}
+
+/* Supplement to the shared .data-card-header: times render lighter and smaller
+   than the bold header text; space-between already pushes them right. */
+.mobile-card-time {
+    font-weight: 400;
+    font-size: 0.875rem;
 }
 </style>

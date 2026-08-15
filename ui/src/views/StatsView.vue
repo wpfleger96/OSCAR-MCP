@@ -459,4 +459,21 @@ const anyVisibleChart = computed(() => selectedMetrics.value.some((key) => hasDa
     text-align: center;
     padding: 1.5rem 0;
 }
+
+@media (max-width: 767.98px) {
+    .control-group {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.375rem;
+    }
+
+    .control-label {
+        width: auto;
+        padding-top: 0;
+    }
+
+    .control-group [data-slot='toggle-group'] {
+        flex-wrap: wrap;
+    }
+}
 </style>

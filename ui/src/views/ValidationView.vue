@@ -99,6 +99,7 @@
                 />
             </div>
 
+            <!-- Deliberate mobile treatment: this dense validation metrics matrix stays a horizontally scrolling table rather than cards. -->
             <div class="rounded-md border overflow-x-auto">
                 <Table>
                     <TableHeader>

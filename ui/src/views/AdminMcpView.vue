@@ -482,4 +482,36 @@ async function handleResetAll(): Promise<void> {
 .action-btn--destructive:hover {
     background: hsl(from var(--color-destructive) h s l / 0.08);
 }
+
+@media (max-width: 767.98px) {
+    /* Stack label above value instead of a 9rem label column */
+    .status-row,
+    .detail-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.25rem;
+    }
+
+    .status-label,
+    .detail-label {
+        min-width: 0;
+        padding-top: 0;
+    }
+
+    .endpoint-row {
+        width: 100%;
+    }
+
+    /* Scroll the table inside itself rather than widening the page */
+    .bindings-table {
+        display: block;
+        overflow-x: auto;
+    }
+
+    /* Comfortable tap targets — mirrors the shared layout.css mobile rule,
+       which this scoped .action-btn otherwise out-specifies */
+    .action-btn {
+        padding: 0.5rem 0.875rem;
+    }
+}
 </style>

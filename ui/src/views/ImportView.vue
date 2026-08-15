@@ -841,4 +841,18 @@ onUnmounted(() => {
     color: var(--color-destructive);
     margin: 0;
 }
+
+/* ---- Mobile (<768px) ---- */
+
+@media (max-width: 767.98px) {
+    .card-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    /* 44px minimum tap height; min-height wins over the Button's layered h-9 */
+    .card-actions > * {
+        min-height: var(--tap-target);
+    }
+}
 </style>

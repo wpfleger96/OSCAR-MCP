@@ -13,6 +13,7 @@ import type {
     RxPeriodResponse,
     RxComparisonResponse,
     RxChangesResponse,
+    RxAllResponse,
     SessionDetail,
     EventItem,
     WaveformDataResponse,
@@ -434,6 +435,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1470,
             start_time: '2026-04-06T23:42:24',
+            therapy_day: '2026-04-06',
             duration_hours: 9.59,
             ahi: 0.52,
             enabled: true,
@@ -444,6 +446,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1473,
             start_time: '2026-04-06T00:21:31',
+            therapy_day: '2026-04-05',
             duration_hours: 7.95,
             ahi: 0.38,
             enabled: true,
@@ -454,6 +457,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1463,
             start_time: '2026-04-04T23:57:10',
+            therapy_day: '2026-04-04',
             duration_hours: 8.78,
             ahi: 0.34,
             enabled: true,
@@ -464,6 +468,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1469,
             start_time: '2026-04-03T23:48:52',
+            therapy_day: '2026-04-03',
             duration_hours: 9.13,
             ahi: 0.77,
             enabled: true,
@@ -474,6 +479,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1468,
             start_time: '2026-04-02T23:57:20',
+            therapy_day: '2026-04-02',
             duration_hours: 8.54,
             ahi: 0.47,
             enabled: true,
@@ -484,6 +490,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1461,
             start_time: '2026-04-02T00:10:10',
+            therapy_day: '2026-04-01',
             duration_hours: 2.32,
             ahi: 0.43,
             enabled: true,
@@ -494,6 +501,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1460,
             start_time: '2026-04-01T00:11:06',
+            therapy_day: '2026-03-31',
             duration_hours: 8.23,
             ahi: 0.24,
             enabled: true,
@@ -504,6 +512,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1471,
             start_time: '2026-03-30T23:12:31',
+            therapy_day: '2026-03-30',
             duration_hours: 10.02,
             ahi: 0.3,
             enabled: true,
@@ -514,6 +523,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1464,
             start_time: '2026-03-30T06:07:33',
+            therapy_day: '2026-03-29',
             duration_hours: 3.56,
             ahi: 0.56,
             enabled: true,
@@ -524,6 +534,7 @@ export const sessionsFixture: PaginatedResponse<SessionListItem> = {
         {
             id: 1458,
             start_time: '2026-03-29T04:05:25',
+            therapy_day: '2026-03-28',
             duration_hours: 5.9,
             ahi: 1.19,
             enabled: true,
@@ -1032,6 +1043,14 @@ export const rxChangesFixture: RxChangesResponse = {
             new_value: '4',
         },
     ],
+}
+
+export const rxAllFixture: RxAllResponse = {
+    current: rxCurrentFixture,
+    history: rxHistoryFixture,
+    changes: rxChangesFixture,
+    best_index: rxCompareFixture.best_index,
+    worst_index: rxCompareFixture.worst_index,
 }
 
 export const maskLogFixture: MaskLogEntryResponse[] = [

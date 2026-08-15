@@ -305,4 +305,11 @@ async function handleCreate() {
 .field-input {
     flex: 1;
 }
+
+@media (max-width: 767.98px) {
+    /* Badges/actions drop to a second line instead of crushing the name */
+    .profile-item {
+        flex-wrap: wrap;
+    }
+}
 </style>

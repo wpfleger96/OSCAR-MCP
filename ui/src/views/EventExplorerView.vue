@@ -81,8 +81,49 @@
             </InfoHint>
         </div>
 
-        <!-- Event List -->
-        <Table>
+        <!-- Event List (mobile cards) -->
+        <div v-if="isMobile" class="card-list">
+            <div v-for="(row, i) in paginatedEvents" :key="i" class="data-card">
+                <div class="data-card-header">
+                    <span
+                        class="event-badge"
+                        :style="{ background: EVENT_COLORS[row.event_type] ?? '#ccc' }"
+                    >
+                        {{ row.event_type }}
+                    </span>
+                    <button
+                        type="button"
+                        class="time-link text-primary"
+                        @click="jumpToWaveform(row.offset_seconds)"
+                    >
+                        {{ formatTimeOffset(row.offset_seconds) }}
+                    </button>
+                </div>
+                <div class="data-card-row">
+                    <span class="data-card-label">Duration</span>
+                    <span class="data-card-value">{{ row.duration_seconds.toFixed(1) }}s</span>
+                </div>
+                <div class="data-card-row">
+                    <span class="data-card-label"
+                        >SpO₂ Drop <InfoHint glossary-key="spo2_drop"
+                    /></span>
+                    <span class="data-card-value">{{
+                        row.spo2_drop != null ? row.spo2_drop.toFixed(1) + '%' : emDash
+                    }}</span>
+                </div>
+                <div class="data-card-row">
+                    <span class="data-card-label">Peak FL <InfoHint glossary-key="peak_fl" /></span>
+                    <span class="data-card-value">{{
+                        row.peak_flow_limitation != null
+                            ? row.peak_flow_limitation.toFixed(2)
+                            : emDash
+                    }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Event List (desktop table) -->
+        <Table v-else>
             <TableHeader>
                 <TableRow>
                     <TableHead style="width: 80px">Type</TableHead>
@@ -127,29 +168,12 @@
             </TableBody>
         </Table>
 
-        <div v-if="totalPages > 1" class="flex items-center justify-between px-2 py-4">
-            <span class="text-sm text-muted-foreground">
-                Page {{ currentPage + 1 }} of {{ totalPages }}
-            </span>
-            <div class="flex gap-2">
-                <Button
-                    variant="outline"
-                    size="sm"
-                    :disabled="currentPage === 0"
-                    @click="currentPage--"
-                >
-                    Previous
-                </Button>
-                <Button
-                    variant="outline"
-                    size="sm"
-                    :disabled="currentPage >= totalPages - 1"
-                    @click="currentPage++"
-                >
-                    Next
-                </Button>
-            </div>
-        </div>
+        <PaginationBar
+            :offset="currentPage * pageSize"
+            :page-size="pageSize"
+            :total="filteredEvents.length"
+            @page="(newOffset) => (currentPage = Math.floor(newOffset / pageSize))"
+        />
     </div>
 </template>
 
@@ -164,14 +188,15 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
-import { Button } from '@/components/ui/button'
 import { Loader2, ArrowLeft } from '@lucide/vue'
 import StatCard from '@/components/StatCard.vue'
+import PaginationBar from '@/components/PaginationBar.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import EventTypeLegend from '@/components/EventTypeLegend.vue'
 import { getSessionEvents, getEventMatch } from '@/api/events'
 import { getSession } from '@/api/sessions'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { formatTimeOffset } from '@/utils/formatting'
 import { EVENT_COLORS } from '@/types'
 import type { EventItem, EventMatchResult } from '@/types'
@@ -180,6 +205,7 @@ import ErrorState from '@/components/ErrorState.vue'
 const emDash = '\u2014' // em-dash used for null display
 const props = defineProps<{ sessionId: number }>()
 const router = useRouter()
+const { isMobile } = useIsMobile()
 
 const activeTypes = ref<Set<string>>(new Set())
 const currentPage = ref(0)
@@ -214,8 +240,6 @@ const paginatedEvents = computed(() => {
     const start = currentPage.value * pageSize
     return filteredEvents.value.slice(start, start + pageSize)
 })
-
-const totalPages = computed(() => Math.ceil(filteredEvents.value.length / pageSize))
 
 const eventsPerHour = computed(() => {
     if (!sessionDuration.value) return null
@@ -265,14 +289,6 @@ function jumpToWaveform(offsetSec: number): void {
     gap: 0.5rem;
 }
 
-.filter-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 1rem;
-    flex-wrap: wrap;
-}
-
 .type-chips {
     display: flex;
     gap: 0.4rem;
@@ -299,5 +315,11 @@ function jumpToWaveform(offsetSec: number): void {
 }
 .time-link:hover {
     text-decoration: underline;
+}
+
+@media (max-width: 767.98px) {
+    .time-link {
+        min-height: var(--tap-target);
+    }
 }
 </style>

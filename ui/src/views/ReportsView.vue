@@ -325,4 +325,10 @@ async function handleGenerate(): Promise<void> {
     font-size: 0.875rem;
     color: var(--color-muted-foreground);
 }
+
+@media (max-width: 767.98px) {
+    .rx-select {
+        max-width: none;
+    }
+}
 </style>

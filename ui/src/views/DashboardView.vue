@@ -172,13 +172,33 @@
                     </p>
                 </InfoHint>
             </h2>
-            <CalendarHeatmap :days="days" @day-click="onDayClick" />
+            <CalendarHeatmap :days="days" :months-back="isMobile ? 3 : 6" @day-click="onDayClick" />
         </div>
 
         <!-- Recent Sessions -->
         <div v-if="recentSessions.length" class="section-card">
             <h2>Recent Sessions</h2>
-            <Table>
+            <div v-if="isMobile" class="card-list">
+                <RouterLink
+                    v-for="session in recentSessions"
+                    :key="session.id"
+                    class="data-card"
+                    :to="{ name: 'session-detail', params: { id: session.id } }"
+                >
+                    <div class="data-card-header">{{ formatDateFull(session.therapy_day) }}</div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Duration</span>
+                        <span class="data-card-value"
+                            >{{ session.duration_hours.toFixed(1) }}h</span
+                        >
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">AHI</span>
+                        <span class="data-card-value">{{ session.ahi?.toFixed(1) ?? '---' }}</span>
+                    </div>
+                </RouterLink>
+            </div>
+            <Table v-else>
                 <TableHeader>
                     <TableRow>
                         <TableHead>Date</TableHead>
@@ -207,7 +227,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -228,6 +248,7 @@ import { getDays } from '@/api/days'
 import { getSessions } from '@/api/sessions'
 import { getHealthNights } from '@/api/health'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { formatDateFull } from '@/utils/formatting'
 import { AHI_COLOR_SCALE } from '@/utils/ahiScale'
 import { EVENT_COLORS } from '@/types'
@@ -240,6 +261,7 @@ function thirtyDaysAgo(): string {
 }
 
 const router = useRouter()
+const { isMobile } = useIsMobile()
 
 // Dashboard gracefully shows empty sections on error, so `error` is unused.
 const { data, loading } = useApiLoad(async () => {

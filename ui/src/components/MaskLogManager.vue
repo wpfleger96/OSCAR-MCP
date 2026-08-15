@@ -756,4 +756,11 @@ async function handleDelete() {
     margin-bottom: 0.5rem;
     color: var(--color-muted-foreground);
 }
+
+@media (max-width: 767.98px) {
+    .epoch-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+}
 </style>

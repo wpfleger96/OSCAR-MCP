@@ -1070,4 +1070,28 @@ async function handleDeleteData(): Promise<void> {
     width: auto;
     align-self: flex-start;
 }
+
+@media (max-width: 767.98px) {
+    /* Stack label above value instead of a 7rem label column */
+    .field-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.25rem;
+    }
+
+    .field-label {
+        min-width: 0;
+    }
+
+    /* Comfortable tap target — mirrors the shared layout.css mobile rule,
+       which this scoped .action-btn otherwise out-specifies */
+    .action-btn {
+        padding: 0.5rem 0.875rem;
+    }
+
+    .totp-code-input {
+        width: 100%;
+        max-width: 12rem;
+    }
+}
 </style>
