@@ -30,6 +30,8 @@ dependencies = [
     "authlib>=1.4.0",
     "fastmcp>=3,<4",
     "matplotlib>=3.11",
+    "pyotp>=2.9.0",
+    "segno>=1.6.0",
 ]
 
 [project.optional-dependencies]

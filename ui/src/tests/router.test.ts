@@ -4,11 +4,13 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { ref } from 'vue'
 
 vi.mock('@/composables/useAuth')
+vi.mock('@/api/me', () => ({ getPreferences: vi.fn() }))
 
 // Import the production guard — guard logic comes from the real module, not a copy.
 // The default export (router instance) is used in the route resolution tests below.
 import router, { authGuard } from '@/router'
 import { useAuth } from '@/composables/useAuth'
+import { getPreferences } from '@/api/me'
 import { makeAuthMock as baseMakeAuthMock } from './helpers/mockUseAuth'
 
 function makeAuthMock(authed: boolean, local: boolean) {
@@ -31,6 +33,8 @@ function makeRoute(
 describe('authGuard (production)', () => {
     beforeEach(() => {
         vi.resetAllMocks()
+        // resolveLandingPath() calls getPreferences; mock it so redirect destinations are deterministic.
+        vi.mocked(getPreferences).mockResolvedValue({ landing_page: 'dashboard' } as never)
     })
 
     it('test_unauthenticated_access_to_guarded_route_redirects_to_login', async () => {
@@ -118,6 +122,57 @@ describe('authGuard (production)', () => {
         await expect(
             authGuard(makeRoute('/invite', { authFree: true }) as never),
         ).resolves.toBeUndefined()
+    })
+
+    it('test_enrollment_required_redirects_to_totp_enroll', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                totpEnrollmentRequired: ref(true) as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/sessions') as never)
+        expect(result).toBe('/totp-enroll')
+    })
+
+    it('test_enrollment_required_does_not_redirect_to_totp_enroll_when_already_there', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                totpEnrollmentRequired: ref(true) as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/totp-enroll') as never)
+        expect(result).toBeUndefined()
+    })
+
+    it('test_totp_enroll_redirects_away_when_enrollment_not_required', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(true) as never,
+                isLocal: ref(false) as never,
+                totpEnrollmentRequired: ref(false) as never,
+            }) as never,
+        )
+        vi.mocked(getPreferences).mockResolvedValueOnce({ landing_page: 'dashboard' } as never)
+        const result = await authGuard(makeRoute('/totp-enroll') as never)
+        // Guard calls resolveLandingPath() → getPreferences() → '/dashboard'.
+        expect(result).toBe('/dashboard')
+    })
+
+    it('test_enrollment_required_does_not_apply_in_local_mode', async () => {
+        vi.mocked(useAuth).mockReturnValue(
+            baseMakeAuthMock({
+                isAuthenticated: ref(false) as never,
+                isLocal: ref(true) as never,
+                totpEnrollmentRequired: ref(true) as never,
+            }) as never,
+        )
+        const result = await authGuard(makeRoute('/sessions') as never)
+        // Local mode users bypass TOTP enforcement — no redirect to /totp-enroll
+        expect(result).toBeUndefined()
     })
 })
 

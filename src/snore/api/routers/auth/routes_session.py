@@ -52,6 +52,13 @@ from snore.auth.passwords import (
     verify_password_async,
 )
 from snore.auth.session_cookie import clear_session_cookie
+from snore.auth.totp import (
+    consume_pending_token,
+    decode_totp_pending_token,
+    encode_totp_pending_token,
+    is_token_consumed,
+    verify_totp_or_recovery,
+)
 from snore.database import models
 
 router = APIRouter()
@@ -60,6 +67,17 @@ router = APIRouter()
 class LoginRequest(BaseModel):
     email: Annotated[str, StringConstraints(max_length=EMAIL_MAX_LEN)]
     password: Annotated[str, StringConstraints(max_length=PASSWORD_MAX_CHARS)]
+
+
+class LoginResponse(BaseModel):
+    message: str | None = None
+    totp_required: bool = False
+    pending_token: str | None = None
+
+
+class TotpChallengeRequest(BaseModel):
+    pending_token: Annotated[str, StringConstraints(max_length=512)]
+    code: Annotated[str, StringConstraints(max_length=32)]
 
 
 class ActiveProfileRequest(BaseModel):
@@ -76,6 +94,7 @@ class UserInfo(BaseModel):
     email: str
     display_name: str | None
     role: str
+    totp_enabled: bool = False
 
 
 class AuthStatusResponse(BaseModel):
@@ -85,9 +104,10 @@ class AuthStatusResponse(BaseModel):
     profiles: list[ProfileInfo] = []
     active_profile_id: int | None = None
     demo_available: bool = False
+    totp_enrollment_required: bool = False
 
 
-@router.post("/login", response_model=MessageResponse)
+@router.post("/login", response_model=LoginResponse)
 async def login(
     request: Request,
     body: LoginRequest,
@@ -143,6 +163,25 @@ async def login(
         user_row.password_hash = new_hash
 
     lockout.record_success(canonical, ip)
+
+    # TOTP 2FA branch: if the user has active TOTP enrollment, return a
+    # time-limited pending token for the second factor instead of issuing a
+    # full session cookie.  The full session cookie is withheld until both
+    # factors complete — issuing it after password success and validating TOTP
+    # lazily would let users bypass 2FA (e.g., by clearing cookies or using
+    # the cookie directly before the TOTP check runs).  last_login_at is
+    # updated only when full auth completes (POST /login/totp).
+    if user_row.totp_secret is not None and user_row.totp_enabled_at is not None:
+        return JSONResponse(
+            content={
+                "totp_required": True,
+                "pending_token": encode_totp_pending_token(
+                    cfg.session_secret, user_row.id
+                ),
+            },
+            headers=NO_STORE,
+        )
+
     user_row.last_login_at = datetime.now(UTC)
 
     # Opportunistic cleanup of expired/consumed oauth_attempts rows.
@@ -164,6 +203,78 @@ async def login(
         response,
         cfg,
         SessionTicket(actor.user_id, actor.profile_id, user_row.session_version),
+    )
+    return response
+
+
+@router.post("/login/totp", response_model=MessageResponse)
+async def login_totp(
+    request: Request,
+    body: TotpChallengeRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JSONResponse:
+    """Complete a TOTP second-factor challenge issued by POST /login.
+
+    The ``pending_token`` must be the value returned by a successful password
+    verification within the last 5 minutes.  Accepts a 6-digit TOTP code or a
+    10-char lowercase hex recovery code.  All failures return the same generic
+    401 to prevent oracle attacks.
+    """
+    cfg = get_config()
+    lockout = get_lockout_store()
+    ip = get_client_ip(request)
+
+    user_id = decode_totp_pending_token(cfg.session_secret, body.pending_token)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    # Reject already-consumed tokens — prevents replay within the 5-minute window.
+    if is_token_consumed(body.pending_token):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    user = await db.get(models.User, user_id)
+    if (
+        user is None
+        or user.disabled_at is not None
+        or user.totp_secret is None
+        or user.totp_enabled_at is None
+    ):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    if lockout.is_locked(user.canonical_email, ip):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    code = body.code.strip()
+    ok, matched_step = await verify_totp_or_recovery(db, user, code)
+
+    if not ok:
+        lockout.record_failure(user.canonical_email, ip)
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    if matched_step is not None:
+        user.totp_last_used_step = matched_step
+
+    lockout.record_success(user.canonical_email, ip)
+    consume_pending_token(
+        body.pending_token
+    )  # single-use: prevent replay within window
+    user.last_login_at = datetime.now(UTC)
+
+    factory = ActorContextFactory(db)
+    actor = await factory.make(
+        user_id=user.id,
+        active_profile_id=user.default_profile_id,
+        mode=cfg.auth_mode,
+    )
+
+    response = JSONResponse(
+        content={"message": "Logged in"},
+        headers=NO_STORE,
+    )
+    apply_session_cookie(
+        response,
+        cfg,
+        SessionTicket(actor.user_id, actor.profile_id, user.session_version),
     )
     return response
 
@@ -304,10 +415,12 @@ async def auth_status(
                 email=user.canonical_email,
                 display_name=user.display_name,
                 role=user.role,
+                totp_enabled=user.totp_enabled_at is not None,
             ),
             profiles=[ProfileInfo(id=p.id, name=p.name) for p in profiles_rows],
             active_profile_id=actor.profile_id,
             demo_available=demo_available,
+            totp_enrollment_required=actor.enrollment_required,
         ).model_dump(),
         headers=NO_STORE,
     )

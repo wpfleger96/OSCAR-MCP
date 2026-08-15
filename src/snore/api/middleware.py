@@ -24,6 +24,14 @@
 ``RateLimitMiddleware``
     Per-IP sliding-window rate limiter (30 req/60 s) on ``/api/v1/auth/``
     in multiuser mode.  Uses the canonical trusted-client-IP helper.
+
+``TotpEnforcementMiddleware``
+    When ``SNORE_REQUIRE_TOTP`` is on and the resolved actor has
+    ``enrollment_required=True``, all ``/api/`` requests are blocked with 403
+    except the TOTP enrollment path prefix and a small set of exact auth paths
+    (logout, status, me).  Non-API paths (SPA, static assets) always pass
+    through so the frontend can render the enrollment UI without an auth gate.
+    Runs after ``AuthMiddleware`` so ``request.state.actor`` is already set.
 """
 
 from __future__ import annotations
@@ -140,11 +148,24 @@ async def _resolve_multiuser_actor(request: Request) -> ActorContext | None:
             from snore.auth.factory import ActorContextFactory  # noqa: PLC0415
 
             factory = ActorContextFactory(db)
-            return await factory.make(
+            actor = await factory.make(
                 user_id=user_id,
                 active_profile_id=active_profile_id,
                 mode=AuthMode.MULTIUSER,
             )
+            # Local accounts (password_hash set) that have never completed TOTP
+            # enrollment require it when enforcement is on.  Google-only accounts
+            # (password_hash is None) and demo users are exempt.
+            if (
+                cfg.require_totp
+                and user.password_hash is not None
+                and user.totp_enabled_at is None
+                and user.role != "demo"
+            ):
+                import dataclasses  # noqa: PLC0415
+
+                actor = dataclasses.replace(actor, enrollment_required=True)
+            return actor
     except Exception as exc:
         logger.warning("Multiuser actor resolution failed: %s", exc)
         return None
@@ -363,3 +384,67 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
 
         return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# TotpEnforcementMiddleware
+# ---------------------------------------------------------------------------
+
+_TOTP_ENROLLMENT_PATH_PREFIX = "/api/v1/auth/me/totp"
+_TOTP_ENFORCEMENT_EXEMPT_PATHS = frozenset(
+    {
+        "/api/v1/auth/logout",
+        "/api/v1/auth/status",
+        "/api/v1/auth/me",
+    }
+)
+
+
+class TotpEnforcementMiddleware(BaseHTTPMiddleware):
+    """Gate API access for users who must complete TOTP enrollment.
+
+    When ``SNORE_REQUIRE_TOTP`` is on and the resolved actor has
+    ``enrollment_required=True``, all ``/api/`` requests are blocked with 403
+    except:
+    - any path starting with ``/api/v1/auth/me/totp`` (enrollment flow)
+    - exact paths ``/api/v1/auth/logout``, ``/api/v1/auth/status``,
+      ``/api/v1/auth/me``
+
+    Paths outside ``/api/`` (SPA, static assets, index.html) always pass
+    through untouched so the frontend can load the enrollment UI.
+
+    Depends on ``request.state.actor`` populated by ``AuthMiddleware``, which
+    must be outer (run first) in the Starlette middleware stack.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        actor = getattr(request.state, "actor", None)
+
+        if actor is None or not actor.enrollment_required:
+            return await call_next(request)
+
+        path = request.url.path
+
+        # Non-API paths pass through — SPA must load so the enrollment UI renders.
+        if not path.startswith("/api/"):
+            return await call_next(request)
+
+        # TOTP enrollment routes are always permitted.
+        if path == _TOTP_ENROLLMENT_PATH_PREFIX or path.startswith(
+            _TOTP_ENROLLMENT_PATH_PREFIX + "/"
+        ):
+            return await call_next(request)
+
+        # A small set of auth utility paths must remain reachable during enrollment.
+        if path in _TOTP_ENFORCEMENT_EXEMPT_PATHS:
+            return await call_next(request)
+
+        from starlette.responses import JSONResponse  # noqa: PLC0415
+
+        return JSONResponse(
+            {"detail": "TOTP enrollment required", "totp_enrollment_required": True},
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )

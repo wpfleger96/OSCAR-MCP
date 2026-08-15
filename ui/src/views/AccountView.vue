@@ -151,6 +151,197 @@
                 />
             </div>
 
+            <!-- Two-factor authentication card — password accounts only -->
+            <div v-if="me.has_password && !isDemo" class="section-card">
+                <h2>Two-factor authentication</h2>
+
+                <div v-if="totpLoading" class="loading-state">
+                    <Loader2 class="h-4 w-4 animate-spin" />
+                    <span>Loading…</span>
+                </div>
+
+                <div v-else-if="totpLoadError" class="error-state">
+                    <span>{{ totpLoadError }}</span>
+                </div>
+
+                <!-- Not enrolled -->
+                <template v-else-if="totpStatus && !totpStatus.enabled">
+                    <template v-if="!showingEnrollWizard">
+                        <p class="field-hint">
+                            Adds a second step to password sign-in using an authenticator app.
+                        </p>
+                        <Button class="self-start" @click="startEnrollment">
+                            Set up two-factor auth
+                        </Button>
+                        <p v-if="totpActionError" role="alert" class="form-error">
+                            {{ totpActionError }}
+                        </p>
+                    </template>
+                    <template v-else>
+                        <TotpEnrollmentWizard @done="onEnrollDone" />
+                        <button
+                            type="button"
+                            class="action-btn action-btn--ghost"
+                            @click="showingEnrollWizard = false"
+                        >
+                            Cancel
+                        </button>
+                    </template>
+                </template>
+
+                <!-- Enrolled -->
+                <template v-else-if="totpStatus && totpStatus.enabled">
+                    <div class="field-row">
+                        <span class="field-label">Status</span>
+                        <span class="field-value totp-enabled-badge">Enabled</span>
+                    </div>
+                    <div class="field-row">
+                        <span class="field-label">Recovery codes</span>
+                        <span
+                            class="field-value"
+                            :class="{
+                                'totp-low-codes': (totpStatus.recovery_codes_remaining ?? 0) <= 3,
+                            }"
+                        >
+                            {{ totpStatus.recovery_codes_remaining ?? 0 }} remaining
+                            <span
+                                v-if="(totpStatus.recovery_codes_remaining ?? 0) <= 3"
+                                class="low-codes-warning"
+                            >
+                                — Few recovery codes left, regenerate soon
+                            </span>
+                        </span>
+                    </div>
+
+                    <!-- Regenerate flow -->
+                    <template v-if="showingRegenWizard">
+                        <p class="field-hint">
+                            Enter your current authenticator code to regenerate recovery codes:
+                        </p>
+                        <form class="stacked-form" @submit.prevent="submitRegenCodes">
+                            <input
+                                v-model="regenCode"
+                                type="text"
+                                inputmode="numeric"
+                                pattern="[0-9]{6}"
+                                maxlength="6"
+                                placeholder="123456"
+                                class="field-input totp-code-input"
+                                autocomplete="one-time-code"
+                                :disabled="regenBusy"
+                            />
+                            <p v-if="regenError" role="alert" class="form-error">
+                                {{ regenError }}
+                            </p>
+                            <div class="inline-row">
+                                <Button
+                                    type="submit"
+                                    :disabled="regenBusy || regenCode.length !== 6"
+                                >
+                                    <Loader2 v-if="regenBusy" class="h-4 w-4 animate-spin" />
+                                    <span v-else>Regenerate</span>
+                                </Button>
+                                <button
+                                    type="button"
+                                    class="action-btn action-btn--ghost"
+                                    :disabled="regenBusy"
+                                    @click="cancelRegen"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </form>
+                        <!-- Show new codes after regeneration -->
+                        <template v-if="newRecoveryCodes.length > 0">
+                            <p class="field-hint">
+                                <strong>Save these new recovery codes.</strong> Your old codes are
+                                now invalid.
+                            </p>
+                            <RecoveryCodesDisplay
+                                :codes="newRecoveryCodes"
+                                v-model="regenAcknowledged"
+                            />
+                            <Button
+                                class="self-start"
+                                :disabled="!regenAcknowledged"
+                                @click="finishRegen"
+                            >
+                                Done
+                            </Button>
+                        </template>
+                    </template>
+
+                    <!-- Disable flow -->
+                    <template v-else-if="showingDisableForm">
+                        <p class="field-hint">
+                            Enter your current password and authenticator code (or a recovery code)
+                            to disable two-factor auth:
+                        </p>
+                        <form class="stacked-form" @submit.prevent="submitDisable">
+                            <div class="field-group">
+                                <label for="disable-password" class="field-label">Password</label>
+                                <input
+                                    id="disable-password"
+                                    v-model="disablePassword"
+                                    type="password"
+                                    autocomplete="current-password"
+                                    class="field-input"
+                                    :disabled="disableBusy"
+                                />
+                            </div>
+                            <div class="field-group">
+                                <label for="disable-code" class="field-label">Code</label>
+                                <input
+                                    id="disable-code"
+                                    v-model="disableCode"
+                                    type="text"
+                                    class="field-input totp-code-input"
+                                    placeholder="123456 or recovery code"
+                                    autocomplete="one-time-code"
+                                    :disabled="disableBusy"
+                                />
+                            </div>
+                            <p v-if="disableError" role="alert" class="form-error">
+                                {{ disableError }}
+                            </p>
+                            <div class="inline-row">
+                                <Button
+                                    type="submit"
+                                    variant="destructive"
+                                    :disabled="disableBusy || !disablePassword || !disableCode"
+                                >
+                                    <Loader2 v-if="disableBusy" class="h-4 w-4 animate-spin" />
+                                    <span v-else>Disable 2FA</span>
+                                </Button>
+                                <button
+                                    type="button"
+                                    class="action-btn action-btn--ghost"
+                                    :disabled="disableBusy"
+                                    @click="cancelDisable"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </form>
+                    </template>
+
+                    <!-- Enrolled idle state — action buttons -->
+                    <template v-else>
+                        <div class="totp-enrolled-actions">
+                            <Button variant="outline" @click="showingRegenWizard = true">
+                                Regenerate recovery codes
+                            </Button>
+                            <Button variant="destructive" @click="showingDisableForm = true">
+                                Disable two-factor auth
+                            </Button>
+                        </div>
+                        <p v-if="totpActionError" role="alert" class="form-error">
+                            {{ totpActionError }}
+                        </p>
+                    </template>
+                </template>
+            </div>
+
             <!-- Preferences card -->
             <div class="section-card">
                 <h2>Preferences</h2>
@@ -299,6 +490,8 @@ import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import GoogleSignInButton from '@/components/GoogleSignInButton.vue'
+import TotpEnrollmentWizard from '@/components/TotpEnrollmentWizard.vue'
+import RecoveryCodesDisplay from '@/components/RecoveryCodesDisplay.vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
@@ -311,9 +504,12 @@ import {
     updatePreferences,
     deleteMyData,
 } from '@/api/me'
+import { getTotpStatus, disableTotp, regenerateRecoveryCodes } from '@/api/totp'
 import { listProfiles, setProfileTimezone } from '@/api/profiles'
 import type { components } from '@/types/generated'
 import type { AxiosError } from 'axios'
+
+type TotpStatusResponse = components['schemas']['TotpStatusResponse']
 
 type UserPreferences = components['schemas']['UserPreferences']
 
@@ -421,6 +617,105 @@ async function confirmUnlinkGoogle() {
     } finally {
         unlinking.value = false
     }
+}
+
+// ── Two-factor authentication ─────────────────────────────────────────────────
+
+const totpStatus = ref<TotpStatusResponse | null>(null)
+const totpLoading = ref(false)
+const totpLoadError = ref<string | null>(null)
+const totpActionError = ref<string | null>(null)
+
+const showingEnrollWizard = ref(false)
+
+// Regenerate flow
+const showingRegenWizard = ref(false)
+const regenCode = ref('')
+const regenBusy = ref(false)
+const regenError = ref<string | null>(null)
+const newRecoveryCodes = ref<string[]>([])
+const regenAcknowledged = ref(false)
+
+// Disable flow
+const showingDisableForm = ref(false)
+const disablePassword = ref('')
+const disableCode = ref('')
+const disableBusy = ref(false)
+const disableError = ref<string | null>(null)
+
+async function loadTotpStatus() {
+    if (isDemo.value) return
+    totpLoading.value = true
+    totpLoadError.value = null
+    try {
+        totpStatus.value = await getTotpStatus()
+    } catch (e: unknown) {
+        totpLoadError.value = e instanceof Error ? e.message : 'Failed to load 2FA status'
+    } finally {
+        totpLoading.value = false
+    }
+}
+
+function startEnrollment() {
+    totpActionError.value = null
+    showingEnrollWizard.value = true
+}
+
+async function onEnrollDone() {
+    showingEnrollWizard.value = false
+    await loadTotpStatus()
+}
+
+async function submitRegenCodes() {
+    regenError.value = null
+    regenBusy.value = true
+    try {
+        const result = await regenerateRecoveryCodes({ code: regenCode.value })
+        newRecoveryCodes.value = result.recovery_codes
+        regenCode.value = ''
+    } catch (e: unknown) {
+        regenError.value = e instanceof Error ? e.message : 'Failed to regenerate codes'
+    } finally {
+        regenBusy.value = false
+    }
+}
+
+function cancelRegen() {
+    showingRegenWizard.value = false
+    regenCode.value = ''
+    regenError.value = null
+    newRecoveryCodes.value = []
+    regenAcknowledged.value = false
+}
+
+function finishRegen() {
+    cancelRegen()
+    void loadTotpStatus()
+}
+
+async function submitDisable() {
+    disableError.value = null
+    disableBusy.value = true
+    try {
+        await disableTotp({
+            password: disablePassword.value,
+            code: disableCode.value.trim().toLowerCase(),
+        })
+        // Backend clears the session cookie — sign the user out locally and redirect.
+        clearAuth()
+        router.push('/')
+    } catch (e: unknown) {
+        disableError.value = e instanceof Error ? e.message : 'Failed to disable 2FA'
+    } finally {
+        disableBusy.value = false
+    }
+}
+
+function cancelDisable() {
+    showingDisableForm.value = false
+    disablePassword.value = ''
+    disableCode.value = ''
+    disableError.value = null
 }
 
 // ── Preferences ───────────────────────────────────────────────────────────────
@@ -560,6 +855,7 @@ function applyDetectedTimezone() {
 
 onMounted(() => {
     loadProfileTimezone()
+    void loadTotpStatus()
     if ('google_connected' in route.query) {
         connectSuccess.value = 'Google account linked'
         void router.replace({ path: '/account' })
@@ -737,6 +1033,37 @@ async function handleDeleteData(): Promise<void> {
 
 .action-btn--ghost:hover {
     background: hsl(from var(--color-primary) h s l / 0.08);
+}
+
+.totp-enabled-badge {
+    color: var(--color-success, var(--color-primary));
+    font-weight: 500;
+}
+
+.totp-low-codes {
+    color: var(--color-warning, var(--color-destructive));
+}
+
+.low-codes-warning {
+    font-size: 0.8rem;
+}
+
+.totp-code-input {
+    font-family: monospace;
+    letter-spacing: 0.1em;
+    width: 12rem;
+}
+
+.totp-enrolled-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
 }
 
 .connect-google-btn {

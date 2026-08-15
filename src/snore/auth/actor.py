@@ -42,6 +42,9 @@ class ActorContext:
     profile_id: int
     role: Role
     mode: AuthMode
+    # True when the user must complete TOTP enrollment before accessing the API.
+    # Set by middleware; downstream middleware enforces access control based on this flag.
+    enrollment_required: bool = False
 
     @property
     def can_write(self) -> bool:

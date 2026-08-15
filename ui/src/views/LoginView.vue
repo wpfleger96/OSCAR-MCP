@@ -4,7 +4,7 @@
             <h1 class="login-title">SNORE</h1>
             <p class="login-subtitle">Sleep data, your way.</p>
 
-            <form class="login-form" @submit.prevent="handleLogin">
+            <form v-if="step === 'password'" class="login-form" @submit.prevent="handleLogin">
                 <div class="field-group">
                     <label for="email" class="field-label">Email</label>
                     <input
@@ -38,17 +38,46 @@
                 </Button>
             </form>
 
-            <div class="login-divider"><span>or</span></div>
+            <template v-if="step === 'password'">
+                <div class="login-divider"><span>or</span></div>
 
-            <GoogleSignInButton href="/api/v1/auth/google/login" />
+                <GoogleSignInButton href="/api/v1/auth/google/login" />
 
-            <template v-if="demoAvailable">
-                <p v-if="demoError" role="alert" class="login-error">{{ demoError }}</p>
-                <button class="demo-btn" :disabled="demoLoading" @click="handleDemoLogin">
-                    <Loader2 v-if="demoLoading" class="h-4 w-4 animate-spin mr-2" />
-                    {{ demoLoading ? 'Signing in…' : 'Sign in as Demo' }}
-                </button>
+                <template v-if="demoAvailable">
+                    <p v-if="demoError" role="alert" class="login-error">{{ demoError }}</p>
+                    <button class="demo-btn" :disabled="demoLoading" @click="handleDemoLogin">
+                        <Loader2 v-if="demoLoading" class="h-4 w-4 animate-spin mr-2" />
+                        {{ demoLoading ? 'Signing in…' : 'Sign in as Demo' }}
+                    </button>
+                </template>
             </template>
+
+            <form v-else-if="step === 'totp'" class="login-form" @submit.prevent="handleTotpSubmit">
+                <div class="field-group">
+                    <label for="totp-code" class="field-label">Authentication code</label>
+                    <input
+                        id="totp-code"
+                        v-model="totpCode"
+                        type="text"
+                        autocomplete="one-time-code"
+                        autofocus
+                        class="field-input"
+                        :disabled="loading"
+                    />
+                    <p class="field-hint">A saved recovery code also works.</p>
+                </div>
+
+                <p v-if="errorMessage" role="alert" class="login-error">{{ errorMessage }}</p>
+
+                <Button type="submit" class="login-btn" :disabled="loading">
+                    <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
+                    {{ loading ? 'Verifying…' : 'Verify' }}
+                </Button>
+
+                <button type="button" class="demo-btn" :disabled="loading" @click="handleTotpBack">
+                    Back
+                </button>
+            </form>
         </div>
     </div>
 </template>
@@ -63,14 +92,19 @@ import { useAuth } from '@/composables/useAuth'
 import { resolveLandingPath } from '@/router'
 
 const router = useRouter()
-const { login, demoLogin, demoAvailable, isAuthenticated } = useAuth()
+const { login, submitTotp, clearTotpChallenge, demoLogin, demoAvailable, isAuthenticated } =
+    useAuth()
 
+const step = ref<'password' | 'totp'>('password')
 const email = ref('')
 const password = ref('')
+const totpCode = ref('')
 const loading = ref(false)
 const errorMessage = ref<string | null>(null)
 const demoLoading = ref(false)
 const demoError = ref<string | null>(null)
+// Tracks consecutive TOTP code failures so the UI can surface a retry hint on the 2nd+ attempt.
+const totpFailCount = ref(0)
 
 // When background self-heal authenticates the session while the user sits on the login
 // page, navigate to their landing path. Skip if an explicit login handler is already
@@ -85,7 +119,11 @@ async function handleLogin() {
     errorMessage.value = null
     loading.value = true
     try {
-        await login(email.value, password.value)
+        const { totpRequired } = await login(email.value, password.value)
+        if (totpRequired) {
+            step.value = 'totp'
+            return
+        }
         router.push(await resolveLandingPath())
     } catch (e: unknown) {
         const status = (e as { response?: { status?: number } }).response?.status
@@ -101,6 +139,42 @@ async function handleLogin() {
     } finally {
         loading.value = false
     }
+}
+
+async function handleTotpSubmit() {
+    errorMessage.value = null
+    loading.value = true
+    try {
+        await submitTotp(totpCode.value)
+        totpFailCount.value = 0
+        router.push(await resolveLandingPath())
+    } catch (e: unknown) {
+        totpFailCount.value++
+        const status = (e as { response?: { status?: number } }).response?.status
+        if (status === 401) {
+            const hint =
+                totpFailCount.value >= 2
+                    ? ' If this keeps happening, go back and sign in again.'
+                    : ''
+            errorMessage.value = 'Invalid code — try again' + hint
+        } else if (status === 429) {
+            errorMessage.value = 'Too many attempts — try again later'
+        } else if (!navigator.onLine || (e instanceof Error && e.message === 'Network Error')) {
+            errorMessage.value = 'Unable to reach server'
+        } else {
+            errorMessage.value = e instanceof Error ? e.message : 'Sign-in failed'
+        }
+    } finally {
+        loading.value = false
+    }
+}
+
+function handleTotpBack() {
+    clearTotpChallenge()
+    step.value = 'password'
+    errorMessage.value = null
+    totpCode.value = ''
+    totpFailCount.value = 0
 }
 
 async function handleDemoLogin() {
@@ -130,6 +204,12 @@ async function handleDemoLogin() {
     color: var(--color-muted-foreground);
     text-align: center;
     margin: 0 0 0.5rem;
+}
+
+.field-hint {
+    font-size: 0.75rem;
+    color: var(--color-muted-foreground);
+    margin: 0.25rem 0 0;
 }
 
 .demo-btn {

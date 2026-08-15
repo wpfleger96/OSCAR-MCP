@@ -101,11 +101,17 @@ Environment variables
     is embedded into the FastAPI app and served at ``{SNORE_PUBLIC_BASE_URL}/mcp``.
     The MCP OAuth issuer equals ``SNORE_PUBLIC_BASE_URL`` — no separate MCP
     base URL is needed.  When absent, ``/mcp`` is not served.
+
+``SNORE_REQUIRE_TOTP``
+    ``"1"``, ``"true"``, or ``"yes"`` (case-insensitive) to require TOTP
+    enrollment for password-login users in multiuser mode.  Default: not
+    required.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 
 from dataclasses import dataclass, field
@@ -115,6 +121,8 @@ from urllib.parse import urlparse
 from snore.auth.actor import AuthMode
 from snore.auth.emails import normalize_email
 from snore.constants import DEFAULT_UPLOAD_SPOOL_DIR
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(ValueError):
@@ -189,6 +197,8 @@ class AppConfig:
     )  # Parse process pool size (device-data parsing).
     bootstrap_admin_email: str | None = None
     upload_spool_dir: Path = field(default_factory=lambda: DEFAULT_UPLOAD_SPOOL_DIR)
+    # When True, password-login users in multiuser mode must complete TOTP enrollment.
+    require_totp: bool = False
 
     @property
     def is_multiuser(self) -> bool:
@@ -360,6 +370,18 @@ def load_config(
             f"{bootstrap_admin_email!r}"
         )
 
+    raw_require_totp = os.environ.get("SNORE_REQUIRE_TOTP", "").strip().lower()
+    _TOTP_TRUTHY = frozenset({"1", "true", "yes"})
+    _TOTP_FALSY = frozenset({"0", "false", "no", ""})
+    require_totp = raw_require_totp in _TOTP_TRUTHY
+    if raw_require_totp not in _TOTP_TRUTHY and raw_require_totp not in _TOTP_FALSY:
+        logger.warning(
+            "SNORE_REQUIRE_TOTP=%r is not a recognized value; "
+            "accepted: 1/true/yes (enable), 0/false/no (disable). "
+            "TOTP enforcement is currently DISABLED.",
+            os.environ.get("SNORE_REQUIRE_TOTP", ""),
+        )
+
     public_origin: tuple[str, str, int] | None = None
     if auth_mode is AuthMode.MULTIUSER:
         if not session_secret:
@@ -430,6 +452,7 @@ def load_config(
         parse_max_workers=parse_max_workers,
         bootstrap_admin_email=bootstrap_admin_email,
         upload_spool_dir=upload_spool_dir,
+        require_totp=require_totp,
     )
 
 

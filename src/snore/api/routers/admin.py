@@ -36,13 +36,14 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.api.client_ip import get_client_ip
 from snore.api.constants import NO_STORE
 from snore.api.deps import get_db
 from snore.api.guards import RequireAdmin
@@ -50,6 +51,8 @@ from snore.api.schemas import DISPLAY_NAME_MAX_LEN, MessageResponse
 from snore.auth.emails import normalize_email
 from snore.auth.invite import invite_valid_clauses
 from snore.auth.invite_tokens import hash_invite_token
+from snore.auth.lockout import get_lockout_store
+from snore.auth.totp import is_totp_code, verify_totp_code
 from snore.database import models
 from snore.database.models import AuthIdentity
 
@@ -72,6 +75,7 @@ class UserItem(BaseModel):
     has_password: bool
     auth_providers: list[str]
     last_login_at: datetime | None
+    totp_enabled: bool
 
 
 class PatchUserRequest(BaseModel):
@@ -115,6 +119,16 @@ class InviteCreatedResponse(BaseModel):
     role: str
     invite_url: str
     expires_at: datetime
+
+
+class TotpResetRequest(BaseModel):
+    """Optional request body for POST /users/{user_id}/totp/reset.
+
+    When the calling admin has TOTP enabled, ``code`` is required and must be
+    a valid 6-digit TOTP code for the admin's own second factor.
+    """
+
+    code: Annotated[str, StringConstraints(max_length=16)] | None = None
 
 
 class InviteItem(BaseModel):
@@ -171,6 +185,7 @@ async def list_users(
             has_password=u.password_hash is not None,
             auth_providers=providers_by_user.get(u.id, []),
             last_login_at=u.last_login_at,
+            totp_enabled=u.totp_enabled_at is not None,
         )
         for u in rows
     ]
@@ -292,6 +307,78 @@ async def enable_user(
 
     user.disabled_at = None
     return MessageResponse(message="User enabled")
+
+
+@router.post("/users/{user_id}/totp/reset", response_model=MessageResponse)
+async def reset_user_totp(
+    request: Request,
+    user_id: int,
+    actor: RequireAdmin,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    body: TotpResetRequest | None = None,
+) -> JSONResponse:
+    """Reset TOTP enrollment for a user, forcing re-enrollment on next login.
+
+    Clears totp_secret, totp_enabled_at, and totp_last_used_step; deletes all
+    recovery codes; bumps session_version to invalidate existing sessions.
+
+    If the calling admin has TOTP enrolled, a valid 6-digit TOTP code for the
+    admin's own second factor is required in ``{"code": "..."}``; the lockout
+    pre-check and replay guard both apply.  Admins without TOTP enrolled may
+    call the endpoint without a request body.
+
+    Self-reset is allowed — it forces re-enrollment rather than lockout.
+    """
+    # Verify the calling admin's own second factor when they have TOTP enabled.
+    admin_user = await db.get(models.User, actor.user_id)
+    if admin_user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    if admin_user.totp_enabled_at is not None:
+        ip = get_client_ip(request)
+        lockout = get_lockout_store()
+
+        if lockout.is_locked(admin_user.canonical_email, ip):
+            raise HTTPException(status_code=403, detail="Authentication failed")
+
+        submitted_code = body.code if body else None
+        if not submitted_code or not is_totp_code(submitted_code):
+            lockout.record_failure(admin_user.canonical_email, ip)
+            raise HTTPException(status_code=403, detail="Authentication failed")
+
+        ok, step = verify_totp_code(
+            admin_user.totp_secret,  # type: ignore[arg-type]
+            submitted_code,
+            admin_user.totp_last_used_step,
+        )
+        if not ok:
+            lockout.record_failure(admin_user.canonical_email, ip)
+            raise HTTPException(status_code=403, detail="Authentication failed")
+
+        admin_user.totp_last_used_step = step
+        lockout.record_success(admin_user.canonical_email, ip)
+
+    user = await db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.totp_secret = None
+    user.totp_enabled_at = None
+    user.totp_last_used_step = None
+    user.session_version += 1
+
+    await db.execute(
+        delete(models.TotpRecoveryCode).where(
+            models.TotpRecoveryCode.user_id == user_id
+        )
+    )
+
+    logger.info("Admin id=%s reset TOTP for user id=%s", actor.user_id, user_id)
+
+    return JSONResponse(
+        content={"message": "TOTP reset"},
+        headers=NO_STORE,
+    )
 
 
 # ---------------------------------------------------------------------------

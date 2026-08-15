@@ -43,7 +43,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,6 +90,9 @@ class MeResponse(BaseModel):
     role: str
     has_password: bool
     google_linked: bool
+    totp_enabled: bool
+    totp_enrollment_required: bool
+    recovery_codes_remaining: int | None
 
 
 class DisplayNameRequest(BaseModel):
@@ -156,6 +159,18 @@ async def get_me(
         ).scalar()
     )
 
+    totp_enabled = user.totp_enabled_at is not None
+    recovery_codes_remaining: int | None = None
+    if totp_enabled:
+        recovery_codes_remaining = (
+            await db.scalar(
+                select(func.count()).where(
+                    models.TotpRecoveryCode.user_id == actor.user_id,
+                    models.TotpRecoveryCode.used_at.is_(None),
+                )
+            )
+        ) or 0
+
     return JSONResponse(
         content=MeResponse(
             id=user.id,
@@ -164,6 +179,9 @@ async def get_me(
             role=user.role,
             has_password=user.password_hash is not None,
             google_linked=google_linked,
+            totp_enabled=totp_enabled,
+            totp_enrollment_required=actor.enrollment_required,
+            recovery_codes_remaining=recovery_codes_remaining,
         ).model_dump(),
         headers=NO_STORE,
     )

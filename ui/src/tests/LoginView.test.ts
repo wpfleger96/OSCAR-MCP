@@ -30,7 +30,9 @@ function makeRouter() {
 describe('LoginView', () => {
     beforeEach(() => {
         vi.mocked(useAuth).mockReturnValue({
-            login: vi.fn(),
+            login: vi.fn().mockResolvedValue({ totpRequired: false }),
+            submitTotp: vi.fn().mockResolvedValue(undefined),
+            clearTotpChallenge: vi.fn(),
             demoLogin: vi.fn(),
             logout: vi.fn(),
             clearAuth: vi.fn(),
@@ -46,6 +48,7 @@ describe('LoginView', () => {
             role: { value: null } as never,
             canWrite: { value: true } as never,
             demoAvailable: { value: true } as never,
+            totpEnrollmentRequired: { value: false } as never,
             statusUnknown: { value: false } as never,
             profileKey: { value: 0 } as never,
         })
@@ -68,6 +71,8 @@ describe('LoginView', () => {
         vi.mocked(useAuth).mockReturnValue({
             ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
             login: loginMock,
+            submitTotp: vi.fn(),
+            clearTotpChallenge: vi.fn(),
         })
         const wrapper = mount(LoginView, {
             global: { plugins: [makeRouter()] },
@@ -90,6 +95,8 @@ describe('LoginView', () => {
         vi.mocked(useAuth).mockReturnValue({
             ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
             login: loginMock,
+            submitTotp: vi.fn(),
+            clearTotpChallenge: vi.fn(),
         })
         const wrapper = mount(LoginView, {
             global: { plugins: [makeRouter()] },
@@ -116,6 +123,8 @@ describe('LoginView', () => {
         vi.mocked(useAuth).mockReturnValue({
             ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
             demoAvailable: ref(false) as never,
+            submitTotp: vi.fn(),
+            clearTotpChallenge: vi.fn(),
         })
         const wrapper = mount(LoginView, {
             global: { plugins: [makeRouter()] },
@@ -128,6 +137,8 @@ describe('LoginView', () => {
         vi.mocked(useAuth).mockReturnValue({
             ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
             demoLogin: demoLoginMock,
+            submitTotp: vi.fn(),
+            clearTotpChallenge: vi.fn(),
         })
         const router = makeRouter()
         const wrapper = mount(LoginView, {
@@ -150,6 +161,8 @@ describe('LoginView', () => {
         vi.mocked(useAuth).mockReturnValue({
             ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
             demoLogin: demoLoginMock,
+            submitTotp: vi.fn(),
+            clearTotpChallenge: vi.fn(),
         })
         const wrapper = mount(LoginView, {
             global: { plugins: [makeRouter()] },
@@ -160,5 +173,143 @@ describe('LoginView', () => {
         await wrapper.vm.$nextTick()
 
         expect(wrapper.find('[role="alert"]').text()).toBe('Demo unavailable')
+    })
+
+    it('test_totp_required_login_transitions_to_code_step', async () => {
+        const loginMock = vi.fn().mockResolvedValueOnce({ totpRequired: true })
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            login: loginMock,
+            submitTotp: vi.fn(),
+            clearTotpChallenge: vi.fn(),
+        })
+        const wrapper = mount(LoginView, {
+            global: { plugins: [makeRouter()] },
+        })
+
+        await wrapper.find('input[type="email"]').setValue('alice@example.com')
+        await wrapper.find('input[type="password"]').setValue('hunter2')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        expect(wrapper.find('input[autocomplete="one-time-code"]').exists()).toBe(true)
+        expect(wrapper.find('input[type="email"]').exists()).toBe(false)
+    })
+
+    it('test_totp_submit_calls_submitTotp_and_navigates', async () => {
+        const loginMock = vi.fn().mockResolvedValueOnce({ totpRequired: true })
+        const submitTotpMock = vi.fn().mockResolvedValueOnce(undefined)
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            login: loginMock,
+            submitTotp: submitTotpMock,
+            clearTotpChallenge: vi.fn(),
+        })
+        const router = makeRouter()
+        const wrapper = mount(LoginView, {
+            global: { plugins: [router] },
+        })
+
+        // Advance to TOTP step
+        await wrapper.find('input[type="email"]').setValue('alice@example.com')
+        await wrapper.find('input[type="password"]').setValue('hunter2')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        // Submit the code
+        await wrapper.find('input[autocomplete="one-time-code"]').setValue('123456')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        expect(submitTotpMock).toHaveBeenCalledWith('123456')
+        expect(router.currentRoute.value.path).toBe('/dashboard')
+    })
+
+    it('test_totp_401_shows_invalid_code_error', async () => {
+        const loginMock = vi.fn().mockResolvedValueOnce({ totpRequired: true })
+        const submitTotpMock = vi.fn().mockRejectedValueOnce({
+            response: { status: 401 },
+            message: 'Unauthorized',
+        })
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            login: loginMock,
+            submitTotp: submitTotpMock,
+            clearTotpChallenge: vi.fn(),
+        })
+        const wrapper = mount(LoginView, {
+            global: { plugins: [makeRouter()] },
+        })
+
+        await wrapper.find('input[type="email"]').setValue('alice@example.com')
+        await wrapper.find('input[type="password"]').setValue('hunter2')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        await wrapper.find('input[autocomplete="one-time-code"]').setValue('000000')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        expect(wrapper.find('[role="alert"]').text()).toBe('Invalid code — try again')
+    })
+
+    it('test_totp_429_shows_rate_limit_error', async () => {
+        const loginMock = vi.fn().mockResolvedValueOnce({ totpRequired: true })
+        const submitTotpMock = vi.fn().mockRejectedValueOnce({
+            response: { status: 429 },
+            message: 'Too Many Requests',
+        })
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            login: loginMock,
+            submitTotp: submitTotpMock,
+            clearTotpChallenge: vi.fn(),
+        })
+        const wrapper = mount(LoginView, {
+            global: { plugins: [makeRouter()] },
+        })
+
+        // Advance to TOTP step
+        await wrapper.find('input[type="email"]').setValue('alice@example.com')
+        await wrapper.find('input[type="password"]').setValue('hunter2')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        // Submit the code — server responds with 429
+        await wrapper.find('input[autocomplete="one-time-code"]').setValue('123456')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        expect(wrapper.find('[role="alert"]').text()).toContain('Too many attempts')
+    })
+
+    it('test_totp_back_button_returns_to_password_step', async () => {
+        const loginMock = vi.fn().mockResolvedValueOnce({ totpRequired: true })
+        const clearTotpChallengeMock = vi.fn()
+        vi.mocked(useAuth).mockReturnValue({
+            ...(vi.mocked(useAuth)() as ReturnType<typeof useAuth>),
+            login: loginMock,
+            submitTotp: vi.fn(),
+            clearTotpChallenge: clearTotpChallengeMock,
+        })
+        const wrapper = mount(LoginView, {
+            global: { plugins: [makeRouter()] },
+        })
+
+        // Advance to TOTP step
+        await wrapper.find('input[type="email"]').setValue('alice@example.com')
+        await wrapper.find('input[type="password"]').setValue('hunter2')
+        await wrapper.find('form').trigger('submit')
+        await flushPromises()
+
+        expect(wrapper.find('input[autocomplete="one-time-code"]').exists()).toBe(true)
+
+        // Click back
+        await wrapper.find('.demo-btn').trigger('click')
+        await wrapper.vm.$nextTick()
+
+        expect(clearTotpChallengeMock).toHaveBeenCalledOnce()
+        expect(wrapper.find('input[type="email"]').exists()).toBe(true)
+        expect(wrapper.find('input[autocomplete="one-time-code"]').exists()).toBe(false)
     })
 })

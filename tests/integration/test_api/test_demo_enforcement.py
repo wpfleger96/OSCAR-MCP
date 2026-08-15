@@ -31,6 +31,7 @@ from snore.auth.actor import ActorContext, AuthMode
 DEMO_ALLOWED_MUTATING = {
     # Public auth endpoints — no actor required at all.
     "POST /api/v1/auth/login",
+    "POST /api/v1/auth/login/totp",
     "POST /api/v1/auth/logout",
     "POST /api/v1/auth/demo-login",
     "POST /api/v1/auth/invites/lookup",
