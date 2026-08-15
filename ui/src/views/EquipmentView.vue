@@ -119,7 +119,13 @@
                                         :key="entry.key"
                                         class="setting-row"
                                     >
-                                        <dt class="setting-key">{{ entry.label }}</dt>
+                                        <dt class="setting-key">
+                                            {{ entry.label }}
+                                            <InfoHint
+                                                v-if="entry.glossaryKey"
+                                                :glossary-key="entry.glossaryKey"
+                                            />
+                                        </dt>
                                         <dd class="setting-val">{{ entry.value }}</dd>
                                     </div>
                                 </dl>
@@ -135,7 +141,13 @@
                                         :key="entry.key"
                                         class="setting-row"
                                     >
-                                        <dt class="setting-key">{{ entry.label }}</dt>
+                                        <dt class="setting-key">
+                                            {{ entry.label }}
+                                            <InfoHint
+                                                v-if="entry.glossaryKey"
+                                                :glossary-key="entry.glossaryKey"
+                                            />
+                                        </dt>
                                         <dd class="setting-val">{{ entry.value }}</dd>
                                     </div>
                                 </dl>
@@ -218,6 +230,7 @@ import { computed, reactive, watch } from 'vue'
 import { ChevronDown, HardDrive, Loader2 } from '@lucide/vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import ErrorState from '@/components/ErrorState.vue'
+import InfoHint from '@/components/InfoHint.vue'
 import MaskLogManager from '@/components/MaskLogManager.vue'
 import { getDevices, getDeviceDetail } from '@/api/devices'
 import { getMaskEpochs } from '@/api/equipment'
@@ -395,6 +408,9 @@ watch(devices, (devs) => {
 }
 
 .setting-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
     color: var(--color-muted-foreground);
     min-width: 130px;
 }

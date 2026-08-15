@@ -8,6 +8,8 @@
  * See also `src/snore/cli/display/settings.py` for the CLI counterpart.
  */
 
+import { GLOSSARY } from './glossary'
+
 export interface SettingsCategory {
     label: string
     keys: string[]
@@ -173,10 +175,19 @@ export function formatSettingValue(key: string, rawValue: string): string {
     return rawValue
 }
 
+/** Glossary key for a setting key, or undefined when no entry exists. */
+function settingGlossaryKey(key: string): string | undefined {
+    const gk = `setting_${key}`
+    return gk in GLOSSARY ? gk : undefined
+}
+
 /** Partition a flat settings dict into categorized groups + an "Other settings" bucket. */
 export function categorizeSettings(settings: Record<string, string>): {
-    categories: { label: string; entries: { key: string; label: string; value: string }[] }[]
-    other: { key: string; label: string; value: string }[]
+    categories: {
+        label: string
+        entries: { key: string; label: string; value: string; glossaryKey?: string }[]
+    }[]
+    other: { key: string; label: string; value: string; glossaryKey?: string }[]
 } {
     const categories = SETTING_CATEGORIES.map((cat) => ({
         label: cat.label,
@@ -186,12 +197,18 @@ export function categorizeSettings(settings: Record<string, string>): {
                 key: k,
                 label: settingLabel(k),
                 value: formatSettingValue(k, settings[k]),
+                glossaryKey: settingGlossaryKey(k),
             })),
     })).filter((cat) => cat.entries.length > 0)
 
     const other = Object.entries(settings)
         .filter(([k]) => !KNOWN_KEYS.has(k))
-        .map(([k, v]) => ({ key: k, label: settingLabel(k), value: v }))
+        .map(([k, v]) => ({
+            key: k,
+            label: settingLabel(k),
+            value: v,
+            glossaryKey: settingGlossaryKey(k),
+        }))
 
     return { categories, other }
 }
