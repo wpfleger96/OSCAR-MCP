@@ -22,7 +22,8 @@ export function useWaveformData(
 
     async function loadData(startSec?: number, endSec?: number, maxPoints = 2000): Promise<void> {
         abortController?.abort()
-        abortController = new AbortController()
+        const thisController = new AbortController()
+        abortController = thisController
 
         loading.value = true
         error.value = null
@@ -36,14 +37,16 @@ export function useWaveformData(
                 sessionId.value,
                 waveformType.value,
                 params,
-                abortController.signal,
+                thisController.signal,
             )
         } catch (err: unknown) {
             if (err instanceof Error && err.name !== 'CanceledError') {
                 error.value = err.message
             }
         } finally {
-            loading.value = false
+            if (abortController === thisController) {
+                loading.value = false
+            }
         }
     }
 
