@@ -36,15 +36,16 @@
                     <X class="h-4 w-4" />
                 </Button>
             </div>
+            <!-- Full-height spinner only before first data; refetches keep the chart mounted with a corner spinner (:refetching) -->
             <div
-                v-if="chart.loading"
+                v-if="chart.loading && !chart.data"
                 class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
             >
                 <Loader2 class="h-4 w-4 animate-spin" />
                 Loading {{ WAVEFORM_LABELS[chart.type] ?? chart.type }}...
             </div>
             <div
-                v-else-if="chart.error"
+                v-else-if="chart.error && !chart.data"
                 class="h-60 flex items-center justify-center gap-2 text-destructive"
             >
                 <AlertTriangle class="h-4 w-4" />
@@ -61,8 +62,15 @@
                 :events="chart.type === 'flow' ? events : undefined"
                 :sync-key="syncKey"
                 :start-epoch="startEpoch"
+                :refetching="chart.loading"
                 @zoom="onZoom"
             />
+            <div
+                v-if="chart.data && chart.error && !chart.loading"
+                class="mt-1 text-sm text-destructive"
+            >
+                Failed to refresh waveform: {{ chart.error }}
+            </div>
         </div>
     </div>
 </template>
@@ -109,6 +117,7 @@ let nextId = 0
 const syncKey = uPlot.sync(`waveform-sync-${crypto.randomUUID()}`)
 const charts = ref<ChartState[]>([])
 const chartRefs = ref<(InstanceType<typeof WaveformChart> | null)[]>([])
+const chartAborts = new Map<number, AbortController>()
 
 const typeOptions = computed(() =>
     props.availableTypes.map((t) => ({ value: t, label: WAVEFORM_LABELS[t] ?? t })),
@@ -119,28 +128,45 @@ function setChartRef(idx: number, el: unknown): void {
 }
 
 async function loadChart(chart: ChartState, startSec?: number, endSec?: number): Promise<void> {
+    chartAborts.get(chart.id)?.abort()
+    const thisController = new AbortController()
+    chartAborts.set(chart.id, thisController)
+
     chart.loading = true
     chart.error = null
     try {
         const params: Record<string, number> = { max_points: 2000 }
         if (startSec !== undefined) params.start_seconds = startSec
         if (endSec !== undefined) params.end_seconds = endSec
-        chart.data = await getWaveformData(props.sessionId, chart.type, params)
+        chart.data = await getWaveformData(
+            props.sessionId,
+            chart.type,
+            params,
+            thisController.signal,
+        )
     } catch (err: unknown) {
-        chart.error = err instanceof Error ? err.message : 'Failed to load waveform'
+        if (err instanceof Error && err.name !== 'CanceledError') {
+            chart.error = err.message
+        }
     } finally {
-        chart.loading = false
+        if (chartAborts.get(chart.id) === thisController) {
+            chart.loading = false
+        }
     }
 }
 
 function addChart(type: string): void {
     if (charts.value.length >= 4) return
-    const chart: ChartState = { id: nextId++, type, data: null, loading: false, error: null }
-    charts.value.push(chart)
-    void loadChart(chart)
+    charts.value.push({ id: nextId++, type, data: null, loading: false, error: null })
+    void loadChart(charts.value[charts.value.length - 1]!)
 }
 
 function removeChart(idx: number): void {
+    const chart = charts.value[idx]
+    if (chart) {
+        chartAborts.get(chart.id)?.abort()
+        chartAborts.delete(chart.id)
+    }
     charts.value.splice(idx, 1)
     chartRefs.value.splice(idx, 1)
 }

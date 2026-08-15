@@ -109,22 +109,22 @@
                 @add-chart="handleAddChart"
             />
 
-            <div
-                v-if="waveformLoading && !multiMode"
-                class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
-            >
-                <Loader2 class="h-4 w-4 animate-spin" /> Loading waveform...
-            </div>
-            <div
-                v-else-if="waveformError && !multiMode"
-                class="h-60 flex items-center justify-center gap-2 text-destructive"
-            >
-                {{ waveformError }}
-            </div>
-
             <template v-if="!multiMode">
+                <!-- Full-height spinner only before first data; refetches keep the chart mounted with a corner spinner (:refetching) -->
+                <div
+                    v-if="waveformLoading && !waveformData"
+                    class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
+                >
+                    <Loader2 class="h-4 w-4 animate-spin" /> Loading waveform...
+                </div>
+                <div
+                    v-else-if="waveformError && !waveformData"
+                    class="h-60 flex items-center justify-center gap-2 text-destructive"
+                >
+                    {{ waveformError }}
+                </div>
                 <WaveformChart
-                    v-if="waveformData"
+                    v-else-if="waveformData"
                     ref="singleChartRef"
                     :timestamps="waveformData.timestamps"
                     :values="waveformData.values"
@@ -133,8 +133,15 @@
                     :waveform-type="selectedType"
                     :events="selectedType === 'flow' ? events : undefined"
                     :start-epoch="startEpoch"
+                    :refetching="waveformLoading"
                     @zoom="handleZoom"
                 />
+                <div
+                    v-if="waveformData && waveformError && !waveformLoading"
+                    class="mt-1 text-sm text-destructive"
+                >
+                    Failed to refresh waveform: {{ waveformError }}
+                </div>
             </template>
 
             <MultiWaveformView
@@ -1292,7 +1299,18 @@ async function navigateToDate(date: string): Promise<void> {
 }
 
 watch(selectedType, (newType) => {
-    if (!multiMode.value && newType) void loadData()
+    if (!multiMode.value && newType) {
+        resetWaveformData()
+        void loadData()
+    }
+})
+
+// Re-sync single-mode data (and clear any stale error) when leaving multi mode;
+// multi-mode zooms update currentZoomRange but never refetch the single chart
+watch(multiMode, (multi) => {
+    if (!multi) {
+        void loadData(currentZoomRange.value?.start, currentZoomRange.value?.end)
+    }
 })
 
 let loadGeneration = 0

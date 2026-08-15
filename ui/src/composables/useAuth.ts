@@ -21,6 +21,10 @@ let _healTimer: ReturnType<typeof setTimeout> | null = null
 let _healDelay = 3_000 // doubles on each consecutive failed heal, capped at 30s; reset on success/clearAuth/refreshStatus
 
 const REVALIDATE_MS = 5 * 60 * 1000
+// Fast first path — keeps the login form snappy when the origin is healthy.
+const AUTH_STATUS_TIMEOUT_MS = 3_000
+// Longer retry — survives SQLite write-lock windows / container restarts up to ~11.5s total.
+const AUTH_STATUS_RETRY_TIMEOUT_MS = 8_000
 
 export function useAuth() {
     const user = computed(() => status.value?.user ?? null)
@@ -46,12 +50,12 @@ export function useAuth() {
 
         async function attempt(gen: number): Promise<AuthStatusResponse> {
             try {
-                return await getAuthStatus(AbortSignal.timeout(10_000))
+                return await getAuthStatus(AbortSignal.timeout(AUTH_STATUS_TIMEOUT_MS))
             } catch {
                 // Retry once after a short backoff.
                 await new Promise<void>((r) => setTimeout(r, 500))
                 if (_generation !== gen) throw new Error('superseded')
-                return getAuthStatus(AbortSignal.timeout(10_000))
+                return getAuthStatus(AbortSignal.timeout(AUTH_STATUS_RETRY_TIMEOUT_MS))
             }
         }
 

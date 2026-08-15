@@ -5,15 +5,54 @@
     <link rel="icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SNORE</title>
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2" />
     <script>
       try {
         if (localStorage.getItem('snore-dark-mode') === '1')
           document.documentElement.classList.add('dark')
       } catch (e) {}
     </script>
+    <!-- Pre-mount shell: oklch color values copied from tailwind.css (:root/.dark tokens --background, --card, --primary, --border)
+         and geometry copied from layout.css (.login-card, .login-title). Update both source files when changing. -->
+    <style>
+      #app-shell {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        background: oklch(1 0 0);
+      }
+      #app-shell-card {
+        width: 100%;
+        max-width: 360px;
+        background: oklch(1 0 0);
+        border: 1px solid oklch(0.922 0 0);
+        border-radius: 12px;
+        padding: 2rem 2rem 1.75rem;
+      }
+      #app-shell-title {
+        font-family: system-ui, sans-serif;
+        font-size: 1.75rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        color: oklch(0.205 0 0);
+        text-align: center;
+        margin: 0;
+      }
+      html.dark #app-shell { background: oklch(0.145 0 0); }
+      html.dark #app-shell-card { background: oklch(0.205 0 0); border-color: oklch(1 0 0 / 10%); }
+      html.dark #app-shell-title { color: oklch(0.922 0 0); }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div id="app-shell">
+        <div id="app-shell-card">
+          <h1 id="app-shell-title">SNORE</h1>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
