@@ -21,12 +21,17 @@ _dev-auth require_totp: web-install web-build (dev-invite "dev@localhost" "admin
     SNORE_REQUIRE_TOTP={{require_totp}} \
     uv run snore serve --host 127.0.0.1 --port 8000 --reload
 
-# Seed an invite into the dev DB and print the signup URL.
+# Seed an invite into the dev DB and print the signup URL — unless the
+# account already exists (invites are signup-only; redeeming one for a
+# registered email fails with a deliberately generic error).
 # Run from a second terminal while dev-auth is up to add more users.
 dev-invite email="member@localhost" role="member":
-    @echo "--- Invite: {{email}} ({{role}}) ---"
-    SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
-    uv run snore user invite {{email}} --role {{role}}
+    @if uv run snore user list | grep -qF "] {{email}} "; then \
+        echo "--- {{email}} is already registered — sign in at http://127.0.0.1:8000 ---"; \
+    else \
+        echo "--- Invite: {{email}} ({{role}}) ---"; \
+        SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 uv run snore user invite {{email}} --role {{role}}; \
+    fi
 
 # Seed fake Google bindings into the dev DB so the /admin/mcp reset flows are
 # testable under `just dev-auth` (no real Google OAuth needed). Idempotent.
