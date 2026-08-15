@@ -1,5 +1,5 @@
 <template>
-    <div class="calendar-heatmap">
+    <div ref="heatmapEl" class="calendar-heatmap">
         <div class="month-labels" :style="{ gridTemplateColumns: `repeat(${weeks}, 14px)` }">
             <span v-for="m in monthLabels" :key="m.offset" :style="{ gridColumn: m.offset }">
                 {{ m.label }}
@@ -28,7 +28,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { DayListItem } from '@/types'
 import { parseLocalDate } from '@/utils/formatting'
 import { ahiColorClass } from '@/utils/ahiScale'
@@ -43,6 +43,8 @@ defineEmits<{
 }>()
 
 const monthsBack = computed(() => props.monthsBack ?? 6)
+
+const heatmapEl = ref<HTMLElement | null>(null)
 
 const dayMap = computed(() => {
     const map = new Map<string, DayListItem>()
@@ -72,6 +74,18 @@ const cells = computed(() => {
 
 const weeks = computed(() => Math.ceil(cells.value.length / 7))
 
+// Show the most recent weeks first when the grid overflows horizontally.
+// Watch the cells source (not just mount): monthsBack flips 3↔6 on rotation,
+// rebuilding the grid, so the scroll anchor must be re-applied.
+watch(
+    cells,
+    async () => {
+        await nextTick()
+        if (heatmapEl.value) heatmapEl.value.scrollLeft = heatmapEl.value.scrollWidth
+    },
+    { immediate: true },
+)
+
 const monthLabels = computed(() => {
     const labels: { label: string; offset: number }[] = []
     let lastMonth = -1
@@ -93,9 +107,15 @@ const monthLabels = computed(() => {
 .calendar-heatmap {
     display: flex;
     gap: 0.25rem;
+    overflow-x: auto;
 }
 
 .day-labels {
+    /* Pin to the left edge of the scroll container; cells slide under it. */
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--color-card);
     display: grid;
     grid-template-rows: repeat(7, 14px);
     gap: 2px;

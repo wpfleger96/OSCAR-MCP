@@ -1,11 +1,11 @@
 <template>
     <div class="waveform-toolbar">
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 max-md:flex-1">
             <Select
                 :model-value="modelValue"
                 @update:model-value="(v) => $emit('update:modelValue', v as string)"
             >
-                <SelectTrigger class="w-[180px] h-8 text-sm">
+                <SelectTrigger class="w-[180px] h-8 text-sm max-md:flex-1">
                     <SelectValue placeholder="Waveform type" />
                 </SelectTrigger>
                 <SelectContent>
@@ -121,5 +121,21 @@ const glossaryKey = computed(() => WAVEFORM_GLOSSARY_MAP[props.modelValue as Wav
     display: flex;
     align-items: center;
     gap: 0.5rem;
+}
+
+@media (max-width: 767.98px) {
+    .waveform-toolbar {
+        flex-wrap: wrap;
+    }
+
+    .toolbar-right {
+        flex-wrap: wrap;
+    }
+
+    /* shadcn size utilities are layered and lose to scoped CSS, so touch sizing lives here */
+    .toolbar-right :deep(button) {
+        min-height: var(--tap-target);
+        min-width: var(--tap-target);
+    }
 }
 </style>

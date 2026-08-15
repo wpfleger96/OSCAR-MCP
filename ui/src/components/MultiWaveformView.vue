@@ -5,7 +5,7 @@
             :key="chart.id"
             class="border border-border rounded-lg p-3 bg-card"
         >
-            <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center justify-between mb-2 max-md:flex-wrap">
                 <div class="flex items-center gap-2">
                     <Select
                         :model-value="chart.type"
@@ -30,7 +30,7 @@
                     v-if="charts.length > 1"
                     variant="ghost"
                     size="icon"
-                    class="text-destructive hover:text-destructive"
+                    class="chart-remove text-destructive hover:text-destructive"
                     @click="removeChart(idx)"
                 >
                     <X class="h-4 w-4" />
@@ -213,3 +213,13 @@ defineExpose({
     },
 })
 </script>
+
+<style scoped>
+@media (max-width: 767.98px) {
+    /* shadcn size="icon" is layered (36px) and loses to scoped CSS, so the touch floor lives here */
+    .chart-remove {
+        min-height: var(--tap-target);
+        min-width: var(--tap-target);
+    }
+}
+</style>

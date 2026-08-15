@@ -41,7 +41,62 @@
             <!-- Comparison Table -->
             <div v-if="history.length > 1" class="section-card">
                 <h2>Period Comparison</h2>
-                <div class="overflow-x-auto">
+                <div v-if="isMobile" class="card-list">
+                    <div
+                        v-for="row in comparisonRows"
+                        :key="row.start_date"
+                        class="data-card"
+                        :class="{ 'rx-card-best': row.isBest, 'rx-card-worst': row.isWorst }"
+                    >
+                        <div class="data-card-header">
+                            <span
+                                >{{ formatDateFull(row.start_date) }} –
+                                {{ formatDateFull(row.end_date) }}</span
+                            >
+                            <Badge
+                                v-if="row.isBest"
+                                class="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                                >Best</Badge
+                            >
+                            <Badge v-if="row.isWorst" variant="destructive">Worst</Badge>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Days</span>
+                            <span class="data-card-value">{{ row.days_count }}</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Device</span>
+                            <span class="data-card-value">{{ row.device_name ?? '—' }}</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Avg AHI</span>
+                            <span class="data-card-value">{{
+                                row.avg_ahi?.toFixed(1) ?? '---'
+                            }}</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Median AHI</span>
+                            <span class="data-card-value">{{
+                                row.median_ahi?.toFixed(1) ?? '---'
+                            }}</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Avg Hours</span>
+                            <span class="data-card-value">{{
+                                row.avg_hours?.toFixed(1) ?? '---'
+                            }}</span>
+                        </div>
+                        <div class="data-card-row">
+                            <span class="data-card-label">Avg Leak</span>
+                            <span class="data-card-value">{{
+                                row.avg_leak?.toFixed(1) ?? '---'
+                            }}</span>
+                        </div>
+                        <div class="data-card-label mt-1">Settings</div>
+                        <div class="text-sm">{{ summarizeSettings(row.settings) }}</div>
+                    </div>
+                </div>
+                <div v-else class="overflow-x-auto">
                     <Table>
                         <TableHeader>
                             <TableRow>
@@ -106,7 +161,60 @@
             <!-- Settings Changes — device changes merged with mask log, most recent first -->
             <div v-if="timelineRows.length || maskError" class="section-card">
                 <h2>Settings Changes</h2>
-                <div v-if="timelineRows.length" class="overflow-x-auto">
+                <div v-if="isMobile && timelineRows.length" class="card-list">
+                    <div v-for="row in timelineRows" :key="row.key" class="data-card">
+                        <div class="data-card-header">
+                            <span>{{ formatDateFull(row.date) }}</span>
+                            <Badge v-if="row.source === 'device'" variant="secondary">Device</Badge>
+                            <Badge v-else variant="outline">Mask Log</Badge>
+                        </div>
+                        <template v-if="row.source === 'device'">
+                            <div class="data-card-row">
+                                <span class="data-card-label">Device</span>
+                                <span class="data-card-value">{{ row.change.device_name }}</span>
+                            </div>
+                            <div class="data-card-row">
+                                <span class="data-card-label">Setting</span>
+                                <span class="data-card-value">{{
+                                    settingLabel(row.change.key)
+                                }}</span>
+                            </div>
+                            <div class="data-card-row">
+                                <span class="data-card-label">Change</span>
+                                <span class="data-card-value">
+                                    <span class="text-muted-foreground">{{
+                                        row.change.old_value != null
+                                            ? formatSettingValue(
+                                                  row.change.key,
+                                                  row.change.old_value,
+                                              )
+                                            : '—'
+                                    }}</span>
+                                    <span class="mx-1">→</span>
+                                    <span>{{
+                                        row.change.new_value != null
+                                            ? formatSettingValue(
+                                                  row.change.key,
+                                                  row.change.new_value,
+                                              )
+                                            : '—'
+                                    }}</span>
+                                </span>
+                            </div>
+                        </template>
+                        <template v-else>
+                            <div class="data-card-row">
+                                <span class="data-card-label">Setting</span>
+                                <span class="data-card-value">Mask</span>
+                            </div>
+                            <div class="data-card-row">
+                                <span class="data-card-label">Change</span>
+                                <span class="data-card-value">{{ maskSummary(row.entry) }}</span>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+                <div v-else-if="timelineRows.length" class="overflow-x-auto">
                     <Table>
                         <TableHeader>
                             <TableRow>
@@ -195,11 +303,14 @@ import {
 import { getRxAll } from '@/api/rx'
 import { getMaskLog } from '@/api/equipment'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { formatDateFull } from '@/utils/formatting'
 import { settingLabel, formatSettingValue } from '@/utils/deviceSettings'
 import { maskEntryName, styleLabel } from '@/utils/maskOptions'
 import type { MaskLogEntryResponse, RxPeriodResponse, RxSettingChange } from '@/types'
 import ErrorState from '@/components/ErrorState.vue'
+
+const { isMobile } = useIsMobile()
 
 const { data, loading, error, reload } = useApiLoad(() => getRxAll(), 'Failed to load RX data')
 
@@ -316,5 +427,14 @@ const timelineRows = computed<TimelineRow[]>(() => {
 
 .setting-pill {
     font-size: 0.78rem;
+}
+
+/* Scoped (higher specificity) so these win over the unlayered .data-card background. */
+.rx-card-best {
+    background: color-mix(in srgb, var(--color-green-500) 10%, var(--color-card));
+}
+
+.rx-card-worst {
+    background: color-mix(in srgb, var(--color-destructive) 10%, var(--color-card));
 }
 </style>

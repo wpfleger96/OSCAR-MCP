@@ -459,4 +459,31 @@ watch(devices, (devs) => {
     color: var(--color-muted-foreground);
     font-size: 0.8em;
 }
+
+@media (max-width: 767.98px) {
+    .device-card {
+        padding: 0.875rem 1rem;
+    }
+
+    .settings-groups {
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .settings-group {
+        min-width: 0;
+    }
+
+    .setting-row {
+        justify-content: space-between;
+    }
+
+    .setting-key {
+        min-width: 0;
+    }
+
+    .setting-val {
+        text-align: right;
+    }
+}
 </style>

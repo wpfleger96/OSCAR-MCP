@@ -32,8 +32,57 @@
             </Button>
         </div>
 
+        <!-- Sessions (mobile cards) -->
+        <div v-if="isMobile">
+            <div v-if="loading" class="loading-state">
+                <Loader2 class="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+            <div v-else-if="!sessions.length" class="py-8 text-center text-muted-foreground">
+                No sessions found.
+            </div>
+            <div v-else class="card-list">
+                <div v-for="s in sessions" :key="s.session_id" class="data-card">
+                    <div class="data-card-header">
+                        <RouterLink
+                            :to="{
+                                name: 'session-analysis',
+                                params: { id: s.session_id },
+                            }"
+                            class="text-primary hover:underline"
+                        >
+                            {{ formatDateShort(s.session_date) }}
+                        </RouterLink>
+                        <Badge
+                            v-if="s.has_analysis"
+                            class="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                        >
+                            Analyzed
+                        </Badge>
+                        <Badge v-else variant="secondary">Not Analyzed</Badge>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Duration</span>
+                        <span class="data-card-value">{{
+                            s.duration_hours != null ? s.duration_hours.toFixed(1) + 'h' : '---'
+                        }}</span>
+                    </div>
+                    <div v-if="canWrite && s.has_analysis" class="data-card-actions">
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Delete analysis"
+                            class="mobile-touch-btn text-destructive hover:text-destructive"
+                            @click="confirmDelete(s.session_id)"
+                        >
+                            <Trash2 class="h-4 w-4" />
+                        </Button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Sessions table -->
-        <Table>
+        <Table v-else>
             <TableHeader>
                 <TableRow>
                     <TableHead style="min-width: 160px">Session Date</TableHead>
@@ -238,8 +287,10 @@ import { formatDateShort } from '@/utils/formatting'
 import type { AnalysisListItem, AnalysisDeletePreview } from '@/types'
 import { useAuth } from '@/composables/useAuth'
 import { useAvailableDates } from '@/composables/useAvailableDates'
+import { useIsMobile } from '@/composables/useIsMobile'
 
 const { canWrite } = useAuth()
+const { isMobile } = useIsMobile()
 const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
 
 const sessions = ref<AnalysisListItem[]>([])
@@ -430,5 +481,10 @@ onUnmounted(() => {
 <style scoped>
 .analysis-mgmt {
     max-width: 1200px;
+}
+
+.mobile-touch-btn {
+    min-height: var(--tap-target);
+    min-width: var(--tap-target);
 }
 </style>

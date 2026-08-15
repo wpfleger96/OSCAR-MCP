@@ -1,19 +1,14 @@
 <template>
     <div v-if="!route.meta.authFree" class="app-layout">
-        <AppSidebar class="hidden md:flex" />
+        <AppSidebar />
         <main class="app-main">
-            <button
-                class="md:hidden fixed top-3 left-3 z-50 inline-flex items-center justify-center rounded-md border border-border bg-background p-2 text-foreground shadow-sm"
-                @click="mobileMenuOpen = true"
-            >
-                <Menu class="h-5 w-5" />
-            </button>
             <RouterView :key="profileKey" />
         </main>
     </div>
     <main v-else class="auth-layout">
         <RouterView :key="profileKey" />
     </main>
+    <MobileTabBar v-if="!route.meta.authFree" @more="mobileMenuOpen = true" />
     <Sheet v-if="!route.meta.authFree" v-model:open="mobileMenuOpen">
         <SheetContent side="left" class="w-[220px] p-0">
             <SheetTitle class="sr-only">Navigation</SheetTitle>
@@ -25,14 +20,16 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Menu } from '@lucide/vue'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
 import AppSidebar from '@/components/AppSidebar.vue'
+import MobileTabBar from '@/components/MobileTabBar.vue'
 import { useAuth } from '@/composables/useAuth'
+import { useIsMobile } from '@/composables/useIsMobile'
 
 const mobileMenuOpen = ref(false)
 const route = useRoute()
 const { profileKey } = useAuth()
+const { isMobile } = useIsMobile()
 
 watch(
     () => route.path,
@@ -40,6 +37,12 @@ watch(
         mobileMenuOpen.value = false
     },
 )
+
+// Close the mobile sheet if the viewport grows past the mobile breakpoint —
+// the route watcher above only fires on navigation, not on resize.
+watch(isMobile, (mobile) => {
+    if (!mobile) mobileMenuOpen.value = false
+})
 </script>
 
 <style>
@@ -62,13 +65,23 @@ watch(
     min-height: 100vh;
 }
 
-@media (max-width: 767px) {
+@media (max-width: 767.98px) {
     .app-layout {
         grid-template-columns: 1fr;
     }
 
+    /* !important: AppSidebar's scoped `display: flex` is unlayered too, so a
+       Tailwind `hidden` utility (layered) can never win — this must be forced. */
+    .app-layout > .app-sidebar {
+        display: none !important;
+    }
+
     .app-main {
-        padding-top: 3.5rem;
+        padding-top: 1rem;
+        padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+        padding-left: max(1rem, env(safe-area-inset-left, 0px));
+        padding-right: max(1rem, env(safe-area-inset-right, 0px));
+        overflow-x: clip;
     }
 }
 </style>

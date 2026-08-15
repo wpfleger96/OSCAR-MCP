@@ -1546,4 +1546,26 @@ watch(
     gap: 0.4rem;
     margin-bottom: 1rem;
 }
+
+@media (max-width: 767.98px) {
+    .session-title-nav {
+        flex-wrap: wrap;
+    }
+
+    .session-title-trigger {
+        font-size: 1.25rem;
+    }
+
+    .nav-arrow {
+        padding: 0.75rem;
+    }
+
+    .settings-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .setting-row {
+        overflow-wrap: anywhere;
+    }
+}
 </style>

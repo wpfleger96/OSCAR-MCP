@@ -1,5 +1,42 @@
 <template>
-    <div class="overflow-x-auto">
+    <div v-if="isMobile" class="card-list">
+        <div v-for="entry in entries" :key="entry.id" class="data-card">
+            <div class="data-card-header">
+                {{ entry.start_date ? formatDateFull(entry.start_date) : '—' }}
+            </div>
+            <div class="data-card-row">
+                <span class="data-card-label">Brand</span>
+                <span class="data-card-value">{{ entry.brand ?? '—' }}</span>
+            </div>
+            <div class="data-card-row">
+                <span class="data-card-label">Model</span>
+                <span class="data-card-value">{{ entry.model ?? '—' }}</span>
+            </div>
+            <div class="data-card-row">
+                <span class="data-card-label">Style</span>
+                <span class="data-card-value">{{
+                    entry.style ? styleLabel(entry.style) : '—'
+                }}</span>
+            </div>
+            <div class="data-card-row">
+                <span class="data-card-label">Size</span>
+                <span class="data-card-value">{{ entry.size ?? '—' }}</span>
+            </div>
+            <div class="data-card-row">
+                <span class="data-card-label">Notes</span>
+                <span class="data-card-value">{{ entry.notes ?? '—' }}</span>
+            </div>
+            <div v-if="canWrite" class="data-card-actions">
+                <Button variant="ghost" size="sm" :disabled="saving" @click="emit('edit', entry)">
+                    Edit
+                </Button>
+                <Button variant="ghost" size="sm" :disabled="saving" @click="emit('delete', entry)">
+                    Delete
+                </Button>
+            </div>
+        </div>
+    </div>
+    <div v-else class="overflow-x-auto">
         <Table>
             <TableHeader>
                 <TableRow>
@@ -58,6 +95,7 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { formatDateFull } from '@/utils/formatting'
 import { styleLabel } from '@/utils/maskOptions'
 import type { MaskLogEntryResponse } from '@/types'
@@ -72,4 +110,6 @@ const emit = defineEmits<{
     edit: [entry: MaskLogEntryResponse]
     delete: [entry: MaskLogEntryResponse]
 }>()
+
+const { isMobile } = useIsMobile()
 </script>

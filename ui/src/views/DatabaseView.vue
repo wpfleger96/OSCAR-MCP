@@ -507,7 +507,7 @@ function copyInviteUrl(): void {
 
 .counts-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 1rem;
 }
 
@@ -681,5 +681,14 @@ function copyInviteUrl(): void {
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
     color: var(--color-foreground);
+}
+
+@media (max-width: 767.98px) {
+    /* Stack description above a full-width action button */
+    .vacuum-card,
+    .danger-card {
+        flex-direction: column;
+        align-items: stretch;
+    }
 }
 </style>

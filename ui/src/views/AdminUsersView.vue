@@ -11,7 +11,42 @@
             </div>
             <p v-else-if="usersError" role="alert" class="section-error">{{ usersError }}</p>
             <template v-else>
-                <Table>
+                <template v-if="isMobile">
+                    <p v-if="!usersData?.length" class="empty-state">No users.</p>
+                    <div v-else class="card-list">
+                        <UserCard
+                            v-for="u in usersData"
+                            :key="u.id"
+                            v-model:edit-name="editName"
+                            v-model:totp-reset-code="totpResetAdminCode"
+                            :user="u"
+                            :is-current-user="u.id === currentUser?.id"
+                            :displayed-role="displayedRoles[u.id] ?? u.role"
+                            :busy="busyUserIds.has(u.id)"
+                            :editing="editingUserId === u.id"
+                            :edit-name-saving="editNameSaving"
+                            :last-login="u.last_login_at ? formatDate(u.last_login_at) : null"
+                            :admin-has-totp="adminHasTotp"
+                            :totp-reset-confirming="totpResetConfirmId === u.id"
+                            :error="userRowErrors[u.id]"
+                            @start-edit="startEditName(u)"
+                            @save-name="saveDisplayName(u.id)"
+                            @cancel-edit="cancelEditName"
+                            @role-change="onRoleChange(u, $event)"
+                            @disable="handleDisable(u.id)"
+                            @enable="handleEnable(u.id)"
+                            @start-totp-reset="totpResetConfirmId = u.id"
+                            @confirm-totp-reset="
+                                executeTotpReset(
+                                    u.id,
+                                    adminHasTotp ? totpResetAdminCode : undefined,
+                                )
+                            "
+                            @cancel-totp-reset="cancelTotpReset"
+                        />
+                    </div>
+                </template>
+                <Table v-else>
                     <TableHeader>
                         <TableRow>
                             <TableHead>Email</TableHead>
@@ -271,6 +306,21 @@
             <p v-else-if="invitesError" role="alert" class="section-error">{{ invitesError }}</p>
             <template v-else>
                 <p v-if="!invitesData?.length" class="empty-state">No pending invites.</p>
+                <div v-else-if="isMobile" class="card-list">
+                    <InviteCard
+                        v-for="inv in invitesData"
+                        :key="inv.id"
+                        :invite="inv"
+                        :created="formatDate(inv.created_at)"
+                        :expires="formatDate(inv.expires_at)"
+                        :revoking="revokingInviteId === inv.id"
+                        :revoke-busy="revokeBusy"
+                        :error="inviteRowErrors[inv.id]"
+                        @start-revoke="revokingInviteId = inv.id"
+                        @confirm-revoke="executeRevoke(inv.id)"
+                        @cancel-revoke="revokingInviteId = null"
+                    />
+                </div>
                 <Table v-else>
                     <TableHeader>
                         <TableRow>
@@ -342,9 +392,12 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
+import UserCard from '@/components/UserCard.vue'
+import InviteCard from '@/components/InviteCard.vue'
 import { useApiLoad } from '@/composables/useApiLoad'
 import { useAuth } from '@/composables/useAuth'
 import { useDateFormat } from '@/composables/useDateFormat'
+import { useIsMobile } from '@/composables/useIsMobile'
 import {
     listUsers,
     updateUser,
@@ -363,6 +416,7 @@ type InviteCreatedResponse = components['schemas']['InviteCreatedResponse']
 const { user: currentUser } = useAuth()
 const adminHasTotp = computed(() => currentUser.value?.totp_enabled ?? false)
 const { formatDate, loadDateFormat } = useDateFormat()
+const { isMobile } = useIsMobile()
 
 onMounted(() => {
     loadDateFormat()
@@ -787,5 +841,21 @@ async function executeRevoke(inviteId: number): Promise<void> {
 
 .totp-reset-code-input:focus {
     border-color: var(--color-primary);
+}
+
+/* Stack the invite form on phones (its controls are inline-width on desktop) */
+@media (max-width: 767.98px) {
+    .invite-form {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .invite-form > * {
+        width: 100%;
+    }
+
+    .ttl-input {
+        flex: 1;
+    }
 }
 </style>

@@ -248,8 +248,15 @@ async function handleLogout() {
     flex-direction: column;
     position: sticky;
     top: 0;
-    height: 100vh;
+    height: 100dvh;
     overflow-y: auto;
+}
+
+/* Inside the mobile Sheet: larger nav items for ~44px tap targets. */
+@media (max-width: 767.98px) {
+    .nav-item {
+        padding: 0.75rem;
+    }
 }
 
 .sidebar-header {

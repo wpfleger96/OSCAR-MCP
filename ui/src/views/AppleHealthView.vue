@@ -48,7 +48,45 @@
         </div>
 
         <template v-else>
-            <Table>
+            <div v-if="isMobile" class="card-list">
+                <RouterLink
+                    v-for="night in data.items"
+                    :key="night.night_date"
+                    class="data-card"
+                    :to="`/apple-health/${night.night_date}`"
+                >
+                    <div class="data-card-header">{{ formatDateFull(night.night_date) }}</div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Total Sleep (hr)</span>
+                        <span class="data-card-value">{{
+                            fmtHours(night.total_sleep_seconds)
+                        }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Efficiency (%)</span>
+                        <span class="data-card-value">{{
+                            fmtPct(night.sleep_efficiency_pct)
+                        }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Core (hr)</span>
+                        <span class="data-card-value">{{ fmtHours(night.core_seconds) }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Deep (hr)</span>
+                        <span class="data-card-value">{{ fmtHours(night.deep_seconds) }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">REM (hr)</span>
+                        <span class="data-card-value">{{ fmtHours(night.rem_seconds) }}</span>
+                    </div>
+                    <div class="data-card-row">
+                        <span class="data-card-label">Source</span>
+                        <span class="data-card-value">{{ night.preferred_source ?? '---' }}</span>
+                    </div>
+                </RouterLink>
+            </div>
+            <Table v-else>
                 <TableHeader>
                     <TableRow>
                         <TableHead>Date</TableHead>
@@ -123,10 +161,12 @@ import StatCard from '@/components/StatCard.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import { useApiLoad } from '@/composables/useApiLoad'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { getHealthNights } from '@/api/health'
 import { avg, formatDateFull } from '@/utils/formatting'
 
 const router = useRouter()
+const { isMobile } = useIsMobile()
 
 const PAGE_SIZE = 30
 const offset = ref(0)

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { ref } from 'vue'
 
@@ -38,6 +38,7 @@ import {
     cancelAnalysisJob,
 } from '@/api/analysis'
 import { makeAuthMock } from './helpers/mockUseAuth'
+import { setMediaMatches } from './matchMedia'
 
 describe('AnalysisManagementView — analyze missing', () => {
     beforeEach(() => {
@@ -53,6 +54,12 @@ describe('AnalysisManagementView — analyze missing', () => {
         })
         vi.mocked(getAnalysisJobs).mockResolvedValue({ jobs: [] })
         vi.mocked(runBatchAnalysis).mockResolvedValue({ job_id: 'job-1', session_count: 5 })
+    })
+
+    afterEach(() => {
+        // useIsMobile's ref is a module-scope singleton — reset the breakpoint
+        // so mobile-branch tests never leak into later tests in this file.
+        setMediaMatches(false)
     })
 
     async function mountView() {
@@ -109,5 +116,36 @@ describe('AnalysisManagementView — analyze missing', () => {
 
         expect(vm.error).toBeNull()
         expect(vi.mocked(getAnalysisJobs).mock.calls.length).toBeGreaterThan(fetchCallsBefore)
+    })
+
+    it('test_mobile_breakpoint_renders_card_list_not_table', async () => {
+        // Falsifiable: with the old immutable matchMedia stub isMobile could
+        // never become true, so the card branch was unreachable in unit tests.
+        setMediaMatches(true)
+        vi.mocked(getAnalysisSessions).mockResolvedValue({
+            items: [
+                {
+                    session_id: 1470,
+                    session_date: '2026-04-06',
+                    has_analysis: true,
+                    analysis_id: 7,
+                    duration_hours: 9.6,
+                },
+            ],
+            total: 1,
+            limit: 25,
+            offset: 0,
+        })
+        const wrapper = mount(AnalysisManagementView, {
+            global: {
+                // The card header links to session-analysis; no router is
+                // installed in this suite, so resolve RouterLink to an anchor.
+                components: { RouterLink: { props: ['to'], template: '<a><slot /></a>' } },
+            },
+        })
+        await flushPromises()
+
+        expect(wrapper.find('.card-list').exists()).toBe(true)
+        expect(wrapper.find('table').exists()).toBe(false)
     })
 })

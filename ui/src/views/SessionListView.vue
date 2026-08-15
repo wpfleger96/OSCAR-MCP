@@ -47,7 +47,77 @@
             </Button>
         </div>
 
-        <Table class="sessions-table">
+        <!-- Mobile: card list -->
+        <template v-if="isMobile">
+            <div v-if="loading" class="card-list">
+                <div v-for="i in 4" :key="'skel-' + i" class="data-card">
+                    <Skeleton class="mb-3 h-5 w-40" />
+                    <Skeleton class="mb-2 h-4 w-full" />
+                    <Skeleton class="mb-2 h-4 w-full" />
+                    <Skeleton class="h-4 w-2/3" />
+                </div>
+            </div>
+            <div v-else-if="!sessions.length" class="py-8 text-center text-muted-foreground">
+                No sessions found.
+            </div>
+            <template v-else>
+                <div class="mobile-sort-row">
+                    <span class="mobile-sort-label">Sort by</span>
+                    <Select v-model="mobileSortColumn">
+                        <SelectTrigger class="mobile-sort-trigger">
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="date">Date</SelectItem>
+                            <SelectItem value="duration">Duration</SelectItem>
+                        </SelectContent>
+                    </Select>
+                    <Button
+                        variant="outline"
+                        size="icon"
+                        class="mobile-sort-dir"
+                        :disabled="mobileSortColumn === 'duration'"
+                        :aria-label="
+                            sortDesc
+                                ? 'Sorted descending, switch to ascending'
+                                : 'Sorted ascending, switch to descending'
+                        "
+                        @click="toggleSortDirection"
+                    >
+                        <ArrowDown v-if="sortDesc" class="h-4 w-4" />
+                        <ArrowUp v-else class="h-4 w-4" />
+                    </Button>
+                </div>
+                <label class="select-all-row">
+                    <input
+                        type="checkbox"
+                        :checked="allOnPageSelected"
+                        :indeterminate="selectedIds.size > 0 && !allOnPageSelected"
+                        class="cursor-pointer"
+                        @change="toggleSelectAll"
+                    />
+                    Select all on page
+                </label>
+                <div class="card-list">
+                    <SessionCard
+                        v-for="session in sessions"
+                        :key="session.id"
+                        :session="session"
+                        :selected="selectedIds.has(session.id)"
+                        :can-write="canWrite"
+                        @toggle-select="toggleSelect(session.id)"
+                        @toggle-enabled="toggleEnabled(session)"
+                        @events="
+                            router.push({ name: 'session-events', params: { id: session.id } })
+                        "
+                        @delete="confirmDelete(session)"
+                    />
+                </div>
+            </template>
+        </template>
+
+        <!-- Desktop: table -->
+        <Table v-else class="sessions-table">
             <TableHeader>
                 <TableRow>
                     <TableHead style="width: 40px">
@@ -255,6 +325,7 @@ import {
     SelectValue,
 } from '@/components/ui/select'
 import PaginationBar from '@/components/PaginationBar.vue'
+import SessionCard from '@/components/SessionCard.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import {
     getSessions,
@@ -267,10 +338,12 @@ import { getDevices } from '@/api/devices'
 import { ahiClass, formatDateTime, formatDateWithWeekday } from '@/utils/formatting'
 import type { SessionListItem, DeletePreview, DeviceInfo } from '@/types'
 import { useAuth } from '@/composables/useAuth'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { useAvailableDates } from '@/composables/useAvailableDates'
 import DatePickerInput from '@/components/DatePickerInput.vue'
 
 const { canWrite } = useAuth()
+const { isMobile } = useIsMobile()
 const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
 
 const router = useRouter()
@@ -370,6 +443,26 @@ function clearFilters(): void {
     selectedDevice.value = null
 }
 
+// Mobile sort control — projects the same sortBy ref the table headers set
+const mobileSortColumn = computed({
+    get: () => (sortBy.value === 'duration' ? 'duration' : 'date'),
+    set: (col: string) => {
+        if (col === 'duration') {
+            sortBy.value = 'duration'
+        } else {
+            // Preserve the current direction when re-selecting Date
+            sortBy.value = sortDesc.value ? 'date-desc' : 'date-asc'
+        }
+    },
+})
+const sortDesc = computed(() => sortBy.value === 'date-desc')
+
+function toggleSortDirection(): void {
+    if (sortBy.value === 'date-asc' || sortBy.value === 'date-desc') {
+        sortBy.value = sortBy.value === 'date-desc' ? 'date-asc' : 'date-desc'
+    }
+}
+
 function toggleSort(col: 'date' | 'duration'): void {
     if (col === 'date') {
         sortBy.value = sortBy.value === 'date-desc' ? 'date-asc' : 'date-desc'
@@ -460,5 +553,39 @@ onMounted(async () => {
 .row-actions {
     display: flex;
     gap: 0.25rem;
+}
+
+.mobile-sort-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0 0.25rem 0.75rem;
+}
+
+.mobile-sort-label {
+    font-size: 0.875rem;
+    color: var(--color-muted-foreground);
+    white-space: nowrap;
+}
+
+.mobile-sort-trigger {
+    flex: 1;
+    min-height: var(--tap-target);
+}
+
+.mobile-sort-dir {
+    min-width: var(--tap-target);
+    min-height: var(--tap-target);
+    flex-shrink: 0;
+}
+
+.select-all-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.25rem 0.25rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-muted-foreground);
+    cursor: pointer;
 }
 </style>
