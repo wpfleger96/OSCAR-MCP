@@ -1,11 +1,17 @@
 <template>
-    <div ref="containerRef" class="waveform-chart" />
+    <div class="relative">
+        <div ref="containerRef" class="waveform-chart" />
+        <div v-if="refetching" class="absolute top-2 right-2 text-muted-foreground">
+            <Loader2 class="h-4 w-4 animate-spin" />
+        </div>
+    </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
+import { Loader2 } from '@lucide/vue'
 import { EVENT_COLORS, EVENT_SOLID_COLORS } from '@/types'
 import type { EventItem } from '@/types'
 import { useDarkMode } from '@/composables/useDarkMode'
@@ -22,6 +28,7 @@ const props = defineProps<{
     waveformType?: string
     events?: EventItem[]
     syncKey?: uPlot.SyncPubSub
+    refetching?: boolean
 }>()
 
 const emit = defineEmits<{
