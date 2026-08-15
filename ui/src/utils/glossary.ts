@@ -365,4 +365,179 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         short: 'Therapy-algorithm target pressure in cmH₂O, reported as a 0.5 Hz duty-cycle average.',
         long: "Distinct from the mask-side 'Pressure' channel: this is the algorithm's commanded set point rather than the measured delivered pressure.",
     },
+
+    // ── Device settings (Equipment page) ──────────────────────────────────
+    // The setting_ prefix namespaces these entries so they never collide with the
+    // measured-channel entries above (ipap, epap, pressure). Each label mirrors
+    // SETTING_LABELS in deviceSettings.ts (kept in sync by a unit test).
+    setting_mode: {
+        label: 'Mode',
+        short: 'The therapy mode the device runs, which determines how pressure is delivered.',
+        long: 'CPAP holds a single fixed pressure, APAP auto-adjusts within a range, and the bilevel modes (S, VAuto, ST) alternate between two pressure levels. The mode decides which of the other pressure settings actually apply.',
+    },
+    setting_pressure_fixed: {
+        label: 'Pressure',
+        short: 'The single fixed pressure delivered all night in CPAP mode, in cmH₂O.',
+    },
+    setting_pressure_min: {
+        label: 'Min Pressure',
+        short: 'The lower bound of the auto-adjusting pressure range in APAP mode, in cmH₂O.',
+        long: 'The device will not drop below this pressure; it is the baseline it settles to when your airway is stable.',
+    },
+    setting_pressure_max: {
+        label: 'Max Pressure',
+        short: 'The upper bound of the auto-adjusting pressure range in APAP mode, in cmH₂O.',
+        long: 'The device raises pressure toward this ceiling in response to obstructive events but never exceeds it.',
+    },
+    setting_ipap: {
+        label: 'IPAP',
+        short: 'Inspiratory Positive Airway Pressure: the pressure delivered while breathing in, in cmH₂O.',
+        long: 'The higher of the two bilevel pressures. It supports each breath and, together with EPAP, sets the amount of pressure support.',
+    },
+    setting_epap: {
+        label: 'EPAP',
+        short: 'Expiratory Positive Airway Pressure: the pressure delivered while breathing out, in cmH₂O.',
+        long: 'The lower of the two bilevel pressures. It holds the airway open between breaths and is the main defense against obstructive apneas.',
+    },
+    setting_ps: {
+        label: 'Pressure Support',
+        short: 'The fixed difference between IPAP and EPAP, in cmH₂O.',
+        long: 'Pressure support eases breathing effort and boosts tidal volume; a higher value means more ventilatory assistance on each breath.',
+    },
+    setting_min_epap: {
+        label: 'Min EPAP',
+        short: 'The lower bound of the auto-adjusting EPAP range in bilevel auto modes, in cmH₂O.',
+    },
+    setting_max_epap: {
+        label: 'Max EPAP',
+        short: 'The upper bound of the auto-adjusting EPAP range in bilevel auto modes, in cmH₂O.',
+    },
+    setting_min_ps: {
+        label: 'Min PS',
+        short: 'The lower bound of auto-adjusting pressure support, in cmH₂O.',
+        long: 'Applies to modes that vary pressure support automatically, such as iVAPS or ASV-style ventilation.',
+    },
+    setting_max_ps: {
+        label: 'Max PS',
+        short: 'The upper bound of auto-adjusting pressure support, in cmH₂O.',
+        long: 'Applies to modes that vary pressure support automatically, such as iVAPS or ASV-style ventilation.',
+    },
+    setting_epap_auto: {
+        label: 'EPAP Auto',
+        short: 'Whether EPAP auto-adjusts in response to obstructive events rather than staying fixed.',
+    },
+    setting_ramp_start_pressure: {
+        label: 'Ramp Start Pressure',
+        short: 'The reduced pressure the device starts at during the ramp period, in cmH₂O.',
+        long: 'A gentler starting pressure makes falling asleep easier; the device rises from here to the prescribed pressure over the ramp time.',
+    },
+    setting_epr_level: {
+        label: 'EPR Level',
+        short: 'The Expiratory Pressure Relief level, from 1 to 3.',
+        long: 'Each level drops exhalation pressure by that many cmH₂O in CPAP and APAP modes, making breathing out feel easier without changing the treatment pressure.',
+    },
+    setting_epr_mode: {
+        label: 'EPR Mode',
+        short: 'When Expiratory Pressure Relief applies, or whether it is off.',
+        long: 'Common options are Full Time (relief on every breath all night) and Ramp Only (relief only during the ramp period).',
+    },
+    setting_response: {
+        label: 'Response',
+        short: 'How quickly APAP raises pressure after an event, set to Standard or Soft.',
+        long: 'Soft responds more gently and gradually, which some users find more comfortable; Standard reacts faster to events.',
+    },
+    setting_ramp_enabled: {
+        label: 'Ramp',
+        short: 'Whether the device starts at a low pressure and gradually rises to the prescribed level while you fall asleep.',
+    },
+    setting_ramp_time: {
+        label: 'Ramp Time',
+        short: 'How long the ramp period lasts before full pressure is reached, in minutes.',
+    },
+    setting_smart_ramp: {
+        label: 'Smart Ramp',
+        short: 'AutoRamp holds the low ramp pressure until the device detects you have fallen asleep, then ramps up.',
+    },
+    setting_ti_min: {
+        label: 'Ti Min',
+        short: 'The shortest inspiratory time the device allows per breath, in seconds.',
+        long: 'In bilevel modes this constrains how briefly pressure can stay at IPAP, keeping breaths from being cut too short.',
+    },
+    setting_ti_max: {
+        label: 'Ti Max',
+        short: 'The longest inspiratory time the device allows per breath, in seconds.',
+        long: 'In bilevel modes this caps how long pressure stays at IPAP before cycling back to EPAP.',
+    },
+    setting_rise_time: {
+        label: 'Rise Time',
+        short: 'How quickly pressure transitions from EPAP to IPAP at the start of a breath.',
+        long: 'A longer rise time makes the switch to inhalation pressure feel gentler and more gradual.',
+    },
+    setting_trigger: {
+        label: 'Trigger',
+        short: 'The sensitivity for detecting the start of inhalation and switching to IPAP.',
+        long: 'A higher trigger sensitivity switches to inspiratory pressure on a smaller breathing effort.',
+    },
+    setting_cycle: {
+        label: 'Cycle',
+        short: 'The sensitivity for detecting the end of inhalation and switching back to EPAP.',
+        long: 'This affects how well the device stays synchronized with the end of your natural breath.',
+    },
+    setting_humidity_enabled: {
+        label: 'Humidity',
+        short: 'Whether the heated humidifier is turned on.',
+    },
+    setting_humidity_level: {
+        label: 'Humidity Level',
+        short: 'The moisture output of the heated humidifier, from 1 to 8.',
+        long: 'Higher levels add more moisture to the air, reducing dryness and nasal congestion.',
+    },
+    setting_climate_control: {
+        label: 'Climate Control',
+        short: 'Whether the device manages humidity and tube temperature automatically or you set them yourself.',
+        long: 'In Auto mode the device coordinates humidity and tube temperature to prevent rainout; in Manual mode you control each setting directly.',
+    },
+    setting_tube_temp_enabled: {
+        label: 'Heated Tube',
+        short: 'Whether the heated tube is turned on.',
+    },
+    setting_tube_temp: {
+        label: 'Tube Temperature',
+        short: 'The target temperature of the air in the heated tube.',
+        long: 'Warming the hose prevents condensation, or "rainout," that would otherwise pool and gurgle in the tubing.',
+    },
+    setting_smart_start: {
+        label: 'Smart Start',
+        short: 'Therapy starts automatically when you breathe into the mask.',
+    },
+    setting_smart_stop: {
+        label: 'Smart Stop',
+        short: 'Therapy stops automatically a short time after you remove the mask.',
+    },
+    setting_ab_filter: {
+        label: 'Filter Type',
+        short: 'The air filter type the device is configured for, Standard or antibacterial.',
+        long: 'The setting adjusts the device airflow compensation to account for the filter fitted.',
+    },
+    setting_mask_type: {
+        label: 'Mask Type',
+        short: 'The mask category the device compensates for, such as Full Face, Nasal, or Pillows.',
+        long: 'The device tunes its leak and pressure compensation curves to the selected mask category.',
+    },
+    setting_easy_breathe: {
+        label: 'Easy-Breathe',
+        short: 'The Easy-Breathe waveform smooths pressure changes to mirror natural breathing for comfort.',
+    },
+    setting_tube: {
+        label: 'Tube',
+        short: 'The hose diameter or model the device calibrates its flow against, such as SlimLine or Standard.',
+    },
+    setting_pt_access: {
+        label: 'Patient Access',
+        short: 'Whether the patient menu is allowed to change clinical settings on the device.',
+    },
+    setting_pt_view: {
+        label: 'Patient View',
+        short: 'Which on-device menu is shown: Simple, or the more detailed Advanced view.',
+    },
 }

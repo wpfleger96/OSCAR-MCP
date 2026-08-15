@@ -8,6 +8,8 @@
  * See also `src/snore/cli/display/settings.py` for the CLI counterpart.
  */
 
+import { GLOSSARY } from './glossary'
+
 export interface SettingsCategory {
     label: string
     keys: string[]
@@ -173,12 +175,38 @@ export function formatSettingValue(key: string, rawValue: string): string {
     return rawValue
 }
 
-/** Partition a flat settings dict into categorized groups + an "Other settings" bucket. */
-export function categorizeSettings(settings: Record<string, string>): {
-    categories: { label: string; entries: { key: string; label: string; value: string }[] }[]
-    other: { key: string; label: string; value: string }[]
-} {
-    const categories = SETTING_CATEGORIES.map((cat) => ({
+/**
+ * Glossary key for a setting key, or undefined when no entry exists.
+ *
+ * Setting entries are namespaced `setting_<key>` in the glossary so they never
+ * collide with same-named measured-channel entries (`ipap`, `epap`, `pressure`).
+ * Each `setting_*` entry's `label` deliberately mirrors `SETTING_LABELS` (kept in
+ * sync by a unit test) rather than sharing one source, so `GlossaryEntry.label`
+ * stays required and the two modules avoid an import cycle.
+ */
+function settingGlossaryKey(key: string): string | undefined {
+    const gk = `setting_${key}`
+    return Object.hasOwn(GLOSSARY, gk) ? gk : undefined
+}
+
+export interface SettingEntry {
+    key: string
+    label: string
+    value: string
+    glossaryKey?: string
+}
+
+export interface SettingsGroup {
+    label: string
+    entries: SettingEntry[]
+}
+
+/**
+ * Group a flat settings dict into display groups: the known categories (non-empty
+ * only) followed by an "Other settings" group for unrecognized keys when present.
+ */
+export function categorizeSettings(settings: Record<string, string>): SettingsGroup[] {
+    const groups: SettingsGroup[] = SETTING_CATEGORIES.map((cat) => ({
         label: cat.label,
         entries: cat.keys
             .filter((k) => k in settings)
@@ -186,12 +214,22 @@ export function categorizeSettings(settings: Record<string, string>): {
                 key: k,
                 label: settingLabel(k),
                 value: formatSettingValue(k, settings[k]),
+                glossaryKey: settingGlossaryKey(k),
             })),
     })).filter((cat) => cat.entries.length > 0)
 
-    const other = Object.entries(settings)
+    const other: SettingEntry[] = Object.entries(settings)
         .filter(([k]) => !KNOWN_KEYS.has(k))
-        .map(([k, v]) => ({ key: k, label: settingLabel(k), value: v }))
+        .map(([k, v]) => ({
+            key: k,
+            label: settingLabel(k),
+            value: v,
+            glossaryKey: settingGlossaryKey(k),
+        }))
 
-    return { categories, other }
+    if (other.length > 0) {
+        groups.push({ label: 'Other settings', entries: other })
+    }
+
+    return groups
 }
