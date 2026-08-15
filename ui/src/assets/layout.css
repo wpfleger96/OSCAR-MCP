@@ -240,6 +240,7 @@
     padding: 1rem;
 }
 
+/* NOTE: the index.html pre-mount shell mirrors this geometry — update the shell when dimensions, padding, or border-radius change. */
 .login-card {
     width: 100%;
     max-width: 360px;
