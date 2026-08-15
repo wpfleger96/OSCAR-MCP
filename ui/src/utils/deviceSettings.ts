@@ -175,21 +175,38 @@ export function formatSettingValue(key: string, rawValue: string): string {
     return rawValue
 }
 
-/** Glossary key for a setting key, or undefined when no entry exists. */
+/**
+ * Glossary key for a setting key, or undefined when no entry exists.
+ *
+ * Setting entries are namespaced `setting_<key>` in the glossary so they never
+ * collide with same-named measured-channel entries (`ipap`, `epap`, `pressure`).
+ * Each `setting_*` entry's `label` deliberately mirrors `SETTING_LABELS` (kept in
+ * sync by a unit test) rather than sharing one source, so `GlossaryEntry.label`
+ * stays required and the two modules avoid an import cycle.
+ */
 function settingGlossaryKey(key: string): string | undefined {
     const gk = `setting_${key}`
-    return gk in GLOSSARY ? gk : undefined
+    return Object.hasOwn(GLOSSARY, gk) ? gk : undefined
 }
 
-/** Partition a flat settings dict into categorized groups + an "Other settings" bucket. */
-export function categorizeSettings(settings: Record<string, string>): {
-    categories: {
-        label: string
-        entries: { key: string; label: string; value: string; glossaryKey?: string }[]
-    }[]
-    other: { key: string; label: string; value: string; glossaryKey?: string }[]
-} {
-    const categories = SETTING_CATEGORIES.map((cat) => ({
+export interface SettingEntry {
+    key: string
+    label: string
+    value: string
+    glossaryKey?: string
+}
+
+export interface SettingsGroup {
+    label: string
+    entries: SettingEntry[]
+}
+
+/**
+ * Group a flat settings dict into display groups: the known categories (non-empty
+ * only) followed by an "Other settings" group for unrecognized keys when present.
+ */
+export function categorizeSettings(settings: Record<string, string>): SettingsGroup[] {
+    const groups: SettingsGroup[] = SETTING_CATEGORIES.map((cat) => ({
         label: cat.label,
         entries: cat.keys
             .filter((k) => k in settings)
@@ -201,7 +218,7 @@ export function categorizeSettings(settings: Record<string, string>): {
             })),
     })).filter((cat) => cat.entries.length > 0)
 
-    const other = Object.entries(settings)
+    const other: SettingEntry[] = Object.entries(settings)
         .filter(([k]) => !KNOWN_KEYS.has(k))
         .map(([k, v]) => ({
             key: k,
@@ -210,5 +227,9 @@ export function categorizeSettings(settings: Record<string, string>): {
             glossaryKey: settingGlossaryKey(k),
         }))
 
-    return { categories, other }
+    if (other.length > 0) {
+        groups.push({ label: 'Other settings', entries: other })
+    }
+
+    return groups
 }

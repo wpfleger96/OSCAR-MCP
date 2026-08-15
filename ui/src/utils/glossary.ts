@@ -367,6 +367,9 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     },
 
     // ── Device settings (Equipment page) ──────────────────────────────────
+    // The setting_ prefix namespaces these entries so they never collide with the
+    // measured-channel entries above (ipap, epap, pressure). Each label mirrors
+    // SETTING_LABELS in deviceSettings.ts (kept in sync by a unit test).
     setting_mode: {
         label: 'Mode',
         short: 'The therapy mode the device runs, which determines how pressure is delivered.',
@@ -430,8 +433,8 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     },
     setting_epr_level: {
         label: 'EPR Level',
-        short: 'How much the pressure drops on exhalation for comfort, from 1 to 3 cmH₂O.',
-        long: 'Expiratory Pressure Relief applies in CPAP and APAP modes, making breathing out feel easier without changing the treatment pressure.',
+        short: 'The Expiratory Pressure Relief level, from 1 to 3.',
+        long: 'Each level drops exhalation pressure by that many cmH₂O in CPAP and APAP modes, making breathing out feel easier without changing the treatment pressure.',
     },
     setting_epr_mode: {
         label: 'EPR Mode',
@@ -535,6 +538,6 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     },
     setting_pt_view: {
         label: 'Patient View',
-        short: 'Whether the on-device display shows the Essentials or the more detailed Advanced view.',
+        short: 'Which on-device menu is shown: Simple, or the more detailed Advanced view.',
     },
 }

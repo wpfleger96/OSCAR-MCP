@@ -101,43 +101,21 @@
                     </CollapsibleTrigger>
                     <CollapsibleContent>
                         <div
-                            v-if="!device.current_settings"
+                            v-if="!categorizedSettings.get(device.id)?.length"
                             class="text-sm text-muted-foreground py-2"
                         >
                             No settings recorded for this device.
                         </div>
                         <div v-else class="settings-groups">
                             <div
-                                v-for="cat in categorizedSettings.get(device.id)?.categories"
-                                :key="cat.label"
+                                v-for="group in categorizedSettings.get(device.id)"
+                                :key="group.label"
                                 class="settings-group"
                             >
-                                <h4 class="settings-group-label">{{ cat.label }}</h4>
+                                <h4 class="settings-group-label">{{ group.label }}</h4>
                                 <dl class="settings-list">
                                     <div
-                                        v-for="entry in cat.entries"
-                                        :key="entry.key"
-                                        class="setting-row"
-                                    >
-                                        <dt class="setting-key">
-                                            {{ entry.label }}
-                                            <InfoHint
-                                                v-if="entry.glossaryKey"
-                                                :glossary-key="entry.glossaryKey"
-                                            />
-                                        </dt>
-                                        <dd class="setting-val">{{ entry.value }}</dd>
-                                    </div>
-                                </dl>
-                            </div>
-                            <div
-                                v-if="categorizedSettings.get(device.id)?.other.length"
-                                class="settings-group"
-                            >
-                                <h4 class="settings-group-label">Other settings</h4>
-                                <dl class="settings-list">
-                                    <div
-                                        v-for="entry in categorizedSettings.get(device.id)?.other"
+                                        v-for="entry in group.entries"
                                         :key="entry.key"
                                         class="setting-row"
                                     >
@@ -263,7 +241,7 @@ const categorizedSettings = computed(
         new Map(
             devices.value.map((d) => [
                 d.id,
-                d.current_settings ? categorizeSettings(d.current_settings) : null,
+                d.current_settings ? categorizeSettings(d.current_settings) : [],
             ]),
         ),
 )
