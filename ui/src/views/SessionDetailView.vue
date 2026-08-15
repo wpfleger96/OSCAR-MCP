@@ -109,22 +109,21 @@
                 @add-chart="handleAddChart"
             />
 
-            <div
-                v-if="waveformLoading && !multiMode"
-                class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
-            >
-                <Loader2 class="h-4 w-4 animate-spin" /> Loading waveform...
-            </div>
-            <div
-                v-else-if="waveformError && !multiMode"
-                class="h-60 flex items-center justify-center gap-2 text-destructive"
-            >
-                {{ waveformError }}
-            </div>
-
             <template v-if="!multiMode">
+                <div
+                    v-if="waveformLoading && !waveformData"
+                    class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
+                >
+                    <Loader2 class="h-4 w-4 animate-spin" /> Loading waveform...
+                </div>
+                <div
+                    v-else-if="waveformError"
+                    class="h-60 flex items-center justify-center gap-2 text-destructive"
+                >
+                    {{ waveformError }}
+                </div>
                 <WaveformChart
-                    v-if="waveformData"
+                    v-else-if="waveformData"
                     ref="singleChartRef"
                     :timestamps="waveformData.timestamps"
                     :values="waveformData.values"
@@ -133,6 +132,7 @@
                     :waveform-type="selectedType"
                     :events="selectedType === 'flow' ? events : undefined"
                     :start-epoch="startEpoch"
+                    :refetching="waveformLoading"
                     @zoom="handleZoom"
                 />
             </template>

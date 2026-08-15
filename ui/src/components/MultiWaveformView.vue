@@ -37,7 +37,7 @@
                 </Button>
             </div>
             <div
-                v-if="chart.loading"
+                v-if="chart.loading && !chart.data"
                 class="h-60 flex items-center justify-center gap-2 text-muted-foreground"
             >
                 <Loader2 class="h-4 w-4 animate-spin" />
@@ -61,6 +61,7 @@
                 :events="chart.type === 'flow' ? events : undefined"
                 :sync-key="syncKey"
                 :start-epoch="startEpoch"
+                :refetching="chart.loading"
                 @zoom="onZoom"
             />
         </div>
