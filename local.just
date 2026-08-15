@@ -7,8 +7,12 @@ dev: web-install web-build
 
 # Start the API in MULTIUSER auth mode with a throwaway secret and a seeded admin invite.
 # Prints the signup URL to stdout so you can paste it into a browser.
-# `just dev-auth 1` also requires TOTP enrollment for password-login users.
-dev-auth require_totp="0": web-install web-build (dev-invite "dev@localhost" "admin")
+dev-auth: (_dev-auth "0")
+
+# Like dev-auth, but requires TOTP enrollment for password-login users.
+dev-auth-mfa: (_dev-auth "1")
+
+_dev-auth require_totp: web-install web-build (dev-invite "dev@localhost" "admin")
     SNORE_AUTH_MODE=multiuser \
     SNORE_SESSION_SECRET=dev-throwaway-secret-not-for-production-1234567890ab \
     SNORE_PUBLIC_BASE_URL=http://127.0.0.1:8000 \
