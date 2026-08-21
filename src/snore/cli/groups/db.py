@@ -283,6 +283,14 @@ def scrub_demo(db: str | None, source_profile_id: int, yes: bool) -> None:
     asyncio.run(_run())
 
 
+# Columns the demo scrub must NOT copy verbatim: identity/FK columns get
+# remapped values, ``date`` is shifted, and audit instants regenerate via
+# defaults.  test_demo imports these so its column guards stay in lockstep
+# with the clone. Statistics has no surrogate ``id`` — session_id is its PK.
+_DAY_CLONE_EXCLUDED_COLUMNS = ("id", "device_id", "date", "created_at", "updated_at")
+_STATS_CLONE_EXCLUDED_COLUMNS = ("session_id",)
+
+
 async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
     """Async implementation of the scrub-demo command.
 
@@ -423,12 +431,11 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
         src_days = (await db.execute(days_q)).scalars().all()
         for src_day in src_days:
             # Reflect all aggregate columns so new metrics are never silently
-            # dropped; id/device_id/date get remapped or shifted values and the
-            # audit instants regenerate via defaults.
+            # dropped (test_demo asserts every copied column stays numeric).
             day_payload = {
                 c.name: getattr(src_day, c.name)
                 for c in Day.__table__.columns
-                if c.name not in ("id", "device_id", "date", "created_at", "updated_at")
+                if c.name not in _DAY_CLONE_EXCLUDED_COLUMNS
             }
             demo_day = Day(
                 device_id=demo_dev.id,
@@ -513,16 +520,16 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
         )
         for src_stats in (await db.execute(stats_q)).scalars().all():
             # Reflect all metric columns so new metrics are never silently
-            # dropped (test_demo asserts every column stays numeric).
-            payload = {
+            # dropped (test_demo asserts every copied column stays numeric).
+            stats_payload = {
                 c.name: getattr(src_stats, c.name)
                 for c in Statistics.__table__.columns
-                if c.name not in ("id", "session_id")
+                if c.name not in _STATS_CLONE_EXCLUDED_COLUMNS
             }
             db.add(
                 Statistics(
                     session_id=src_to_demo_session[src_stats.session_id],
-                    **payload,
+                    **stats_payload,
                 )
             )
             counts["statistics"] += 1
