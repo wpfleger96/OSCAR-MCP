@@ -35,6 +35,27 @@ from snore.constants import EventDetectionConstants as EDC
 logger = logging.getLogger(__name__)
 
 
+def _mark_breaths_in_events(
+    breaths: list[BreathMetrics],
+    events: list[ApneaEvent] | list[HypopneaEvent],
+) -> None:
+    """Flag breaths fully contained in any event as ``in_event``.
+
+    Contained breaths are dropped from the rolling baselines used by downstream
+    detection. Breaths are time-ordered, so each event's scan stops once a
+    breath starts after the event ends.
+    """
+    for event in events:
+        for breath in breaths:
+            if breath.start_time > event.end_time:
+                break  # breaths are time-ordered
+            if (
+                breath.start_time >= event.start_time
+                and breath.end_time <= event.end_time
+            ):
+                breath.in_event = True
+
+
 class EventDetector:
     """
     Configurable respiratory event detector.
@@ -140,6 +161,15 @@ class EventDetector:
         Returns:
             ModeResult with detected events and metrics
         """
+        # Reset per-call breath state so each detect_events call is
+        # self-contained. detect_events runs once per mode over the SAME breaths
+        # list, and the apnea and hypopnea loops set in_event=True; without this
+        # reset a prior mode's flags would contaminate this mode's baselines and
+        # make results mode-order-dependent. in_event is the only breath field
+        # detect_events mutates.
+        for breath in breaths:
+            breath.in_event = False
+
         if self.config.name == "resmed":
             apneas = self._detect_events_resmed(breaths, flow_data, sample_rate)
         else:
@@ -311,13 +341,7 @@ class EventDetector:
             f"{self.config.name}: Detected {len(apneas)} apneas: {oa} OA, {ca} CA, {ma} MA, {ua} UA"
         )
 
-        for apnea in apneas:
-            for breath in breaths:
-                if (
-                    breath.start_time >= apnea.start_time
-                    and breath.end_time <= apnea.end_time
-                ):
-                    breath.in_event = True
+        _mark_breaths_in_events(breaths, apneas)
 
         return apneas
 
@@ -507,15 +531,9 @@ class EventDetector:
 
         # Mark contained breaths as in-event so they are excluded from the
         # baselines used by downstream detection (RERAs run after hypopneas).
-        # Mirrors the apnea loop in _detect_apneas. Applied after merging so it
-        # does not perturb the hypopneas computed in this same call.
-        for hypopnea in hypopneas:
-            for breath in breaths:
-                if (
-                    breath.start_time >= hypopnea.start_time
-                    and breath.end_time <= hypopnea.end_time
-                ):
-                    breath.in_event = True
+        # Applied after merging so it does not perturb the hypopneas computed in
+        # this same call.
+        _mark_breaths_in_events(breaths, hypopneas)
 
         logger.info(f"{self.config.name}: Detected {len(hypopneas)} hypopneas")
 
@@ -576,6 +594,8 @@ class EventDetector:
         excluded = np.zeros(len(breaths), dtype=bool)
         for event in list(apneas) + list(hypopneas):
             for i, breath in enumerate(breaths):
+                if breath.start_time > event.end_time:
+                    break  # breaths are time-ordered
                 if (
                     breath.start_time >= event.start_time
                     and breath.end_time <= event.end_time

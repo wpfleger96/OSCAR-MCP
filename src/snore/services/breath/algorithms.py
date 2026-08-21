@@ -124,7 +124,8 @@ def _iter_fl_run_recoveries(
     (no gap; a ``flow_class is None`` breath ends the run) is a recovery
     breath.  The follower is a recovery breath when EITHER:
 
-    (a) ``is_recovery_breath is True`` — the analysis-time amplitude detector; OR
+    (a) ``is_recovery_breath is True`` — the analysis-time amplitude detector
+        (``detector.py::_detect_reras``); OR
     (b) self-contained (RERA-proxy v2): the follower's ``flow_class`` drops to
         <= 2 AND its ``peak_flow_lpm`` is >= ``(1 + recovery_amplitude_margin)``
         times the mean of the run's non-null ``peak_flow_lpm`` values.

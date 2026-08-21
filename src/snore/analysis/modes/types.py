@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from snore.analysis.shared.types import ApneaEvent, HypopneaEvent, RERAEvent
 from snore.constants import EventDetectionConstants as EDC
@@ -117,6 +117,21 @@ class DetectionModeConfig(BaseModel):
         ge=0,
         description="RERA recovery breath: minimum amplitude increase over sequence mean",
     )
+
+    @model_validator(mode="after")
+    def _validate_threshold_bands(self) -> "DetectionModeConfig":
+        """Reject inverted [min, max) reduction bands at construction."""
+        if self.rera_reduction_min >= self.rera_reduction_max:
+            raise ValueError(
+                "rera_reduction_min must be < rera_reduction_max "
+                f"(got {self.rera_reduction_min} >= {self.rera_reduction_max})"
+            )
+        if self.hypopnea_min_threshold >= self.hypopnea_max_threshold:
+            raise ValueError(
+                "hypopnea_min_threshold must be < hypopnea_max_threshold "
+                f"(got {self.hypopnea_min_threshold} >= {self.hypopnea_max_threshold})"
+            )
+        return self
 
 
 class ModeResult(BaseModel):

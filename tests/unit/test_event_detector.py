@@ -11,7 +11,12 @@ from snore.analysis.modes.classification import (
     _check_desaturation,
     _classify_apnea_type,
 )
-from snore.analysis.modes.config import AASM_CONFIG, AASM_RELAXED_CONFIG, RESMED_CONFIG
+from snore.analysis.modes.config import (
+    AASM_CONFIG,
+    AASM_RELAXED_CONFIG,
+    RESMED_CONFIG,
+    DetectionModeConfig,
+)
 from snore.analysis.modes.detector import EventDetector
 from snore.analysis.modes.postprocess import (
     _calculate_event_overlap,
@@ -2435,3 +2440,92 @@ class TestReraThresholdConfig:
         breaths = self._rera_pattern()
         reras = EventDetector(config)._detect_reras(breaths, [], [])
         assert len(reras) == 0
+
+    def test_lowered_recovery_reduction_max_suppresses_rera(self):
+        """A recovery-reduction ceiling of 0 rejects the recovery breath.
+
+        The recovery breath exceeds baseline, so its clamped reduction is 0.0;
+        the default 0.10 ceiling admits it, but 0.0 (strict <) rejects it. This
+        isolates rera_recovery_reduction_max — no other threshold changes.
+        """
+        config = AASM_CONFIG.model_copy(update={"rera_recovery_reduction_max": 0.0})
+        breaths = self._rera_pattern()
+        reras = EventDetector(config)._detect_reras(breaths, [], [])
+        assert len(reras) == 0
+
+
+class TestDetectEventsModeIsolation:
+    """detect_events resets per-breath state so multi-mode runs stay independent."""
+
+    def _flow_data(self, breaths: list[BreathMetrics]) -> tuple[np.ndarray, np.ndarray]:
+        """Flat flow signal spanning the breath timeline (no apnea to classify)."""
+        timestamps = np.arange(0.0, breaths[-1].end_time + 1.0, 0.1)
+        return timestamps, np.zeros_like(timestamps)
+
+    def _hypopnea_pattern(self) -> list[BreathMetrics]:
+        """15 normal breaths, a 4-breath 50%-reduced run, then normal breaths."""
+        breaths = [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(15)]
+        breaths += [_uniform_breath(i + 1, float(i * 4), 25.0) for i in range(15, 19)]
+        breaths += [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(19, 30)]
+        return breaths
+
+    def test_preset_in_event_flags_do_not_change_results(self):
+        """Contaminated in_event flags from a prior mode do not alter detection.
+
+        Without the reset, pre-set flags would starve the baselines (falling to
+        the fixed floor) and suppress the hypopnea; the reset makes each
+        detect_events call self-contained and mode-order-independent.
+        """
+        detector = EventDetector(AASM_CONFIG)
+
+        fresh = self._hypopnea_pattern()
+        flow_data = self._flow_data(fresh)
+        expected = detector.detect_events(
+            fresh,
+            flow_data=flow_data,
+            sample_rate=25.0,
+            session_duration_hours=1.0,
+        )
+        # Guard: the fixture must actually produce an event, else the test is vacuous.
+        assert len(expected.hypopneas) >= 1
+
+        contaminated = self._hypopnea_pattern()
+        for breath in contaminated:
+            breath.in_event = True
+        actual = detector.detect_events(
+            contaminated,
+            flow_data=flow_data,
+            sample_rate=25.0,
+            session_duration_hours=1.0,
+        )
+
+        assert len(actual.apneas) == len(expected.apneas)
+        assert len(actual.hypopneas) == len(expected.hypopneas)
+        assert len(actual.reras) == len(expected.reras)
+        assert actual.ahi == pytest.approx(expected.ahi)
+        assert actual.rdi == pytest.approx(expected.rdi)
+
+
+class TestThresholdBandValidation:
+    """DetectionModeConfig rejects inverted [min, max) threshold bands."""
+
+    def _config_dict(self, **overrides: float) -> dict:
+        base = AASM_CONFIG.model_dump()
+        base.update(overrides)
+        return base
+
+    def test_inverted_rera_band_rejected(self):
+        """rera_reduction_min >= rera_reduction_max is rejected at construction."""
+        with pytest.raises(ValueError, match="rera_reduction_min"):
+            DetectionModeConfig.model_validate(
+                self._config_dict(rera_reduction_min=0.40, rera_reduction_max=0.30)
+            )
+
+    def test_inverted_hypopnea_band_rejected(self):
+        """hypopnea_min_threshold >= hypopnea_max_threshold is rejected."""
+        with pytest.raises(ValueError, match="hypopnea_min_threshold"):
+            DetectionModeConfig.model_validate(
+                self._config_dict(
+                    hypopnea_min_threshold=0.90, hypopnea_max_threshold=0.30
+                )
+            )
