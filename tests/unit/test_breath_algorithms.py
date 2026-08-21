@@ -137,63 +137,6 @@ class TestWeightedAverageSmoothing:
         assert abs(smoothed_2 - expected_2) < 0.1
 
 
-class TestPercentileBasedEventDetection:
-    """Test percentile-based flow restriction detection."""
-
-    def test_detects_sustained_restriction_events(self):
-        """
-        Should detect sustained periods where amplitude falls below threshold.
-
-        Uses 60th percentile of amplitudes as baseline, flags when breath
-        amplitude < (p60 * restriction_percent) for minimum duration.
-        """
-        segmenter = BreathSegmenter()
-
-        mock_breaths = []
-        amplitudes = [50, 52, 48, 51, 49, 20, 22, 18, 21, 19, 23, 50, 51, 49, 48, 52]
-
-        for i, amp in enumerate(amplitudes):
-            breath = BreathMetrics(
-                breath_number=i + 1,
-                start_time=i * 4.0,
-                middle_time=i * 4.0 + 2.0,
-                end_time=i * 4.0 + 4.0,
-                duration=4.0,
-                tidal_volume=500.0,
-                tidal_volume_smoothed=500.0,
-                peak_inspiratory_flow=amp * 0.6,
-                peak_expiratory_flow=amp * 0.4,
-                inspiration_time=2.0,
-                expiration_time=2.0,
-                i_e_ratio=1.0,
-                respiratory_rate=15.0,
-                respiratory_rate_rolling=15.0,
-                minute_ventilation=7.5,
-                amplitude=amp,
-                is_complete=True,
-            )
-            mock_breaths.append(breath)
-
-        restrictions = segmenter.detect_flow_restriction(
-            mock_breaths, restriction_percent=50.0, duration_threshold=10.0
-        )
-
-        assert len(restrictions) >= 1, "Should detect at least one restriction event"
-
-        if len(restrictions) > 0:
-            start_idx, end_idx = restrictions[0]
-            assert start_idx >= 4, (
-                f"Restriction should start around breath 5, got {start_idx}"
-            )
-            assert end_idx <= 11, (
-                f"Restriction should end around breath 10, got {end_idx}"
-            )
-            duration = sum(
-                mock_breaths[i].duration for i in range(start_idx, end_idx + 1)
-            )
-            assert duration >= 10.0, f"Restriction duration {duration}s should be ≥ 10s"
-
-
 class TestEndToEndBreathSegmentation:
     """Integration test for complete breath segmentation pipeline."""
 

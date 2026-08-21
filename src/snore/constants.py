@@ -190,21 +190,23 @@ class FlowLimitationConstants:
 
     CONFIDENCE_THRESHOLD = 0.6
 
+    # Plateau thresholds are fractions of inspiration time (plateau_fraction),
+    # not absolute seconds, so slow deep breaths no longer trivially clear them.
     FL_CLASS7_FLATNESS_MIN = 0.9
-    FL_CLASS7_PLATEAU_MIN = 0.8
+    FL_CLASS7_PLATEAU_FRAC_MIN = 0.5
 
     FL_CLASS6_PEAK_POSITION_MIN = 0.7
     FL_CLASS6_FLATNESS_MIN = 0.6
-    FL_CLASS6_PLATEAU_MIN = 0.4
+    FL_CLASS6_PLATEAU_FRAC_MIN = 0.25
 
     FL_CLASS5_FLATNESS_MIN = 0.7
     FL_CLASS5_PEAK_POSITION_MIN = 0.4
     FL_CLASS5_PEAK_POSITION_MAX = 0.6
-    FL_CLASS5_PLATEAU_MIN = 0.3
+    FL_CLASS5_PLATEAU_FRAC_MIN = 0.2
 
     FL_CLASS4_FLATNESS_MIN = 0.4
     FL_CLASS4_PEAK_POSITION_MAX = 0.3
-    FL_CLASS4_PLATEAU_MIN = 0.5
+    FL_CLASS4_PLATEAU_FRAC_MIN = 0.3
 
     FL_CLASS3_PEAK_COUNT_MIN = 3
     FL_CLASS3_FLATNESS_MIN = 0.3
@@ -213,20 +215,17 @@ class FlowLimitationConstants:
     FL_CLASS2_PEAK_COUNT = 2
     FL_CLASS2_PEAK_SPACING_MIN = 0.3
 
-    FL_CLASS1_FLATNESS_MAX = 0.3
+    FL_CLASS1_FLATNESS_MAX = 0.45
     FL_CLASS1_SYMMETRY_MAX = 0.3
-    FL_CLASS1_KURTOSIS_MIN = 2.0
 
+    # Threshold-margin confidence: rule-matched confidence is
+    # FL_CONFIDENCE_BASE + FL_CONFIDENCE_MARGIN_SCALE * mean(margins), where each
+    # margin is the fractional distance of a value past its threshold, clipped to
+    # [0, 1].  Base > FL_DEFAULT_CONFIDENCE guarantees rule-matched breaths always
+    # score strictly above the fallback (the gate nightly metrics key on).
     FL_DEFAULT_CONFIDENCE = 0.5
-    FL_HIGH_FEATURE_COUNT = 3
-    FL_MEDIUM_FEATURE_COUNT = 2
-    FL_HIGH_CONFIDENCE = 0.9
-    FL_MEDIUM_CONFIDENCE = 0.7
-    FL_LOW_CONFIDENCE = 0.6
-
-    FL_VERY_HIGH_FLATNESS = 0.95
-    FL_HIGH_PEAK_SPACING = 0.4
-    FL_CONFIDENCE_BONUS = 0.05
+    FL_CONFIDENCE_BASE = 0.6
+    FL_CONFIDENCE_MARGIN_SCALE = 0.3
 
 
 class PulseChangeConstants:

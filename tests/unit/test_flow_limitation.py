@@ -5,6 +5,8 @@ Tests rule-based classification of breaths into 7 flow limitation classes,
 confidence scoring, and session-level flow limitation index calculation.
 """
 
+import pytest
+
 from snore.analysis.shared.feature_extractors import (
     PeakFeatures,
     ShapeFeatures,
@@ -14,6 +16,7 @@ from snore.analysis.shared.flow_limitation import (
     FlowLimitationClassifier,
     FlowPattern,
 )
+from snore.constants import FlowLimitationConstants as FLC
 from tests.helpers.synthetic_data import (
     generate_flattened_breath,
     generate_multi_peak_breath,
@@ -44,6 +47,11 @@ class TestClass1Sinusoidal:
         assert pattern.flow_class == 1
         assert pattern.class_name == "Sinusoidal"
         assert pattern.severity == "normal"
+        # Regression: the class-1 rule must actually match (confidence > 0.5),
+        # not fall through to the 0.5 fallback as it did when the rule required
+        # positive kurtosis (unsatisfiable for smooth platykurtic breaths).
+        assert pattern.confidence > 0.5
+        assert "low_flatness" in pattern.matched_features
 
     def test_class1_confidence_high(self):
         """Normal breathing should have reasonable confidence."""
@@ -79,6 +87,7 @@ class TestClass2DoublePeak:
         shape = ShapeFeatures(
             flatness_index=0.4,
             plateau_duration=0.2,
+            plateau_fraction=0.1,
             symmetry_score=0.1,
             kurtosis=1.5,
             rise_time=0.3,
@@ -109,6 +118,7 @@ class TestClass2DoublePeak:
         shape = ShapeFeatures(
             flatness_index=0.4,
             plateau_duration=0.2,
+            plateau_fraction=0.1,
             symmetry_score=0.1,
             kurtosis=1.5,
             rise_time=0.3,
@@ -169,6 +179,7 @@ class TestClass4EarlyPeak:
         shape = ShapeFeatures(
             flatness_index=0.5,
             plateau_duration=0.6,
+            plateau_fraction=0.4,
             symmetry_score=-0.3,
             kurtosis=1.2,
             rise_time=0.2,
@@ -204,6 +215,7 @@ class TestClass5MidPeak:
         shape = ShapeFeatures(
             flatness_index=0.75,
             plateau_duration=0.4,
+            plateau_fraction=0.3,
             symmetry_score=0.05,
             kurtosis=1.0,
             rise_time=0.4,
@@ -239,6 +251,7 @@ class TestClass6LatePeak:
         shape = ShapeFeatures(
             flatness_index=0.65,
             plateau_duration=0.5,
+            plateau_fraction=0.3,
             symmetry_score=0.3,
             kurtosis=0.8,
             rise_time=0.8,
@@ -262,6 +275,41 @@ class TestClass6LatePeak:
         assert pattern.class_name == "Peak During Late Phase"
         assert pattern.severity == "severe"
         assert "late_peak" in pattern.matched_features
+
+    def test_dominant_late_peak_drives_class6(self):
+        """The most-prominent peak — not the first — selects the shape class.
+
+        A small early peak (position 0.2) precedes a dominant late peak
+        (position 0.8, far higher prominence).  Indexing by the first peak
+        would read 0.2 and miss Class 6; the dominant-peak rule must read 0.8.
+        """
+        classifier = FlowLimitationClassifier()
+
+        shape = ShapeFeatures(
+            flatness_index=0.65,
+            plateau_duration=0.5,
+            plateau_fraction=0.3,
+            symmetry_score=0.3,
+            kurtosis=0.8,
+            rise_time=0.8,
+            fall_time=0.2,
+        )
+
+        peaks = PeakFeatures(
+            peak_count=2,
+            peak_positions=[0.2, 0.8],
+            peak_prominences=[0.2, 0.9],
+            inter_peak_intervals=[0.5],
+        )
+
+        pattern = classifier.classify_flow_pattern(
+            breath_number=1,
+            shape_features=shape,
+            peak_features=peaks,
+        )
+
+        assert pattern.flow_class == 6
+        assert pattern.matched_features["late_peak"] == 0.8
 
 
 class TestClass7PlateauThroughout:
@@ -298,6 +346,7 @@ class TestClass7PlateauThroughout:
         shape = ShapeFeatures(
             flatness_index=0.96,
             plateau_duration=0.9,
+            plateau_fraction=1.0,
             symmetry_score=0.0,
             kurtosis=0.5,
             rise_time=0.1,
@@ -321,16 +370,81 @@ class TestClass7PlateauThroughout:
         assert pattern.confidence >= 0.7
 
 
+class TestPlateauFractionControls:
+    """Classifier keys plateau on plateau_fraction (ratio), not plateau_duration."""
+
+    def test_classification_follows_plateau_fraction_not_duration(self):
+        """When plateau_duration (seconds) and plateau_fraction (ratio) disagree,
+        classification tracks plateau_fraction.
+
+        Both breaths share a flatness in (FL_CLASS4_FLATNESS_MIN,
+        FL_CLASS1_FLATNESS_MAX) and an early peak, so only the plateau gate
+        separates Class 4 from Class 1.  A large plateau_duration that would
+        clear an absolute-seconds threshold must not promote a breath whose
+        plateau_fraction is below the ratio threshold, and a tiny
+        plateau_duration must not block one whose fraction clears it.
+        """
+        classifier = FlowLimitationClassifier()
+
+        peaks = PeakFeatures(
+            peak_count=1,
+            peak_positions=[0.2],
+            peak_prominences=[0.9],
+            inter_peak_intervals=[],
+        )
+
+        # Big duration, sub-threshold fraction → NOT Class 4.
+        low_fraction = ShapeFeatures(
+            flatness_index=0.42,
+            plateau_duration=5.0,
+            plateau_fraction=0.1,
+            symmetry_score=0.0,
+            kurtosis=1.0,
+            rise_time=0.2,
+            fall_time=0.8,
+        )
+        # Identical except the two plateau fields: tiny duration, supra-threshold
+        # fraction → Class 4.
+        high_fraction = ShapeFeatures(
+            flatness_index=0.42,
+            plateau_duration=0.01,
+            plateau_fraction=0.5,
+            symmetry_score=0.0,
+            kurtosis=1.0,
+            rise_time=0.2,
+            fall_time=0.8,
+        )
+
+        low = classifier.classify_flow_pattern(
+            breath_number=1, shape_features=low_fraction, peak_features=peaks
+        )
+        high = classifier.classify_flow_pattern(
+            breath_number=2, shape_features=high_fraction, peak_features=peaks
+        )
+
+        assert low.flow_class != 4
+        assert high.flow_class == 4
+        assert "plateau_sustained" in high.matched_features
+
+
 class TestConfidenceScoring:
     """Test confidence score calculation."""
 
-    def test_confidence_multiple_features_matched(self):
-        """More matched features should give higher confidence."""
+    def test_confidence_large_margins_high(self):
+        """Confidence follows the margin formula, not a per-class constant.
+
+        Values far past their thresholds must match FL_CONFIDENCE_BASE +
+        FL_CONFIDENCE_MARGIN_SCALE * mean(margins); the superseded feature-count
+        formula ignored how far past the threshold each value sat.
+        """
         classifier = FlowLimitationClassifier()
 
+        flatness = 0.92
+        plateau_fraction = 1.0
         shape = ShapeFeatures(
-            flatness_index=0.92,
+            flatness_index=flatness,
             plateau_duration=0.85,
+            plateau_fraction=plateau_fraction,
             symmetry_score=0.0,
             kurtosis=0.6,
             rise_time=0.1,
@@ -350,7 +464,59 @@ class TestConfidenceScoring:
             peak_features=peaks,
         )
 
+        # Class 7 matches on its two continuous thresholds; reproduce their
+        # margins (each clipped to [0, 1]) and the mean-margin confidence.
+        margins = [
+            (flatness - FLC.FL_CLASS7_FLATNESS_MIN) / FLC.FL_CLASS7_FLATNESS_MIN,
+            min(
+                (plateau_fraction - FLC.FL_CLASS7_PLATEAU_FRAC_MIN)
+                / FLC.FL_CLASS7_PLATEAU_FRAC_MIN,
+                1.0,
+            ),
+        ]
+        expected = FLC.FL_CONFIDENCE_BASE + FLC.FL_CONFIDENCE_MARGIN_SCALE * (
+            sum(margins) / len(margins)
+        )
+        assert pattern.flow_class == 7
+        assert pattern.confidence == pytest.approx(expected)
         assert pattern.confidence >= 0.7
+
+    def test_rule_match_at_threshold_yields_base_confidence(self):
+        """A rule match with every value at its threshold has ~zero margin, so
+        confidence collapses to FL_CONFIDENCE_BASE (the margin term vanishes)."""
+        classifier = FlowLimitationClassifier()
+
+        eps = 1e-9
+        shape = ShapeFeatures(
+            flatness_index=FLC.FL_CLASS7_FLATNESS_MIN + eps,
+            plateau_duration=0.9,
+            plateau_fraction=FLC.FL_CLASS7_PLATEAU_FRAC_MIN + eps,
+            symmetry_score=0.0,
+            kurtosis=0.5,
+            rise_time=0.1,
+            fall_time=0.1,
+        )
+
+        peaks = PeakFeatures(
+            peak_count=0,
+            peak_positions=[],
+            peak_prominences=[],
+            inter_peak_intervals=[],
+        )
+
+        pattern = classifier.classify_flow_pattern(
+            breath_number=1,
+            shape_features=shape,
+            peak_features=peaks,
+        )
+
+        assert pattern.flow_class == 7
+        assert pattern.confidence == pytest.approx(FLC.FL_CONFIDENCE_BASE, abs=1e-6)
+
+    def test_base_confidence_exceeds_fallback_invariant(self):
+        """Rule-matched confidence must sit strictly above the fallback the
+        nightly fl_class_ge4_pct gate keys on; guards against a lowered BASE."""
+        assert FLC.FL_CONFIDENCE_BASE > FLC.FL_DEFAULT_CONFIDENCE
 
     def test_confidence_always_in_range(self):
         """Confidence should always be between 0 and 1."""
@@ -443,6 +609,34 @@ class TestFlowLimitationIndex:
 
         assert fli == 0.0
 
+    def test_fli_strictly_increasing_in_class(self):
+        """Uniform sessions must score monotonically by class severity.
+
+        Guards against the confidence-weighting inversion where a confident
+        Class 6 outscored a less-certain Class 7.  The index now uses class
+        weights only, so it must be strictly increasing in class number.
+        """
+        classifier = FlowLimitationClassifier()
+
+        def uniform_index(flow_class: int) -> float:
+            patterns = [
+                FlowPattern(
+                    breath_number=i,
+                    flow_class=flow_class,
+                    class_name="x",
+                    # Confidence deliberately varies inversely with severity to
+                    # prove it does not affect the ordering.
+                    confidence=1.0 - 0.1 * flow_class,
+                    matched_features={},
+                    severity="x",
+                )
+                for i in range(1, 6)
+            ]
+            return classifier.calculate_flow_limitation_index(patterns)
+
+        indices = [uniform_index(c) for c in range(1, 8)]
+        assert all(a < b for a, b in zip(indices, indices[1:], strict=False))
+
 
 class TestSessionAnalysis:
     """Test complete session analysis."""
@@ -479,6 +673,7 @@ class TestSessionAnalysis:
             shape = ShapeFeatures(
                 flatness_index=0.2,
                 plateau_duration=0.1,
+                plateau_fraction=0.1,
                 symmetry_score=0.0,
                 kurtosis=3.0,
                 rise_time=0.3,
@@ -496,6 +691,7 @@ class TestSessionAnalysis:
             shape = ShapeFeatures(
                 flatness_index=0.95,
                 plateau_duration=0.9,
+                plateau_fraction=0.6,
                 symmetry_score=0.0,
                 kurtosis=0.5,
                 rise_time=0.1,

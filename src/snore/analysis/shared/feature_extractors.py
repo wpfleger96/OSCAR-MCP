@@ -29,7 +29,35 @@ __all__ = [
     "StatisticalFeatures",
     "SpectralFeatures",
     "compute_mid_insp_flattening",
+    "largest_inspiratory_segment",
 ]
+
+
+def largest_inspiratory_segment(flow: np.ndarray) -> np.ndarray:
+    """Return the longest contiguous run of positive samples in ``flow``.
+
+    Masking positive samples (``flow[flow > 0]``) concatenates non-adjacent
+    inspiratory runs: a mid-breath dip below zero stitches two humps into one,
+    corrupting peak counts and mid-inspiratory flattening.  This returns only
+    the single longest positive run, preserving contiguity.
+
+    Args:
+        flow: 1-D flow array (L/min), time-ordered.
+
+    Returns:
+        The longest contiguous positive-valued slice, or an empty array if no
+        sample is positive.  This is a view into ``flow``; do not mutate it.
+    """
+    if len(flow) == 0:
+        return flow
+    positive = (flow > 0).astype(int)
+    changes = np.diff(np.concatenate([[0], positive, [0]]))
+    starts = np.where(changes == 1)[0]
+    ends = np.where(changes == -1)[0]
+    if len(starts) == 0:
+        return flow[:0]
+    idx = int(np.argmax(ends - starts))
+    return flow[starts[idx] : ends[idx]]
 
 
 def compute_mid_insp_flattening(insp_flow: np.ndarray) -> float | None:
@@ -156,6 +184,7 @@ class WaveformFeatureExtractor:
             return ShapeFeatures(
                 flatness_index=0,
                 plateau_duration=0,
+                plateau_fraction=0,
                 symmetry_score=0,
                 kurtosis=0,
                 rise_time=0,
@@ -167,6 +196,7 @@ class WaveformFeatureExtractor:
             return ShapeFeatures(
                 flatness_index=0,
                 plateau_duration=0,
+                plateau_fraction=0,
                 symmetry_score=0,
                 kurtosis=0,
                 rise_time=0,
@@ -181,6 +211,15 @@ class WaveformFeatureExtractor:
         # Plateau duration: continuous time at high flow
         plateau_duration = self._calculate_plateau_duration(
             waveform, flatness_threshold_value, sample_rate
+        )
+
+        # Plateau fraction: plateau duration normalized by inspiration time, so
+        # slow deep breaths don't clear absolute-second thresholds trivially.
+        inspiration_time = len(waveform) / sample_rate
+        plateau_fraction = (
+            float(np.clip(plateau_duration / inspiration_time, 0.0, 1.0))
+            if inspiration_time > 0
+            else 0.0
         )
 
         # Symmetry score: statistical skewness
@@ -200,6 +239,7 @@ class WaveformFeatureExtractor:
         return ShapeFeatures(
             flatness_index=flatness_index,
             plateau_duration=plateau_duration,
+            plateau_fraction=plateau_fraction,
             symmetry_score=symmetry_score,
             kurtosis=kurtosis_value,
             rise_time=rise_time,

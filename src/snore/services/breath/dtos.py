@@ -570,9 +570,11 @@ class NightlyAnalysisSummary(BaseModel):
     fl_95th: float | None
     fl_max: float | None
     fl_reason: NullReason | None
-    # Percent of leak-valid classified breaths with flow_class >= 4. Denominator
-    # is leak-valid breaths with a non-null flow_class (consistent with
-    # fl_median's leak-valid convention).
+    # Percent of leak-valid, rule-matched classified breaths with flow_class >= 4.
+    # Both numerator and denominator count only breaths whose flow_confidence
+    # exceeds 0.5 (rule-matched, not the 0.5 fallback guess), so fallback class-4
+    # guesses do not inflate the FL rate.  Denominator follows fl_median's
+    # leak-valid convention.
     fl_class_ge4_pct: float | None
     fl_class_ge4_pct_reason: NullReason | None
 

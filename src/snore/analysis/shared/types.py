@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from snore.constants import ApneaEventType
 
@@ -189,6 +189,10 @@ class ShapeFeatures(BaseModel):
         flatness_index: Ratio of time spent >80% of peak (0-1)
             High values indicate plateau/flattened waveforms
         plateau_duration: Duration of plateau phase in seconds
+            Retained as a standalone feature and as the intermediate from which
+            plateau_fraction is derived.
+        plateau_fraction: Plateau duration as a fraction of inspiration time (0-1)
+            Duration-normalized form used by the classifier.
         symmetry_score: Statistical skewness (-1 to 1)
             0 = symmetric, + = right-skewed, - = left-skewed
         kurtosis: Measure of peakedness vs flatness
@@ -199,6 +203,9 @@ class ShapeFeatures(BaseModel):
 
     flatness_index: float = Field(ge=0, le=1, description="Plateau time ratio")
     plateau_duration: float = Field(ge=0, description="Plateau duration (seconds)")
+    plateau_fraction: float = Field(
+        ge=0, le=1, description="Plateau duration / inspiration time (0-1)"
+    )
     symmetry_score: float = Field(description="Statistical skewness")
     kurtosis: float = Field(description="Peakedness measure")
     rise_time: float = Field(ge=0, description="10-90% rise time (seconds)")
@@ -224,6 +231,17 @@ class PeakFeatures(BaseModel):
     peak_positions: list[float] = Field(description="Peak positions (0-1 scale)")
     peak_prominences: list[float] = Field(description="Peak heights")
     inter_peak_intervals: list[float] = Field(description="Peak spacing (seconds)")
+
+    @model_validator(mode="after")
+    def _positions_align_with_prominences(self) -> "PeakFeatures":
+        """Dominant-peak selection indexes ``peak_positions`` by the argmax of
+        ``peak_prominences``; the two lists must stay parallel."""
+        if len(self.peak_positions) != len(self.peak_prominences):
+            raise ValueError(
+                "peak_positions and peak_prominences must have equal length "
+                f"(got {len(self.peak_positions)} and {len(self.peak_prominences)})"
+            )
+        return self
 
 
 class StatisticalFeatures(BaseModel):
